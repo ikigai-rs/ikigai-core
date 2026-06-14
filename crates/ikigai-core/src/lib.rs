@@ -49,7 +49,7 @@ pub use arg::ArgRef;
 pub use capability::Capability;
 pub use content::{ContentId, ContentIdError};
 pub use describe::{ArgSpec, Description};
-pub use endpoint::{Endpoint, FnEndpoint, Invocation};
+pub use endpoint::{Endpoint, FnEndpoint, Invocation, Issuer};
 pub use error::{Error, Result};
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{Iri, IriError};
