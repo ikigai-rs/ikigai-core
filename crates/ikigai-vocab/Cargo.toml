@@ -1,0 +1,10 @@
+[package]
+name = "ikigai-vocab"
+description = "The ikigai self-description vocabulary (RDF), with Hydra/OpenAPI projections."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]

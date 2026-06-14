@@ -1,0 +1,10 @@
+[package]
+name = "ikigai-core"
+description = "Identity, representations, resolution, content-addressed caching, and capabilities."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]

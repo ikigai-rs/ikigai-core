@@ -1,0 +1,10 @@
+[package]
+name = "ikigai-fs"
+description = "Capability-confined file endpoint with byte/string/stream transforms."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
