@@ -1,6 +1,10 @@
 //! Small closure-backed endpoints — the simplest, idempotent, perfectly
 //! cacheable kind. They double as the M1 demonstration of resolution and the
 //! pure-cache test: the same call with the same value has the same identity.
+//!
+//! Per the crate naming conventions, each `snake_case` constructor builds an
+//! endpoint whose `lowerCamelCase` identifier matches its name — e.g.
+//! [`to_upper`] builds the `toUpper` endpoint resolved at `urn:fn:toUpper`.
 
 use crate::endpoint::{FnEndpoint, Invocation};
 use crate::error::{Error, Result};

@@ -15,6 +15,18 @@
 //! M1 adds resolution: a [`Request`] is matched by a [`Grammar`] within a
 //! [`Space`] to an [`Endpoint`] that produces a [`Representation`]. Spaces
 //! compose via [`Mount`], [`Fallback`], and [`Rewrite`].
+//!
+//! # Naming conventions
+//!
+//! Two namespaces, two conventions:
+//!
+//! - **Resource identifiers** — IRIs and endpoint names, e.g. `toUpper` in
+//!   `urn:fn:toUpper` — use RDF-idiomatic casing: `lowerCamelCase` for
+//!   properties and operations, `PascalCase` for classes.
+//! - **Rust identifiers** use `snake_case` and `PascalCase` per Rust convention.
+//!
+//! A `snake_case` constructor therefore maps to a `lowerCamelCase` identifier —
+//! e.g. [`builtins::to_upper`] builds the `toUpper` endpoint.
 #![forbid(unsafe_code)]
 
 mod arg;
