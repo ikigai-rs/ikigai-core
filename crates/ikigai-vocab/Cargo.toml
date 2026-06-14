@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-vocab"
-description = "The ikigai self-description vocabulary (RDF), with Hydra/OpenAPI projections."
+description = "The ikigai self-description vocabulary and its RDF (Turtle) projection."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,4 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+ikigai-core = { path = "../ikigai-core" }

@@ -1,5 +1,6 @@
 use crate::arg::ArgRef;
 use crate::capability::Capability;
+use crate::describe::Description;
 use crate::error::{Error, Result};
 use crate::grammar::Bindings;
 use crate::repr::Representation;
@@ -53,6 +54,12 @@ pub trait Endpoint: Send + Sync {
     /// A short label for diagnostics.
     fn name(&self) -> &str {
         "endpoint"
+    }
+
+    /// A structured self-description, which `ikigai-vocab` can project to RDF.
+    /// The default reports just the endpoint's name.
+    fn describe(&self) -> Description {
+        Description::new(self.name())
     }
 }
 
