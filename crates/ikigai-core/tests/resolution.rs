@@ -18,11 +18,7 @@ fn run(space: &dyn Space, req: &Request) -> Option<Vec<u8>> {
     match space.resolve(req, &Scope::empty()) {
         Resolution::Hit(resolved) => {
             let cap = Capability::root();
-            let inv = ikigai_core::Invocation {
-                request: req,
-                bindings: &resolved.bindings,
-                capability: &cap,
-            };
+            let inv = ikigai_core::Invocation::detached(req, &resolved.bindings, &cap);
             let rep: Representation = block_on(resolved.endpoint.invoke(&inv)).unwrap();
             Some(rep.bytes)
         }

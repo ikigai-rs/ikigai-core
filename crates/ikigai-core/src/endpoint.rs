@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use async_trait::async_trait;
 
 use crate::arg::ArgRef;
@@ -5,14 +7,26 @@ use crate::capability::Capability;
 use crate::describe::Description;
 use crate::error::{Error, Result};
 use crate::grammar::Bindings;
-use crate::repr::Representation;
+use crate::iri::Iri;
+use crate::repr::{Expiry, Representation};
 use crate::request::Request;
+use crate::verb::Verb;
+
+/// Lets an endpoint issue sub-requests back through the kernel. Implemented by
+/// the [`Kernel`](crate::Kernel); a detached [`Invocation`] has no issuer, so
+/// `source`/`issue` are unavailable when testing an endpoint in isolation.
+#[async_trait]
+pub trait Issuer: Send + Sync {
+    /// Resolve and evaluate a sub-request.
+    async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation>;
+}
 
 /// The context handed to an endpoint when it is invoked.
 ///
-/// All input arrives here — the request, the bindings the resolving grammar
-/// captured, and the capability authorizing the call. Endpoints take no
-/// ambient authority.
+/// All input arrives here — the request, the grammar-captured bindings, and the
+/// authorizing capability — and, when the kernel is driving, the ability to
+/// issue sub-requests via [`Invocation::source`] / [`Invocation::issue`].
+/// Endpoints take no ambient authority.
 pub struct Invocation<'a> {
     /// The request being served.
     pub request: &'a Request,
@@ -20,9 +34,43 @@ pub struct Invocation<'a> {
     pub bindings: &'a Bindings,
     /// The capability authorizing invocation.
     pub capability: &'a Capability,
+    issuer: Option<&'a dyn Issuer>,
+    deps: Mutex<Vec<Expiry>>,
 }
 
-impl Invocation<'_> {
+impl<'a> Invocation<'a> {
+    /// A context with no kernel attached: `source`/`issue` are unavailable.
+    /// Useful for invoking an endpoint directly in tests.
+    pub fn detached(
+        request: &'a Request,
+        bindings: &'a Bindings,
+        capability: &'a Capability,
+    ) -> Self {
+        Invocation {
+            request,
+            bindings,
+            capability,
+            issuer: None,
+            deps: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A context backed by an issuer (the kernel), enabling sub-requests.
+    pub(crate) fn with_issuer(
+        request: &'a Request,
+        bindings: &'a Bindings,
+        capability: &'a Capability,
+        issuer: &'a dyn Issuer,
+    ) -> Self {
+        Invocation {
+            request,
+            bindings,
+            capability,
+            issuer: Some(issuer),
+            deps: Mutex::new(Vec::new()),
+        }
+    }
+
     /// The bytes of an inline argument, or an error if absent / not inline.
     pub fn inline_arg(&self, name: &str) -> Result<&[u8]> {
         match self.request.args.get(name) {
@@ -41,6 +89,37 @@ impl Invocation<'_> {
             name: name.to_string(),
             detail: "not valid UTF-8".to_string(),
         })
+    }
+
+    /// Issue a sub-request through the kernel, recording it as a dependency of
+    /// this invocation's result so expiry propagates. Errors if detached.
+    pub async fn issue(&self, request: Request) -> Result<Representation> {
+        let issuer = self
+            .issuer
+            .ok_or_else(|| Error::Endpoint("sub-requests require a kernel context".to_string()))?;
+        let representation = issuer.issue(request, self.capability).await?;
+        self.deps
+            .lock()
+            .expect("deps lock")
+            .push(representation.expiry);
+        Ok(representation)
+    }
+
+    /// `SOURCE` another resource — dereference a by-reference argument — recording
+    /// it as a dependency.
+    pub async fn source(&self, target: &Iri) -> Result<Representation> {
+        self.issue(Request::new(Verb::Source, target.clone())).await
+    }
+
+    /// Combined expiry of the dependencies issued during this invocation:
+    /// `Always` if any is volatile, else `Never`.
+    pub(crate) fn dependency_expiry(&self) -> Expiry {
+        let deps = self.deps.lock().expect("deps lock");
+        if deps.contains(&Expiry::Always) {
+            Expiry::Always
+        } else {
+            Expiry::Never
+        }
     }
 }
 

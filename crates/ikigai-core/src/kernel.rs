@@ -15,8 +15,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
+
 use crate::capability::Capability;
-use crate::endpoint::Invocation;
+use crate::endpoint::{Invocation, Issuer};
 use crate::error::{Error, Result};
 use crate::repr::{Expiry, Representation};
 use crate::request::{Request, RequestId};
@@ -60,15 +62,21 @@ impl Kernel {
         };
 
         // Invocation is asynchronous.
-        let invocation = Invocation {
-            request: &request,
-            bindings: &resolved.bindings,
-            capability,
-        };
+        let invocation = Invocation::with_issuer(&request, &resolved.bindings, capability, self);
         let representation = resolved.endpoint.invoke(&invocation).await?;
 
-        // Cache only when the verb is idempotent and the endpoint opted in.
-        if cacheable_verb && representation.expiry == Expiry::Never {
+        // Effective expiry propagates from the dependencies: a result is
+        // cacheable only if it opted in AND every dependency it read is cacheable.
+        let effective = if representation.expiry == Expiry::Never
+            && invocation.dependency_expiry() == Expiry::Never
+        {
+            Expiry::Never
+        } else {
+            Expiry::Always
+        };
+        let representation = representation.with_expiry(effective);
+
+        if cacheable_verb && effective == Expiry::Never {
             self.cache
                 .lock()
                 .expect("cache lock")
@@ -83,12 +91,20 @@ impl Kernel {
     }
 }
 
+#[async_trait]
+impl Issuer for Kernel {
+    async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation> {
+        // Delegate to the inherent method (which the context calls back into).
+        Kernel::issue(self, request, capability).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::arg::ArgRef;
     use crate::builtins;
-    use crate::endpoint::{FnEndpoint, Invocation};
+    use crate::endpoint::{Endpoint, FnEndpoint, Invocation};
     use crate::grammar::Exact;
     use crate::iri::Iri;
     use crate::repr::ReprType;
@@ -170,5 +186,72 @@ mod tests {
         let err = block_on(kernel.issue(Request::new(Verb::Source, iri("urn:fn:nope")), &cap))
             .unwrap_err();
         assert!(matches!(err, Error::Unresolved(_)));
+    }
+
+    /// A composing endpoint: dereference the `src` by-reference argument and
+    /// upper-case its content.
+    struct UpcaseOf;
+
+    #[async_trait::async_trait]
+    impl Endpoint for UpcaseOf {
+        async fn invoke(&self, cx: &Invocation<'_>) -> Result<Representation> {
+            let src = match cx.request.args.get("src") {
+                Some(ArgRef::Reference(iri)) => iri.clone(),
+                _ => return Err(Error::MissingArgument("src".to_string())),
+            };
+            let upstream = cx.source(&src).await?;
+            let upper = String::from_utf8_lossy(&upstream.bytes).to_uppercase();
+            Ok(Representation::new(ReprType::new("text/plain"), upper.into_bytes()).cacheable())
+        }
+    }
+
+    #[test]
+    fn composes_over_a_referenced_resource_and_caches() {
+        static GREETING_CALLS: AtomicU32 = AtomicU32::new(0);
+        let greeting = FnEndpoint::new("greeting", |_cx: &Invocation<'_>| {
+            GREETING_CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(Representation::new(ReprType::new("text/plain"), b"hello".to_vec()).cacheable())
+        });
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:data:greeting"), greeting)
+            .bind(Exact::new("urn:fn:upcaseOf"), UpcaseOf);
+        let kernel = Kernel::new(Arc::new(space));
+        let cap = Capability::root();
+        let req = || {
+            Request::new(Verb::Source, iri("urn:fn:upcaseOf"))
+                .with_arg("src", ArgRef::Reference(iri("urn:data:greeting")))
+        };
+        let a = block_on(kernel.issue(req(), &cap)).unwrap();
+        let b = block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(a.bytes, b"HELLO");
+        assert_eq!(a.bytes, b.bytes);
+        // Both deps cacheable -> composed result cached -> greeting sourced once.
+        assert_eq!(GREETING_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn volatile_dependency_forbids_caching_the_composer() {
+        static CLOCK_CALLS: AtomicU32 = AtomicU32::new(0);
+        // No `.cacheable()` -> volatile dependency.
+        let clock = FnEndpoint::new("clock", |_cx: &Invocation<'_>| {
+            CLOCK_CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                b"tick".to_vec(),
+            ))
+        });
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:data:clock"), clock)
+            .bind(Exact::new("urn:fn:upcaseOf"), UpcaseOf);
+        let kernel = Kernel::new(Arc::new(space));
+        let cap = Capability::root();
+        let req = || {
+            Request::new(Verb::Source, iri("urn:fn:upcaseOf"))
+                .with_arg("src", ArgRef::Reference(iri("urn:data:clock")))
+        };
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        // Expiry propagates: volatile dep -> composer not cached -> clock sourced twice.
+        assert_eq!(CLOCK_CALLS.load(Ordering::SeqCst), 2);
     }
 }

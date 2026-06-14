@@ -152,11 +152,7 @@ mod tests {
         let mut bindings = Bindings::new();
         bindings.insert("path", path);
         let cap = Capability::root();
-        let inv = Invocation {
-            request: &req,
-            bindings: &bindings,
-            capability: &cap,
-        };
+        let inv = Invocation::detached(&req, &bindings, &cap);
         block_on(ep.invoke(&inv))
     }
 
@@ -197,11 +193,7 @@ mod tests {
         let req = Request::new(Verb::Source, Iri::parse("urn:file:default").unwrap());
         let bindings = Bindings::new();
         let cap = Capability::root();
-        let inv = Invocation {
-            request: &req,
-            bindings: &bindings,
-            capability: &cap,
-        };
+        let inv = Invocation::detached(&req, &bindings, &cap);
         assert!(matches!(
             block_on(ep.invoke(&inv)).unwrap_err(),
             Error::MissingArgument(_)
@@ -214,11 +206,7 @@ mod tests {
         let req = Request::new(Verb::Meta, Iri::parse("urn:file:default").unwrap());
         let bindings = Bindings::new();
         let cap = Capability::root();
-        let inv = Invocation {
-            request: &req,
-            bindings: &bindings,
-            capability: &cap,
-        };
+        let inv = Invocation::detached(&req, &bindings, &cap);
         let rep = block_on(ep.invoke(&inv)).unwrap();
         assert_eq!(rep.repr_type.media_type, "text/turtle");
         assert!(String::from_utf8(rep.bytes)
