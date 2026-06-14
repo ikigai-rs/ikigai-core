@@ -20,6 +20,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use async_trait::async_trait;
 use ikigai_core::{
     ArgSpec, Description, Endpoint, Error, Invocation, ReprType, Representation, Result, Verb,
 };
@@ -70,8 +71,9 @@ impl FileEndpoint {
     }
 }
 
+#[async_trait]
 impl Endpoint for FileEndpoint {
-    fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         match inv.request.verb {
             Verb::Meta => Ok(ikigai_vocab::describe_turtle(&self.describe())),
             Verb::Source => {
@@ -130,6 +132,7 @@ fn media_type_for(path: &Path) -> ReprType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::executor::block_on;
     use ikigai_core::{Bindings, Capability, Iri, Request};
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -154,7 +157,7 @@ mod tests {
             bindings: &bindings,
             capability: &cap,
         };
-        ep.invoke(&inv)
+        block_on(ep.invoke(&inv))
     }
 
     #[test]
@@ -200,7 +203,7 @@ mod tests {
             capability: &cap,
         };
         assert!(matches!(
-            ep.invoke(&inv).unwrap_err(),
+            block_on(ep.invoke(&inv)).unwrap_err(),
             Error::MissingArgument(_)
         ));
     }
@@ -216,7 +219,7 @@ mod tests {
             bindings: &bindings,
             capability: &cap,
         };
-        let rep = ep.invoke(&inv).unwrap();
+        let rep = block_on(ep.invoke(&inv)).unwrap();
         assert_eq!(rep.repr_type.media_type, "text/turtle");
         assert!(String::from_utf8(rep.bytes)
             .unwrap()

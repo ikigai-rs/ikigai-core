@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use futures::executor::block_on;
 use ikigai_core::{
     builtins, ArgRef, Capability, EndpointSpace, Exact, Fallback, Iri, Mount, Representation,
     Request, Resolution, Rewrite, Scope, Space, UriTemplate, Verb,
@@ -22,7 +23,7 @@ fn run(space: &dyn Space, req: &Request) -> Option<Vec<u8>> {
                 bindings: &resolved.bindings,
                 capability: &cap,
             };
-            let rep: Representation = resolved.endpoint.invoke(&inv).unwrap();
+            let rep: Representation = block_on(resolved.endpoint.invoke(&inv)).unwrap();
             Some(rep.bytes)
         }
         Resolution::Miss => None,
