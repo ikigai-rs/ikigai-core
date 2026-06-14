@@ -11,21 +11,34 @@
 //!
 //! The identity model is content-addressed: equal inputs collapse to equal
 //! identities, so caching and de-duplication fall out by construction.
+//!
+//! M1 adds resolution: a [`Request`] is matched by a [`Grammar`] within a
+//! [`Space`] to an [`Endpoint`] that produces a [`Representation`]. Spaces
+//! compose via [`Mount`], [`Fallback`], and [`Rewrite`].
 #![forbid(unsafe_code)]
 
 mod arg;
+pub mod builtins;
 mod capability;
 mod content;
+mod endpoint;
+mod error;
+mod grammar;
 pub(crate) mod hashing;
 mod iri;
 mod repr;
 mod request;
+mod space;
 mod verb;
 
 pub use arg::ArgRef;
 pub use capability::Capability;
 pub use content::{ContentId, ContentIdError};
+pub use endpoint::{Endpoint, FnEndpoint, Invocation};
+pub use error::{Error, Result};
+pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{Iri, IriError};
 pub use repr::{ReprType, Representation};
 pub use request::{Request, RequestId};
+pub use space::{EndpointSpace, Fallback, Mount, Resolution, Resolved, Rewrite, Scope, Space};
 pub use verb::Verb;
