@@ -1,0 +1,6 @@
+(undo-tree-save-format-version . 1)
+"cf2c5bc19fca746ab1592656f6eaf4c7130ca8b4"
+[nil nil nil nil (27182 51848 784809 0) 0 (:visualizer [0 1 0 #<marker in no buffer>])]
+([nil nil ((1 . 2) (t 27182 14408 318748 147000)) (("q" . 1) (undo-tree-id0 . -1) (undo-tree-id1 . -1) (undo-tree-id2 . -1)) (27182 51848 784807 0) 0 (:visualizer [0 1 0 #<marker in no buffer>])])
+([nil current (("q" . -1) (undo-tree-id3 . -1) (undo-tree-id4 . -1) (undo-tree-id5 . -1) (undo-tree-id6 . -1) (undo-tree-id7 . -1) 2) nil (27182 51870 590121 0) 0 nil])
+nil
