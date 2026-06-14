@@ -54,6 +54,21 @@ impl fmt::Display for ReprType {
     }
 }
 
+/// How long a representation stays valid in the cache.
+///
+/// M3a uses the two ends of the spectrum; richer expiry (dependent on
+/// sub-requests, time-based, golden-thread) arrives with dependency tracking.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Expiry {
+    /// Always expired — never cached. The safe default: an endpoint must opt in
+    /// to caching (mirroring NetKernel, where a response with no expiry is volatile).
+    #[default]
+    Always,
+    /// Never expires — permanently cacheable. Correct for a pure function of
+    /// content-addressed inputs, where the request identity fully determines the result.
+    Never,
+}
+
 /// A typed value produced by an endpoint.
 ///
 /// M0 carries the universal byte form; richer in-memory forms (RDF graphs,
@@ -64,15 +79,31 @@ pub struct Representation {
     pub repr_type: ReprType,
     /// The representation's bytes.
     pub bytes: Vec<u8>,
+    /// Cache validity; defaults to [`Expiry::Always`] (uncacheable).
+    #[serde(default)]
+    pub expiry: Expiry,
 }
 
 impl Representation {
-    /// Build a representation from a type and bytes.
+    /// Build a representation from a type and bytes (uncacheable by default).
     pub fn new(repr_type: ReprType, bytes: impl Into<Vec<u8>>) -> Self {
         Representation {
             repr_type,
             bytes: bytes.into(),
+            expiry: Expiry::Always,
         }
+    }
+
+    /// Mark this representation permanently cacheable ([`Expiry::Never`]).
+    pub fn cacheable(mut self) -> Self {
+        self.expiry = Expiry::Never;
+        self
+    }
+
+    /// Set the expiry explicitly (builder).
+    pub fn with_expiry(mut self, expiry: Expiry) -> Self {
+        self.expiry = expiry;
+        self
     }
 
     /// The content address of this representation (its type and bytes together).

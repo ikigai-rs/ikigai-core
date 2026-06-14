@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use crate::arg::ArgRef;
 use crate::capability::Capability;
 use crate::describe::Description;
@@ -47,9 +49,10 @@ impl Invocation<'_> {
 /// Endpoints are synchronous and free of ambient authority in M1: everything
 /// they may use arrives through the [`Invocation`]. (Async execution and
 /// sub-request issuing are introduced with the kernel.)
+#[async_trait]
 pub trait Endpoint: Send + Sync {
     /// Produce a representation for the invocation.
-    fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation>;
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation>;
 
     /// A short label for diagnostics.
     fn name(&self) -> &str {
@@ -85,8 +88,9 @@ impl FnEndpoint {
     }
 }
 
+#[async_trait]
 impl Endpoint for FnEndpoint {
-    fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         (self.invoke)(inv)
     }
 

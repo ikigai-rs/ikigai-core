@@ -16,20 +16,14 @@ fn text_plain_utf8() -> ReprType {
 
 fn to_upper_impl(inv: &Invocation<'_>) -> Result<Representation> {
     let input = inv.inline_str("in")?;
-    Ok(Representation::new(
-        text_plain_utf8(),
-        input.to_uppercase().into_bytes(),
-    ))
+    Ok(Representation::new(text_plain_utf8(), input.to_uppercase().into_bytes()).cacheable())
 }
 
 fn reverse_list_impl(inv: &Invocation<'_>) -> Result<Representation> {
     let input = inv.inline_str("in")?;
     let mut items: Vec<&str> = input.split('\n').collect();
     items.reverse();
-    Ok(Representation::new(
-        text_plain_utf8(),
-        items.join("\n").into_bytes(),
-    ))
+    Ok(Representation::new(text_plain_utf8(), items.join("\n").into_bytes()).cacheable())
 }
 
 fn echo_impl(inv: &Invocation<'_>) -> Result<Representation> {
@@ -37,10 +31,7 @@ fn echo_impl(inv: &Invocation<'_>) -> Result<Representation> {
         .bindings
         .get("message")
         .ok_or_else(|| Error::MissingArgument("message".to_string()))?;
-    Ok(Representation::new(
-        text_plain_utf8(),
-        message.as_bytes().to_vec(),
-    ))
+    Ok(Representation::new(text_plain_utf8(), message.as_bytes().to_vec()).cacheable())
 }
 
 /// `toUpper`: upper-cases the UTF-8 string in the `in` argument.

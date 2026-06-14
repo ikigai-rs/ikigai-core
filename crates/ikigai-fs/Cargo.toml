@@ -8,5 +8,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait = "0.1"
 ikigai-core = { path = "../ikigai-core" }
 ikigai-vocab = { path = "../ikigai-vocab" }
+
+[dev-dependencies]
+futures = "0.3"
