@@ -75,7 +75,7 @@ impl FileEndpoint {
 impl Endpoint for FileEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         match inv.request.verb {
-            Verb::Meta => Ok(ikigai_vocab::describe_turtle(&self.describe())),
+            // `Meta` is routed by the kernel via the transform layer.
             Verb::Source => {
                 let rel = inv
                     .bindings
@@ -133,8 +133,10 @@ fn media_type_for(path: &Path) -> ReprType {
 mod tests {
     use super::*;
     use futures::executor::block_on;
-    use ikigai_core::{Bindings, Capability, Iri, Request};
+    use ikigai_core::{Bindings, Capability, EndpointSpace, Exact, Iri, Kernel, Request};
+    use ikigai_vocab::TurtleRenderer;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
 
     fn temp_root() -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -201,13 +203,18 @@ mod tests {
     }
 
     #[test]
-    fn meta_returns_self_description() {
-        let ep = FileEndpoint::new(temp_root());
-        let req = Request::new(Verb::Meta, Iri::parse("urn:file:default").unwrap());
-        let bindings = Bindings::new();
+    fn meta_renders_self_description_via_kernel() {
+        let space = EndpointSpace::new().bind(
+            Exact::new("urn:file:default"),
+            FileEndpoint::new(temp_root()),
+        );
+        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleRenderer));
         let cap = Capability::root();
-        let inv = Invocation::detached(&req, &bindings, &cap);
-        let rep = block_on(ep.invoke(&inv)).unwrap();
+        let rep = block_on(kernel.issue(
+            Request::new(Verb::Meta, Iri::parse("urn:file:default").unwrap()),
+            &cap,
+        ))
+        .unwrap();
         assert_eq!(rep.repr_type.media_type, "text/turtle");
         assert!(String::from_utf8(rep.bytes)
             .unwrap()

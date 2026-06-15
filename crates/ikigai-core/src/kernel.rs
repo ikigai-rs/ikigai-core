@@ -17,18 +17,22 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+use crate::arg::ArgRef;
 use crate::capability::Capability;
 use crate::endpoint::{Invocation, Issuer};
 use crate::error::{Error, Result};
-use crate::repr::{Expiry, Representation};
+use crate::meta::MetaRenderer;
+use crate::repr::{Expiry, ReprType, Representation};
 use crate::request::{Request, RequestId};
 use crate::space::{Resolution, Scope, Space};
+use crate::verb::Verb;
 
 /// Resolves requests against a root space, invokes the resolved endpoint, and
 /// caches cacheable representations by their content-addressed request id.
 pub struct Kernel {
     root: Arc<dyn Space>,
     cache: Mutex<HashMap<RequestId, Representation>>,
+    meta: Option<Arc<dyn MetaRenderer>>,
 }
 
 impl Kernel {
@@ -37,6 +41,16 @@ impl Kernel {
         Kernel {
             root,
             cache: Mutex::new(HashMap::new()),
+            meta: None,
+        }
+    }
+
+    /// A kernel that answers `Meta` requests by rendering through `renderer`.
+    pub fn with_meta_renderer(root: Arc<dyn Space>, renderer: Arc<dyn MetaRenderer>) -> Self {
+        Kernel {
+            root,
+            cache: Mutex::new(HashMap::new()),
+            meta: Some(renderer),
         }
     }
 
@@ -61,22 +75,35 @@ impl Kernel {
             Resolution::Miss => return Err(Error::Unresolved(request.target.clone())),
         };
 
-        // Invocation is asynchronous.
-        let invocation = Invocation::with_issuer(&request, &resolved.bindings, capability, self);
-        let representation = resolved.endpoint.invoke(&invocation).await?;
-
-        // Effective expiry propagates from the dependencies: a result is
-        // cacheable only if it opted in AND every dependency it read is cacheable.
-        let effective = if representation.expiry == Expiry::Never
-            && invocation.dependency_expiry() == Expiry::Never
-        {
-            Expiry::Never
+        let representation = if request.verb == Verb::Meta {
+            // Uniform Meta routing: the kernel renders the endpoint's canonical
+            // self-description to the requested type via the transform layer,
+            // rather than each endpoint hand-rolling it.
+            let renderer = self
+                .meta
+                .as_ref()
+                .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
+            renderer
+                .render(&resolved.endpoint.describe(), &meta_target(&request))?
+                .cacheable()
         } else {
-            Expiry::Always
+            // Invocation is asynchronous.
+            let invocation =
+                Invocation::with_issuer(&request, &resolved.bindings, capability, self);
+            let representation = resolved.endpoint.invoke(&invocation).await?;
+            // Effective expiry propagates from the dependencies: a result is
+            // cacheable only if it opted in AND every dependency it read is cacheable.
+            let effective = if representation.expiry == Expiry::Never
+                && invocation.dependency_expiry() == Expiry::Never
+            {
+                Expiry::Never
+            } else {
+                Expiry::Always
+            };
+            representation.with_expiry(effective)
         };
-        let representation = representation.with_expiry(effective);
 
-        if cacheable_verb && effective == Expiry::Never {
+        if cacheable_verb && representation.expiry == Expiry::Never {
             self.cache
                 .lock()
                 .expect("cache lock")
@@ -89,6 +116,17 @@ impl Kernel {
     pub fn cache_len(&self) -> usize {
         self.cache.lock().expect("cache lock").len()
     }
+}
+
+/// The representation type a `Meta` request asks for: the `as` inline argument
+/// if present, else `text/turtle`.
+fn meta_target(request: &Request) -> ReprType {
+    if let Some(ArgRef::Inline(bytes)) = request.args.get("as") {
+        if let Ok(media) = std::str::from_utf8(bytes) {
+            return ReprType::new(media);
+        }
+    }
+    ReprType::new("text/turtle")
 }
 
 #[async_trait]
@@ -104,6 +142,7 @@ mod tests {
     use super::*;
     use crate::arg::ArgRef;
     use crate::builtins;
+    use crate::describe::Description;
     use crate::endpoint::{Endpoint, FnEndpoint, Invocation};
     use crate::grammar::Exact;
     use crate::iri::Iri;
@@ -115,6 +154,37 @@ mod tests {
 
     fn iri(s: &str) -> Iri {
         Iri::parse(s).unwrap()
+    }
+
+    struct EchoIdRenderer;
+    impl MetaRenderer for EchoIdRenderer {
+        fn render(&self, description: &Description, _target: &ReprType) -> Result<Representation> {
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                description.id.clone().into_bytes(),
+            )
+            .cacheable())
+        }
+    }
+
+    #[test]
+    fn meta_is_routed_through_the_renderer() {
+        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
+        let cap = Capability::root();
+        let rep =
+            block_on(kernel.issue(Request::new(Verb::Meta, iri("urn:fn:toUpper")), &cap)).unwrap();
+        assert_eq!(rep.bytes, b"toUpper");
+    }
+
+    #[test]
+    fn meta_without_a_renderer_errors() {
+        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let kernel = Kernel::new(Arc::new(space));
+        let cap = Capability::root();
+        assert!(
+            block_on(kernel.issue(Request::new(Verb::Meta, iri("urn:fn:toUpper")), &cap)).is_err()
+        );
     }
 
     #[test]
