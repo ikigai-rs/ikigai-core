@@ -42,6 +42,13 @@ impl Bindings {
 pub trait Grammar: Send + Sync {
     /// Return captured bindings if `iri` matches this grammar, else `None`.
     fn match_iri(&self, iri: &Iri) -> Option<Bindings>;
+
+    /// A human-readable pattern for this grammar, used when enumerating a space
+    /// (e.g. the exact IRI, or a template like `urn:demo:echo/{message}`). The
+    /// default is uninformative; concrete grammars override it.
+    fn pattern(&self) -> String {
+        "<opaque>".to_string()
+    }
 }
 
 /// Matches one exact identifier and captures no variables.
@@ -57,6 +64,10 @@ impl Exact {
 impl Grammar for Exact {
     fn match_iri(&self, iri: &Iri) -> Option<Bindings> {
         (iri.as_str() == self.0).then(Bindings::new)
+    }
+
+    fn pattern(&self) -> String {
+        self.0.clone()
     }
 }
 
@@ -175,6 +186,10 @@ impl Grammar for UriTemplate {
     fn match_iri(&self, iri: &Iri) -> Option<Bindings> {
         self.match_str(iri.as_str())
     }
+
+    fn pattern(&self) -> String {
+        self.source.clone()
+    }
 }
 
 /// Error parsing a [`UriTemplate`].
@@ -226,6 +241,17 @@ mod tests {
         let t = UriTemplate::parse("urn:r:{id}/data").unwrap();
         let b = t.match_iri(&iri("urn:r:7/data")).unwrap();
         assert_eq!(t.expand(&b).as_deref(), Some("urn:r:7/data"));
+    }
+
+    #[test]
+    fn pattern_reflects_the_grammar() {
+        assert_eq!(Exact::new("urn:fn:toUpper").pattern(), "urn:fn:toUpper");
+        assert_eq!(
+            UriTemplate::parse("urn:demo:echo/{message}")
+                .unwrap()
+                .pattern(),
+            "urn:demo:echo/{message}"
+        );
     }
 
     #[test]

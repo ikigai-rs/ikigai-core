@@ -58,5 +58,7 @@ pub use kernel::Kernel;
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, ReprType, Representation};
 pub use request::{Request, RequestId};
-pub use space::{EndpointSpace, Fallback, Mount, Resolution, Resolved, Rewrite, Scope, Space};
+pub use space::{
+    EndpointSpace, Fallback, Mount, Resolution, Resolved, Rewrite, Scope, Space, SpaceEntry,
+};
 pub use verb::Verb;
