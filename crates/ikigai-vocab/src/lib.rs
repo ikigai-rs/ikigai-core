@@ -8,7 +8,7 @@
 //! WASM-trivial — the emitted graph is small and fully controlled. (A future
 //! revision may project to Hydra / OpenAPI from the same vocabulary.)
 
-use ikigai_core::{Description, ReprType, Representation, Verb};
+use ikigai_core::{Description, Error, MetaRenderer, ReprType, Representation, Result, Verb};
 
 /// The ikigai vocabulary namespace. Provisional — the canonical namespace IRI
 /// is a project decision; it is used here purely as a stable identifier.
@@ -102,6 +102,48 @@ pub fn describe_turtle(description: &Description) -> Representation {
         ReprType::new("text/turtle"),
         to_turtle(description).into_bytes(),
     )
+}
+
+/// Render a [`Description`] as human-readable plain text (for the CLI `describe`).
+pub fn to_text(description: &Description) -> String {
+    let mut s = format!("{} — {}\n", description.id, description.title);
+    if !description.summary.is_empty() {
+        s.push_str(&format!("{}\n", description.summary));
+    }
+    if !description.verbs.is_empty() {
+        let verbs: Vec<&str> = description.verbs.iter().map(|v| verb_name(*v)).collect();
+        s.push_str(&format!("verbs: {}\n", verbs.join(", ")));
+    }
+    for input in &description.inputs {
+        let opt = if input.required { "" } else { " (optional)" };
+        s.push_str(&format!(
+            "  input {}{}: {}\n",
+            input.name, opt, input.summary
+        ));
+    }
+    if !description.outputs.is_empty() {
+        s.push_str(&format!("outputs: {}\n", description.outputs.join(", ")));
+    }
+    s
+}
+
+/// A [`MetaRenderer`] projecting descriptions to `text/turtle` (the default) or
+/// `text/plain`. Inject it into a kernel via `Kernel::with_meta_renderer`.
+pub struct TurtleRenderer;
+
+impl MetaRenderer for TurtleRenderer {
+    fn render(&self, description: &Description, target: &ReprType) -> Result<Representation> {
+        match target.media_type.as_str() {
+            "text/turtle" | "*/*" | "" => Ok(describe_turtle(description)),
+            "text/plain" => Ok(Representation::new(
+                ReprType::new("text/plain").with_param("charset", "utf-8"),
+                to_text(description).into_bytes(),
+            )),
+            other => Err(Error::Endpoint(format!(
+                "meta renderer does not support target `{other}`"
+            ))),
+        }
+    }
 }
 
 #[cfg(test)]
