@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 use crate::meta::MetaRenderer;
 use crate::repr::{Expiry, ReprType, Representation};
 use crate::request::{Request, RequestId};
-use crate::space::{Resolution, Scope, Space};
+use crate::space::{Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
 
 /// Resolves requests against a root space, invokes the resolved endpoint, and
@@ -115,6 +115,12 @@ impl Kernel {
     /// The number of representations currently cached (diagnostics/tests).
     pub fn cache_len(&self) -> usize {
         self.cache.lock().expect("cache lock").len()
+    }
+
+    /// Enumerate the root space's bindings, if it supports enumeration. `None`
+    /// when the root space is not enumerable.
+    pub fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        self.root.entries()
     }
 }
 

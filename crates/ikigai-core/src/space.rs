@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::endpoint::Endpoint;
 use crate::grammar::{Bindings, Grammar};
 use crate::iri::Iri;
@@ -50,11 +52,28 @@ pub struct Resolved {
     pub bindings: Bindings,
 }
 
+/// One binding in a space, for enumeration: the grammar's pattern and the name
+/// of the endpoint it resolves to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceEntry {
+    /// The grammar's pattern (an exact IRI, or a template like `…/{var}`).
+    pub pattern: String,
+    /// The bound endpoint's name.
+    pub endpoint: String,
+}
+
 /// A space maps requests to endpoints by resolution. Spaces compose via the
 /// [`Mount`], [`Fallback`], and [`Rewrite`] combinators.
 pub trait Space: Send + Sync {
     /// Resolve a request to an endpoint, or report a miss.
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution;
+
+    /// Enumerate this space's bindings, if it can. `None` means the space does
+    /// not support enumeration (e.g. a rewrite or a remote space); `Some(vec![])`
+    /// means it is enumerable but empty. The default is `None`.
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        None
+    }
 }
 
 /// A leaf space: an ordered set of `(grammar, endpoint)` bindings. The first
@@ -105,6 +124,18 @@ impl Space for EndpointSpace {
         }
         Resolution::Miss
     }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        Some(
+            self.bindings
+                .iter()
+                .map(|(grammar, endpoint)| SpaceEntry {
+                    pattern: grammar.pattern(),
+                    endpoint: endpoint.name().to_string(),
+                })
+                .collect(),
+        )
+    }
 }
 
 /// Mount a space behind an IRI prefix; only requests whose target starts with
@@ -132,6 +163,11 @@ impl Space for Mount {
             Resolution::Miss
         }
     }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        // The inner space's patterns are already full identifiers.
+        self.inner.entries()
+    }
 }
 
 /// Try each space in order; the first hit wins.
@@ -154,6 +190,20 @@ impl Space for Fallback {
             }
         }
         Resolution::Miss
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        // Concatenate the entries of every member that can enumerate, in order;
+        // `None` only if no member supports enumeration at all.
+        let mut entries = Vec::new();
+        let mut enumerable = false;
+        for space in &self.spaces {
+            if let Some(inner) = space.entries() {
+                enumerable = true;
+                entries.extend(inner);
+            }
+        }
+        enumerable.then_some(entries)
     }
 }
 
@@ -191,5 +241,51 @@ impl Space for Rewrite {
             }
             None => self.inner.resolve(request, scope),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builtins;
+    use crate::grammar::{Exact, UriTemplate};
+
+    #[test]
+    fn endpoint_space_enumerates_its_bindings() {
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(
+                UriTemplate::parse("urn:demo:echo/{message}").unwrap(),
+                builtins::echo(),
+            );
+        let entries = space.entries().expect("enumerable");
+        assert_eq!(
+            entries,
+            vec![
+                SpaceEntry {
+                    pattern: "urn:fn:toUpper".to_string(),
+                    endpoint: "toUpper".to_string(),
+                },
+                SpaceEntry {
+                    pattern: "urn:demo:echo/{message}".to_string(),
+                    endpoint: "echo".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_concatenates_enumerable_members_in_order() {
+        let a = Arc::new(EndpointSpace::new().bind(Exact::new("urn:a"), builtins::to_upper()));
+        let b = Arc::new(EndpointSpace::new().bind(Exact::new("urn:b"), builtins::reverse_list()));
+        let entries = Fallback::new(vec![a, b]).entries().expect("enumerable");
+        let patterns: Vec<&str> = entries.iter().map(|e| e.pattern.as_str()).collect();
+        assert_eq!(patterns, ["urn:a", "urn:b"]);
+    }
+
+    #[test]
+    fn rewrite_is_not_enumerable() {
+        let inner = Arc::new(EndpointSpace::new().bind(Exact::new("urn:x"), builtins::to_upper()));
+        assert!(Rewrite::new(inner, |_iri| None).entries().is_none());
     }
 }
