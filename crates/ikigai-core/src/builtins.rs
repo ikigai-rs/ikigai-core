@@ -6,9 +6,11 @@
 //! endpoint whose `lowerCamelCase` identifier matches its name — e.g.
 //! [`to_upper`] builds the `toUpper` endpoint resolved at `urn:fn:toUpper`.
 
+use crate::describe::{ArgSpec, Description};
 use crate::endpoint::{FnEndpoint, Invocation};
 use crate::error::{Error, Result};
 use crate::repr::{ReprType, Representation};
+use crate::verb::Verb;
 
 fn text_plain_utf8() -> ReprType {
     ReprType::new("text/plain").with_param("charset", "utf-8")
@@ -34,18 +36,48 @@ fn echo_impl(inv: &Invocation<'_>) -> Result<Representation> {
     Ok(Representation::new(text_plain_utf8(), message.as_bytes().to_vec()).cacheable())
 }
 
+const TEXT_PLAIN_UTF8: &str = "text/plain;charset=utf-8";
+
 /// `toUpper`: upper-cases the UTF-8 string in the `in` argument.
 pub fn to_upper() -> FnEndpoint {
-    FnEndpoint::new("toUpper", to_upper_impl)
+    FnEndpoint::new("toUpper", to_upper_impl).with_description(
+        Description::new("toUpper")
+            .title("Upper-case")
+            .summary("Upper-cases the UTF-8 text supplied in the `in` argument.")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(ArgSpec::new("in").summary("the text to upper-case"))
+            .output(TEXT_PLAIN_UTF8),
+    )
 }
 
 /// `reverseList`: reverses the order of newline-separated items in `in`.
 pub fn reverse_list() -> FnEndpoint {
-    FnEndpoint::new("reverseList", reverse_list_impl)
+    FnEndpoint::new("reverseList", reverse_list_impl).with_description(
+        Description::new("reverseList")
+            .title("Reverse list")
+            .summary("Reverses the order of newline-separated items in the `in` argument.")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(ArgSpec::new("in").summary("newline-separated items"))
+            .output(TEXT_PLAIN_UTF8),
+    )
 }
 
 /// `echo`: returns the `message` variable captured by the resolving grammar
 /// (demonstrates grammar bindings flowing to an endpoint).
 pub fn echo() -> FnEndpoint {
-    FnEndpoint::new("echo", echo_impl)
+    FnEndpoint::new("echo", echo_impl).with_description(
+        Description::new("echo")
+            .title("Echo")
+            .summary("Returns the `message` segment captured from the resource identifier.")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(
+                ArgSpec::new("message")
+                    .summary("the text to echo, captured from the path by the resolving grammar")
+                    .binding(),
+            )
+            .output(TEXT_PLAIN_UTF8),
+    )
 }

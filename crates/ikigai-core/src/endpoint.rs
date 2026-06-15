@@ -152,6 +152,7 @@ type InvokeFn = Box<dyn Fn(&Invocation<'_>) -> Result<Representation> + Send + S
 pub struct FnEndpoint {
     name: String,
     invoke: InvokeFn,
+    description: Option<Description>,
 }
 
 impl FnEndpoint {
@@ -163,7 +164,16 @@ impl FnEndpoint {
         FnEndpoint {
             name: name.into(),
             invoke: Box::new(invoke),
+            description: None,
         }
+    }
+
+    /// Attach a self-description declaring this endpoint's parameter contract,
+    /// verbs, and outputs (builder). Without one, [`Endpoint::describe`] reports
+    /// just the name.
+    pub fn with_description(mut self, description: Description) -> Self {
+        self.description = Some(description);
+        self
     }
 }
 
@@ -175,5 +185,11 @@ impl Endpoint for FnEndpoint {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn describe(&self) -> Description {
+        self.description
+            .clone()
+            .unwrap_or_else(|| Description::new(&self.name))
     }
 }
