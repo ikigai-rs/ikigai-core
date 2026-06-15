@@ -2,6 +2,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::verb::Verb;
 
+/// Where an input's value comes from — the two channels an endpoint can read a
+/// parameter through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputSource {
+    /// A by-value argument supplied alongside the request and content-addressed
+    /// into its identity (`ArgRef::Inline` / `Content`). The default.
+    #[default]
+    Argument,
+    /// A variable captured from the resource identifier by the resolving grammar
+    /// (e.g. a `{var}` in a [`UriTemplate`](crate::UriTemplate)). Its value lives
+    /// in the IRI, so it is part of the resource's identity directly.
+    Binding,
+}
+
 /// A specification of one named input an endpoint accepts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArgSpec {
@@ -11,15 +26,19 @@ pub struct ArgSpec {
     pub summary: String,
     /// Whether the argument is required.
     pub required: bool,
+    /// Whether the value arrives as a by-value argument or a grammar binding.
+    #[serde(default)]
+    pub source: InputSource,
 }
 
 impl ArgSpec {
-    /// A required argument with the given name.
+    /// A required by-value argument with the given name.
     pub fn new(name: impl Into<String>) -> Self {
         ArgSpec {
             name: name.into(),
             summary: String::new(),
             required: true,
+            source: InputSource::Argument,
         }
     }
 
@@ -32,6 +51,13 @@ impl ArgSpec {
     /// Mark the argument optional (builder).
     pub fn optional(mut self) -> Self {
         self.required = false;
+        self
+    }
+
+    /// Declare that this input is captured from the resource identifier by the
+    /// resolving grammar rather than passed as a by-value argument (builder).
+    pub fn binding(mut self) -> Self {
+        self.source = InputSource::Binding;
         self
     }
 }
@@ -115,8 +141,18 @@ mod tests {
     }
 
     #[test]
+    fn inputs_default_to_arguments_and_can_be_bindings() {
+        let arg = ArgSpec::new("in");
+        assert_eq!(arg.source, InputSource::Argument);
+        let bound = ArgSpec::new("message").binding();
+        assert_eq!(bound.source, InputSource::Binding);
+    }
+
+    #[test]
     fn serde_round_trip() {
-        let d = Description::new("x").verb(Verb::Meta);
+        let d = Description::new("x")
+            .verb(Verb::Meta)
+            .input(ArgSpec::new("message").binding());
         let json = serde_json::to_string(&d).unwrap();
         assert_eq!(serde_json::from_str::<Description>(&json).unwrap(), d);
     }

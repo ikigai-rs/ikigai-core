@@ -8,7 +8,9 @@
 //! WASM-trivial — the emitted graph is small and fully controlled. (A future
 //! revision may project to Hydra / OpenAPI from the same vocabulary.)
 
-use ikigai_core::{Description, Error, MetaRenderer, ReprType, Representation, Result, Verb};
+use ikigai_core::{
+    Description, Error, InputSource, MetaRenderer, ReprType, Representation, Result, Verb,
+};
 
 /// The ikigai vocabulary namespace. Provisional — the canonical namespace IRI
 /// is a project decision; it is used here purely as a stable identifier.
@@ -41,6 +43,13 @@ fn verb_name(verb: Verb) -> &'static str {
         Verb::Exists => "Exists",
         Verb::Delete => "Delete",
         Verb::Meta => "Meta",
+    }
+}
+
+fn source_name(source: InputSource) -> &'static str {
+    match source {
+        InputSource::Argument => "argument",
+        InputSource::Binding => "binding",
     }
 }
 
@@ -79,8 +88,9 @@ pub fn to_turtle(description: &Description) -> String {
     }
     for input in &description.inputs {
         let mut node = format!(
-            "[ ik:inputName {} ; ik:required {}",
+            "[ ik:inputName {} ; ik:source {} ; ik:required {}",
             lit(&input.name),
+            lit(source_name(input.source)),
             input.required
         );
         if !input.summary.is_empty() {
@@ -117,8 +127,11 @@ pub fn to_text(description: &Description) -> String {
     for input in &description.inputs {
         let opt = if input.required { "" } else { " (optional)" };
         s.push_str(&format!(
-            "  input {}{}: {}\n",
-            input.name, opt, input.summary
+            "  input {} [{}]{}: {}\n",
+            input.name,
+            source_name(input.source),
+            opt,
+            input.summary
         ));
     }
     if !description.outputs.is_empty() {
@@ -170,8 +183,23 @@ mod tests {
         assert!(ttl.contains("ik:verb \"Source\", \"Meta\""));
         assert!(ttl.contains("ik:output \"text/plain;charset=utf-8\""));
         assert!(ttl.contains("ik:inputName \"in\""));
+        assert!(ttl.contains("ik:source \"argument\""));
         assert!(ttl.contains("ik:required true"));
         assert!(ttl.trim_end().ends_with('.'));
+    }
+
+    #[test]
+    fn renders_binding_inputs() {
+        let d = Description::new("echo").verb(Verb::Source).input(
+            ArgSpec::new("message")
+                .summary("captured from the path")
+                .binding(),
+        );
+        let ttl = to_turtle(&d);
+        assert!(ttl.contains("ik:inputName \"message\""));
+        assert!(ttl.contains("ik:source \"binding\""));
+        let text = to_text(&d);
+        assert!(text.contains("input message [binding]"));
     }
 
     #[test]
