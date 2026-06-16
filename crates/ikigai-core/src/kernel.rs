@@ -117,6 +117,20 @@ impl Kernel {
         self.cache.lock().expect("cache lock").len()
     }
 
+    /// Whether issuing `request` right now would be served from the cache — a
+    /// read-only probe that neither resolves nor mutates. `false` for verbs that
+    /// aren't cacheable, and for any request whose result isn't already cached
+    /// (including one that would be a miss). Lets a caller report cache state
+    /// without the observer effect of actually issuing the request.
+    pub fn is_cached(&self, request: &Request) -> bool {
+        request.verb.is_cacheable()
+            && self
+                .cache
+                .lock()
+                .expect("cache lock")
+                .contains_key(&request.id())
+    }
+
     /// Enumerate the root space's bindings, if it supports enumeration. `None`
     /// when the root space is not enumerable.
     pub fn entries(&self) -> Option<Vec<SpaceEntry>> {
@@ -228,6 +242,35 @@ mod tests {
             1,
             "second issue should be a cache hit"
         );
+    }
+
+    #[test]
+    fn is_cached_probes_without_resolving() {
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        let counter = FnEndpoint::new("count", |_inv: &Invocation<'_>| {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(Representation::new(ReprType::new("text/plain"), b"x".to_vec()).cacheable())
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:fn:count"), counter),
+        ));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:fn:count"));
+
+        // Not cached before the first issue; probing does not resolve it.
+        assert!(!kernel.is_cached(&req()));
+        assert!(!kernel.is_cached(&req()));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0, "is_cached must not invoke");
+        assert_eq!(kernel.cache_len(), 0, "is_cached must not cache");
+
+        // Cached after issuing once.
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert!(kernel.is_cached(&req()));
+
+        // A different request (different argument identity) is still a miss.
+        let other = Request::new(Verb::Source, iri("urn:fn:count"))
+            .with_arg("in", ArgRef::Inline(b"z".to_vec()));
+        assert!(!kernel.is_cached(&other));
     }
 
     #[test]
