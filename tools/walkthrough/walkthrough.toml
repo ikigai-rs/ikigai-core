@@ -1,0 +1,348 @@
+# Annotation manifest for the ikigai code walkthrough.
+#
+# Prose only — every code snippet is sliced live from the committed source by
+# generate.py, so this file never duplicates code. Each [[file]] names a source
+# file; each [[file.note]] attaches bullets to the card whose source contains
+# `anchor` (a unique substring of the file). `generate.py --check` verifies every
+# anchor still resolves, so drift fails fast.
+
+[doc]
+title = "ikigai"
+subtitle = "code walkthrough · M0–M3"
+footer = "ikigai-core — M0–M3 code walkthrough"
+intro = [
+  "A side-by-side reading of the resolution kernel: identity (M0); resolution — spaces, grammars, endpoints (M1); the SPARQL and file endpoints with RDF self-description (M2); and the async kernel with content-addressed caching and resource composition (M3). Source on the left, annotations on the right, with the reasoning behind the Rust choices.",
+  "Every snippet is sliced from the committed source across the workspace crates, so it matches the repository. Unit-test modules are omitted to keep the focus on the API.",
+]
+
+# ---------------------------------------------------------------- ikigai-core
+[[file]]
+path = "crates/ikigai-core/src/lib.rs"
+title = "ikigai-core / lib.rs"
+subtitle = "Crate root: module map, public surface, conventions"
+[[file.note]]
+anchor = "#![forbid(unsafe_code)]"
+bullets = [
+  "The crate doc is the map of the kernel: identity (M0), resolution (M1), the async kernel + cache (M3).",
+  "`#![forbid(unsafe_code)]` — a crate-wide, compile-time ban on unsafe.",
+  "Two naming worlds, documented here: resource identifiers are `lowerCamelCase` (RDF-idiomatic); Rust identifiers stay `snake_case` / `PascalCase`.",
+]
+[[file.note]]
+anchor = "pub use space::{"
+bullets = [
+  "Private `mod`s behind a curated `pub use` facade — callers depend on a small, stable surface, not the file layout.",
+  "`InputSource` and `SpaceEntry` are part of that surface: the self-description model (argument vs binding) and space enumeration are public API.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/iri.rs"
+title = "ikigai-core / iri.rs"
+subtitle = "Validated absolute IRIs — newtype + serde"
+[[file.note]]
+anchor = "pub struct Iri(String)"
+bullets = [
+  "Newtype `Iri(String)` — holding one is proof of validity (RFC 3987, via `oxiri`).",
+  "`#[serde(try_from)]` re-validates on the wire; raw input is never trusted.",
+  "`Eq`/`Ord`/`Hash` let an IRI be a map key and join the content-addressed identity.",
+]
+[[file.note]]
+anchor = "pub fn parse(value: impl Into<String>)"
+bullets = [
+  "`parse` validates then stores; `as_str` hands out a borrow tied to `&self`.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/verb.rs"
+title = "ikigai-core / verb.rs"
+subtitle = "Request verbs and their cacheability"
+[[file.note]]
+anchor = "pub enum Verb"
+bullets = [
+  "Five verbs, mirroring NetKernel: Source / Sink / Exists / Delete / Meta.",
+  "Explicit `#[repr(u8)]` codes feed identity hashing with a stable, version-independent byte.",
+]
+[[file.note]]
+anchor = "pub fn is_cacheable(self)"
+bullets = [
+  "Cacheability is a property of the verb: only the idempotent reads (Source / Exists / Meta) may be cached; mutating verbs never are.",
+  "This split is also the latent safe-vs-destructive classification a richer endpoint taxonomy would build on.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/content.rs"
+title = "ikigai-core / content.rs"
+subtitle = "Content addresses — BLAKE3, rendered b3:<hex>"
+[[file.note]]
+anchor = "pub struct ContentId([u8; 32])"
+bullets = [
+  "A `ContentId` is a BLAKE3 digest: equal content yields an equal id, which is what makes the cache de-duplicating.",
+  "The `b3:` prefix names the algorithm — room for agility, and the on-ramp to a real multihash/CID at the persistence edge.",
+]
+[[file.note]]
+anchor = "pub fn of(bytes: &[u8])"
+bullets = [
+  "`of` hashes a slice; `from_hasher` finalizes the streaming encodings used for requests and representations.",
+  "BLAKE3 chosen for crypto strength (the id is a security boundary), speed on the hash-everything hot path, and a pure-Rust / WASM-clean build.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/repr.rs"
+title = "ikigai-core / repr.rs"
+subtitle = "Representation types, expiry, and the typed value"
+[[file.note]]
+anchor = "pub struct ReprType"
+bullets = [
+  "A media type plus sorted parameters — `charset`, parse format — kept canonical so the cache never conflates a UTF-8 decode with a Latin-1 decode of the same bytes.",
+]
+[[file.note]]
+anchor = "pub enum Expiry"
+bullets = [
+  "Two ends of the spectrum for now: `Always` (uncacheable — the safe default; an endpoint must opt in) and `Never` (a pure function of content-addressed inputs).",
+  "The middle — dependency-tracked / golden-thread expiry — lands with live invalidation.",
+]
+[[file.note]]
+anchor = "pub fn content_id(&self)"
+bullets = [
+  "A representation's identity folds in both its type and its bytes — so the same bytes under different types are different resources.",
+  "`cacheable()` is the opt-in: build defaults to uncacheable, then flip to `Never` only when the result is genuinely pure.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/arg.rs"
+title = "ikigai-core / arg.rs"
+subtitle = "Argument channels — reference, inline, content"
+[[file.note]]
+anchor = "pub enum ArgRef"
+bullets = [
+  "Three ways a value reaches a request: `Reference(Iri)` (resolve it later — a dependency edge), `Inline(bytes)` (a small literal), `Content(id)` (a large interned value).",
+  "By-value args are content-addressed, so two callers passing the same value share a request identity — cache reuse, and the cure for the fresh-id-per-literal problem.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/hashing.rs"
+title = "ikigai-core / hashing.rs"
+subtitle = "Canonical, prefix-free hashing helpers"
+[[file.note]]
+anchor = "pub(crate) fn feed_bytes"
+bullets = [
+  "Every variable-length field is length-prefixed, so distinct field sequences can never collide into the same digest.",
+  "All hashed encodings flow through these helpers — identity correctness depends on one deterministic encoding, not scattered ad-hoc ones.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/request.rs"
+title = "ikigai-core / request.rs"
+subtitle = "A request and its content-addressed identity"
+[[file.note]]
+anchor = "pub struct Request {"
+bullets = [
+  "A verb, a target IRI, and named arguments in a sorted `BTreeMap` — so identity depends on the set of arguments, never their insertion order.",
+]
+[[file.note]]
+anchor = "pub fn id(&self)"
+bullets = [
+  "The `RequestId` is a BLAKE3 of (verb, target, arguments) — itself a content address of the computation, and the kernel's cache key.",
+  "Each `ArgRef` variant hashes distinctly: a `Reference` folds in its IRI, an `Inline` its bytes — so a grammar binding (in the IRI) and a by-value arg both reach the key, by different routes.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/grammar.rs"
+title = "ikigai-core / grammar.rs"
+subtitle = "Grammars: match an identifier, capture bindings"
+[[file.note]]
+anchor = "pub struct Exact(String)"
+bullets = [
+  "`Grammar` is the resolution seam: match an IRI, optionally capture `Bindings`. `Exact` matches one identifier and captures nothing.",
+  "`pattern()` (used by space enumeration) defaults to uninformative and is overridden per grammar — additive, so future custom grammars need not implement it.",
+]
+[[file.note]]
+anchor = "pub struct UriTemplate"
+bullets = [
+  "A constrained RFC 6570 template — Level 1 `{var}` only. Matching (not expansion) is the hard direction, kept deterministic: literals match verbatim, a `{var}` captures up to the next literal.",
+  "Adjacent variables are rejected at construction as ambiguous. Richer constrained/typed grammars slot in beside this as new `Grammar` impls, no change here.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/endpoint.rs"
+title = "ikigai-core / endpoint.rs"
+subtitle = "Endpoints, the invocation context, and the issuer"
+[[file.note]]
+anchor = "pub trait Issuer"
+bullets = [
+  "`Issuer` is how an endpoint issues sub-requests back through the kernel — implemented by the `Kernel`. A detached invocation has none, so endpoints can be tested in isolation.",
+]
+[[file.note]]
+anchor = "pub struct Invocation"
+bullets = [
+  "All input arrives through the `Invocation`: the request, grammar bindings, the authorizing capability, and (when the kernel drives) the ability to source sub-requests. No ambient authority.",
+  "`source` / `issue` record each sub-result's expiry as a dependency, so cacheability propagates: a result is `Never` only if it opted in and every dependency it read is too.",
+]
+[[file.note]]
+anchor = "pub trait Endpoint"
+bullets = [
+  "`invoke` is `async` (dyn via `async-trait`, which boxes the future) — runtime-free, so the core stays executor-agnostic and WASM-able; the executor is chosen at the edge.",
+  "`describe()` returns a structured, RDF-agnostic `Description`; the kernel routes `Meta` through it.",
+]
+[[file.note]]
+anchor = "pub fn with_description"
+bullets = [
+  "`FnEndpoint` wraps a plain closure — the simplest endpoint. `with_description` lets it declare its full parameter contract; without one, `describe()` reports just the name.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/space.rs"
+title = "ikigai-core / space.rs"
+subtitle = "Address spaces: resolution and composition"
+[[file.note]]
+anchor = "pub struct Scope"
+bullets = [
+  "`Scope` is the stack of spaces visible to a request — the substrate for scope-relative visibility and, later, navigable space stacks.",
+]
+[[file.note]]
+anchor = "pub trait Space"
+bullets = [
+  "A `Space` maps a request to an endpoint by resolution. `entries()` optionally enumerates its bindings — `None` for spaces that cannot (rewrite, remote), so enumeration is a capability, not a guarantee.",
+]
+[[file.note]]
+anchor = "pub struct SpaceEntry"
+bullets = [
+  "One binding, for enumeration: a grammar pattern and the endpoint it resolves to — what the CLI `list` command renders.",
+]
+[[file.note]]
+anchor = "pub struct EndpointSpace"
+bullets = [
+  "The leaf space: an ordered list of (grammar, endpoint) bindings; first match wins. It enumerates its bindings directly.",
+]
+[[file.note]]
+anchor = "pub struct Mount"
+bullets = [
+  "The composition algebra: `Mount` delegates an IRI prefix to an inner space; `Fallback` tries spaces in order; `Rewrite` rewrites the target before delegating. A small, total set.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/capability.rs"
+title = "ikigai-core / capability.rs"
+subtitle = "Unforgeable authority handle (shape only, in M0)"
+[[file.note]]
+anchor = "pub struct Capability"
+bullets = [
+  "Authority is an explicit, unforgeable handle — it cannot be built from arbitrary data outside this crate. No ambient authority anywhere.",
+  "`root()` is a development-only, all-permitting stub; a real minting authority (attenuation, delegation, per-verb grants) arrives with the authorization layer.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/describe.rs"
+title = "ikigai-core / describe.rs"
+subtitle = "Structured, RDF-agnostic self-description"
+[[file.note]]
+anchor = "pub enum InputSource"
+bullets = [
+  "The two parameter channels, made explicit: `Argument` (a by-value arg, content-addressed) vs `Binding` (a `{var}` captured from the IRI by the grammar).",
+  "Both fold into the request identity — but a client (the REPL, an MCP projection) needs to know which channel an input uses; this is where it is declared.",
+]
+[[file.note]]
+anchor = "pub struct ArgSpec"
+bullets = [
+  "One declared input: name, summary, required, and its `source`. `.binding()` marks a grammar-captured input.",
+]
+[[file.note]]
+anchor = "pub struct Description"
+bullets = [
+  "The neutral self-description an endpoint returns: id, title, verbs, inputs, outputs. `ikigai-vocab` projects it to RDF — kept free of any RDF dependency so core stays lean.",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/meta.rs"
+title = "ikigai-core / meta.rs"
+subtitle = "The Meta transform seam (no RDF dependency)"
+[[file.note]]
+anchor = "pub trait MetaRenderer"
+bullets = [
+  "Defined in core so the kernel routes `Meta` uniformly, but with no RDF dependency — `ikigai-vocab` provides an implementation, injected by the host.",
+  "The first piece of the transform layer: an endpoint returns its canonical `Description`, and the requested type drives the projection (one resource, many representations).",
+]
+
+[[file]]
+path = "crates/ikigai-core/src/builtins.rs"
+title = "ikigai-core / builtins.rs"
+subtitle = "Closure-backed endpoints — the simplest kind"
+[[file.note]]
+anchor = "fn to_upper_impl"
+bullets = [
+  "Pure, idempotent, perfectly cacheable functions — the M1 demonstration of resolution and the pure-cache test. `toUpper` / `reverseList` read the `in` argument.",
+  "`echo` instead reads a `message` grammar binding — so the builtins exercise both input channels.",
+]
+[[file.note]]
+anchor = "pub fn to_upper()"
+bullets = [
+  "Per the naming convention, the `snake_case` constructor builds the `lowerCamelCase` endpoint: `to_upper()` is the `toUpper` resource.",
+  "Each now carries a full `Description` (verbs, the `in` argument, output type), so `describe` and the contract-driven REPL routing have something to read.",
+]
+
+# --------------------------------------------------------------- ikigai-store
+[[file]]
+path = "crates/ikigai-store/src/lib.rs"
+title = "ikigai-store / lib.rs"
+subtitle = "RDF/SPARQL endpoint backed by Oxigraph (in-memory)"
+[[file.note]]
+anchor = "pub struct SparqlEndpoint"
+bullets = [
+  "Wraps an in-memory Oxigraph store (shared via `Arc`). Synchronous — in-memory evaluation needs no async runtime.",
+  "WASM-able: depends on Oxigraph with `default-features = false` (no RocksDB); the `js` feature is added only for the wasm target.",
+]
+[[file.note]]
+anchor = "fn evaluate(&self, query: &str)"
+bullets = [
+  "The query result type drives the representation: SELECT/ASK → `application/sparql-results+json`; CONSTRUCT/DESCRIBE → `application/n-triples`.",
+]
+[[file.note]]
+anchor = "impl Endpoint for SparqlEndpoint"
+bullets = [
+  "Only `Source` serves data — `Meta` is routed by the kernel through the transform layer, so the endpoint never hand-rolls its own description rendering.",
+  "`describe()` declares the `query` argument and both output types — machine-readable, and projected to RDF by the same Meta path.",
+]
+
+# ------------------------------------------------------------------ ikigai-fs
+[[file]]
+path = "crates/ikigai-fs/src/lib.rs"
+title = "ikigai-fs / lib.rs"
+subtitle = "Capability-confined file endpoint (default-deny)"
+[[file.note]]
+anchor = "pub struct FileEndpoint"
+bullets = [
+  "Holds no inherent authority over the filesystem: jailed to a `root` given at construction, it will never serve a path outside it.",
+  "The path comes from the `path` binding captured by the resolving grammar — so the file's identity is the request, not an out-of-band argument.",
+]
+[[file.note]]
+anchor = "fn resolve_within_root"
+bullets = [
+  "Default-deny by construction: `..` and absolute segments are rejected outright; when the target exists, its canonical path must still sit within the canonical root (symlink-safe).",
+  "This is application-level confinement, not OS isolation — true sandboxing is the WASI/wasmtime layer. Docs say confined, not sandboxed.",
+]
+[[file.note]]
+anchor = "fn media_type_for"
+bullets = [
+  "The native representation is the file's bytes with a media type guessed from the extension; byte→string/graph conversions are the transform layer's job.",
+]
+
+# --------------------------------------------------------------- ikigai-vocab
+[[file]]
+path = "crates/ikigai-vocab/src/lib.rs"
+title = "ikigai-vocab / lib.rs"
+subtitle = "Self-description vocabulary and its RDF projection"
+[[file.note]]
+anchor = "pub fn to_turtle"
+bullets = [
+  "Renders a core `Description` to Turtle by hand — dependency-free and WASM-trivial; the emitted graph is small and fully controlled.",
+  "Each input renders its `ik:source` (`argument` or `binding`), so the parameter contract is machine-readable in RDF.",
+]
+[[file.note]]
+anchor = "pub struct TurtleRenderer"
+bullets = [
+  "Implements core's `MetaRenderer` — text/turtle (default) and text/plain. Injected into a kernel via `Kernel::with_meta_renderer`, breaking the core↔vocab dependency cycle.",
+]
+[[file.note]]
+anchor = "fn source_name"
+bullets = [
+  "The one place the `InputSource` enum becomes RDF vocabulary — the seam between the neutral core model and its projection.",
+]

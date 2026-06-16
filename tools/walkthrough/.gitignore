@@ -1,0 +1,2 @@
+# Generated PDF is a build artifact; regenerate with generate.py
+*.pdf
