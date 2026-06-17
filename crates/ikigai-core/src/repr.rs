@@ -16,7 +16,11 @@ pub struct ReprType {
     /// The media type, e.g. `text/turtle`.
     pub media_type: String,
     /// Canonicalized parameters (sorted by key).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    //
+    // No `skip_serializing_if`: it would omit an empty map, which a
+    // non-self-describing binary codec (postcard, used by the IPC wire) can't
+    // round-trip. `default` still fills a missing field in self-describing formats.
+    #[serde(default)]
     pub params: BTreeMap<String, String>,
 }
 
