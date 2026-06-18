@@ -16,6 +16,10 @@ readme = "README.md"
 # core stays executor-agnostic and WASM-able. The executor is chosen at the edge.
 async-trait = "0.1"
 blake3 = "1"
+# Future *combinators* only (try_join_all) — runtime-free and WASM-able, so
+# `compose` can fork its `$a{}` sub-resolutions and join them. Spawns nothing;
+# the executor is still chosen at the edge.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 oxiri = "0.2"
 serde = { version = "1", features = ["derive"] }
 
