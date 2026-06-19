@@ -3,6 +3,12 @@
 # capability-gated resource. ikigai *infers* the manifest from the signature
 # (see greeting.inferred.ttl) — it lands in the same vocabulary as the authored
 # personal.module.* files.
+#
+# NOTE: this file is a COMPONENT OF the personal module (same authority, same
+# signer) — not a stray third-party file that "drops in" and binds into
+# urn:personal:. Binding into a space is an act of host authority, not a claim a
+# module makes by naming a prefix; see ../README.md "Binding: who may publish
+# into a space".
 
 from ikigai import endpoint, source
 

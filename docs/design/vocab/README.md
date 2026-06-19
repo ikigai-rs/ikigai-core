@@ -82,6 +82,32 @@ For the lightweight (Python) end, imports can be **discovered** from the
 `source(...)` call sites and then *confirmed and pinned* explicitly — the easy
 path proposes the dependency list; the secure path locks it down.
 
+## Binding: who may publish into a space (the dual of imports)
+
+A module does **not** get to publish into a prefix by fiat. There is **no global
+publish**: within a kernel the **host composes the stack** (`Mount` / `Rewrite`
+are operator acts), so a module *offers* bindings and the host decides whether
+and where they graft into a public prefix. The manifest's `space:` (and the
+bound prefixes) is a **request/default ratified by the host's mount**, not a
+claim — `"space": "urn:personal:"` does not, by itself, authorize anything.
+
+Binding authority is the **write side** of capability-gated space access (#17):
+a capability over a prefix, delegated and attenuated from the space's **root
+authority**. Safe-by-default mechanism: a module binds in **its own namespace**
+(owned by construction), and the host `Rewrite`s chosen bindings into the public
+prefix — so a module literally cannot *name* another's namespace without an
+explicit host graft. A first-party module that *defines* a space holds (or is
+granted) authority over the prefix; a third-party contribution needs an explicit
+grant.
+
+**Publish-authority and import-trust are duals that meet at the signature.** A
+space's bindings are trustworthy iff signed by the space authority — the *same*
+signer an importer gates on (`{ prefix, signer }`). So locking *who may bind* is
+exactly what makes a namespace *safe to import from*; both reduce to "whose
+signature vouches for this prefix's contents." (This is why the worked example's
+`greeting.py` is a **component of the personal module** — same authority, same
+signer — not a stray file that squats `urn:personal:greeting`.)
+
 ## `urn:shape:fn`
 
 The *structural* contract for a function resource: exactly one output
