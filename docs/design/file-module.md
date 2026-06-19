@@ -1,9 +1,12 @@
 # Capability-scoped files & stores (`ikigai-fs`) — design
 
-**Status:** design, settled 2026-06-18 (Brian + sketch). Not yet implemented.
+**Status:** settled 2026-06-18; **v1 implemented** 2026-06-19 — the standalone
+`ikigai-fs` crate (SOURCE/SINK/EXISTS/DELETE, jail + path-ACL, strings-default,
+native `std::fs` with a stubbed wasm `localStorage` backend) and the CLI wiring
+(`sink` command, `read-only`/`read`/`write`/`delete`/`agent` cap profiles).
 Companion to [`resolution-architecture.md`](resolution-architecture.md) and the
-capability work (`ikigai-core 0.1.7`). Reviewed and the major decisions are
-locked; small knobs carry recommendations, marked.
+capability work (`ikigai-core 0.1.7`). This document is the rationale; the code is
+the spec where they differ.
 
 Files are the single most dangerous endpoint in the system — arbitrary
 filesystem read *and write* — so the **security model is the point**, not an
@@ -93,13 +96,14 @@ Friendly `cap` labels alongside `freebusy`:
 
 | profile | grants |
 |---------|--------|
-| `read-only` / `read` | `urn:cap:fs:<root>:read` |
-| `write` | read + write |
-| `delete` | read + write + delete |
+| `read-only` / `read` | `urn:cap:fs:read:<root>` |
+| `write` | read + `urn:cap:fs:write:<root>` |
+| `delete` | read + write + `urn:cap:fs:delete:<root>` |
 | `agent` | `freebusy` + `read-only` — the "what I delegate" preset |
 
 So `cap read-only` drops the session (or an agent) to read-only file access — the
-same gesture as `cap freebusy`.
+same gesture as `cap freebusy`. (Scope form is **verb-first**:
+`urn:cap:fs:<action>:<path>`, matching the path-ACL above.)
 
 ---
 
