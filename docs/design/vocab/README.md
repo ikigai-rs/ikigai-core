@@ -95,6 +95,15 @@ orthogonal so the shape is reusable for local validation too. A constrained
 - **Namespace IRIs** are placeholders (`https://ikigai-rs.org/ns/…`). w3id.org?
   A permanent ikigai domain? Painful to change later — worth deciding early.
 - **Platform-as-predicate vs `{platform, target}` list** (decision #3).
+- **Representation types as IRIs, on two axes.** Today `ik:mediaType` is a string
+  token. The principled model makes representation types **IRIs in one type
+  space** (media-type / WIT-interface / XSD-datatype / SHACL-shape IRIs all as the
+  nodes of the transreption type graph), so transreptors become RDF triples
+  `(fromType) ik:transrepts (toType)`. That also separates two axes `xsd:string`
+  conflated: **serialization** (`ik:mediaType`, e.g. `text/plain`) vs **structure**
+  (a future `ik:schema` — a SHACL shape, a **WIT interface**, or an XSD datatype).
+  WIT maps onto the structure axis (record ≈ SHACL shape; primitives ≈ XSD), and
+  that mapping is itself a transreptor. See task #28.
 - **Controlled vocabularies** for `cache` / `transport` / `capability` (string
   literals today; enumerated IRIs once SHACL tightens).
 - **`module/v1` context versioning** — how the implied context evolves without

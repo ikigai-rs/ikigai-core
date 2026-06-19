@@ -17,7 +17,14 @@
     rdfs:label   "ikigai function contract" ;
     rdfs:comment "A resource conforms if it declares exactly one output mediaType and its declared arguments are well-formed." ;
 
-    # exactly one output representation type
+    # exactly one output representation type.
+    # NOTE: `ik:mediaType` is the SERIALIZATION axis (IANA media type), distinct
+    # from the STRUCTURE axis (a SHACL shape / WIT interface / XSD datatype, via a
+    # future `ik:schema`). `sh:datatype xsd:string` here types the media-type
+    # *token*; the principled form makes representation types IRIs in one type
+    # space (media-type / WIT / XSD / SHACL all as IRIs — the nodes of the
+    # transreption type graph), at which point this becomes `sh:nodeKind sh:IRI`.
+    # See ../README.md open questions and task #28.
     sh:property [
         sh:path      ik:mediaType ;
         sh:minCount  1 ;
