@@ -302,29 +302,6 @@ bullets = [
   "`describe()` declares the `query` argument and both output types — machine-readable, and projected to RDF by the same Meta path.",
 ]
 
-# ------------------------------------------------------------------ ikigai-fs
-[[file]]
-path = "crates/ikigai-fs/src/lib.rs"
-title = "ikigai-fs / lib.rs"
-subtitle = "Capability-confined file endpoint (default-deny)"
-[[file.note]]
-anchor = "pub struct FileEndpoint"
-bullets = [
-  "Holds no inherent authority over the filesystem: jailed to a `root` given at construction, it will never serve a path outside it.",
-  "The path comes from the `path` binding captured by the resolving grammar — so the file's identity is the request, not an out-of-band argument.",
-]
-[[file.note]]
-anchor = "fn resolve_within_root"
-bullets = [
-  "Default-deny by construction: `..` and absolute segments are rejected outright; when the target exists, its canonical path must still sit within the canonical root (symlink-safe).",
-  "This is application-level confinement, not OS isolation — true sandboxing is the WASI/wasmtime layer. Docs say confined, not sandboxed.",
-]
-[[file.note]]
-anchor = "fn media_type_for"
-bullets = [
-  "The native representation is the file's bytes with a media type guessed from the extension; byte→string/graph conversions are the transform layer's job.",
-]
-
 # --------------------------------------------------------------- ikigai-vocab
 [[file]]
 path = "crates/ikigai-vocab/src/lib.rs"
