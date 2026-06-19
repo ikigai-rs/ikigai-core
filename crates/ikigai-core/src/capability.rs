@@ -18,12 +18,12 @@ use serde::{Deserialize, Serialize};
 /// channel authenticated (e.g. the peercred-verified owner over IPC). Full
 /// cryptographic unforgeability over an unauthenticated channel (QUIC) arrives
 /// with capability-on-the-wire.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capability {
     kind: Kind,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Kind {
     /// Full authority — grants every scope. A resource owner's root.
     Root,
