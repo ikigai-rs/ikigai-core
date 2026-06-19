@@ -1,0 +1,39 @@
+<svg width="100%" viewBox="0 0 680 352" role="img" xmlns="http://www.w3.org/2000/svg" font-family="ui-sans-serif, system-ui, sans-serif">
+  <title>A space is a named graph</title>
+  <desc>The personal space on the left maps to a named graph on the right whose triples describe its endpoints. A SPARQL query over that graph lists what is in the space.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- space (runtime view) -->
+  <rect x="44" y="58" width="252" height="156" rx="12" fill="#EAF1FB" stroke="#2F6FBF" stroke-width="1.5"/>
+  <text x="60" y="82" fill="#0C447C" font-size="14" font-weight="500">space</text>
+  <text x="60" y="98" fill="#3E6CA3" font-size="12" font-family="ui-monospace, monospace">urn:personal:</text>
+  <rect x="60" y="110" width="220" height="38" rx="7" fill="#F3F8FF" stroke="#9CC0EE" stroke-width="1.25"/>
+  <text x="72" y="133" fill="#0C447C" font-size="12" font-family="ui-monospace, monospace">urn:personal:contacts</text>
+  <rect x="60" y="154" width="220" height="48" rx="7" fill="#F3F8FF" stroke="#9CC0EE" stroke-width="1.25"/>
+  <text x="72" y="174" fill="#0C447C" font-size="12" font-family="ui-monospace, monospace">urn:personal:calendar</text>
+  <text x="72" y="190" fill="#3E6CA3" font-size="10">exposes http · freebusy projection</text>
+
+  <!-- bridge arrow -->
+  <text x="340" y="124" text-anchor="middle" fill="#64748B" font-size="11">stored as a</text>
+  <text x="340" y="138" text-anchor="middle" fill="#64748B" font-size="11">named graph</text>
+  <line x1="300" y1="150" x2="380" y2="150" stroke="#8FA3BA" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- named graph (RDF view) -->
+  <rect x="384" y="58" width="252" height="156" rx="12" fill="#F3F8FF" stroke="#9CC0EE" stroke-width="1.5"/>
+  <text x="400" y="82" fill="#0C447C" font-size="11.5" font-family="ui-monospace, monospace">GRAPH urn:space:personal</text>
+  <text x="400" y="108" fill="#334155" font-size="11" font-family="ui-monospace, monospace">contacts a ik:Endpoint ;</text>
+  <text x="400" y="124" fill="#334155" font-size="11" font-family="ui-monospace, monospace">  ik:mediaType "ld+json" .</text>
+  <text x="400" y="148" fill="#334155" font-size="11" font-family="ui-monospace, monospace">calendar a ik:Endpoint ;</text>
+  <text x="400" y="164" fill="#334155" font-size="11" font-family="ui-monospace, monospace">  ik:exposes [ http ;</text>
+  <text x="400" y="180" fill="#334155" font-size="11" font-family="ui-monospace, monospace">    freebusy ] .</text>
+
+  <!-- query -->
+  <rect x="44" y="244" width="592" height="86" rx="10" fill="#F6F8FB" stroke="#C3D0E0" stroke-width="1.5"/>
+  <text x="60" y="266" fill="#64748B" font-size="11">ask "what is in the space?" — one SPARQL query</text>
+  <text x="60" y="292" fill="#334155" font-size="12.5" font-family="ui-monospace, monospace">GRAPH urn:space:personal { ?e a ik:Endpoint }</text>
+  <text x="60" y="316" fill="#0B5E47" font-size="12.5" font-family="ui-monospace, monospace">→  contacts, calendar</text>
+</svg>

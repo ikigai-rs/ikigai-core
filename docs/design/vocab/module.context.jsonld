@@ -1,0 +1,36 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "@vocab": "https://ikigai-rs.org/ns/module#",
+    "ik":  "https://ikigai-rs.org/ns/module#",
+    "ikp": "https://ikigai-rs.org/ns/platform#",
+
+    "module":     "ik:name",
+    "version":    "ik:version",
+    "space":      { "@id": "ik:space",      "@type": "@id" },
+
+    "binds":      { "@id": "ik:binds",      "@container": "@set" },
+    "resource":   { "@id": "ik:resource",   "@type": "@id" },
+    "mediaType":  "ik:mediaType",
+    "cache":      "ik:cache",
+    "runtime":    "ik:runtime",
+    "backend":    "ik:backend",
+    "macos":      "ikp:macos",
+    "linux":      "ikp:linux",
+    "windows":    "ikp:windows",
+
+    "arg":        { "@id": "ik:arg",        "@container": "@set" },
+    "name":       "ik:argName",
+
+    "exposes":    { "@id": "ik:exposes",    "@container": "@set" },
+    "transport":  "ik:transport",
+    "projection": { "@id": "ik:projection", "@type": "@id" },
+    "capability": "ik:capability",
+
+    "imports":    { "@id": "ik:imports",    "@type": "@id", "@container": "@set" },
+    "content":    "ik:content",
+    "signer":     { "@id": "ik:signer",     "@type": "@id" },
+    "prefix":     "ik:prefix",
+    "shape":      { "@id": "ik:shape",      "@type": "@id" }
+  }
+}

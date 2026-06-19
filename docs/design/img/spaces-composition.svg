@@ -1,0 +1,62 @@
+<svg width="100%" viewBox="0 0 680 556" role="img" xmlns="http://www.w3.org/2000/svg" font-family="ui-sans-serif, system-ui, sans-serif">
+  <title>Embedded spaces: a composed resolution stack</title>
+  <desc>A Root fallback contains an Overrides layer over a Mount. The Mount routes four prefixes to spaces; urn:data: routes to a nested fallback of LocalData over a Remote space.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- Root -->
+  <rect x="40" y="40" width="600" height="472" rx="14" fill="#F6F8FB" stroke="#C3D0E0" stroke-width="1.5"/>
+  <text x="58" y="64" fill="#334155" font-size="14" font-weight="500">Root</text>
+  <text x="58" y="80" fill="#64748B" font-size="12">fallback · first match wins ↓</text>
+
+  <!-- Overrides layer -->
+  <rect x="58" y="92" width="564" height="44" rx="10" fill="#EAF1FB" stroke="#2F6FBF" stroke-width="1.5"/>
+  <text x="74" y="114" fill="#0C447C" font-size="14" font-weight="500">Overrides</text>
+  <text x="74" y="129" fill="#3E6CA3" font-size="12">user pins · hotfixes</text>
+
+  <!-- Mount layer -->
+  <rect x="58" y="148" width="564" height="348" rx="10" fill="#EAF1FB" stroke="#2F6FBF" stroke-width="1.5"/>
+  <text x="74" y="170" fill="#0C447C" font-size="14" font-weight="500">Mount</text>
+  <text x="74" y="185" fill="#3E6CA3" font-size="12">route by prefix</text>
+
+  <!-- personal row -->
+  <rect x="74" y="196" width="532" height="44" rx="8" fill="#F3F8FF" stroke="#9CC0EE" stroke-width="1.25"/>
+  <text x="86" y="223" fill="#0C447C" font-size="13" font-family="ui-monospace, monospace">urn:personal:</text>
+  <text x="210" y="223" fill="#0C447C" font-size="13">→  PersonalBackends</text>
+  <rect x="420" y="205" width="178" height="26" rx="13" fill="#EDE7FB" stroke="#8B7FD6" stroke-width="1.25"/>
+  <text x="431" y="222" fill="#4A3E9E" font-size="11" font-family="ui-monospace, monospace">rewrite → macos:eventkit:</text>
+
+  <!-- fn row -->
+  <rect x="74" y="248" width="532" height="40" rx="8" fill="#F3F8FF" stroke="#9CC0EE" stroke-width="1.25"/>
+  <text x="86" y="273" fill="#0C447C" font-size="13" font-family="ui-monospace, monospace">urn:fn:</text>
+  <text x="210" y="273" fill="#0C447C" font-size="13">→  FnLibrary</text>
+
+  <!-- dash row -->
+  <rect x="74" y="296" width="532" height="40" rx="8" fill="#F3F8FF" stroke="#9CC0EE" stroke-width="1.25"/>
+  <text x="86" y="321" fill="#0C447C" font-size="13" font-family="ui-monospace, monospace">urn:dash:</text>
+  <text x="210" y="321" fill="#0C447C" font-size="13">→  Dashboard</text>
+
+  <!-- data row -> nested fallback -->
+  <text x="86" y="406" fill="#0C447C" font-size="13" font-family="ui-monospace, monospace">urn:data:</text>
+  <line x1="166" y1="406" x2="294" y2="410" stroke="#8FA3BA" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="300" y="344" width="306" height="140" rx="10" fill="#F6F8FB" stroke="#C3D0E0" stroke-width="1.5"/>
+  <text x="312" y="363" fill="#64748B" font-size="11">fallback · local shadows remote ↓</text>
+  <rect x="312" y="370" width="282" height="48" rx="8" fill="#DCF3EC" stroke="#0F8A66" stroke-width="1.25"/>
+  <text x="324" y="391" fill="#0B5E47" font-size="13" font-weight="500">LocalData</text>
+  <text x="324" y="407" fill="#2E7D63" font-size="11">local · bootstrap shell</text>
+  <rect x="312" y="424" width="282" height="48" rx="8" fill="#FBEFD7" stroke="#B7791F" stroke-width="1.25" stroke-dasharray="5 4"/>
+  <text x="324" y="445" fill="#7A4F11" font-size="13" font-weight="500">Remote</text>
+  <text x="324" y="461" fill="#95622A" font-size="11" font-family="ui-monospace, monospace">quic://peer:4433</text>
+
+  <!-- legend -->
+  <rect x="40" y="522" width="158" height="22" rx="11" fill="#DCF3EC" stroke="#0F8A66" stroke-width="1.25"/>
+  <text x="51" y="537" fill="#0B5E47" font-size="11">local · in-process</text>
+  <rect x="208" y="522" width="184" height="22" rx="11" fill="#FBEFD7" stroke="#B7791F" stroke-width="1.25" stroke-dasharray="5 4"/>
+  <text x="219" y="537" fill="#7A4F11" font-size="11">remote · over the network</text>
+  <rect x="402" y="522" width="150" height="22" rx="11" fill="#EDE7FB" stroke="#8B7FD6" stroke-width="1.25"/>
+  <text x="413" y="537" fill="#4A3E9E" font-size="11">rewrite · graft</text>
+</svg>

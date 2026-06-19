@@ -1,0 +1,30 @@
+module  = "personal"
+version = "0.1.0"
+space   = "urn:personal:"
+
+[[binds]]
+resource  = "urn:personal:contacts"
+mediaType = "application/ld+json"
+cache     = "private"
+backend   = { macos = "eventkit:contacts", linux = "ldap:default", windows = "ad:default" }
+
+[[binds]]
+resource  = "urn:personal:calendar"
+mediaType = "text/calendar"
+backend   = { macos = "eventkit:calendar", linux = "caldav:default", windows = "ad:calendar" }
+
+[[exposes]]
+resource   = "urn:personal:calendar"
+transport  = "http"
+projection = "urn:personal:fn:freebusy"
+capability = "freebusy"
+
+[[imports]]
+resource = "urn:fn:redact"
+content  = "blake3:9af2c1d4e5b6a7c8"
+signer   = "did:key:z6MkpExampleTrustedSigner"
+
+[[imports]]
+prefix = "urn:fn:date:"
+signer = "did:key:z6MkpExampleTrustedSigner"
+shape  = "urn:shape:fn"

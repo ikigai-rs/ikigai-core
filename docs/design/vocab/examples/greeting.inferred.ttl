@@ -1,0 +1,19 @@
+# The manifest ikigai INFERS from greeting.py — same vocabulary as the authored
+# manifests, just derived instead of written. Heavy = authored, light = inferred,
+# one model underneath.
+#
+# Note: no ik:exposes -> not exposed by default. No ik:signer -> fine for a local
+# endpoint; the signing requirement is the *import* gate (across a trust boundary),
+# not a property of every function. This node conforms to urn:shape:fn structurally
+# (one output mediaType + a well-formed arg), so it *could* be imported elsewhere
+# once signed.
+
+@prefix ik: <https://ikigai-rs.org/ns/module#> .
+
+<urn:ikigai:module:personal>
+    ik:binds
+        [ ik:resource  <urn:personal:greeting> ;
+          ik:runtime   "python" ;
+          ik:mediaType "text/plain" ;                                    # inferred from -> str
+          ik:arg       [ ik:argName "name" ; ik:mediaType "text/plain" ] # inferred from (name: str)
+        ] .

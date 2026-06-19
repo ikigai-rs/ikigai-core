@@ -1,0 +1,45 @@
+# urn:shape:fn — the structural contract a resource must satisfy to be
+# importable as a *function* (e.g. via a constrained-prefix import
+# `{ "prefix": "...", "shape": "urn:shape:fn" }`).
+#
+# STRUCTURE ONLY. This shape says nothing about *trust*: whether a candidate is
+# signed, and by whom, is the import declaration's `signer`/`content` gate, kept
+# deliberately orthogonal so this shape is also reusable for local validation.
+#
+# Status: design draft. Placeholder namespaces.
+
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix ik:   <https://ikigai-rs.org/ns/module#> .
+
+<urn:shape:fn> a sh:NodeShape ;
+    rdfs:label   "ikigai function contract" ;
+    rdfs:comment "A resource conforms if it declares exactly one output mediaType and its declared arguments are well-formed." ;
+
+    # exactly one output representation type.
+    # NOTE: `ik:mediaType` is the SERIALIZATION axis (IANA media type), distinct
+    # from the STRUCTURE axis (a SHACL shape / WIT interface / XSD datatype, via a
+    # future `ik:schema`). `sh:datatype xsd:string` here types the media-type
+    # *token*; the principled form makes representation types IRIs in one type
+    # space (media-type / WIT / XSD / SHACL all as IRIs — the nodes of the
+    # transreption type graph), at which point this becomes `sh:nodeKind sh:IRI`.
+    # See ../README.md open questions and task #28.
+    sh:property [
+        sh:path      ik:mediaType ;
+        sh:minCount  1 ;
+        sh:maxCount  1 ;
+        sh:datatype  xsd:string ;
+        sh:message   "a function must declare exactly one output mediaType"
+    ] ;
+
+    # arguments are optional, but every declared one must be a well-formed {argName, mediaType}
+    sh:property [
+        sh:path    ik:arg ;
+        sh:node    <urn:shape:fn-arg> ;
+        sh:message "each arg must be a well-formed { name, mediaType }"
+    ] .
+
+<urn:shape:fn-arg> a sh:NodeShape ;
+    sh:property [ sh:path ik:argName ;   sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] ;
+    sh:property [ sh:path ik:mediaType ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] .

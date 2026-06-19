@@ -1,0 +1,37 @@
+# The single RDF graph produced by personal.module.{json,toml,yaml} after
+# ikigai injects the implied @context (module/v1) and its manifest transreptor
+# assigns the subject id (urn:ikigai:module:<name>; see README decision #2).
+#
+# This is what SHACL validates, what gets canonicalized + signed, and what the
+# dashboard projects back to any authoring format.
+
+@prefix ik:  <https://ikigai-rs.org/ns/module#> .
+@prefix ikp: <https://ikigai-rs.org/ns/platform#> .
+
+<urn:ikigai:module:personal>
+    ik:name    "personal" ;
+    ik:version "0.1.0" ;
+    ik:space   <urn:personal:> ;
+
+    ik:binds
+        [ ik:resource  <urn:personal:contacts> ;
+          ik:mediaType "application/ld+json" ;
+          ik:cache     "private" ;
+          ik:backend   [ ikp:macos "eventkit:contacts" ; ikp:linux "ldap:default" ; ikp:windows "ad:default" ] ] ,
+        [ ik:resource  <urn:personal:calendar> ;
+          ik:mediaType "text/calendar" ;
+          ik:backend   [ ikp:macos "eventkit:calendar" ; ikp:linux "caldav:default" ; ikp:windows "ad:calendar" ] ] ;
+
+    ik:exposes
+        [ ik:resource   <urn:personal:calendar> ;
+          ik:transport  "http" ;
+          ik:projection <urn:personal:fn:freebusy> ;
+          ik:capability "freebusy" ] ;
+
+    ik:imports
+        [ ik:resource <urn:fn:redact> ;
+          ik:content  "blake3:9af2c1d4e5b6a7c8" ;
+          ik:signer   <did:key:z6MkpExampleTrustedSigner> ] ,
+        [ ik:prefix "urn:fn:date:" ;
+          ik:signer <did:key:z6MkpExampleTrustedSigner> ;
+          ik:shape  <urn:shape:fn> ] .
