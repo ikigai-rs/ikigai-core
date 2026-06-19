@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
+
 /// An unforgeable handle conferring authority to resolve and invoke resources.
 ///
 /// ikigai uses no ambient authority: an endpoint receives the capabilities it
@@ -10,14 +12,18 @@ use std::collections::BTreeSet;
 /// already held, and there is no widening operation, so non-escalation is
 /// structural. The handle cannot be constructed from arbitrary data outside this
 /// crate (only [`root`](Capability::root), [`scoped`](Capability::scoped), and
-/// attenuation), which is what makes it unforgeable in-process; cryptographic
-/// unforgeability across a wire arrives with capability-on-the-wire.
-#[derive(Clone, Debug)]
+/// attenuation), which makes it unforgeable in-process. It also derives
+/// `Serialize`/`Deserialize` so it can travel a transport — but a *deserialized*
+/// capability is untrusted: the receiver must clamp it to the principal the
+/// channel authenticated (e.g. the peercred-verified owner over IPC). Full
+/// cryptographic unforgeability over an unauthenticated channel (QUIC) arrives
+/// with capability-on-the-wire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capability {
     kind: Kind,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Kind {
     /// Full authority — grants every scope. A resource owner's root.
     Root,
@@ -133,5 +139,20 @@ mod tests {
         ]);
         assert!(!escalated.allows("urn:cap:personal:calendar:read:detail"));
         assert!(escalated.allows("urn:cap:personal:calendar:read:freebusy"));
+    }
+
+    #[test]
+    fn serde_round_trips_for_the_wire() {
+        // Capability travels a transport (capability-on-the-wire); it must
+        // round-trip its grants intact.
+        let cap = Capability::root().attenuate(["urn:cap:personal:calendar:read:freebusy"]);
+        let json = serde_json::to_string(&cap).unwrap();
+        let back: Capability = serde_json::from_str(&json).unwrap();
+        assert!(back.allows("urn:cap:personal:calendar:read:freebusy"));
+        assert!(!back.allows("urn:cap:personal:calendar:read:detail"));
+        // Root survives too.
+        let root: Capability =
+            serde_json::from_str(&serde_json::to_string(&Capability::root()).unwrap()).unwrap();
+        assert!(root.is_root());
     }
 }
