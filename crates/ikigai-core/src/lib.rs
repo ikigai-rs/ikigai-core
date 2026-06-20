@@ -56,7 +56,7 @@ pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{Iri, IriError};
 pub use kernel::Kernel;
 pub use meta::MetaRenderer;
-pub use repr::{Expiry, ReprType, Representation};
+pub use repr::{Expiry, ReprType, Representation, Thread};
 pub use request::{Request, RequestId};
 pub use space::{
     EndpointSpace, Fallback, Mount, Resolution, Resolved, Rewrite, Scope, Space, SpaceEntry,

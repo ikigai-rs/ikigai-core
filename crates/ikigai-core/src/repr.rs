@@ -1,10 +1,53 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::content::ContentId;
 use crate::hashing::{feed_bytes, feed_str};
+
+/// A **golden thread**: a named validity token a cached representation can depend
+/// on.
+///
+/// A thread has identity but no representation — it names a piece of state whose
+/// change should invalidate caches. Cutting a thread ([`Kernel::cut`](crate::Kernel::cut))
+/// invalidates every cached representation that depended on it, directly or
+/// transitively through composition. By convention a thread's name is the IRI of
+/// the state it tracks (e.g. `urn:file:notes.txt`, `urn:person:alice`), so a
+/// `Sink` that mutates a resource — or an external watcher — cuts the thread named
+/// after it.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+pub struct Thread(String);
+
+impl Thread {
+    /// A thread with the given name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Thread(name.into())
+    }
+
+    /// The thread's name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Thread {
+    fn from(s: String) -> Self {
+        Thread(s)
+    }
+}
+
+impl From<&str> for Thread {
+    fn from(s: &str) -> Self {
+        Thread(s.to_string())
+    }
+}
+
+impl fmt::Display for Thread {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// A representation type: a media type plus canonicalized parameters.
 ///
@@ -77,7 +120,7 @@ pub enum Expiry {
 ///
 /// M0 carries the universal byte form; richer in-memory forms (RDF graphs,
 /// solution sets) arrive with the store.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Representation {
     /// The representation type.
     pub repr_type: ReprType,
@@ -86,7 +129,30 @@ pub struct Representation {
     /// Cache validity; defaults to [`Expiry::Always`] (uncacheable).
     #[serde(default)]
     pub expiry: Expiry,
+    /// Golden threads this representation depends on (its cache *provenance*).
+    ///
+    /// Set by [`depends_on`](Representation::depends_on) and grown by the kernel,
+    /// which unions in the threads of every sub-resource resolved while producing
+    /// it — so a composite inherits its parts' threads and cutting any of them
+    /// invalidates it. Kernel-local: **not serialized** (cache validity is a
+    /// per-kernel concern, not part of a representation crossing a wire) and **not
+    /// part of representation identity** (see the manual `PartialEq`).
+    #[serde(skip)]
+    threads: BTreeSet<Thread>,
 }
+
+// Threads are cache provenance, not content: two representations with the same
+// type and bytes are equal regardless of how their validity was tracked. (Also
+// keeps wire round-trips equal, since `threads` is `serde(skip)`.)
+impl PartialEq for Representation {
+    fn eq(&self, other: &Self) -> bool {
+        self.repr_type == other.repr_type
+            && self.bytes == other.bytes
+            && self.expiry == other.expiry
+    }
+}
+
+impl Eq for Representation {}
 
 impl Representation {
     /// Build a representation from a type and bytes (uncacheable by default).
@@ -95,6 +161,7 @@ impl Representation {
             repr_type,
             bytes: bytes.into(),
             expiry: Expiry::Always,
+            threads: BTreeSet::new(),
         }
     }
 
@@ -107,6 +174,30 @@ impl Representation {
     /// Set the expiry explicitly (builder).
     pub fn with_expiry(mut self, expiry: Expiry) -> Self {
         self.expiry = expiry;
+        self
+    }
+
+    /// Declare that this representation depends on a golden [`Thread`] (builder).
+    ///
+    /// When it is cached, cutting that thread invalidates it. A handler reading
+    /// mutable state names the thread for that state (conventionally its IRI) and
+    /// cuts it on write; an external watcher cuts it on change. Threads also
+    /// propagate up through composition automatically, so a composer need only
+    /// resolve its parts.
+    pub fn depends_on(mut self, thread: impl Into<Thread>) -> Self {
+        self.threads.insert(thread.into());
+        self
+    }
+
+    /// The golden threads this representation depends on.
+    pub fn threads(&self) -> &BTreeSet<Thread> {
+        &self.threads
+    }
+
+    /// Replace the thread set (kernel use: install the effective set after
+    /// unioning in dependency threads).
+    pub(crate) fn with_threads(mut self, threads: BTreeSet<Thread>) -> Self {
+        self.threads = threads;
         self
     }
 
