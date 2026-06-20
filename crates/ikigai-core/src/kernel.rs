@@ -14,6 +14,12 @@
 //! composition), and [`Kernel::cut`] invalidates everything carrying a thread.
 //! That lets results which read mutable state be cached and invalidated on change
 //! — a `Sink` (or an external watcher) cuts the thread named after the state.
+//!
+//! The kernel also reserves the **`urn:kernel:*`** namespace for its own
+//! operations as capability-gated resources, resolved intrinsically before the
+//! root space: `sink urn:kernel:cut <thread>` cuts a thread (so an endpoint or a
+//! remote peer can invalidate by *resolving*, not via a special method), and
+//! `source urn:kernel:cache` / `urn:kernel:threads` introspect cache and threads.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -75,6 +81,14 @@ impl Kernel {
     /// Issue a request: return a valid cached representation if one exists,
     /// otherwise resolve, invoke the endpoint, and cache the result if cacheable.
     pub async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation> {
+        // The kernel-behavior namespace (`urn:kernel:*`) is resolved by the kernel
+        // itself — before the cache and the root space, which cannot shadow it —
+        // exposing the kernel's own operations (cut a thread, inspect cache and
+        // threads) as capability-gated resources.
+        if let Some(op) = request.target.as_str().strip_prefix(KERNEL_NS) {
+            return self.issue_kernel(op, &request, capability);
+        }
+
         let id = request.id();
         let cacheable_verb = request.verb.is_cacheable();
 
@@ -190,6 +204,57 @@ impl Kernel {
         *gens.entry(thread.into()).or_insert(0) += 1;
     }
 
+    /// Resolve a `urn:kernel:*` request — a kernel operation exposed as a
+    /// capability-gated resource. `op` is the suffix after `urn:kernel:`.
+    ///
+    /// These are deliberately resources, not just Rust methods: an endpoint can
+    /// invalidate another resource by *resolving* `urn:kernel:cut` (no special
+    /// `Issuer` method); a remote peer can do the same over the wire, gated by its
+    /// capability; and `describe`/the dashboard can see them. Results are live
+    /// kernel state, so they are uncacheable.
+    fn issue_kernel(
+        &self,
+        op: &str,
+        request: &Request,
+        capability: &Capability,
+    ) -> Result<Representation> {
+        match (op, request.verb) {
+            // Cut a golden thread. The thread is the sunk content — so
+            // `sink urn:kernel:cut <thread>` works — or an explicit `thread` arg.
+            ("cut", Verb::Sink) => {
+                require_cap(capability, "urn:cap:kernel:cut")?;
+                let thread = kernel_arg(request, "thread")
+                    .or_else(|| kernel_arg(request, "content"))
+                    .ok_or_else(|| Error::MissingArgument("thread".to_string()))?;
+                self.cut(thread);
+                Ok(kernel_text(format!("cut {thread}\n")))
+            }
+            // Inspect the cache (entry count).
+            ("cache", Verb::Source) => {
+                require_cap(capability, "urn:cap:kernel:inspect")?;
+                let entries = self.cache.lock().expect("cache lock").len();
+                Ok(kernel_text(format!("cache\n  entries  {entries}\n")))
+            }
+            // Inspect the golden threads that have been cut, and how many times.
+            ("threads", Verb::Source) => {
+                require_cap(capability, "urn:cap:kernel:inspect")?;
+                let gens = self.generations.lock().expect("generations lock");
+                let mut body = String::from("threads (cut generations)\n");
+                if gens.is_empty() {
+                    body.push_str("  (none cut)\n");
+                } else {
+                    let mut rows: Vec<_> = gens.iter().collect();
+                    rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                    for (thread, generation) in rows {
+                        body.push_str(&format!("  {}  gen {generation}\n", thread.as_str()));
+                    }
+                }
+                Ok(kernel_text(body))
+            }
+            _ => Err(Error::Unresolved(request.target.clone())),
+        }
+    }
+
     /// The number of representations currently cached (diagnostics/tests).
     pub fn cache_len(&self) -> usize {
         self.cache.lock().expect("cache lock").len()
@@ -228,6 +293,36 @@ impl Kernel {
 /// The current generation of `thread` (absent ⇒ 0).
 fn generation_of(generations: &HashMap<Thread, u64>, thread: &Thread) -> u64 {
     generations.get(thread).copied().unwrap_or(0)
+}
+
+/// The reserved kernel-behavior namespace prefix.
+const KERNEL_NS: &str = "urn:kernel:";
+
+/// Authorize a kernel operation, or report a capability denial.
+fn require_cap(capability: &Capability, scope: &str) -> Result<()> {
+    if capability.allows(scope) {
+        Ok(())
+    } else {
+        Err(Error::Endpoint(format!(
+            "kernel: capability does not grant `{scope}`"
+        )))
+    }
+}
+
+/// An inline argument of a kernel request, decoded as UTF-8.
+fn kernel_arg<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+    match request.args.get(name) {
+        Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes).ok(),
+        _ => None,
+    }
+}
+
+/// A `text/plain` representation of live kernel state (uncacheable by default).
+fn kernel_text(body: String) -> Representation {
+    Representation::new(
+        ReprType::new("text/plain").with_param("charset", "utf-8"),
+        body.into_bytes(),
+    )
 }
 
 /// The representation type a `Meta` request asks for: the `as` inline argument
@@ -692,5 +787,76 @@ mod tests {
 
         // Read again: the cache recomputes and sees v2.
         assert_eq!(block_on(kernel.issue(source(), &cap)).unwrap().bytes, b"v2");
+    }
+
+    // --- the kernel-behavior namespace (urn:kernel:*) --------------------------
+
+    fn cut_request(thread: &str) -> Request {
+        Request::new(Verb::Sink, iri("urn:kernel:cut"))
+            .with_arg("content", ArgRef::Inline(thread.as_bytes().to_vec()))
+    }
+
+    #[test]
+    fn cut_as_a_resource_invalidates_a_cached_read() {
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        let ep = FnEndpoint::new("x", |_cx: &Invocation<'_>| {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(
+                Representation::new(ReprType::new("text/plain"), b"v".to_vec())
+                    .cacheable()
+                    .depends_on("urn:data:x"),
+            )
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:data:x"), ep),
+        ));
+        let cap = Capability::root();
+        let read = || Request::new(Verb::Source, iri("urn:data:x"));
+
+        block_on(kernel.issue(read(), &cap)).unwrap();
+        block_on(kernel.issue(read(), &cap)).unwrap();
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1, "cached");
+
+        // Cut the thread by RESOLVING urn:kernel:cut — not calling Kernel::cut.
+        let ack = block_on(kernel.issue(cut_request("urn:data:x"), &cap)).unwrap();
+        assert!(String::from_utf8_lossy(&ack.bytes).contains("cut urn:data:x"));
+        assert!(
+            !kernel.is_cached(&read()),
+            "the resource cut invalidated it"
+        );
+
+        block_on(kernel.issue(read(), &cap)).unwrap();
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2, "recomputed after the cut");
+    }
+
+    #[test]
+    fn the_kernel_namespace_is_capability_gated() {
+        let kernel = Kernel::new(Arc::new(EndpointSpace::new()));
+        // A scoped capability lacking `urn:cap:kernel:cut` is refused.
+        let scoped = Capability::scoped(["urn:cap:something:else"]);
+        assert!(block_on(kernel.issue(cut_request("urn:data:x"), &scoped)).is_err());
+        // Root holds it.
+        assert!(block_on(kernel.issue(cut_request("urn:data:x"), &Capability::root())).is_ok());
+    }
+
+    #[test]
+    fn the_kernel_namespace_reports_cut_threads_and_cache() {
+        let kernel = Kernel::new(Arc::new(EndpointSpace::new()));
+        let cap = Capability::root();
+        kernel.cut("urn:data:a");
+        kernel.cut("urn:data:a");
+        kernel.cut("urn:data:b");
+
+        let threads =
+            block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:threads")), &cap))
+                .unwrap();
+        let text = String::from_utf8_lossy(&threads.bytes);
+        assert!(text.contains("urn:data:a  gen 2"), "{text}");
+        assert!(text.contains("urn:data:b  gen 1"), "{text}");
+
+        let cache =
+            block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:cache")), &cap))
+                .unwrap();
+        assert!(String::from_utf8_lossy(&cache.bytes).contains("entries"));
     }
 }
