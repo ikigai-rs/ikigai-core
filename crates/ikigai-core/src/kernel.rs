@@ -7,12 +7,15 @@
 //! a runtime. Resolution itself is synchronous (pure routing); the asynchronous
 //! work lives in endpoint invocation.
 //!
-//! Caching in M3a is deliberately conservative: a result is cached only when the
-//! verb is idempotent *and* the endpoint opted in via [`Expiry::Never`] (a pure
-//! function of content-addressed inputs). Dependency-tracked expiry — for
-//! results that read mutable state — arrives in M3b.
+//! A result is cached only when the verb is idempotent *and* the endpoint opted
+//! in via [`Expiry::Never`]. Validity is then tracked by **golden threads**
+//! ([`Thread`]): a cached representation depends on the threads it declared plus
+//! those of every sub-resource it resolved (they propagate up through
+//! composition), and [`Kernel::cut`] invalidates everything carrying a thread.
+//! That lets results which read mutable state be cached and invalidated on change
+//! — a `Sink` (or an external watcher) cuts the thread named after the state.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -22,7 +25,7 @@ use crate::capability::Capability;
 use crate::endpoint::{Invocation, Issuer};
 use crate::error::{Error, Result};
 use crate::meta::MetaRenderer;
-use crate::repr::{Expiry, ReprType, Representation};
+use crate::repr::{Expiry, ReprType, Representation, Thread};
 use crate::request::{Request, RequestId};
 use crate::space::{Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
@@ -31,8 +34,21 @@ use crate::verb::Verb;
 /// caches cacheable representations by their content-addressed request id.
 pub struct Kernel {
     root: Arc<dyn Space>,
-    cache: Mutex<HashMap<RequestId, Representation>>,
+    cache: Mutex<HashMap<RequestId, CacheEntry>>,
+    /// Current generation of each golden thread (absent ⇒ generation 0).
+    /// [`Kernel::cut`] bumps a thread's generation, invalidating every cache entry
+    /// pinned to an earlier one.
+    generations: Mutex<HashMap<Thread, u64>>,
     meta: Option<Arc<dyn MetaRenderer>>,
+}
+
+/// A cached representation plus the golden-thread edges that keep it valid: each
+/// `(thread, generation)` records the generation that thread held when the entry
+/// was stored. The entry is valid only while every thread is still at that
+/// generation — cut any of them and it's stale.
+struct CacheEntry {
+    representation: Representation,
+    edges: Vec<(Thread, u64)>,
 }
 
 impl Kernel {
@@ -41,6 +57,7 @@ impl Kernel {
         Kernel {
             root,
             cache: Mutex::new(HashMap::new()),
+            generations: Mutex::new(HashMap::new()),
             meta: None,
         }
     }
@@ -50,6 +67,7 @@ impl Kernel {
         Kernel {
             root,
             cache: Mutex::new(HashMap::new()),
+            generations: Mutex::new(HashMap::new()),
             meta: Some(renderer),
         }
     }
@@ -60,11 +78,11 @@ impl Kernel {
         let id = request.id();
         let cacheable_verb = request.verb.is_cacheable();
 
-        // Representation-cache lookup (idempotent verbs only). The guard is
-        // dropped before any await.
+        // Representation-cache lookup (idempotent verbs only): serve a cached entry
+        // whose golden-thread edges are all still current. A cut entry is evicted
+        // here and recomputed below. The guard is dropped before any await.
         if cacheable_verb {
-            let hit = self.cache.lock().expect("cache lock").get(&id).cloned();
-            if let Some(cached) = hit {
+            if let Some(cached) = self.valid_cached(&id) {
                 return Ok(cached);
             }
         }
@@ -100,16 +118,67 @@ impl Kernel {
             } else {
                 Expiry::Always
             };
-            representation.with_expiry(effective)
+            // Golden threads propagate too: the result depends on its own declared
+            // threads plus those of every sub-resource it resolved, so cutting any
+            // of them invalidates this composite.
+            let mut threads = representation.threads().clone();
+            threads.extend(invocation.dependency_threads());
+            representation.with_expiry(effective).with_threads(threads)
         };
 
         if cacheable_verb && representation.expiry == Expiry::Never {
-            self.cache
-                .lock()
-                .expect("cache lock")
-                .insert(id, representation.clone());
+            let edges = self.edges_for(representation.threads());
+            self.cache.lock().expect("cache lock").insert(
+                id,
+                CacheEntry {
+                    representation: representation.clone(),
+                    edges,
+                },
+            );
         }
         Ok(representation)
+    }
+
+    /// A cached representation for `id` whose golden-thread edges are all current.
+    /// A stale entry (some thread has been cut since) is evicted and `None`
+    /// returned, so the caller recomputes.
+    fn valid_cached(&self, id: &RequestId) -> Option<Representation> {
+        let mut cache = self.cache.lock().expect("cache lock");
+        let outcome = cache.get(id).map(|entry| {
+            let gens = self.generations.lock().expect("generations lock");
+            let valid = entry
+                .edges
+                .iter()
+                .all(|(thread, gen)| generation_of(&gens, thread) == *gen);
+            (valid, entry.representation.clone())
+        });
+        match outcome {
+            None => None,
+            Some((true, representation)) => Some(representation),
+            Some((false, _)) => {
+                cache.remove(id);
+                None
+            }
+        }
+    }
+
+    /// Pin each thread to its current generation, forming an entry's validity edges.
+    fn edges_for(&self, threads: &BTreeSet<Thread>) -> Vec<(Thread, u64)> {
+        let gens = self.generations.lock().expect("generations lock");
+        threads
+            .iter()
+            .map(|thread| (thread.clone(), generation_of(&gens, thread)))
+            .collect()
+    }
+
+    /// Cut a golden thread: invalidate every cached representation that depends on
+    /// it, directly or transitively through composition. Cheap — it bumps the
+    /// thread's generation; dependent entries are evicted lazily on next lookup.
+    /// A `Sink` that mutates a resource cuts the thread named after it; an external
+    /// watcher cuts it on change.
+    pub fn cut(&self, thread: impl Into<Thread>) {
+        let mut gens = self.generations.lock().expect("generations lock");
+        *gens.entry(thread.into()).or_insert(0) += 1;
     }
 
     /// The number of representations currently cached (diagnostics/tests).
@@ -123,12 +192,21 @@ impl Kernel {
     /// (including one that would be a miss). Lets a caller report cache state
     /// without the observer effect of actually issuing the request.
     pub fn is_cached(&self, request: &Request) -> bool {
-        request.verb.is_cacheable()
-            && self
-                .cache
-                .lock()
-                .expect("cache lock")
-                .contains_key(&request.id())
+        if !request.verb.is_cacheable() {
+            return false;
+        }
+        let cache = self.cache.lock().expect("cache lock");
+        match cache.get(&request.id()) {
+            // Read-only probe: a cut (but not-yet-evicted) entry is not "cached".
+            Some(entry) => {
+                let gens = self.generations.lock().expect("generations lock");
+                entry
+                    .edges
+                    .iter()
+                    .all(|(thread, gen)| generation_of(&gens, thread) == *gen)
+            }
+            None => false,
+        }
     }
 
     /// Enumerate the root space's bindings, if it supports enumeration. `None`
@@ -136,6 +214,11 @@ impl Kernel {
     pub fn entries(&self) -> Option<Vec<SpaceEntry>> {
         self.root.entries()
     }
+}
+
+/// The current generation of `thread` (absent ⇒ 0).
+fn generation_of(generations: &HashMap<Thread, u64>, thread: &Thread) -> u64 {
+    generations.get(thread).copied().unwrap_or(0)
 }
 
 /// The representation type a `Meta` request asks for: the `as` inline argument
@@ -372,5 +455,177 @@ mod tests {
         block_on(kernel.issue(req(), &cap)).unwrap();
         // Expiry propagates: volatile dep -> composer not cached -> clock sourced twice.
         assert_eq!(CLOCK_CALLS.load(Ordering::SeqCst), 2);
+    }
+
+    // --- golden threads --------------------------------------------------------
+
+    #[test]
+    fn cutting_a_thread_invalidates_the_entry_that_declared_it() {
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        // A cacheable read of mutable state: names the thread for that state.
+        let file = FnEndpoint::new("file", |_cx: &Invocation<'_>| {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(
+                Representation::new(ReprType::new("text/plain"), b"v".to_vec())
+                    .cacheable()
+                    .depends_on("urn:file:notes.txt"),
+            )
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:file:notes.txt"), file),
+        ));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:file:notes.txt"));
+
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            1,
+            "cached on the second issue"
+        );
+        assert!(kernel.is_cached(&req()));
+
+        // An external change (or a Sink) cuts the thread.
+        kernel.cut("urn:file:notes.txt");
+        assert!(!kernel.is_cached(&req()), "cut entry is no longer cached");
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2, "recomputed after the cut");
+        // Re-cached at the new generation.
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            2,
+            "cached again after recompute"
+        );
+
+        // Cutting an unrelated thread leaves it cached.
+        kernel.cut("urn:file:other.txt");
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            2,
+            "unrelated cut does not invalidate"
+        );
+    }
+
+    #[test]
+    fn a_thread_propagates_up_through_composition() {
+        static LEAF: AtomicU32 = AtomicU32::new(0);
+        let leaf = FnEndpoint::new("leaf", |_cx: &Invocation<'_>| {
+            LEAF.fetch_add(1, Ordering::SeqCst);
+            Ok(
+                Representation::new(ReprType::new("text/plain"), b"hi".to_vec())
+                    .cacheable()
+                    .depends_on("urn:leaf"),
+            )
+        });
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:data:leaf"), leaf)
+            .bind(Exact::new("urn:fn:upcaseOf"), UpcaseOf);
+        let kernel = Kernel::new(Arc::new(space));
+        let cap = Capability::root();
+        let req = || {
+            Request::new(Verb::Source, iri("urn:fn:upcaseOf"))
+                .with_arg("src", ArgRef::Reference(iri("urn:data:leaf")))
+        };
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(LEAF.load(Ordering::SeqCst), 1, "composite + leaf cached");
+
+        // The composite never declared `urn:leaf`; it inherited it by resolving the
+        // leaf. Cutting it invalidates the composite anyway.
+        kernel.cut("urn:leaf");
+        let out = block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(out.bytes, b"HI");
+        assert_eq!(
+            LEAF.load(Ordering::SeqCst),
+            2,
+            "composite recomputed and re-sourced the leaf"
+        );
+    }
+
+    /// A team resource: concatenates three member resources it resolves, and
+    /// declares its own team-level thread.
+    struct Team;
+
+    #[async_trait::async_trait]
+    impl Endpoint for Team {
+        async fn invoke(&self, cx: &Invocation<'_>) -> Result<Representation> {
+            let mut body = Vec::new();
+            for member in ["urn:person:alice", "urn:person:bob", "urn:person:carol"] {
+                body.extend_from_slice(&cx.source(&iri(member)).await?.bytes);
+            }
+            Ok(Representation::new(ReprType::new("text/plain"), body)
+                .cacheable()
+                .depends_on("urn:team:engineering"))
+        }
+    }
+
+    #[test]
+    fn cutting_one_member_invalidates_the_team_but_not_its_siblings() {
+        static ALICE: AtomicU32 = AtomicU32::new(0);
+        static BOB: AtomicU32 = AtomicU32::new(0);
+        static CAROL: AtomicU32 = AtomicU32::new(0);
+        fn person(thread: &'static str, body: &'static str, n: &'static AtomicU32) -> FnEndpoint {
+            FnEndpoint::new("person", move |_cx: &Invocation<'_>| {
+                n.fetch_add(1, Ordering::SeqCst);
+                Ok(
+                    Representation::new(ReprType::new("text/plain"), body.as_bytes().to_vec())
+                        .cacheable()
+                        .depends_on(thread),
+                )
+            })
+        }
+        let space = EndpointSpace::new()
+            .bind(
+                Exact::new("urn:person:alice"),
+                person("urn:person:alice", "A", &ALICE),
+            )
+            .bind(
+                Exact::new("urn:person:bob"),
+                person("urn:person:bob", "B", &BOB),
+            )
+            .bind(
+                Exact::new("urn:person:carol"),
+                person("urn:person:carol", "C", &CAROL),
+            )
+            .bind(Exact::new("urn:team:engineering"), Team);
+        let kernel = Kernel::new(Arc::new(space));
+        let cap = Capability::root();
+        let team = || Request::new(Verb::Source, iri("urn:team:engineering"));
+
+        let first = block_on(kernel.issue(team(), &cap)).unwrap();
+        block_on(kernel.issue(team(), &cap)).unwrap();
+        assert_eq!(first.bytes, b"ABC");
+        let counts = || {
+            (
+                ALICE.load(Ordering::SeqCst),
+                BOB.load(Ordering::SeqCst),
+                CAROL.load(Ordering::SeqCst),
+            )
+        };
+        assert_eq!(
+            counts(),
+            (1, 1, 1),
+            "members resolved once; team then cached"
+        );
+
+        // Bob changes upstream. The team depends on every member individually.
+        kernel.cut("urn:person:bob");
+        let again = block_on(kernel.issue(team(), &cap)).unwrap();
+        assert_eq!(again.bytes, b"ABC");
+        // Team recomputes (it carried bob's thread) and re-resolves bob; alice and
+        // carol are still valid in cache, so they are NOT recomputed.
+        assert_eq!(counts(), (1, 2, 1), "only bob and the team recompute");
+
+        // And a team-level cut hits only the team, not the members.
+        kernel.cut("urn:team:engineering");
+        block_on(kernel.issue(team(), &cap)).unwrap();
+        assert_eq!(
+            counts(),
+            (1, 2, 1),
+            "roster change re-runs the team, reuses members"
+        );
     }
 }

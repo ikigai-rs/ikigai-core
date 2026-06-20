@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -8,7 +9,7 @@ use crate::describe::Description;
 use crate::error::{Error, Result};
 use crate::grammar::Bindings;
 use crate::iri::Iri;
-use crate::repr::{Expiry, Representation};
+use crate::repr::{Expiry, Representation, Thread};
 use crate::request::Request;
 use crate::verb::Verb;
 
@@ -36,6 +37,9 @@ pub struct Invocation<'a> {
     pub capability: &'a Capability,
     issuer: Option<&'a dyn Issuer>,
     deps: Mutex<Vec<Expiry>>,
+    /// Union of the golden threads of every sub-resource resolved during this
+    /// invocation — so the kernel can propagate them onto the result.
+    dep_threads: Mutex<BTreeSet<Thread>>,
 }
 
 impl<'a> Invocation<'a> {
@@ -52,6 +56,7 @@ impl<'a> Invocation<'a> {
             capability,
             issuer: None,
             deps: Mutex::new(Vec::new()),
+            dep_threads: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -68,6 +73,7 @@ impl<'a> Invocation<'a> {
             capability,
             issuer: Some(issuer),
             deps: Mutex::new(Vec::new()),
+            dep_threads: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -102,6 +108,12 @@ impl<'a> Invocation<'a> {
             .lock()
             .expect("deps lock")
             .push(representation.expiry);
+        // Inherit the sub-resource's golden threads so cutting any of them
+        // invalidates this (composite) result too.
+        self.dep_threads
+            .lock()
+            .expect("dep threads lock")
+            .extend(representation.threads().iter().cloned());
         Ok(representation)
     }
 
@@ -120,6 +132,12 @@ impl<'a> Invocation<'a> {
         } else {
             Expiry::Never
         }
+    }
+
+    /// The union of golden threads of every dependency resolved during this
+    /// invocation — the kernel unions these onto the result's own threads.
+    pub(crate) fn dependency_threads(&self) -> BTreeSet<Thread> {
+        self.dep_threads.lock().expect("dep threads lock").clone()
     }
 }
 
