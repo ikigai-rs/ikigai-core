@@ -126,6 +126,15 @@ impl Kernel {
             representation.with_expiry(effective).with_threads(threads)
         };
 
+        // A successful mutating verb invalidates its target: cut the thread named
+        // after it, so cached `Source`s of that resource — and composites over
+        // them — recompute. This is the internal half of the golden thread (the
+        // kernel owns invalidation on writes); an external watcher cuts the same
+        // thread on an out-of-band change.
+        if request.verb.is_mutating() {
+            self.cut(request.target.as_str());
+        }
+
         if cacheable_verb && representation.expiry == Expiry::Never {
             let edges = self.edges_for(representation.threads());
             self.cache.lock().expect("cache lock").insert(
@@ -627,5 +636,61 @@ mod tests {
             (1, 2, 1),
             "roster change re-runs the team, reuses members"
         );
+    }
+
+    /// A stateful resource: `Source` reads the current value (cacheable, declaring
+    /// the thread named after itself); `Sink` replaces it.
+    struct Cell {
+        value: Mutex<Vec<u8>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Endpoint for Cell {
+        async fn invoke(&self, cx: &Invocation<'_>) -> Result<Representation> {
+            match cx.request.verb {
+                Verb::Source => {
+                    let value = self.value.lock().expect("cell").clone();
+                    Ok(Representation::new(ReprType::new("text/plain"), value)
+                        .cacheable()
+                        .depends_on(cx.request.target.as_str()))
+                }
+                Verb::Sink => {
+                    *self.value.lock().expect("cell") = cx.inline_arg("in")?.to_vec();
+                    Ok(Representation::new(
+                        ReprType::new("text/plain"),
+                        b"ok".to_vec(),
+                    ))
+                }
+                other => Err(Error::Endpoint(format!("cell: unsupported {other:?}"))),
+            }
+        }
+    }
+
+    #[test]
+    fn a_sink_invalidates_the_cached_source_of_its_target() {
+        let cell = Cell {
+            value: Mutex::new(b"v1".to_vec()),
+        };
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:data:cell"), cell),
+        ));
+        let cap = Capability::root();
+        let source = || Request::new(Verb::Source, iri("urn:data:cell"));
+
+        // Read v1; it caches, declaring the `urn:data:cell` thread.
+        assert_eq!(block_on(kernel.issue(source(), &cap)).unwrap().bytes, b"v1");
+        assert!(kernel.is_cached(&source()), "source is cached");
+
+        // Write v2 through the kernel: the mutating verb auto-cuts `urn:data:cell`.
+        let sink = Request::new(Verb::Sink, iri("urn:data:cell"))
+            .with_arg("in", ArgRef::Inline(b"v2".to_vec()));
+        block_on(kernel.issue(sink, &cap)).unwrap();
+        assert!(
+            !kernel.is_cached(&source()),
+            "the write invalidated the cached read"
+        );
+
+        // Read again: the cache recomputes and sees v2.
+        assert_eq!(block_on(kernel.issue(source(), &cap)).unwrap().bytes, b"v2");
     }
 }
