@@ -26,13 +26,13 @@
 //! `source urn:kernel:cache` / `urn:kernel:threads` introspect cache and threads.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 
 use crate::arg::ArgRef;
 use crate::capability::Capability;
-use crate::endpoint::{Invocation, Issuer};
+use crate::endpoint::{Invocation, Issuer, Spawner};
 use crate::error::{Error, Result};
 use crate::meta::MetaRenderer;
 use crate::repr::{Expiry, ReprType, Representation, Thread, Time};
@@ -80,6 +80,12 @@ pub struct Kernel {
     /// kernel cannot evaluate a deadline, so it declines to cache `At` results
     /// (golden-thread and `Never` caching are unaffected).
     clock: Option<Arc<dyn Clock>>,
+    /// Host executor for concurrent fan-out, and a weak self-handle the kernel hands
+    /// to invocations as an owned [`Issuer`] so a spawned sub-request can re-enter the
+    /// kernel without borrowing the invocation. Both set by [`into_scheduled`](Self::into_scheduled);
+    /// absent ⇒ [`Invocation::fan_out`] resolves sequentially (the default).
+    spawner: Option<Arc<dyn Spawner>>,
+    self_ref: Option<Weak<Kernel>>,
 }
 
 /// A cached representation plus the golden-thread edges that keep it valid: each
@@ -100,6 +106,8 @@ impl Kernel {
             generations: Mutex::new(HashMap::new()),
             meta: None,
             clock: None,
+            spawner: None,
+            self_ref: None,
         }
     }
 
@@ -111,7 +119,25 @@ impl Kernel {
             generations: Mutex::new(HashMap::new()),
             meta: Some(renderer),
             clock: None,
+            spawner: None,
+            self_ref: None,
         }
+    }
+
+    /// Make this kernel **schedulable**: wrap it in an `Arc` and inject `spawner`, so
+    /// re-entrant fan-out ([`Invocation::fan_out`]) runs concurrently on the host's
+    /// executor instead of sequentially. Uses [`Arc::new_cyclic`] to store a weak
+    /// self-handle the kernel hands to invocations as an owned [`Issuer`], so a
+    /// spawned sub-request can re-enter the kernel without borrowing the invocation.
+    /// (Chain after the other builders, e.g.
+    /// `Kernel::with_meta_renderer(..).with_clock(..).into_scheduled(spawner)`.)
+    pub fn into_scheduled(self, spawner: Arc<dyn Spawner>) -> Arc<Kernel> {
+        Arc::new_cyclic(|weak: &Weak<Kernel>| {
+            let mut kernel = self;
+            kernel.spawner = Some(spawner);
+            kernel.self_ref = Some(weak.clone());
+            kernel
+        })
     }
 
     /// Inject the [`Clock`] the kernel reads for time-based [`Expiry::At`]
@@ -164,9 +190,19 @@ impl Kernel {
                 .render(&resolved.endpoint.describe(), &meta_target(&request))?
                 .cacheable()
         } else {
-            // Invocation is asynchronous.
+            // Invocation is asynchronous. On a scheduled kernel, hand it the spawner
+            // and an owned self-handle so re-entrant fan-out runs concurrently.
+            let issuer_arc: Option<Arc<dyn Issuer>> = self
+                .self_ref
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .map(|kernel| {
+                    let issuer: Arc<dyn Issuer> = kernel;
+                    issuer
+                });
             let invocation =
-                Invocation::with_issuer(&request, &resolved.bindings, capability, self);
+                Invocation::with_issuer(&request, &resolved.bindings, capability, self)
+                    .with_concurrency(self.spawner.clone(), issuer_arc);
             let representation = resolved.endpoint.invoke(&invocation).await?;
             // Effective expiry propagates from the dependencies: the result is no
             // fresher than its most volatile part. The endpoint's own expiry is met
@@ -417,7 +453,7 @@ mod tests {
     use crate::arg::ArgRef;
     use crate::builtins;
     use crate::describe::Description;
-    use crate::endpoint::{Endpoint, FnEndpoint, Invocation};
+    use crate::endpoint::{BoxFuture, Endpoint, FnEndpoint, Invocation, Spawner};
     use crate::grammar::Exact;
     use crate::iri::Iri;
     use crate::repr::ReprType;
@@ -1090,5 +1126,84 @@ mod tests {
             !kernel.is_cached(&req()),
             "expired entry probes as not cached"
         );
+    }
+
+    // --- Concurrent fan-out (Invocation::fan_out + an injected Spawner) -------
+
+    /// A cooperative spawner for tests: returns each task as its own completion
+    /// future so `join_all` drives them on the current task. Proves the fan-out
+    /// plumbing without real threads — the threadpool deadlock-freedom test lives in
+    /// `ikigai-scheduler`, which owns the executor.
+    struct InlineSpawner;
+    impl Spawner for InlineSpawner {
+        fn spawn(&self, task: BoxFuture<()>) -> BoxFuture<()> {
+            task
+        }
+    }
+
+    fn leaf(byte: &'static str) -> FnEndpoint {
+        FnEndpoint::new("leaf", move |_inv: &Invocation<'_>| {
+            Ok(
+                Representation::new(ReprType::new("text/plain"), byte.as_bytes().to_vec())
+                    .cacheable(),
+            )
+        })
+    }
+
+    /// An endpoint that fans out to a fixed list of leaves and concatenates them.
+    struct FanParent {
+        leaves: Vec<Iri>,
+    }
+    #[async_trait::async_trait]
+    impl Endpoint for FanParent {
+        async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+            let requests = self
+                .leaves
+                .iter()
+                .map(|iri| Request::new(Verb::Source, iri.clone()))
+                .collect();
+            let mut body = Vec::new();
+            for result in inv.fan_out(requests).await {
+                body.extend_from_slice(&result?.bytes);
+            }
+            Ok(Representation::new(ReprType::new("text/plain"), body).cacheable())
+        }
+    }
+
+    fn fan_space() -> EndpointSpace {
+        EndpointSpace::new()
+            .bind(Exact::new("urn:leaf:1"), leaf("1"))
+            .bind(Exact::new("urn:leaf:2"), leaf("2"))
+            .bind(Exact::new("urn:leaf:3"), leaf("3"))
+            .bind(
+                Exact::new("urn:fan:parent"),
+                FanParent {
+                    leaves: vec![iri("urn:leaf:1"), iri("urn:leaf:2"), iri("urn:leaf:3")],
+                },
+            )
+    }
+
+    #[test]
+    fn fan_out_resolves_all_in_order_on_a_scheduled_kernel() {
+        let kernel = Kernel::new(Arc::new(fan_space())).into_scheduled(Arc::new(InlineSpawner));
+        let out = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:fan:parent")),
+            &Capability::root(),
+        ))
+        .unwrap();
+        assert_eq!(out.bytes, b"123", "fan-out preserves request order");
+    }
+
+    #[test]
+    fn fan_out_falls_back_to_sequential_without_a_spawner() {
+        // A plain (non-scheduled) kernel has no spawner — fan_out resolves
+        // sequentially, with an identical result.
+        let kernel = Kernel::new(Arc::new(fan_space()));
+        let out = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:fan:parent")),
+            &Capability::root(),
+        ))
+        .unwrap();
+        assert_eq!(out.bytes, b"123");
     }
 }

@@ -50,7 +50,7 @@ pub use arg::ArgRef;
 pub use capability::Capability;
 pub use content::{ContentId, ContentIdError};
 pub use describe::{ArgSpec, Description, InputSource};
-pub use endpoint::{Endpoint, FnEndpoint, Invocation, Issuer};
+pub use endpoint::{BoxFuture, Endpoint, FnEndpoint, Invocation, Issuer, Spawner};
 pub use error::{Error, Result};
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{Iri, IriError};

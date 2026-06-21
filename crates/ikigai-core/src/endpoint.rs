@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
-use std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -29,6 +31,22 @@ pub trait Issuer: Send + Sync {
     }
 }
 
+/// A pinned, boxed, `Send` future — the unit of work a [`Spawner`] runs.
+pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
+/// Runs futures concurrently on the host's executor. Injected into the kernel like
+/// [`Clock`](crate::Clock) — via [`Kernel::into_scheduled`](crate::Kernel::into_scheduled)
+/// — and object-safe so it can be a trait object; `ikigai-scheduler` implements it.
+/// With no spawner, [`Invocation::fan_out`] falls back to sequential resolution, so
+/// the kernel stays runtime-free and single-threaded by default.
+pub trait Spawner: Send + Sync {
+    /// Spawn `task` to run concurrently; the returned future resolves when it
+    /// completes, so a caller can join several spawned tasks — **parking**, not
+    /// blocking, until they finish (which is what keeps re-entrant fan-out from
+    /// pinning a thread while its children run).
+    fn spawn(&self, task: BoxFuture<()>) -> BoxFuture<()>;
+}
+
 /// The context handed to an endpoint when it is invoked.
 ///
 /// All input arrives here — the request, the grammar-captured bindings, and the
@@ -43,6 +61,13 @@ pub struct Invocation<'a> {
     /// The capability authorizing invocation.
     pub capability: &'a Capability,
     issuer: Option<&'a dyn Issuer>,
+    /// Concurrency context for [`fan_out`](Invocation::fan_out): the host's spawner
+    /// and an *owned* issuer handle (so a spawned sub-request can re-enter the kernel
+    /// without borrowing this invocation). Both present only on a
+    /// [`scheduled`](crate::Kernel::into_scheduled) kernel; otherwise fan-out is
+    /// sequential.
+    spawner: Option<Arc<dyn Spawner>>,
+    issuer_arc: Option<Arc<dyn Issuer>>,
     deps: Mutex<Vec<Expiry>>,
     /// Union of the golden threads of every sub-resource resolved during this
     /// invocation — so the kernel can propagate them onto the result.
@@ -62,6 +87,8 @@ impl<'a> Invocation<'a> {
             bindings,
             capability,
             issuer: None,
+            spawner: None,
+            issuer_arc: None,
             deps: Mutex::new(Vec::new()),
             dep_threads: Mutex::new(BTreeSet::new()),
         }
@@ -79,9 +106,25 @@ impl<'a> Invocation<'a> {
             bindings,
             capability,
             issuer: Some(issuer),
+            spawner: None,
+            issuer_arc: None,
             deps: Mutex::new(Vec::new()),
             dep_threads: Mutex::new(BTreeSet::new()),
         }
+    }
+
+    /// Attach the concurrency context — the injected [`Spawner`] and an owned
+    /// [`Issuer`] handle — so [`fan_out`](Self::fan_out) can spawn sub-requests
+    /// concurrently. Set by the kernel when it has been made schedulable via
+    /// [`Kernel::into_scheduled`](crate::Kernel::into_scheduled).
+    pub(crate) fn with_concurrency(
+        mut self,
+        spawner: Option<Arc<dyn Spawner>>,
+        issuer_arc: Option<Arc<dyn Issuer>>,
+    ) -> Self {
+        self.spawner = spawner;
+        self.issuer_arc = issuer_arc;
+        self
     }
 
     /// The bytes of an inline argument, or an error if absent / not inline.
@@ -128,6 +171,68 @@ impl<'a> Invocation<'a> {
     /// it as a dependency.
     pub async fn source(&self, target: &Iri) -> Result<Representation> {
         self.issue(Request::new(Verb::Source, target.clone())).await
+    }
+
+    /// Resolve `requests` **concurrently**, returning their results in request order.
+    ///
+    /// On a [`scheduled`](crate::Kernel::into_scheduled) kernel each sub-request is
+    /// spawned as its own task and the join *parks* — so a re-entrant fan-out (e.g.
+    /// `compose` expanding several `$a{}` markers) never holds a thread while its
+    /// children run, and a child can run on the thread the parent released. Without a
+    /// spawner it falls back to sequential [`issue`](Self::issue) — the kernel's
+    /// default single-threaded behaviour. Either way each result's expiry and golden
+    /// threads are recorded as dependencies of this invocation, exactly like `issue`.
+    pub async fn fan_out(&self, requests: Vec<Request>) -> Vec<Result<Representation>> {
+        let (Some(spawner), Some(issuer)) = (&self.spawner, &self.issuer_arc) else {
+            // Sequential fallback: same order, same dependency recording as `issue`.
+            let mut results = Vec::with_capacity(requests.len());
+            for request in requests {
+                results.push(self.issue(request).await);
+            }
+            return results;
+        };
+
+        // Spawn each sub-request into its own slot, then join (parking) on all.
+        let slots: Vec<Arc<Mutex<Option<Result<Representation>>>>> = requests
+            .iter()
+            .map(|_| Arc::new(Mutex::new(None)))
+            .collect();
+        let joins: Vec<BoxFuture<()>> = requests
+            .into_iter()
+            .zip(&slots)
+            .map(|(request, slot)| {
+                let issuer = Arc::clone(issuer);
+                let capability = self.capability.clone();
+                let slot = Arc::clone(slot);
+                spawner.spawn(Box::pin(async move {
+                    let result = issuer.issue(request, &capability).await;
+                    *slot.lock().expect("fan-out slot") = Some(result);
+                }))
+            })
+            .collect();
+        futures_util::future::join_all(joins).await;
+
+        // Collect in order; record each result's dependency expiry and threads.
+        let mut results = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let result = slot
+                .lock()
+                .expect("fan-out slot")
+                .take()
+                .expect("spawned fan-out task completed");
+            if let Ok(representation) = &result {
+                self.deps
+                    .lock()
+                    .expect("deps lock")
+                    .push(representation.expiry);
+                self.dep_threads
+                    .lock()
+                    .expect("dep threads lock")
+                    .extend(representation.threads().iter().cloned());
+            }
+            results.push(result);
+        }
+        results
     }
 
     /// The current time per the kernel's injected [`Clock`](crate::Clock), or
