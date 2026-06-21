@@ -204,10 +204,11 @@ fn scan(text: &str) -> Vec<Segment> {
 }
 
 /// Expand every `$a{<iri>}` marker in `text`. The `a` is for *asynchronous*: a
-/// level's markers are forked and joined, so a concurrency-capable kernel pulls
-/// them simultaneously, while a single-threaded executor (the browser, for now)
-/// resolves them in turn. Each result is itself expanded, so a transcluded
-/// shape's own markers recurse. Boxed for the async recursion.
+/// level's markers are forked via [`Invocation::fan_out`] and joined, so a
+/// scheduled kernel resolves them **concurrently** (each spawned onto the pool,
+/// parking on the join) while a single-threaded kernel resolves them in turn. Each
+/// result is itself expanded — a transcluded shape's own markers recurse, and the
+/// sub-expansions run concurrently too. Boxed for the async recursion.
 fn expand<'a>(
     inv: &'a Invocation<'_>,
     text: String,
@@ -220,46 +221,49 @@ fn expand<'a>(
             )));
         }
         let segments = scan(&text);
-        // Fork: one resolution future per marker, in document order.
-        let jobs: Vec<_> = segments
+        // This level's marker bodies, in document order.
+        let markers: Vec<String> = segments
             .iter()
             .filter_map(|segment| match segment {
-                Segment::Marker(inner) => Some(resolve_marker(inv, inner.clone(), depth)),
+                Segment::Marker(inner) => Some(inner.clone()),
                 Segment::Lit(_) => None,
             })
             .collect();
-        // Join: resolve the level concurrently (the kernel parallelizes if it can).
-        let mut resolved = try_join_all(jobs).await?.into_iter();
+        // Fork: resolve the level's markers concurrently. `fan_out` spawns each onto
+        // the scheduler when the kernel is scheduled, and resolves them in turn
+        // otherwise — so the single-threaded path is unchanged.
+        let requests = markers
+            .iter()
+            .map(|inner| parse_marker(inner))
+            .collect::<Result<Vec<_>>>()?;
+        let resolved = inv.fan_out(requests).await;
+        // Each resolved marker is itself expanded; a non-text result isn't inlined.
+        // These sub-expansions run concurrently (and their own markers fan out again).
+        let expansions = resolved
+            .into_iter()
+            .zip(markers)
+            .map(|(result, inner)| async move {
+                let repr = result?;
+                match String::from_utf8(repr.bytes) {
+                    Ok(s) => expand(inv, s, depth + 1).await,
+                    Err(e) => Ok(format!(
+                        "<!-- compose: `{inner}` is non-text ({} bytes), not inlined -->",
+                        e.into_bytes().len()
+                    )),
+                }
+            });
+        let mut expanded = try_join_all(expansions).await?.into_iter();
         // Reassemble in document order.
         let mut out = String::with_capacity(text.len());
         for segment in &segments {
             match segment {
                 Segment::Lit(t) => out.push_str(t),
                 Segment::Marker(_) => {
-                    out.push_str(&resolved.next().expect("one result per marker"))
+                    out.push_str(&expanded.next().expect("one expansion per marker"))
                 }
             }
         }
         Ok(out)
-    })
-}
-
-/// Resolve one marker body `<iri>[?args]` through the kernel, then expand the
-/// result so a transcluded shape's own markers recurse. Non-text isn't inlined.
-fn resolve_marker<'a>(
-    inv: &'a Invocation<'_>,
-    inner: String,
-    depth: usize,
-) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
-    Box::pin(async move {
-        let repr = inv.issue(parse_marker(&inner)?).await?;
-        match String::from_utf8(repr.bytes) {
-            Ok(s) => expand(inv, s, depth + 1).await,
-            Err(e) => Ok(format!(
-                "<!-- compose: `{inner}` is non-text ({} bytes), not inlined -->",
-                e.into_bytes().len()
-            )),
-        }
     })
 }
 
@@ -387,6 +391,38 @@ mod compose_tests {
             ),
         )
         .unwrap()
+    }
+
+    /// A cooperative spawner: returns each task as its own completion future so the
+    /// fan-out join drives them on the current task — exercises compose's `fan_out`
+    /// spawn path without real threads (the threaded version lives in ikigai-scheduler).
+    struct InlineSpawner;
+    impl crate::endpoint::Spawner for InlineSpawner {
+        fn spawn(&self, task: crate::endpoint::BoxFuture<()>) -> crate::endpoint::BoxFuture<()> {
+            task
+        }
+    }
+
+    #[test]
+    fn composes_a_multi_marker_page_on_a_scheduled_kernel() {
+        // On a scheduled kernel, a level's markers go through `fan_out`'s spawn path.
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:fn:compose"), compose())
+            .bind(Exact::new("urn:fn:toUpper"), to_upper())
+            .bind(
+                Exact::new("urn:data:page"),
+                shape(r#"<h1>$a{urn:fn:toUpper?in="a"}$a{urn:fn:toUpper?in="b"}</h1>"#),
+            );
+        let kernel = Kernel::new(Arc::new(space)).into_scheduled(Arc::new(InlineSpawner));
+        let rep = block_on(
+            kernel.issue(
+                Request::new(Verb::Source, Iri::parse("urn:fn:compose").unwrap())
+                    .with_arg("src", ArgRef::Inline(b"urn:data:page".to_vec())),
+                &Capability::root(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(rep.bytes, b"<h1>AB</h1>");
     }
 
     #[test]
