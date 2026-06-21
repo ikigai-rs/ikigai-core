@@ -101,19 +101,75 @@ impl fmt::Display for ReprType {
     }
 }
 
+/// An absolute instant, milliseconds since the Unix epoch.
+///
+/// The kernel's notion of "now" is supplied by an injected [`Clock`](crate::Clock)
+/// rather than read from the system directly, so pure resolution stays
+/// deterministic for replay; a [`Time`] is just the value such a clock returns and
+/// the deadline an [`Expiry::At`] is measured against. Plain `u64` millis: cheap,
+/// `Ord`, serializable, and host-agnostic (system time natively, `Date.now()` in a
+/// browser).
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
+)]
+pub struct Time(pub u64);
+
+impl Time {
+    /// A time from milliseconds since the Unix epoch.
+    pub fn from_millis(millis: u64) -> Self {
+        Time(millis)
+    }
+
+    /// Milliseconds since the Unix epoch.
+    pub fn as_millis(self) -> u64 {
+        self.0
+    }
+
+    /// This time advanced by `millis` (saturating), e.g. a `max-age` deadline
+    /// computed as `now.plus_millis(max_age * 1000)`.
+    pub fn plus_millis(self, millis: u64) -> Self {
+        Time(self.0.saturating_add(millis))
+    }
+}
+
 /// How long a representation stays valid in the cache.
 ///
-/// M3a uses the two ends of the spectrum; richer expiry (dependent on
-/// sub-requests, time-based, golden-thread) arrives with dependency tracking.
+/// A lattice from most- to least-volatile: [`Always`](Expiry::Always) (never
+/// cached) › [`At`](Expiry::At) (cached until a deadline) › [`Never`](Expiry::Never)
+/// (permanently cacheable). Time-based validity rides alongside golden threads —
+/// an `At` entry is valid only while *both* its deadline is in the future and its
+/// threads are uncut.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum Expiry {
     /// Always expired — never cached. The safe default: an endpoint must opt in
     /// to caching (mirroring NetKernel, where a response with no expiry is volatile).
     #[default]
     Always,
+    /// Cached until an absolute deadline (e.g. an HTTP `Cache-Control: max-age`
+    /// turned into `now + max-age`). Evaluated against the kernel's injected
+    /// [`Clock`](crate::Clock); a kernel with no clock cannot honour a deadline, so
+    /// it declines to cache such a result rather than risk serving it forever.
+    At(Time),
     /// Never expires — permanently cacheable. Correct for a pure function of
     /// content-addressed inputs, where the request identity fully determines the result.
     Never,
+}
+
+impl Expiry {
+    /// The more restrictive (sooner-expiring) of two expiries — the cache *meet*.
+    /// [`Always`](Expiry::Always) dominates (any volatile part makes the whole
+    /// volatile); an [`At`](Expiry::At) deadline beats [`Never`](Expiry::Never);
+    /// two deadlines take the earlier. Used to combine a result's own expiry with
+    /// its dependencies', so a composite is never fresher than its most volatile part.
+    pub fn most_restrictive(self, other: Expiry) -> Expiry {
+        use Expiry::*;
+        match (self, other) {
+            (Always, _) | (_, Always) => Always,
+            (At(a), At(b)) => At(a.min(b)),
+            (At(t), Never) | (Never, At(t)) => At(t),
+            (Never, Never) => Never,
+        }
+    }
 }
 
 /// A typed value produced by an endpoint.
@@ -168,6 +224,15 @@ impl Representation {
     /// Mark this representation permanently cacheable ([`Expiry::Never`]).
     pub fn cacheable(mut self) -> Self {
         self.expiry = Expiry::Never;
+        self
+    }
+
+    /// Mark this representation cacheable until an absolute deadline
+    /// ([`Expiry::At`]). The kernel serves it from cache only while its injected
+    /// [`Clock`](crate::Clock) reads before `deadline` (and its golden threads are
+    /// uncut); a clockless kernel declines to cache it.
+    pub fn cacheable_until(mut self, deadline: Time) -> Self {
+        self.expiry = Expiry::At(deadline);
         self
     }
 

@@ -9,7 +9,7 @@ use crate::describe::Description;
 use crate::error::{Error, Result};
 use crate::grammar::Bindings;
 use crate::iri::Iri;
-use crate::repr::{Expiry, Representation, Thread};
+use crate::repr::{Expiry, Representation, Thread, Time};
 use crate::request::Request;
 use crate::verb::Verb;
 
@@ -20,6 +20,13 @@ use crate::verb::Verb;
 pub trait Issuer: Send + Sync {
     /// Resolve and evaluate a sub-request.
     async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation>;
+
+    /// The current time per the issuer's injected [`Clock`](crate::Clock), or
+    /// `None` if it has none. An endpoint computing a time-based deadline (e.g.
+    /// `now + max-age`) reads it through [`Invocation::now`]. Default `None`.
+    fn now(&self) -> Option<Time> {
+        None
+    }
 }
 
 /// The context handed to an endpoint when it is invoked.
@@ -123,15 +130,24 @@ impl<'a> Invocation<'a> {
         self.issue(Request::new(Verb::Source, target.clone())).await
     }
 
-    /// Combined expiry of the dependencies issued during this invocation:
-    /// `Always` if any is volatile, else `Never`.
+    /// The current time per the kernel's injected [`Clock`](crate::Clock), or
+    /// `None` if the kernel has no clock (or the invocation is detached). An
+    /// endpoint turns a relative freshness window into an absolute deadline with
+    /// it — e.g. `inv.now().map(|t| repr.cacheable_until(t.plus_millis(max_age)))`.
+    pub fn now(&self) -> Option<Time> {
+        self.issuer.and_then(|issuer| issuer.now())
+    }
+
+    /// Combined expiry of the dependencies issued during this invocation: the
+    /// [meet](Expiry::most_restrictive) of them all, so the result is no fresher
+    /// than its most volatile dependency. `Always` if any is volatile, the earliest
+    /// `At` deadline among any time-bounded ones, else `Never` (no deps ⇒ `Never`,
+    /// imposing no limit).
     pub(crate) fn dependency_expiry(&self) -> Expiry {
         let deps = self.deps.lock().expect("deps lock");
-        if deps.contains(&Expiry::Always) {
-            Expiry::Always
-        } else {
-            Expiry::Never
-        }
+        deps.iter()
+            .copied()
+            .fold(Expiry::Never, Expiry::most_restrictive)
     }
 
     /// The union of golden threads of every dependency resolved during this
