@@ -214,26 +214,35 @@ impl Kernel {
         Ok(representation)
     }
 
-    /// A cached representation for `id` whose golden-thread edges are all current.
-    /// A stale entry (some thread has been cut since) is evicted and `None`
+    /// Whether a cache entry is valid *right now*: its golden-thread edges are all
+    /// still at their pinned generation (nothing it depends on has been cut) AND,
+    /// if it carries a time deadline, that deadline is still in the future per the
+    /// injected clock. (`At` is only ever stored when a clock is present, so a
+    /// missing clock here conservatively treats a deadline as expired.) The single
+    /// source of truth shared by the serving path ([`valid_cached`](Self::valid_cached),
+    /// which evicts on staleness) and the read-only probe ([`is_cached`](Self::is_cached)),
+    /// so the two can never disagree.
+    fn entry_is_valid(&self, entry: &CacheEntry) -> bool {
+        let gens = self.generations.lock().expect("generations lock");
+        let edges_current = entry
+            .edges
+            .iter()
+            .all(|(thread, gen)| generation_of(&gens, thread) == *gen);
+        let unexpired = match entry.representation.expiry {
+            Expiry::At(deadline) => self.clock.as_ref().is_some_and(|c| c.now() < deadline),
+            _ => true,
+        };
+        edges_current && unexpired
+    }
+
+    /// A cached representation for `id` that is still [valid](Self::entry_is_valid).
+    /// A stale entry (a thread cut, or its deadline passed) is evicted and `None`
     /// returned, so the caller recomputes.
     fn valid_cached(&self, id: &RequestId) -> Option<Representation> {
         let mut cache = self.cache.lock().expect("cache lock");
-        let outcome = cache.get(id).map(|entry| {
-            let gens = self.generations.lock().expect("generations lock");
-            let edges_current = entry
-                .edges
-                .iter()
-                .all(|(thread, gen)| generation_of(&gens, thread) == *gen);
-            // A time-based entry is also valid only while its deadline is still in
-            // the future, per the injected clock. (`At` is only ever stored when a
-            // clock is present, so a missing clock here conservatively expires it.)
-            let unexpired = match entry.representation.expiry {
-                Expiry::At(deadline) => self.clock.as_ref().is_some_and(|c| c.now() < deadline),
-                _ => true,
-            };
-            (edges_current && unexpired, entry.representation.clone())
-        });
+        let outcome = cache
+            .get(id)
+            .map(|entry| (self.entry_is_valid(entry), entry.representation.clone()));
         match outcome {
             None => None,
             Some((true, representation)) => Some(representation),
@@ -328,18 +337,13 @@ impl Kernel {
         if !request.verb.is_cacheable() {
             return false;
         }
+        // Read-only probe: an entry that is cut (a thread bumped) or expired (its
+        // deadline passed) is not "cached", matching what `valid_cached` would
+        // serve. Does not evict — eviction happens on the serving path.
         let cache = self.cache.lock().expect("cache lock");
-        match cache.get(&request.id()) {
-            // Read-only probe: a cut (but not-yet-evicted) entry is not "cached".
-            Some(entry) => {
-                let gens = self.generations.lock().expect("generations lock");
-                entry
-                    .edges
-                    .iter()
-                    .all(|(thread, gen)| generation_of(&gens, thread) == *gen)
-            }
-            None => false,
-        }
+        cache
+            .get(&request.id())
+            .is_some_and(|entry| self.entry_is_valid(entry))
     }
 
     /// Enumerate the root space's bindings, if it supports enumeration. `None`
@@ -1061,6 +1065,30 @@ mod tests {
             LEAF_CALLS.load(Ordering::SeqCst),
             2,
             "composite expired with its leaf"
+        );
+    }
+
+    #[test]
+    fn is_cached_honours_the_deadline() {
+        // The read-only probe must agree with the serving path: an expired entry
+        // is not "cached", so a cache-status label (and the `cache` REPL command)
+        // doesn't claim a Hit that the next issue would actually recompute.
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        let clock = TestClock::at(0);
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:t:x"), timed_endpoint("x", 100, &CALLS)),
+        ))
+        .with_clock(Arc::new(clock.clone()));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:t:x"));
+
+        block_on(kernel.issue(req(), &cap)).unwrap(); // cached, deadline = 100
+        clock.set(50);
+        assert!(kernel.is_cached(&req()), "fresh entry probes as cached");
+        clock.set(150);
+        assert!(
+            !kernel.is_cached(&req()),
+            "expired entry probes as not cached"
         );
     }
 }
