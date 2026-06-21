@@ -26,6 +26,7 @@
 //! `source urn:kernel:cache` / `urn:kernel:threads` introspect cache and threads.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
@@ -66,6 +67,44 @@ impl Clock for SystemClock {
     }
 }
 
+/// One resolved invocation, as the kernel reports it to an installed [`Tracer`].
+/// The `trace` command turns a stream of these (from one real resolution) into the
+/// execution tree — which **worker thread** each node ran on, how long it took, and
+/// whether the cache served it.
+#[derive(Clone, Debug)]
+pub struct TraceEvent {
+    /// The resolved request's target IRI.
+    pub target: String,
+    /// The worker thread the invocation ran on (the scheduler's thread name, or the
+    /// thread id) — so a fan-out's branches show up on different workers.
+    pub thread: String,
+    /// When the invocation started / finished, per the injected [`Clock`] (`None`
+    /// if the kernel has no clock).
+    pub started: Option<Time>,
+    pub ended: Option<Time>,
+    /// Whether the representation cache served it (vs computed now).
+    pub cache_hit: bool,
+}
+
+/// Receives a [`TraceEvent`] per invocation while installed. The kernel records
+/// only when one is set ([`Kernel::set_tracer`]) — off the hot path otherwise — so
+/// the `trace` command can capture one real resolution and render it. The host
+/// supplies the collector (e.g. a `Mutex<Vec<TraceEvent>>`).
+pub trait Tracer: Send + Sync {
+    /// Record one resolved invocation.
+    fn record(&self, event: TraceEvent);
+}
+
+/// The current worker thread's label: its name (the scheduler names workers
+/// `ikigai-sched-N`) or, unnamed, its id.
+fn thread_label() -> String {
+    let current = std::thread::current();
+    current
+        .name()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{:?}", current.id()))
+}
+
 /// Resolves requests against a root space, invokes the resolved endpoint, and
 /// caches cacheable representations by their content-addressed request id.
 pub struct Kernel {
@@ -86,6 +125,11 @@ pub struct Kernel {
     /// absent ⇒ [`Invocation::fan_out`] resolves sequentially (the default).
     spawner: Option<Arc<dyn Spawner>>,
     self_ref: Option<Weak<Kernel>>,
+    /// Execution tracer, installed only while the `trace` command captures one
+    /// resolution. `tracing` is a fast-path gate so an untraced issue pays just an
+    /// atomic load, never the lock.
+    tracer: Mutex<Option<Arc<dyn Tracer>>>,
+    tracing: AtomicBool,
 }
 
 /// A cached representation plus the golden-thread edges that keep it valid: each
@@ -108,6 +152,8 @@ impl Kernel {
             clock: None,
             spawner: None,
             self_ref: None,
+            tracer: Mutex::new(None),
+            tracing: AtomicBool::new(false),
         }
     }
 
@@ -121,6 +167,8 @@ impl Kernel {
             clock: None,
             spawner: None,
             self_ref: None,
+            tracer: Mutex::new(None),
+            tracing: AtomicBool::new(false),
         }
     }
 
@@ -149,6 +197,48 @@ impl Kernel {
         self
     }
 
+    /// Install a [`Tracer`] to record each invocation of the *next* resolution. The
+    /// `trace` command sets one around a single real `source`, then calls
+    /// [`clear_tracer`](Self::clear_tracer). Takes `&self` (interior-mutable), so it
+    /// works on the shared `Arc<Kernel>` the engine drives. Off the hot path when no
+    /// tracer is set — an untraced issue pays only an atomic load.
+    pub fn set_tracer(&self, tracer: Arc<dyn Tracer>) {
+        *self.tracer.lock().expect("tracer lock") = Some(tracer);
+        self.tracing.store(true, Ordering::SeqCst);
+    }
+
+    /// Remove the installed tracer.
+    pub fn clear_tracer(&self) {
+        self.tracing.store(false, Ordering::SeqCst);
+        *self.tracer.lock().expect("tracer lock") = None;
+    }
+
+    /// The clock's "now" if a tracer is installed (the start/end stamp for a
+    /// [`TraceEvent`]); `None` otherwise, so an untraced issue does no clock read.
+    fn trace_now(&self) -> Option<Time> {
+        if self.tracing.load(Ordering::Relaxed) {
+            self.clock.as_ref().map(|clock| clock.now())
+        } else {
+            None
+        }
+    }
+
+    /// Report one resolved invocation to the installed tracer, if any.
+    fn trace_record(&self, request: &Request, started: Option<Time>, cache_hit: bool) {
+        if !self.tracing.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(tracer) = self.tracer.lock().expect("tracer lock").clone() {
+            tracer.record(TraceEvent {
+                target: request.target.as_str().to_string(),
+                thread: thread_label(),
+                started,
+                ended: self.clock.as_ref().map(|clock| clock.now()),
+                cache_hit,
+            });
+        }
+    }
+
     /// Issue a request: return a valid cached representation if one exists,
     /// otherwise resolve, invoke the endpoint, and cache the result if cacheable.
     pub async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation> {
@@ -162,12 +252,15 @@ impl Kernel {
 
         let id = request.id();
         let cacheable_verb = request.verb.is_cacheable();
+        // Trace start-stamp (only while a tracer is installed).
+        let trace_started = self.trace_now();
 
         // Representation-cache lookup (idempotent verbs only): serve a cached entry
         // whose golden-thread edges are all still current. A cut entry is evicted
         // here and recomputed below. The guard is dropped before any await.
         if cacheable_verb {
             if let Some(cached) = self.valid_cached(&id) {
+                self.trace_record(&request, trace_started, true);
                 return Ok(cached);
             }
         }
@@ -218,6 +311,8 @@ impl Kernel {
             threads.extend(invocation.dependency_threads());
             representation.with_expiry(effective).with_threads(threads)
         };
+        // Computed (not served from cache) — record after the invocation completes.
+        self.trace_record(&request, trace_started, false);
 
         // A successful mutating verb invalidates its target: cut the thread named
         // after it, so cached `Source`s of that resource — and composites over
@@ -1205,5 +1300,39 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(out.bytes, b"123");
+    }
+
+    #[test]
+    fn an_installed_tracer_records_each_invocation_then_stops_when_cleared() {
+        struct Recorder(std::sync::Mutex<Vec<TraceEvent>>);
+        impl Tracer for Recorder {
+            fn record(&self, event: TraceEvent) {
+                self.0.lock().expect("recorder").push(event);
+            }
+        }
+        let recorder = Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+        let kernel = Kernel::new(Arc::new(fan_space()));
+        let cap = Capability::root();
+        let parent = || Request::new(Verb::Source, iri("urn:fan:parent"));
+
+        kernel.set_tracer(recorder.clone());
+        block_on(kernel.issue(parent(), &cap)).unwrap();
+        kernel.clear_tracer();
+
+        let events = recorder.0.lock().expect("recorder").clone();
+        let targets: Vec<&str> = events.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(events.len(), 4, "parent + 3 leaves, one event each");
+        assert!(targets.contains(&"urn:fan:parent"));
+        assert!(["urn:leaf:1", "urn:leaf:2", "urn:leaf:3"]
+            .iter()
+            .all(|leaf| targets.contains(leaf)));
+        assert!(
+            events.iter().all(|e| !e.cache_hit),
+            "first resolution computes everything"
+        );
+
+        // A cleared tracer records nothing for subsequent resolutions.
+        block_on(kernel.issue(parent(), &cap)).unwrap();
+        assert_eq!(recorder.0.lock().expect("recorder").len(), 4);
     }
 }

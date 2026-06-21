@@ -54,7 +54,7 @@ pub use endpoint::{BoxFuture, Endpoint, FnEndpoint, Invocation, Issuer, Spawner}
 pub use error::{Error, Result};
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{Iri, IriError};
-pub use kernel::{Clock, Kernel, SystemClock};
+pub use kernel::{Clock, Kernel, SystemClock, TraceEvent, Tracer};
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};
