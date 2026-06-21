@@ -8,12 +8,16 @@
 //! work lives in endpoint invocation.
 //!
 //! A result is cached only when the verb is idempotent *and* the endpoint opted
-//! in via [`Expiry::Never`]. Validity is then tracked by **golden threads**
-//! ([`Thread`]): a cached representation depends on the threads it declared plus
+//! in — permanently ([`Expiry::Never`]) or until a deadline ([`Expiry::At`]).
+//! Validity is then tracked two ways, both of which must hold: **golden threads**
+//! ([`Thread`]) — a cached representation depends on the threads it declared plus
 //! those of every sub-resource it resolved (they propagate up through
-//! composition), and [`Kernel::cut`] invalidates everything carrying a thread.
-//! That lets results which read mutable state be cached and invalidated on change
-//! — a `Sink` (or an external watcher) cuts the thread named after the state.
+//! composition), and [`Kernel::cut`] invalidates everything carrying a thread, so
+//! results which read mutable state can be cached and invalidated on change (a
+//! `Sink`, or an external watcher, cuts the thread named after the state) — and a
+//! **time deadline**, evaluated against an injected [`Clock`], after which an
+//! `At` entry is recomputed. A kernel with no clock simply never caches `At`
+//! results, staying fully time-independent (and so deterministic for replay).
 //!
 //! The kernel also reserves the **`urn:kernel:*`** namespace for its own
 //! operations as capability-gated resources, resolved intrinsically before the
@@ -31,10 +35,36 @@ use crate::capability::Capability;
 use crate::endpoint::{Invocation, Issuer};
 use crate::error::{Error, Result};
 use crate::meta::MetaRenderer;
-use crate::repr::{Expiry, ReprType, Representation, Thread};
+use crate::repr::{Expiry, ReprType, Representation, Thread, Time};
 use crate::request::{Request, RequestId};
 use crate::space::{Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
+
+/// The kernel's source of "now". Injected (rather than read from the system
+/// directly) so pure resolution stays deterministic and replayable: a test or a
+/// replay harness supplies a fixed or recorded clock. Only entries with a
+/// time-based [`Expiry::At`] deadline consult it, so a kernel with no clock is
+/// fully time-independent.
+pub trait Clock: Send + Sync {
+    /// The current time.
+    fn now(&self) -> Time;
+}
+
+/// A [`Clock`] reading the system wall clock — the default real clock. Replay and
+/// test harnesses inject a fixed clock instead. (A browser host injects a
+/// `Date.now()`-backed clock; `ikigai-core` itself stays runtime-agnostic.)
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Time {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Time::from_millis(millis)
+    }
+}
 
 /// Resolves requests against a root space, invokes the resolved endpoint, and
 /// caches cacheable representations by their content-addressed request id.
@@ -46,6 +76,10 @@ pub struct Kernel {
     /// pinned to an earlier one.
     generations: Mutex<HashMap<Thread, u64>>,
     meta: Option<Arc<dyn MetaRenderer>>,
+    /// Source of "now" for time-based [`Expiry::At`] deadlines. Absent ⇒ the
+    /// kernel cannot evaluate a deadline, so it declines to cache `At` results
+    /// (golden-thread and `Never` caching are unaffected).
+    clock: Option<Arc<dyn Clock>>,
 }
 
 /// A cached representation plus the golden-thread edges that keep it valid: each
@@ -65,6 +99,7 @@ impl Kernel {
             cache: Mutex::new(HashMap::new()),
             generations: Mutex::new(HashMap::new()),
             meta: None,
+            clock: None,
         }
     }
 
@@ -75,7 +110,17 @@ impl Kernel {
             cache: Mutex::new(HashMap::new()),
             generations: Mutex::new(HashMap::new()),
             meta: Some(renderer),
+            clock: None,
         }
+    }
+
+    /// Inject the [`Clock`] the kernel reads for time-based [`Expiry::At`]
+    /// deadlines (builder). Without one, `At` results are not cached — golden-thread
+    /// and `Never` caching are unaffected — so a kernel only consults a clock when a
+    /// host opts into time-bounded freshness (e.g. mounting the HTTP client module).
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = Some(clock);
+        self
     }
 
     /// Issue a request: return a valid cached representation if one exists,
@@ -123,15 +168,13 @@ impl Kernel {
             let invocation =
                 Invocation::with_issuer(&request, &resolved.bindings, capability, self);
             let representation = resolved.endpoint.invoke(&invocation).await?;
-            // Effective expiry propagates from the dependencies: a result is
-            // cacheable only if it opted in AND every dependency it read is cacheable.
-            let effective = if representation.expiry == Expiry::Never
-                && invocation.dependency_expiry() == Expiry::Never
-            {
-                Expiry::Never
-            } else {
-                Expiry::Always
-            };
+            // Effective expiry propagates from the dependencies: the result is no
+            // fresher than its most volatile part. The endpoint's own expiry is met
+            // with the combined dependency expiry — `Always` if either is volatile,
+            // the earlier deadline if both are time-bounded, `Never` only if all are.
+            let effective = representation
+                .expiry
+                .most_restrictive(invocation.dependency_expiry());
             // Golden threads propagate too: the result depends on its own declared
             // threads plus those of every sub-resource it resolved, so cutting any
             // of them invalidates this composite.
@@ -149,7 +192,16 @@ impl Kernel {
             self.cut(request.target.as_str());
         }
 
-        if cacheable_verb && representation.expiry == Expiry::Never {
+        // Store an idempotent result unless it's volatile (`Always`). A time-based
+        // `At` deadline is only storable when a clock is present to later evaluate
+        // it — otherwise the kernel could never tell when it expired, so it declines.
+        let storable = cacheable_verb
+            && match representation.expiry {
+                Expiry::Always => false,
+                Expiry::Never => true,
+                Expiry::At(_) => self.clock.is_some(),
+            };
+        if storable {
             let edges = self.edges_for(representation.threads());
             self.cache.lock().expect("cache lock").insert(
                 id,
@@ -169,11 +221,18 @@ impl Kernel {
         let mut cache = self.cache.lock().expect("cache lock");
         let outcome = cache.get(id).map(|entry| {
             let gens = self.generations.lock().expect("generations lock");
-            let valid = entry
+            let edges_current = entry
                 .edges
                 .iter()
                 .all(|(thread, gen)| generation_of(&gens, thread) == *gen);
-            (valid, entry.representation.clone())
+            // A time-based entry is also valid only while its deadline is still in
+            // the future, per the injected clock. (`At` is only ever stored when a
+            // clock is present, so a missing clock here conservatively expires it.)
+            let unexpired = match entry.representation.expiry {
+                Expiry::At(deadline) => self.clock.as_ref().is_some_and(|c| c.now() < deadline),
+                _ => true,
+            };
+            (edges_current && unexpired, entry.representation.clone())
         });
         match outcome {
             None => None,
@@ -342,6 +401,10 @@ impl Issuer for Kernel {
         // Delegate to the inherent method (which the context calls back into).
         Kernel::issue(self, request, capability).await
     }
+
+    fn now(&self) -> Option<Time> {
+        self.clock.as_ref().map(|clock| clock.now())
+    }
 }
 
 #[cfg(test)]
@@ -357,7 +420,25 @@ mod tests {
     use crate::space::EndpointSpace;
     use crate::verb::Verb;
     use futures::executor::block_on;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    /// A [`Clock`] whose "now" the test can set, to drive deadline expiry
+    /// deterministically (no real time involved).
+    #[derive(Clone)]
+    struct TestClock(Arc<AtomicU64>);
+    impl TestClock {
+        fn at(millis: u64) -> Self {
+            TestClock(Arc::new(AtomicU64::new(millis)))
+        }
+        fn set(&self, millis: u64) {
+            self.0.store(millis, Ordering::SeqCst);
+        }
+    }
+    impl Clock for TestClock {
+        fn now(&self) -> Time {
+            Time::from_millis(self.0.load(Ordering::SeqCst))
+        }
+    }
 
     fn iri(s: &str) -> Iri {
         Iri::parse(s).unwrap()
@@ -858,5 +939,128 @@ mod tests {
             block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:cache")), &cap))
                 .unwrap();
         assert!(String::from_utf8_lossy(&cache.bytes).contains("entries"));
+    }
+
+    // --- Time-based expiry (Expiry::At + an injected Clock) ------------------
+
+    #[test]
+    fn most_restrictive_is_the_expiry_meet() {
+        use Expiry::*;
+        let t1 = Time::from_millis(100);
+        let t2 = Time::from_millis(200);
+        // Always dominates everything.
+        assert_eq!(Always.most_restrictive(Never), Always);
+        assert_eq!(At(t1).most_restrictive(Always), Always);
+        // An At deadline beats Never (the composite inherits the deadline).
+        assert_eq!(Never.most_restrictive(At(t1)), At(t1));
+        // Two deadlines take the earlier; Never is the identity.
+        assert_eq!(At(t1).most_restrictive(At(t2)), At(t1));
+        assert_eq!(Never.most_restrictive(Never), Never);
+    }
+
+    /// An endpoint that stamps a deadline `window` ms ahead of the kernel's clock.
+    fn timed_endpoint(name: &'static str, window: u64, calls: &'static AtomicU32) -> FnEndpoint {
+        FnEndpoint::new(name, move |inv: &Invocation<'_>| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let repr = Representation::new(ReprType::new("text/plain"), b"v".to_vec());
+            // Turn the relative freshness window into an absolute deadline via the
+            // injected clock — exactly how the HTTP module will map `max-age`.
+            Ok(match inv.now() {
+                Some(now) => repr.cacheable_until(now.plus_millis(window)),
+                None => repr.cacheable_until(Time::from_millis(window)),
+            })
+        })
+    }
+
+    #[test]
+    fn time_based_entry_serves_until_its_deadline_then_recomputes() {
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        let clock = TestClock::at(1_000);
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:t:x"), timed_endpoint("x", 500, &CALLS)),
+        ))
+        .with_clock(Arc::new(clock.clone()));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:t:x"));
+
+        // t=1000: computed, deadline = 1500.
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        // t=1400: still fresh -> cache hit, not recomputed.
+        clock.set(1_400);
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            1,
+            "served from cache before deadline"
+        );
+        // t=1600: past the deadline -> stale, recomputes (new deadline = 2100).
+        clock.set(1_600);
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2, "recomputed after deadline");
+    }
+
+    #[test]
+    fn a_clockless_kernel_declines_to_cache_a_deadline() {
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        // No clock injected: the kernel can't evaluate a deadline, so an `At`
+        // result is never stored and recomputes every time (rather than risk
+        // serving it forever).
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:t:x"), timed_endpoint("x", 500, &CALLS)),
+        ));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:t:x"));
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            2,
+            "no clock -> At result not cached"
+        );
+        assert_eq!(kernel.cache_len(), 0);
+    }
+
+    #[test]
+    fn a_deadline_propagates_through_composition() {
+        static LEAF_CALLS: AtomicU32 = AtomicU32::new(0);
+        let clock = TestClock::at(0);
+        // `UpcaseOf` is a *permanently*-cacheable composer; sourcing a time-bounded
+        // leaf must still cap the composite at the leaf's deadline (no fresher than
+        // its most volatile part). LEAF_CALLS recomputing tracks the composite too,
+        // since the composite only re-sources the leaf when it itself recomputes.
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:t:leaf"),
+                    timed_endpoint("leaf", 100, &LEAF_CALLS),
+                )
+                .bind(Exact::new("urn:fn:upcaseOf"), UpcaseOf),
+        ))
+        .with_clock(Arc::new(clock.clone()));
+        let cap = Capability::root();
+        let req = || {
+            Request::new(Verb::Source, iri("urn:fn:upcaseOf"))
+                .with_arg("src", ArgRef::Reference(iri("urn:t:leaf")))
+        };
+
+        // t=0: computed, inherited deadline = 100.
+        let a = block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(a.bytes, b"V");
+        // t=50: fresh -> composite served from cache, leaf not re-sourced.
+        clock.set(50);
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(
+            LEAF_CALLS.load(Ordering::SeqCst),
+            1,
+            "composite cached before the leaf's deadline"
+        );
+        // t=150: leaf deadline passed -> composite expired -> recomputes, re-sources leaf.
+        clock.set(150);
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(
+            LEAF_CALLS.load(Ordering::SeqCst),
+            2,
+            "composite expired with its leaf"
+        );
     }
 }
