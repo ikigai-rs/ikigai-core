@@ -23,6 +23,21 @@ pub trait Issuer: Send + Sync {
     /// Resolve and evaluate a sub-request.
     async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation>;
 
+    /// Like [`issue`](Issuer::issue), but carrying the issuing invocation's trace
+    /// `parent` span — so a recorded execution links each sub-request to the node
+    /// that issued it (the tree the `trace` command renders). The default ignores it
+    /// and delegates to `issue`; the kernel overrides it to thread the span. `parent`
+    /// is `None` outside tracing, so this is free off the trace path.
+    async fn issue_with_parent(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+    ) -> Result<Representation> {
+        let _ = parent;
+        self.issue(request, capability).await
+    }
+
     /// The current time per the issuer's injected [`Clock`](crate::Clock), or
     /// `None` if it has none. An endpoint computing a time-based deadline (e.g.
     /// `now + max-age`) reads it through [`Invocation::now`]. Default `None`.
@@ -68,6 +83,9 @@ pub struct Invocation<'a> {
     /// sequential.
     spawner: Option<Arc<dyn Spawner>>,
     issuer_arc: Option<Arc<dyn Issuer>>,
+    /// This invocation's trace span, when the kernel is recording — so a sub-request
+    /// it issues is linked to this node as its parent. `None` off the trace path.
+    span: Option<u64>,
     deps: Mutex<Vec<Expiry>>,
     /// Union of the golden threads of every sub-resource resolved during this
     /// invocation — so the kernel can propagate them onto the result.
@@ -89,6 +107,7 @@ impl<'a> Invocation<'a> {
             issuer: None,
             spawner: None,
             issuer_arc: None,
+            span: None,
             deps: Mutex::new(Vec::new()),
             dep_threads: Mutex::new(BTreeSet::new()),
         }
@@ -108,9 +127,17 @@ impl<'a> Invocation<'a> {
             issuer: Some(issuer),
             spawner: None,
             issuer_arc: None,
+            span: None,
             deps: Mutex::new(Vec::new()),
             dep_threads: Mutex::new(BTreeSet::new()),
         }
+    }
+
+    /// Attach this invocation's trace span (set by the kernel when recording), so
+    /// sub-requests issued from it link to this node as their parent.
+    pub(crate) fn with_span(mut self, span: Option<u64>) -> Self {
+        self.span = span;
+        self
     }
 
     /// Attach the concurrency context — the injected [`Spawner`] and an owned
@@ -153,7 +180,9 @@ impl<'a> Invocation<'a> {
         let issuer = self
             .issuer
             .ok_or_else(|| Error::Endpoint("sub-requests require a kernel context".to_string()))?;
-        let representation = issuer.issue(request, self.capability).await?;
+        let representation = issuer
+            .issue_with_parent(request, self.capability, self.span)
+            .await?;
         self.deps
             .lock()
             .expect("deps lock")
@@ -204,8 +233,12 @@ impl<'a> Invocation<'a> {
                 let issuer = Arc::clone(issuer);
                 let capability = self.capability.clone();
                 let slot = Arc::clone(slot);
+                // Carry this invocation's span across the spawn, so each spawned
+                // sub-request links to this node as its parent — that's what lets the
+                // recorded events reconstruct the real (concurrent) execution tree.
+                let parent = self.span;
                 spawner.spawn(Box::pin(async move {
-                    let result = issuer.issue(request, &capability).await;
+                    let result = issuer.issue_with_parent(request, &capability, parent).await;
                     *slot.lock().expect("fan-out slot") = Some(result);
                 }))
             })

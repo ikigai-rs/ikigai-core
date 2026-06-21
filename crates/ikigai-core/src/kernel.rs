@@ -26,7 +26,7 @@
 //! `source urn:kernel:cache` / `urn:kernel:threads` introspect cache and threads.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
@@ -84,6 +84,12 @@ pub struct TraceEvent {
     pub ended: Option<Time>,
     /// Whether the representation cache served it (vs computed now).
     pub cache_hit: bool,
+    /// This invocation's span id (unique within one traced resolution).
+    pub span: u64,
+    /// The span of the invocation that issued this one — `None` for the root. The
+    /// `(span, parent)` edges reconstruct the real execution tree, including the
+    /// concurrent branches a `fan_out` spawns onto different workers.
+    pub parent: Option<u64>,
 }
 
 /// Receives a [`TraceEvent`] per invocation while installed. The kernel records
@@ -130,6 +136,9 @@ pub struct Kernel {
     /// atomic load, never the lock.
     tracer: Mutex<Option<Arc<dyn Tracer>>>,
     tracing: AtomicBool,
+    /// Monotonic span-id source, advanced once per traced invocation so each node
+    /// gets a unique id and its children can name it as their parent.
+    span_counter: AtomicU64,
 }
 
 /// A cached representation plus the golden-thread edges that keep it valid: each
@@ -154,6 +163,7 @@ impl Kernel {
             self_ref: None,
             tracer: Mutex::new(None),
             tracing: AtomicBool::new(false),
+            span_counter: AtomicU64::new(0),
         }
     }
 
@@ -169,6 +179,7 @@ impl Kernel {
             self_ref: None,
             tracer: Mutex::new(None),
             tracing: AtomicBool::new(false),
+            span_counter: AtomicU64::new(0),
         }
     }
 
@@ -223,8 +234,26 @@ impl Kernel {
         }
     }
 
-    /// Report one resolved invocation to the installed tracer, if any.
-    fn trace_record(&self, request: &Request, started: Option<Time>, cache_hit: bool) {
+    /// A fresh span id for an invocation while tracing; `None` off the trace path,
+    /// so an untraced issue never touches the counter.
+    fn next_span(&self) -> Option<u64> {
+        if self.tracing.load(Ordering::Relaxed) {
+            Some(self.span_counter.fetch_add(1, Ordering::Relaxed))
+        } else {
+            None
+        }
+    }
+
+    /// Report one resolved invocation to the installed tracer, if any — tagged with
+    /// its own `span` and its issuer's `parent` span, so the events form a tree.
+    fn trace_record(
+        &self,
+        request: &Request,
+        span: Option<u64>,
+        parent: Option<u64>,
+        started: Option<Time>,
+        cache_hit: bool,
+    ) {
         if !self.tracing.load(Ordering::Relaxed) {
             return;
         }
@@ -235,6 +264,8 @@ impl Kernel {
                 started,
                 ended: self.clock.as_ref().map(|clock| clock.now()),
                 cache_hit,
+                span: span.unwrap_or(0),
+                parent,
             });
         }
     }
@@ -242,6 +273,20 @@ impl Kernel {
     /// Issue a request: return a valid cached representation if one exists,
     /// otherwise resolve, invoke the endpoint, and cache the result if cacheable.
     pub async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation> {
+        // Top-level entry: no parent span (this is a trace root if one is recording).
+        self.issue_inner(request, capability, None).await
+    }
+
+    /// The resolution path, carrying the `parent` span of the invocation that issued
+    /// this request (`None` at the top level). [`Issuer::issue_with_parent`] threads
+    /// it through re-entrant sub-requests so a recorded run links each node to its
+    /// parent; the public [`issue`](Self::issue) is the parentless entry point.
+    async fn issue_inner(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+    ) -> Result<Representation> {
         // The kernel-behavior namespace (`urn:kernel:*`) is resolved by the kernel
         // itself — before the cache and the root space, which cannot shadow it —
         // exposing the kernel's own operations (cut a thread, inspect cache and
@@ -252,15 +297,16 @@ impl Kernel {
 
         let id = request.id();
         let cacheable_verb = request.verb.is_cacheable();
-        // Trace start-stamp (only while a tracer is installed).
+        // Trace start-stamp and this invocation's span (only while a tracer is installed).
         let trace_started = self.trace_now();
+        let span = self.next_span();
 
         // Representation-cache lookup (idempotent verbs only): serve a cached entry
         // whose golden-thread edges are all still current. A cut entry is evicted
         // here and recomputed below. The guard is dropped before any await.
         if cacheable_verb {
             if let Some(cached) = self.valid_cached(&id) {
-                self.trace_record(&request, trace_started, true);
+                self.trace_record(&request, span, parent, trace_started, true);
                 return Ok(cached);
             }
         }
@@ -295,7 +341,8 @@ impl Kernel {
                 });
             let invocation =
                 Invocation::with_issuer(&request, &resolved.bindings, capability, self)
-                    .with_concurrency(self.spawner.clone(), issuer_arc);
+                    .with_concurrency(self.spawner.clone(), issuer_arc)
+                    .with_span(span);
             let representation = resolved.endpoint.invoke(&invocation).await?;
             // Effective expiry propagates from the dependencies: the result is no
             // fresher than its most volatile part. The endpoint's own expiry is met
@@ -312,7 +359,7 @@ impl Kernel {
             representation.with_expiry(effective).with_threads(threads)
         };
         // Computed (not served from cache) — record after the invocation completes.
-        self.trace_record(&request, trace_started, false);
+        self.trace_record(&request, span, parent, trace_started, false);
 
         // A successful mutating verb invalidates its target: cut the thread named
         // after it, so cached `Source`s of that resource — and composites over
@@ -535,6 +582,17 @@ impl Issuer for Kernel {
     async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation> {
         // Delegate to the inherent method (which the context calls back into).
         Kernel::issue(self, request, capability).await
+    }
+
+    async fn issue_with_parent(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+    ) -> Result<Representation> {
+        // Re-entrant sub-request: thread the issuing node's span through so the
+        // recorded events link parent → child (across the fan-out spawn).
+        self.issue_inner(request, capability, parent).await
     }
 
     fn now(&self) -> Option<Time> {
@@ -1329,6 +1387,21 @@ mod tests {
         assert!(
             events.iter().all(|e| !e.cache_hit),
             "first resolution computes everything"
+        );
+
+        // Span linkage: the parent is a root (no parent span); every leaf names the
+        // parent's span as its own parent — the edges that rebuild the execution tree.
+        let root = events
+            .iter()
+            .find(|e| e.target == "urn:fan:parent")
+            .expect("parent recorded");
+        assert_eq!(root.parent, None, "the traced root has no parent span");
+        assert!(
+            events
+                .iter()
+                .filter(|e| e.target.starts_with("urn:leaf:"))
+                .all(|leaf| leaf.parent == Some(root.span)),
+            "each fanned-out leaf links to the parent's span"
         );
 
         // A cleared tracer records nothing for subsequent resolutions.
