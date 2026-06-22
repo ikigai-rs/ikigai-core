@@ -726,8 +726,7 @@ fn meta_target(request: &Request) -> ReprType {
     ReprType::new("text/turtle")
 }
 
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[async_trait]
 impl Issuer for Kernel {
     async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation> {
         // Delegate to the inherent method (which the context calls back into).
