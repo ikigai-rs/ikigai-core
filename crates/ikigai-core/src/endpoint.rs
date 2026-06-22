@@ -18,7 +18,8 @@ use crate::verb::Verb;
 /// Lets an endpoint issue sub-requests back through the kernel. Implemented by
 /// the [`Kernel`](crate::Kernel); a detached [`Invocation`] has no issuer, so
 /// `source`/`issue` are unavailable when testing an endpoint in isolation.
-#[async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
 pub trait Issuer: Send + Sync {
     /// Resolve and evaluate a sub-request.
     async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation>;
@@ -46,8 +47,15 @@ pub trait Issuer: Send + Sync {
     }
 }
 
-/// A pinned, boxed, `Send` future — the unit of work a [`Spawner`] runs.
+/// A pinned, boxed future — the unit of work a [`Spawner`] runs. `Send` on native
+/// (so it can move between threadpool workers); **not** `Send` on wasm32, where the
+/// executor is the single-threaded JS event loop and a future may hold a `!Send`
+/// `JsValue` (e.g. a pending `fetch`) across an await. The bound is the only thing
+/// that differs — the same async spine targets a threadpool or the event loop.
+#[cfg(not(target_family = "wasm"))]
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+#[cfg(target_family = "wasm")]
+pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
 /// Runs futures concurrently on the host's executor. Injected into the kernel like
 /// [`Clock`](crate::Clock) — via [`Kernel::into_scheduled`](crate::Kernel::into_scheduled)
@@ -300,7 +308,8 @@ impl<'a> Invocation<'a> {
 /// Endpoints are synchronous and free of ambient authority in M1: everything
 /// they may use arrives through the [`Invocation`]. (Async execution and
 /// sub-request issuing are introduced with the kernel.)
-#[async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
 pub trait Endpoint: Send + Sync {
     /// Produce a representation for the invocation.
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation>;
@@ -349,7 +358,8 @@ impl FnEndpoint {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl Endpoint for FnEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         (self.invoke)(inv)
