@@ -25,7 +25,7 @@
 //! remote peer can invalidate by *resolving*, not via a special method), and
 //! `source urn:kernel:cache` / `urn:kernel:threads` introspect cache and threads.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -155,6 +155,23 @@ pub struct Kernel {
     /// Read-only handle to the host scheduler, for `urn:kernel:scheduler`. Injected
     /// by a scheduled host (the [`Clock`] pattern); absent ⇒ single-threaded default.
     scheduler: Option<Arc<dyn SchedulerReporter>>,
+    /// Rolling window of the most recent resolutions (target, time, cache outcome),
+    /// for `urn:kernel:constraint` — the kernel's throughput readout. Always-on like
+    /// the cache; bounded to [`CONSTRAINT_WINDOW`]. `urn:kernel:*` introspection
+    /// requests are not recorded (they short-circuit before the resolution body).
+    constraint: Mutex<VecDeque<ResolutionSample>>,
+}
+
+/// How many recent resolutions `urn:kernel:constraint` aggregates over.
+const CONSTRAINT_WINDOW: usize = 512;
+
+/// One sampled resolution behind `urn:kernel:constraint`: which resource, how long
+/// it took to compute (per the injected [`Clock`]; `None` if the kernel has none),
+/// and whether the cache served it (a hit consumes no constraint capacity).
+struct ResolutionSample {
+    target: String,
+    elapsed_ms: Option<u64>,
+    cache_hit: bool,
 }
 
 /// A cached representation plus the golden-thread edges that keep it valid: each
@@ -181,6 +198,7 @@ impl Kernel {
             tracing: AtomicBool::new(false),
             span_counter: AtomicU64::new(0),
             scheduler: None,
+            constraint: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -198,6 +216,7 @@ impl Kernel {
             tracing: AtomicBool::new(false),
             span_counter: AtomicU64::new(0),
             scheduler: None,
+            constraint: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -251,14 +270,32 @@ impl Kernel {
         *self.tracer.lock().expect("tracer lock") = None;
     }
 
-    /// The clock's "now" if a tracer is installed (the start/end stamp for a
-    /// [`TraceEvent`]); `None` otherwise, so an untraced issue does no clock read.
-    fn trace_now(&self) -> Option<Time> {
-        if self.tracing.load(Ordering::Relaxed) {
-            self.clock.as_ref().map(|clock| clock.now())
-        } else {
-            None
+    /// The clock's "now", or `None` if the kernel has no clock — the start stamp
+    /// shared by a [`TraceEvent`] and the always-on `urn:kernel:constraint` window.
+    fn now_stamp(&self) -> Option<Time> {
+        self.clock.as_ref().map(|clock| clock.now())
+    }
+
+    /// Record one resolution into the rolling constraint window (always-on, bounded
+    /// to [`CONSTRAINT_WINDOW`]). `started` is the pre-resolution stamp; the elapsed
+    /// compute time is `now − started` (only when the kernel has a clock). A cache
+    /// hit is logged but its elapsed is left out of the constraint total.
+    fn record_resolution(&self, request: &Request, started: Option<Time>, cache_hit: bool) {
+        let elapsed_ms = match (started, self.clock.as_ref()) {
+            (Some(start), Some(clock)) => {
+                Some(clock.now().as_millis().saturating_sub(start.as_millis()))
+            }
+            _ => None,
+        };
+        let mut window = self.constraint.lock().expect("constraint lock");
+        if window.len() >= CONSTRAINT_WINDOW {
+            window.pop_front();
         }
+        window.push_back(ResolutionSample {
+            target: request.target.as_str().to_string(),
+            elapsed_ms,
+            cache_hit,
+        });
     }
 
     /// A fresh span id for an invocation while tracing; `None` off the trace path,
@@ -324,8 +361,9 @@ impl Kernel {
 
         let id = request.id();
         let cacheable_verb = request.verb.is_cacheable();
-        // Trace start-stamp and this invocation's span (only while a tracer is installed).
-        let trace_started = self.trace_now();
+        // Start stamp, shared by the trace event and the always-on constraint window
+        // (one clock read); the span only advances while tracing.
+        let started = self.now_stamp();
         let span = self.next_span();
 
         // Representation-cache lookup (idempotent verbs only): serve a cached entry
@@ -333,7 +371,8 @@ impl Kernel {
         // here and recomputed below. The guard is dropped before any await.
         if cacheable_verb {
             if let Some(cached) = self.valid_cached(&id) {
-                self.trace_record(&request, span, parent, trace_started, true);
+                self.trace_record(&request, span, parent, started, true);
+                self.record_resolution(&request, started, true);
                 return Ok(cached);
             }
         }
@@ -386,7 +425,8 @@ impl Kernel {
             representation.with_expiry(effective).with_threads(threads)
         };
         // Computed (not served from cache) — record after the invocation completes.
-        self.trace_record(&request, span, parent, trace_started, false);
+        self.trace_record(&request, span, parent, started, false);
+        self.record_resolution(&request, started, false);
 
         // A successful mutating verb invalidates its target: cut the thread named
         // after it, so cached `Source`s of that resource — and composites over
@@ -542,8 +582,72 @@ impl Kernel {
                 }
                 Ok(kernel_text(body))
             }
+            // The throughput readout: where the constraint is right now — the
+            // resources that consumed the most *uncached* compute over the recent
+            // window. Cache hits are excluded from the total (they cost nothing); the
+            // heaviest target is the bottleneck (Goldratt step 1).
+            ("constraint", Verb::Source) => {
+                require_cap(capability, "urn:cap:kernel:inspect")?;
+                Ok(kernel_text(self.render_constraint()))
+            }
             _ => Err(Error::Unresolved(request.target.clone())),
         }
+    }
+
+    /// Aggregate the constraint window by target and render the heaviest first.
+    /// Ranks by uncached compute time when the kernel has a clock, else by uncached
+    /// call count — so the readout is meaningful even on a clockless kernel.
+    fn render_constraint(&self) -> String {
+        let window = self.constraint.lock().expect("constraint lock");
+        let total = window.len();
+        // Per target: (uncached_ms, calls, cached, any_timed).
+        let mut by_target: HashMap<&str, (u64, usize, usize, bool)> = HashMap::new();
+        for sample in window.iter() {
+            let row = by_target.entry(&sample.target).or_default();
+            row.1 += 1;
+            if sample.cache_hit {
+                row.2 += 1;
+            }
+            if let Some(ms) = sample.elapsed_ms {
+                row.3 = true;
+                if !sample.cache_hit {
+                    row.0 += ms;
+                }
+            }
+        }
+        let mut rows: Vec<_> = by_target.into_iter().collect();
+        // Heaviest uncached time first; break ties by uncached call count.
+        rows.sort_by(|a, b| {
+            let a_uncached = a.1 .1 - a.1 .2;
+            let b_uncached = b.1 .1 - b.1 .2;
+            b.1 .0.cmp(&a.1 .0).then(b_uncached.cmp(&a_uncached))
+        });
+
+        let mut body = format!("constraint  (last {total} resolutions)\n");
+        if rows.is_empty() {
+            body.push_str("  (no resolutions yet)\n");
+            return body;
+        }
+        for (rank, (target, (uncached_ms, calls, cached, timed))) in rows.iter().take(5).enumerate()
+        {
+            let uncached = calls - cached;
+            let cached_pct = if *calls > 0 { cached * 100 / calls } else { 0 };
+            // The leader is the constraint only if it actually consumed capacity.
+            let marker = if rank == 0 && (*uncached_ms > 0 || uncached > 0) {
+                "   ← constraint"
+            } else {
+                ""
+            };
+            let cost = if *timed {
+                format!("{uncached_ms}ms uncached")
+            } else {
+                format!("{uncached} uncached")
+            };
+            body.push_str(&format!(
+                "  {target}{marker}\n    {cost} · {calls} calls · {cached_pct}% cached\n"
+            ));
+        }
+        body
     }
 
     /// The number of representations currently cached (diagnostics/tests).
@@ -1211,6 +1315,61 @@ mod tests {
         // `urn:cap:kernel:inspect` is refused.
         let scoped = Capability::scoped(["urn:cap:something:else"]);
         assert!(block_on(plain.issue(scheduler_request(), &scoped)).is_err());
+    }
+
+    #[test]
+    fn kernel_constraint_resource_ranks_the_heaviest_uncached_target_first() {
+        // Two uncacheable endpoints (every resolution recomputes — pure uncached work).
+        let heavy = FnEndpoint::new("heavy", |_inv: &Invocation<'_>| {
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                b"H".to_vec(),
+            ))
+        });
+        let light = FnEndpoint::new("light", |_inv: &Invocation<'_>| {
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                b"L".to_vec(),
+            ))
+        });
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:test:heavy"), heavy)
+            .bind(Exact::new("urn:test:light"), light);
+        let kernel = Kernel::new(Arc::new(space));
+        let cap = Capability::root();
+
+        for _ in 0..3 {
+            block_on(kernel.issue(Request::new(Verb::Source, iri("urn:test:heavy")), &cap))
+                .unwrap();
+        }
+        block_on(kernel.issue(Request::new(Verb::Source, iri("urn:test:light")), &cap)).unwrap();
+
+        // The introspection request itself short-circuits before recording, so the
+        // window holds exactly the four resolutions above.
+        let out = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:kernel:constraint")),
+            &cap,
+        ))
+        .unwrap();
+        let text = String::from_utf8_lossy(&out.bytes);
+        assert!(text.contains("last 4 resolutions"), "{text}");
+
+        // No clock ⇒ ranked by uncached call count: heavy (3) before light (1).
+        let heavy_pos = text.find("urn:test:heavy").expect("heavy listed");
+        let light_pos = text.find("urn:test:light").expect("light listed");
+        assert!(
+            heavy_pos < light_pos,
+            "heaviest target ranks first:\n{text}"
+        );
+
+        // The leader is flagged as the constraint.
+        let heavy_line_end = text[heavy_pos..]
+            .find('\n')
+            .map_or(text.len(), |i| heavy_pos + i);
+        assert!(
+            text[heavy_pos..heavy_line_end].contains("← constraint"),
+            "leader flagged:\n{text}"
+        );
     }
 
     // --- Time-based expiry (Expiry::At + an injected Clock) ------------------
