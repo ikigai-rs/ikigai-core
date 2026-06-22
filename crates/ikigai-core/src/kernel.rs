@@ -101,6 +101,19 @@ pub trait Tracer: Send + Sync {
     fn record(&self, event: TraceEvent);
 }
 
+/// A read-only view of the host scheduler's live state, injected into the kernel
+/// like a [`Clock`] so `urn:kernel:scheduler` can report it **intrinsically** — over
+/// the wire and without the host binding an endpoint, uniform with `urn:kernel:cache`
+/// and `urn:kernel:threads`. The kernel never *drives* the scheduler (which lives
+/// above it, runtime-free); it only reads these rows. With none injected,
+/// `urn:kernel:scheduler` reports the single-threaded default.
+pub trait SchedulerReporter: Send + Sync {
+    /// Label/value rows describing the scheduler (backend, thread count, task
+    /// counters, …). The kernel renders them verbatim, so a host can add rows
+    /// (queue depth, per-resource executors) without a core change.
+    fn rows(&self) -> Vec<(String, String)>;
+}
+
 /// The current worker thread's label: its name (the scheduler names workers
 /// `ikigai-sched-N`) or, unnamed, its id.
 fn thread_label() -> String {
@@ -139,6 +152,9 @@ pub struct Kernel {
     /// Monotonic span-id source, advanced once per traced invocation so each node
     /// gets a unique id and its children can name it as their parent.
     span_counter: AtomicU64,
+    /// Read-only handle to the host scheduler, for `urn:kernel:scheduler`. Injected
+    /// by a scheduled host (the [`Clock`] pattern); absent ⇒ single-threaded default.
+    scheduler: Option<Arc<dyn SchedulerReporter>>,
 }
 
 /// A cached representation plus the golden-thread edges that keep it valid: each
@@ -164,6 +180,7 @@ impl Kernel {
             tracer: Mutex::new(None),
             tracing: AtomicBool::new(false),
             span_counter: AtomicU64::new(0),
+            scheduler: None,
         }
     }
 
@@ -180,6 +197,7 @@ impl Kernel {
             tracer: Mutex::new(None),
             tracing: AtomicBool::new(false),
             span_counter: AtomicU64::new(0),
+            scheduler: None,
         }
     }
 
@@ -205,6 +223,15 @@ impl Kernel {
     /// host opts into time-bounded freshness (e.g. mounting the HTTP client module).
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = Some(clock);
+        self
+    }
+
+    /// Inject a [`SchedulerReporter`] so `urn:kernel:scheduler` reports the host
+    /// scheduler's live state (builder). Without one it reports the single-threaded
+    /// default. A scheduled host injects this alongside
+    /// [`into_scheduled`](Self::into_scheduled).
+    pub fn with_scheduler_reporter(mut self, reporter: Arc<dyn SchedulerReporter>) -> Self {
+        self.scheduler = Some(reporter);
         self
     }
 
@@ -493,6 +520,24 @@ impl Kernel {
                     rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
                     for (thread, generation) in rows {
                         body.push_str(&format!("  {}  gen {generation}\n", thread.as_str()));
+                    }
+                }
+                Ok(kernel_text(body))
+            }
+            // Inspect the host scheduler (backend, threads, live task counts).
+            ("scheduler", Verb::Source) => {
+                require_cap(capability, "urn:cap:kernel:inspect")?;
+                let mut body = String::from("scheduler\n");
+                match &self.scheduler {
+                    Some(reporter) => {
+                        for (label, value) in reporter.rows() {
+                            body.push_str(&format!("  {label:<10} {value}\n"));
+                        }
+                    }
+                    // No scheduler injected ⇒ the runtime-free single-threaded default.
+                    None => {
+                        body.push_str("  backend    single\n");
+                        body.push_str("  threads    1\n");
                     }
                 }
                 Ok(kernel_text(body))
@@ -1132,6 +1177,40 @@ mod tests {
             block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:cache")), &cap))
                 .unwrap();
         assert!(String::from_utf8_lossy(&cache.bytes).contains("entries"));
+    }
+
+    #[test]
+    fn kernel_scheduler_resource_reports_the_injected_reporter_or_the_single_default() {
+        struct FakeReporter;
+        impl SchedulerReporter for FakeReporter {
+            fn rows(&self) -> Vec<(String, String)> {
+                vec![
+                    ("backend".to_string(), "pool:4".to_string()),
+                    ("threads".to_string(), "4".to_string()),
+                ]
+            }
+        }
+        let scheduler_request = || Request::new(Verb::Source, iri("urn:kernel:scheduler"));
+
+        // With a reporter injected, the resource renders its rows.
+        let kernel = Kernel::new(Arc::new(EndpointSpace::new()))
+            .with_scheduler_reporter(Arc::new(FakeReporter));
+        let out = block_on(kernel.issue(scheduler_request(), &Capability::root())).unwrap();
+        let text = String::from_utf8_lossy(&out.bytes);
+        assert!(
+            text.contains("backend") && text.contains("pool:4") && text.contains("threads  "),
+            "{text}"
+        );
+
+        // Without one, it reports the runtime-free single-threaded default.
+        let plain = Kernel::new(Arc::new(EndpointSpace::new()));
+        let out = block_on(plain.issue(scheduler_request(), &Capability::root())).unwrap();
+        assert!(String::from_utf8_lossy(&out.bytes).contains("backend    single"));
+
+        // Capability-gated like the other kernel resources: a scope lacking
+        // `urn:cap:kernel:inspect` is refused.
+        let scoped = Capability::scoped(["urn:cap:something:else"]);
+        assert!(block_on(plain.issue(scheduler_request(), &scoped)).is_err());
     }
 
     // --- Time-based expiry (Expiry::At + an injected Clock) ------------------
