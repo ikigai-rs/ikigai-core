@@ -79,6 +79,22 @@ impl Capability {
         }
     }
 
+    /// Clamp to a ceiling: the strongest capability **both** `self` and `ceiling`
+    /// grant. Used to bound an untrusted, transport-carried capability to the
+    /// authority the channel authenticated — a peer can present any capability, but
+    /// the server resolves under `ceiling.clamp(&carried)`, so it can only ever
+    /// *narrow* its own authority, never exceed the principal it authenticated as.
+    /// `ceiling.clamp(root) = ceiling`; `root.clamp(c) = c`; otherwise the scope
+    /// intersection (via [`attenuate`](Self::attenuate), so it never widens).
+    pub fn clamp(&self, carried: &Capability) -> Capability {
+        match carried.scopes() {
+            // The peer carried root — clamp to our own ceiling.
+            None => self.clone(),
+            // Keep only scopes the ceiling already grants.
+            Some(scopes) => self.attenuate(scopes.iter().cloned()),
+        }
+    }
+
     /// Whether this capability grants `scope`.
     ///
     /// Matching is exact today; prefix/wildcard matching over the `urn:cap:`
@@ -154,5 +170,22 @@ mod tests {
         let root: Capability =
             serde_json::from_str(&serde_json::to_string(&Capability::root()).unwrap()).unwrap();
         assert!(root.is_root());
+    }
+
+    #[test]
+    fn clamp_bounds_a_carried_capability_to_the_ceiling() {
+        let ceiling = Capability::root().attenuate(["a".to_string(), "b".to_string()]);
+
+        // A peer carrying root is clamped down to the ceiling — it cannot exceed it.
+        let c = ceiling.clamp(&Capability::root());
+        assert!(c.allows("a") && c.allows("b") && !c.allows("c"));
+
+        // A peer carrying a broader set keeps only what the ceiling also grants.
+        let c = ceiling.clamp(&Capability::root().attenuate(["a".to_string(), "c".to_string()]));
+        assert!(c.allows("a") && !c.allows("b") && !c.allows("c"));
+
+        // A root ceiling clamps to exactly what the peer carried.
+        let c = Capability::root().clamp(&Capability::root().attenuate(["a".to_string()]));
+        assert!(c.allows("a") && !c.allows("b"));
     }
 }
