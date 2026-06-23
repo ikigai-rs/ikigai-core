@@ -128,7 +128,13 @@ fn thread_label() -> String {
 /// caches cacheable representations by their content-addressed request id.
 pub struct Kernel {
     root: Arc<dyn Space>,
-    cache: Mutex<HashMap<RequestId, CacheEntry>>,
+    /// Cacheable representations, keyed by `(request id, capability fingerprint)`. The
+    /// capability is part of the key so a cached entry is only ever served back to the
+    /// same authority that computed it — a different (e.g. narrower) capability misses
+    /// and must pass the endpoint's own check. Without this, a cache hit is served
+    /// *before* the endpoint runs (see [`issue_inner`](Self::issue_inner)), which would
+    /// skip the capability check and let one authority read another's cached result.
+    cache: Mutex<HashMap<(RequestId, u64), CacheEntry>>,
     /// Current generation of each golden thread (absent ⇒ generation 0).
     /// [`Kernel::cut`] bumps a thread's generation, invalidating every cache entry
     /// pinned to an earlier one.
@@ -369,8 +375,9 @@ impl Kernel {
         // Representation-cache lookup (idempotent verbs only): serve a cached entry
         // whose golden-thread edges are all still current. A cut entry is evicted
         // here and recomputed below. The guard is dropped before any await.
+        let cap_key = capability_key(capability);
         if cacheable_verb {
-            if let Some(cached) = self.valid_cached(&id) {
+            if let Some(cached) = self.valid_cached(&id, cap_key) {
                 self.trace_record(&request, span, parent, started, true);
                 self.record_resolution(&request, started, true);
                 return Ok(cached);
@@ -449,7 +456,7 @@ impl Kernel {
         if storable {
             let edges = self.edges_for(representation.threads());
             self.cache.lock().expect("cache lock").insert(
-                id,
+                (id, cap_key),
                 CacheEntry {
                     representation: representation.clone(),
                     edges,
@@ -483,16 +490,17 @@ impl Kernel {
     /// A cached representation for `id` that is still [valid](Self::entry_is_valid).
     /// A stale entry (a thread cut, or its deadline passed) is evicted and `None`
     /// returned, so the caller recomputes.
-    fn valid_cached(&self, id: &RequestId) -> Option<Representation> {
+    fn valid_cached(&self, id: &RequestId, cap_key: u64) -> Option<Representation> {
         let mut cache = self.cache.lock().expect("cache lock");
+        let key = (*id, cap_key);
         let outcome = cache
-            .get(id)
+            .get(&key)
             .map(|entry| (self.entry_is_valid(entry), entry.representation.clone()));
         match outcome {
             None => None,
             Some((true, representation)) => Some(representation),
             Some((false, _)) => {
-                cache.remove(id);
+                cache.remove(&key);
                 None
             }
         }
@@ -660,16 +668,18 @@ impl Kernel {
     /// aren't cacheable, and for any request whose result isn't already cached
     /// (including one that would be a miss). Lets a caller report cache state
     /// without the observer effect of actually issuing the request.
-    pub fn is_cached(&self, request: &Request) -> bool {
+    pub fn is_cached(&self, request: &Request, capability: &Capability) -> bool {
         if !request.verb.is_cacheable() {
             return false;
         }
         // Read-only probe: an entry that is cut (a thread bumped) or expired (its
         // deadline passed) is not "cached", matching what `valid_cached` would
-        // serve. Does not evict — eviction happens on the serving path.
+        // serve. Keyed by capability too, so the probe answers "cached *for this
+        // authority*" — consistent with what issuing under it would actually serve.
+        // Does not evict — eviction happens on the serving path.
         let cache = self.cache.lock().expect("cache lock");
         cache
-            .get(&request.id())
+            .get(&(request.id(), capability_key(capability)))
             .is_some_and(|entry| self.entry_is_valid(entry))
     }
 
@@ -683,6 +693,28 @@ impl Kernel {
 /// The current generation of `thread` (absent ⇒ 0).
 fn generation_of(generations: &HashMap<Thread, u64>, thread: &Thread) -> u64 {
     generations.get(thread).copied().unwrap_or(0)
+}
+
+/// A stable fingerprint of a capability's authority, used to namespace cache entries.
+/// Root (full authority) gets its own namespace; a scoped capability's namespace is
+/// derived from its sorted scope set (so two equal capabilities share a namespace, and
+/// a narrower one cannot collide with a broader one). Cheap, allocation-free, and
+/// recomputed per request — the cache holds the `u64`, never the capability.
+fn capability_key(capability: &Capability) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match capability.scopes() {
+        // Root authority — a fixed namespace distinct from any scoped set.
+        None => 0u8.hash(&mut hasher),
+        Some(scopes) => {
+            1u8.hash(&mut hasher);
+            // `scopes` is a `BTreeSet`, so iteration is sorted ⇒ a stable fingerprint.
+            for scope in scopes {
+                scope.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
 }
 
 /// The reserved kernel-behavior namespace prefix.
@@ -868,19 +900,19 @@ mod tests {
         let req = || Request::new(Verb::Source, iri("urn:fn:count"));
 
         // Not cached before the first issue; probing does not resolve it.
-        assert!(!kernel.is_cached(&req()));
-        assert!(!kernel.is_cached(&req()));
+        assert!(!kernel.is_cached(&req(), &Capability::root()));
+        assert!(!kernel.is_cached(&req(), &Capability::root()));
         assert_eq!(CALLS.load(Ordering::SeqCst), 0, "is_cached must not invoke");
         assert_eq!(kernel.cache_len(), 0, "is_cached must not cache");
 
         // Cached after issuing once.
         block_on(kernel.issue(req(), &cap)).unwrap();
-        assert!(kernel.is_cached(&req()));
+        assert!(kernel.is_cached(&req(), &Capability::root()));
 
         // A different request (different argument identity) is still a miss.
         let other = Request::new(Verb::Source, iri("urn:fn:count"))
             .with_arg("in", ArgRef::Inline(b"z".to_vec()));
-        assert!(!kernel.is_cached(&other));
+        assert!(!kernel.is_cached(&other, &Capability::root()));
     }
 
     #[test]
@@ -1011,11 +1043,14 @@ mod tests {
             1,
             "cached on the second issue"
         );
-        assert!(kernel.is_cached(&req()));
+        assert!(kernel.is_cached(&req(), &Capability::root()));
 
         // An external change (or a Sink) cuts the thread.
         kernel.cut("urn:file:notes.txt");
-        assert!(!kernel.is_cached(&req()), "cut entry is no longer cached");
+        assert!(
+            !kernel.is_cached(&req(), &Capability::root()),
+            "cut entry is no longer cached"
+        );
         block_on(kernel.issue(req(), &cap)).unwrap();
         assert_eq!(CALLS.load(Ordering::SeqCst), 2, "recomputed after the cut");
         // Re-cached at the new generation.
@@ -1197,19 +1232,65 @@ mod tests {
 
         // Read v1; it caches, declaring the `urn:data:cell` thread.
         assert_eq!(block_on(kernel.issue(source(), &cap)).unwrap().bytes, b"v1");
-        assert!(kernel.is_cached(&source()), "source is cached");
+        assert!(
+            kernel.is_cached(&source(), &Capability::root()),
+            "source is cached"
+        );
 
         // Write v2 through the kernel: the mutating verb auto-cuts `urn:data:cell`.
         let sink = Request::new(Verb::Sink, iri("urn:data:cell"))
             .with_arg("in", ArgRef::Inline(b"v2".to_vec()));
         block_on(kernel.issue(sink, &cap)).unwrap();
         assert!(
-            !kernel.is_cached(&source()),
+            !kernel.is_cached(&source(), &Capability::root()),
             "the write invalidated the cached read"
         );
 
         // Read again: the cache recomputes and sees v2.
         assert_eq!(block_on(kernel.issue(source(), &cap)).unwrap().bytes, b"v2");
+    }
+
+    #[test]
+    fn cache_is_keyed_by_capability() {
+        // A cacheable endpoint whose output depends on the capability. If the cache
+        // ignored the capability, the first (privileged) read would be served back to a
+        // restricted capability — a capability bypass, since the hit skips the endpoint's
+        // own check. The cache must instead be namespaced by authority.
+        let who = FnEndpoint::new("who", |inv: &Invocation<'_>| {
+            let body = if inv.capability.allows("urn:cap:secret") {
+                "SECRET"
+            } else {
+                "public"
+            };
+            Ok(
+                Representation::new(ReprType::new("text/plain"), body.as_bytes().to_vec())
+                    .cacheable(),
+            )
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:demo:who"), who),
+        ));
+        let req = || Request::new(Verb::Source, iri("urn:demo:who"));
+        let privileged = Capability::root(); // allows everything, including urn:cap:secret
+        let restricted = Capability::root().attenuate(["urn:cap:other".to_string()]); // no secret
+
+        // The privileged read caches SECRET under the root namespace.
+        assert_eq!(
+            block_on(kernel.issue(req(), &privileged)).unwrap().bytes,
+            b"SECRET"
+        );
+        assert!(kernel.is_cached(&req(), &privileged));
+        // The restricted capability is a different namespace — it must NOT probe as
+        // cached, and issuing under it recomputes rather than serving the SECRET entry.
+        assert!(
+            !kernel.is_cached(&req(), &restricted),
+            "the cache is namespaced by capability"
+        );
+        assert_eq!(
+            block_on(kernel.issue(req(), &restricted)).unwrap().bytes,
+            b"public",
+            "the restricted capability recomputes, not served the cached SECRET"
+        );
     }
 
     // --- the kernel-behavior namespace (urn:kernel:*) --------------------------
@@ -1244,7 +1325,7 @@ mod tests {
         let ack = block_on(kernel.issue(cut_request("urn:data:x"), &cap)).unwrap();
         assert!(String::from_utf8_lossy(&ack.bytes).contains("cut urn:data:x"));
         assert!(
-            !kernel.is_cached(&read()),
+            !kernel.is_cached(&read(), &Capability::root()),
             "the resource cut invalidated it"
         );
 
@@ -1511,10 +1592,13 @@ mod tests {
 
         block_on(kernel.issue(req(), &cap)).unwrap(); // cached, deadline = 100
         clock.set(50);
-        assert!(kernel.is_cached(&req()), "fresh entry probes as cached");
+        assert!(
+            kernel.is_cached(&req(), &Capability::root()),
+            "fresh entry probes as cached"
+        );
         clock.set(150);
         assert!(
-            !kernel.is_cached(&req()),
+            !kernel.is_cached(&req(), &Capability::root()),
             "expired entry probes as not cached"
         );
     }
