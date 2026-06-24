@@ -35,8 +35,9 @@ use crate::arg::ArgRef;
 use crate::capability::Capability;
 use crate::endpoint::{Invocation, Issuer, Spawner};
 use crate::error::{Error, Result};
+use crate::iri::Iri;
 use crate::meta::MetaRenderer;
-use crate::repr::{Expiry, ReprType, Representation, Thread, Time};
+use crate::repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 use crate::request::{Request, RequestId};
 use crate::space::{Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
@@ -344,25 +345,70 @@ impl Kernel {
     /// otherwise resolve, invoke the endpoint, and cache the result if cacheable.
     pub async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation> {
         // Top-level entry: no parent span (this is a trace root if one is recording).
-        self.issue_inner(request, capability, None).await
+        self.issue_inner(request, capability, None, None).await
+    }
+
+    /// Issue a request whose input was produced by an upstream pipe stage, folding
+    /// that upstream's [`Provenance`] (expiry + golden threads) into the result's
+    /// effective cacheability. So `source <X> | transform` is no more cacheable than
+    /// `X` — cacheability flows down the pipe — and cutting `X`'s thread invalidates
+    /// the transformed result too. The engine passes this for each pipe stage; plain
+    /// [`issue`](Self::issue) is the no-upstream case.
+    pub async fn issue_with_incoming(
+        &self,
+        request: Request,
+        capability: &Capability,
+        incoming: Provenance,
+    ) -> Result<Representation> {
+        self.issue_inner(request, capability, None, Some(incoming))
+            .await
     }
 
     /// The resolution path, carrying the `parent` span of the invocation that issued
-    /// this request (`None` at the top level). [`Issuer::issue_with_parent`] threads
-    /// it through re-entrant sub-requests so a recorded run links each node to its
-    /// parent; the public [`issue`](Self::issue) is the parentless entry point.
+    /// this request (`None` at the top level) and any upstream pipe [`Provenance`].
+    /// [`Issuer::issue_with_parent`] threads the span through re-entrant sub-requests
+    /// so a recorded run links each node to its parent; the public
+    /// [`issue`](Self::issue) is the parentless, no-upstream entry point.
     async fn issue_inner(
         &self,
         request: Request,
         capability: &Capability,
         parent: Option<u64>,
+        incoming: Option<Provenance>,
     ) -> Result<Representation> {
         // The kernel-behavior namespace (`urn:kernel:*`) is resolved by the kernel
-        // itself — before the cache and the root space, which cannot shadow it —
-        // exposing the kernel's own operations (cut a thread, inspect cache and
-        // threads) as capability-gated resources.
+        // itself — before the root space, which cannot shadow it — exposing the
+        // kernel's own operations (cut a thread, inspect cache and threads) as
+        // capability-gated resources. A *cacheable* builtin (the catalog) still
+        // participates in the cache, so a re-resolution serves `[cached]`; the live
+        // introspection builtins return `Always` and are simply never stored.
         if let Some(op) = request.target.as_str().strip_prefix(KERNEL_NS) {
-            return self.issue_kernel(op, &request, capability);
+            let id = request.id();
+            let cap_key = capability_key(capability);
+            let cacheable_verb = request.verb.is_cacheable();
+            if cacheable_verb {
+                if let Some(cached) = self.valid_cached(&id, cap_key) {
+                    return Ok(cached);
+                }
+            }
+            let representation = self.issue_kernel(op, &request, capability)?;
+            let storable = cacheable_verb
+                && match representation.expiry {
+                    Expiry::Always => false,
+                    Expiry::Never => true,
+                    Expiry::At(_) => self.clock.is_some(),
+                };
+            if storable {
+                let edges = self.edges_for(representation.threads());
+                self.cache.lock().expect("cache lock").insert(
+                    (id, cap_key),
+                    CacheEntry {
+                        representation: representation.clone(),
+                        edges,
+                    },
+                );
+            }
+            return Ok(representation);
         }
 
         let id = request.id();
@@ -421,7 +467,7 @@ impl Kernel {
             // fresher than its most volatile part. The endpoint's own expiry is met
             // with the combined dependency expiry — `Always` if either is volatile,
             // the earlier deadline if both are time-bounded, `Never` only if all are.
-            let effective = representation
+            let mut effective = representation
                 .expiry
                 .most_restrictive(invocation.dependency_expiry());
             // Golden threads propagate too: the result depends on its own declared
@@ -429,6 +475,13 @@ impl Kernel {
             // of them invalidates this composite.
             let mut threads = representation.threads().clone();
             threads.extend(invocation.dependency_threads());
+            // …and from the pipe: an upstream stage's provenance folds in the same
+            // way, so a transform over a piped input is no more cacheable than that
+            // input, and inherits its threads.
+            if let Some(incoming) = incoming {
+                effective = effective.most_restrictive(incoming.expiry);
+                threads.extend(incoming.threads);
+            }
             representation.with_expiry(effective).with_threads(threads)
         };
         // Computed (not served from cache) — record after the invocation completes.
@@ -597,6 +650,40 @@ impl Kernel {
             ("constraint", Verb::Source) => {
                 require_cap(capability, "urn:cap:kernel:inspect")?;
                 Ok(kernel_text(self.render_constraint()))
+            }
+            // The kernel's own catalog: every bound endpoint's `describe()` as one RDF
+            // (Turtle) graph — so the kernel is queryable *about itself* with SPARQL and
+            // renderable to HTML via transreption. Cacheable: the binding set is stable
+            // within a session. Each Exact-bound endpoint is resolved and rendered via the
+            // meta renderer; template patterns (not concrete IRIs) are skipped.
+            ("catalog", Verb::Source) => {
+                require_cap(capability, "urn:cap:kernel:inspect")?;
+                let renderer = self
+                    .meta
+                    .as_ref()
+                    .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
+                let turtle = ReprType::new("text/turtle");
+                let mut body = String::new();
+                for entry in self.root.entries().unwrap_or_default() {
+                    let Ok(iri) = Iri::parse(&entry.pattern) else {
+                        continue;
+                    };
+                    if let Resolution::Hit(resolved) =
+                        self.root.resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
+                    {
+                        if let Ok(repr) = renderer.render(&resolved.endpoint.describe(), &turtle) {
+                            if let Ok(text) = String::from_utf8(repr.bytes) {
+                                body.push_str(text.trim_end());
+                                body.push('\n');
+                            }
+                        }
+                    }
+                }
+                Ok(Representation::new(
+                    ReprType::new("text/turtle").with_param("charset", "utf-8"),
+                    body.into_bytes(),
+                )
+                .cacheable())
             }
             _ => Err(Error::Unresolved(request.target.clone())),
         }
@@ -772,8 +859,9 @@ impl Issuer for Kernel {
         parent: Option<u64>,
     ) -> Result<Representation> {
         // Re-entrant sub-request: thread the issuing node's span through so the
-        // recorded events link parent → child (across the fan-out spawn).
-        self.issue_inner(request, capability, parent).await
+        // recorded events link parent → child (across the fan-out spawn). A
+        // sub-resource resolves on its own merits — no pipe upstream here.
+        self.issue_inner(request, capability, parent, None).await
     }
 
     fn now(&self) -> Option<Time> {
@@ -847,6 +935,104 @@ mod tests {
         assert!(
             block_on(kernel.issue(Request::new(Verb::Meta, iri("urn:fn:toUpper")), &cap)).is_err()
         );
+    }
+
+    #[test]
+    fn catalog_enumerates_every_bound_endpoint_through_the_renderer() {
+        // The catalog is the kernel's self-describing graph: it walks the root
+        // space and renders each entry's `describe()` via the Meta renderer, so a
+        // SPARQL query / transreption can run over "the endpoints" as a resource.
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:fn:echo"), builtins::echo());
+        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
+        let cap = Capability::root();
+        let rep = block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:catalog")), &cap))
+            .unwrap();
+        let body = String::from_utf8(rep.bytes).unwrap();
+        assert!(body.contains("toUpper"), "catalog should describe toUpper: {body}");
+        assert!(body.contains("echo"), "catalog should describe echo: {body}");
+        assert_eq!(rep.repr_type.media_type, "text/turtle");
+        // Cacheable: a downstream SPARQL query inherits this so it can hit cache.
+        assert_eq!(rep.expiry, Expiry::Never);
+        // And it genuinely participates in the cache despite living in the
+        // `urn:kernel:*` namespace — re-resolution is served from cache.
+        let catalog = || Request::new(Verb::Source, iri("urn:kernel:catalog"));
+        assert!(kernel.is_cached(&catalog(), &cap), "catalog should be cached after first issue");
+        assert_eq!(kernel.cache_len(), 1, "exactly the catalog is cached");
+        block_on(kernel.issue(catalog(), &cap)).unwrap();
+        assert_eq!(kernel.cache_len(), 1, "re-issue is a cache hit, not a second entry");
+    }
+
+    #[test]
+    fn incoming_provenance_flows_cacheability_down_the_pipe() {
+        // A cacheable endpoint (toUpper opts into caching via builtins) issued with
+        // an *uncacheable* upstream provenance must itself become uncacheable —
+        // cacheability is no greater than the piped input's.
+        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let kernel = Kernel::new(Arc::new(space));
+        let cap = Capability::root();
+        let req = || {
+            Request::new(Verb::Source, iri("urn:fn:toUpper"))
+                .with_arg("in", ArgRef::Inline(b"hi".to_vec()))
+        };
+
+        // Cacheable upstream (Never) → result stays cacheable → it caches.
+        let cacheable_up = Provenance::new(Expiry::Never, BTreeSet::new());
+        block_on(kernel.issue_with_incoming(req(), &cap, cacheable_up)).unwrap();
+        assert_eq!(kernel.cache_len(), 1, "cacheable upstream keeps the result cacheable");
+
+        // Uncacheable upstream (Always) → result becomes uncacheable → not cached.
+        let other = Request::new(Verb::Source, iri("urn:fn:toUpper"))
+            .with_arg("in", ArgRef::Inline(b"yo".to_vec()));
+        let volatile_up = Provenance::new(Expiry::Always, BTreeSet::new());
+        let rep = block_on(kernel.issue_with_incoming(other, &cap, volatile_up)).unwrap();
+        assert_eq!(rep.expiry, Expiry::Always, "volatile upstream makes the result volatile");
+        assert_eq!(kernel.cache_len(), 1, "the volatile-upstream result was not cached");
+    }
+
+    #[test]
+    fn incoming_threads_are_inherited_so_cutting_the_source_invalidates() {
+        // The upstream's golden threads propagate, so cutting one invalidates the
+        // transformed result — the pipe is a dependency edge.
+        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let kernel = Kernel::new(Arc::new(space));
+        let cap = Capability::root();
+        let req = || {
+            Request::new(Verb::Source, iri("urn:fn:toUpper"))
+                .with_arg("in", ArgRef::Inline(b"hi".to_vec()))
+        };
+        let mut threads = BTreeSet::new();
+        threads.insert(Thread::new("urn:data:source"));
+        let up = Provenance::new(Expiry::Never, threads);
+        block_on(kernel.issue_with_incoming(req(), &cap, up)).unwrap();
+        assert!(kernel.is_cached(&req(), &cap), "cached after first issue");
+        kernel.cut("urn:data:source");
+        assert!(!kernel.is_cached(&req(), &cap), "cutting the inherited thread invalidates it");
+    }
+
+    #[test]
+    fn live_kernel_introspection_is_never_cached() {
+        // The introspection builtins return `Always` (live) — they must not be
+        // cached, even though the catalog (also `urn:kernel:*`) is.
+        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
+        let cap = Capability::root();
+        for op in ["urn:kernel:cache", "urn:kernel:threads", "urn:kernel:constraint"] {
+            block_on(kernel.issue(Request::new(Verb::Source, iri(op)), &cap)).unwrap();
+        }
+        assert_eq!(kernel.cache_len(), 0, "live introspection must never be cached");
+    }
+
+    #[test]
+    fn catalog_requires_the_inspect_capability() {
+        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
+        let unprivileged = Capability::scoped(["urn:cap:nothing".to_string()]);
+        assert!(block_on(
+            kernel.issue(Request::new(Verb::Source, iri("urn:kernel:catalog")), &unprivileged)
+        )
+        .is_err());
     }
 
     #[test]

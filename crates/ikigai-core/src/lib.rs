@@ -56,7 +56,7 @@ pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{Iri, IriError};
 pub use kernel::{Clock, Kernel, SchedulerReporter, SystemClock, TraceEvent, Tracer};
 pub use meta::MetaRenderer;
-pub use repr::{Expiry, ReprType, Representation, Thread, Time};
+pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};
 pub use space::{
     EndpointSpace, Fallback, Mount, Resolution, Resolved, Rewrite, Scope, Space, SpaceEntry,
