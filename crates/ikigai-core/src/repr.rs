@@ -172,6 +172,30 @@ impl Expiry {
     }
 }
 
+/// The cache **provenance** an upstream pipe stage hands to the next: the expiry
+/// and golden threads of whatever produced this request's *input*.
+///
+/// The kernel folds it into the result's effective cacheability via
+/// [`issue_with_incoming`](crate::Kernel::issue_with_incoming), so cacheability
+/// flows down a pipeline — `source <X> | transform` is no more cacheable than `X`,
+/// and cutting `X`'s thread invalidates the transformed result too. A transform
+/// that is itself a pure function of its input (e.g. RDF transreption) thus
+/// *inherits* its source's cacheability rather than asserting its own.
+#[derive(Clone, Debug)]
+pub struct Provenance {
+    /// The upstream representation's expiry.
+    pub expiry: Expiry,
+    /// The upstream representation's golden threads.
+    pub threads: BTreeSet<Thread>,
+}
+
+impl Provenance {
+    /// The provenance of an upstream representation: its expiry and threads.
+    pub fn new(expiry: Expiry, threads: BTreeSet<Thread>) -> Self {
+        Provenance { expiry, threads }
+    }
+}
+
 /// A typed value produced by an endpoint.
 ///
 /// M0 carries the universal byte form; richer in-memory forms (RDF graphs,

@@ -113,8 +113,14 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    /// A context backed by an issuer (the kernel), enabling sub-requests.
-    pub(crate) fn with_issuer(
+    /// A context backed by an issuer, enabling sub-requests (`source`/`issue`).
+    ///
+    /// The kernel builds these with itself as the issuer. It's also the seam a
+    /// dynamically-loaded **module** uses: a module shim runs its endpoint with a
+    /// *host-backed* issuer, so the endpoint's `inv.source`/`inv.issue` resolve
+    /// against the host kernel (its cache, its other spaces) across the module
+    /// boundary — the endpoint code is unchanged, only the issuer is remote.
+    pub fn with_issuer(
         request: &'a Request,
         bindings: &'a Bindings,
         capability: &'a Capability,
