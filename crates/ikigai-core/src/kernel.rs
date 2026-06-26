@@ -33,6 +33,7 @@ use async_trait::async_trait;
 
 use crate::arg::ArgRef;
 use crate::capability::Capability;
+use crate::describe::Description;
 use crate::endpoint::{Invocation, Issuer, Spawner};
 use crate::error::{Error, Result};
 use crate::iri::Iri;
@@ -234,6 +235,43 @@ impl Kernel {
     /// content negotiation, and sniff-and-dispatch. See [`crate::select_transreptor`].
     pub fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
         crate::select::select_transreptor(self.root.as_ref(), from, to)
+    }
+
+    /// Render `description` to `target` by transrepting its canonical Turtle: render the
+    /// Turtle, [`select`](Self::select_transreptor) a transreptor chain `text/turtle →
+    /// target`, and run it (piping `content`, setting `as`) through the kernel. Falls back
+    /// to the canonical Turtle if no transreptor reaches `target`. Used by the `Meta` path
+    /// for any type the renderer doesn't emit directly.
+    async fn transrept_meta(
+        &self,
+        description: &Description,
+        target: &ReprType,
+        capability: &Capability,
+    ) -> Result<Representation> {
+        let renderer = self
+            .meta
+            .as_ref()
+            .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
+        let canonical = renderer.render(description, &ReprType::new(crate::select::CANONICAL))?;
+        let Some(plan) = self.select_transreptor(crate::select::CANONICAL, &target.media_type)
+        else {
+            // Nothing converts Turtle to the requested type — hand back the canonical Turtle.
+            return Ok(canonical.cacheable());
+        };
+        let mut current = canonical;
+        for step in plan {
+            let iri = Iri::parse(&step.endpoint).map_err(|e| {
+                Error::Endpoint(format!("bad transreptor IRI `{}`: {e}", step.endpoint))
+            })?;
+            let request = Request::new(Verb::Source, iri)
+                .with_arg("content", ArgRef::Inline(current.bytes))
+                .with_arg("as", ArgRef::Inline(step.to.into_bytes()));
+            // Box the re-entrant issue: the async call graph (issue → transrept_meta →
+            // issue) is a cycle the compiler must size via indirection, even though at
+            // runtime these are plain `Source` transreptions, never `Meta`.
+            current = Box::pin(self.issue(request, capability)).await?;
+        }
+        Ok(current.cacheable())
     }
 
     /// Make this kernel **schedulable**: wrap it in an `Arc` and inject `spawner`, so
@@ -446,16 +484,27 @@ impl Kernel {
         };
 
         let representation = if request.verb == Verb::Meta {
-            // Uniform Meta routing: the kernel renders the endpoint's canonical
-            // self-description to the requested type via the transform layer,
-            // rather than each endpoint hand-rolling it.
+            // Selection-driven Meta: the renderer emits the endpoint's description in its
+            // *canonical* serializations (Turtle, and JSON/text where the renderer supports
+            // them). Any other requested type is produced by transrepting the canonical
+            // Turtle through a *selected* transreptor chain — so metadata rendering rides
+            // the same transreptor model as everything else, with no per-format logic and no
+            // hardcoded transreptor IRIs here.
             let renderer = self
                 .meta
                 .as_ref()
                 .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
-            renderer
-                .render(&resolved.endpoint.describe(), &meta_target(&request))?
-                .cacheable()
+            let description = resolved.endpoint.describe();
+            let target = meta_target(&request);
+            match renderer.render(&description, &target) {
+                Ok(repr) => repr.cacheable(),
+                // The renderer doesn't emit this type directly — transrept the canonical
+                // Turtle to it.
+                Err(_) => {
+                    self.transrept_meta(&description, &target, capability)
+                        .await?
+                }
+            }
         } else {
             // Invocation is asynchronous. On a scheduled kernel, hand it the spawner
             // and an owned self-handle so re-entrant fan-out runs concurrently.
@@ -935,6 +984,91 @@ mod tests {
         let rep =
             block_on(kernel.issue(Request::new(Verb::Meta, iri("urn:fn:toUpper")), &cap)).unwrap();
         assert_eq!(rep.bytes, b"toUpper");
+    }
+
+    /// A Turtle-only meta renderer (like `ikigai-vocab`'s): emits `text/turtle` for the
+    /// canonical request, errors for anything else — which is what makes the kernel fall
+    /// through to selection-driven transreption.
+    struct TurtleishRenderer;
+    impl MetaRenderer for TurtleishRenderer {
+        fn render(&self, description: &Description, target: &ReprType) -> Result<Representation> {
+            match target.media_type.as_str() {
+                "text/turtle" | "*/*" | "" => Ok(Representation::new(
+                    ReprType::new("text/turtle"),
+                    format!("<urn:x> a ik:Endpoint ; ik:id \"{}\" .", description.id).into_bytes(),
+                )
+                .cacheable()),
+                other => Err(Error::Endpoint(format!(
+                    "unsupported meta target `{other}`"
+                ))),
+            }
+        }
+    }
+
+    /// A stub auto-invocable transreptor (`text/turtle → application/rdf+xml`): wraps the
+    /// piped `content` so a test can see it ran.
+    fn stub_rdf_transrept() -> FnEndpoint {
+        FnEndpoint::new("rdf-transrept", |inv: &Invocation<'_>| {
+            let content = inv.inline_str("content").unwrap_or("");
+            Ok(Representation::new(
+                ReprType::new("application/rdf+xml"),
+                format!("RDFXML({content})").into_bytes(),
+            )
+            .cacheable())
+        })
+        .with_description(
+            Description::new("rdf-transrept")
+                .verb(Verb::Source)
+                .input(crate::describe::ArgSpec::new("content"))
+                .input(crate::describe::ArgSpec::new("as"))
+                .transreptor(["text/turtle"], ["application/rdf+xml"]),
+        )
+    }
+
+    fn meta_kernel() -> Kernel {
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:rdf:transrept"), stub_rdf_transrept());
+        Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleishRenderer))
+    }
+
+    fn meta_as(kernel: &Kernel, target: &str, as_type: &str) -> Representation {
+        let request = Request::new(Verb::Meta, iri(target))
+            .with_arg("as", ArgRef::Inline(as_type.as_bytes().to_vec()));
+        block_on(kernel.issue(request, &Capability::root())).unwrap()
+    }
+
+    #[test]
+    fn meta_serves_canonical_turtle_directly() {
+        let rep = meta_as(&meta_kernel(), "urn:fn:toUpper", "text/turtle");
+        assert_eq!(rep.repr_type.media_type, "text/turtle");
+        assert!(String::from_utf8(rep.bytes)
+            .unwrap()
+            .contains("ik:id \"toUpper\""));
+    }
+
+    #[test]
+    fn meta_transrepts_to_a_non_canonical_type_via_selection() {
+        // as=application/rdf+xml: the renderer can't emit it, so the kernel renders canonical
+        // Turtle and runs the selected turtle→rdf+xml transreptor over it.
+        let rep = meta_as(&meta_kernel(), "urn:fn:toUpper", "application/rdf+xml");
+        assert_eq!(rep.repr_type.media_type, "application/rdf+xml");
+        let body = String::from_utf8(rep.bytes).unwrap();
+        assert!(body.starts_with("RDFXML("), "transreptor ran: {body}");
+        assert!(
+            body.contains("ik:id \"toUpper\""),
+            "over the canonical turtle: {body}"
+        );
+    }
+
+    #[test]
+    fn meta_falls_back_to_turtle_when_no_transreptor_reaches_the_type() {
+        // as=application/pdf: nothing converts turtle→pdf, so fall back to canonical Turtle.
+        let rep = meta_as(&meta_kernel(), "urn:fn:toUpper", "application/pdf");
+        assert_eq!(rep.repr_type.media_type, "text/turtle");
+        assert!(String::from_utf8(rep.bytes)
+            .unwrap()
+            .contains("ik:id \"toUpper\""));
     }
 
     #[test]
