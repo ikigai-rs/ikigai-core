@@ -668,8 +668,9 @@ impl Kernel {
                     let Ok(iri) = Iri::parse(&entry.pattern) else {
                         continue;
                     };
-                    if let Resolution::Hit(resolved) =
-                        self.root.resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
+                    if let Resolution::Hit(resolved) = self
+                        .root
+                        .resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
                     {
                         if let Ok(repr) = renderer.render(&resolved.endpoint.describe(), &turtle) {
                             if let Ok(text) = String::from_utf8(repr.bytes) {
@@ -947,21 +948,35 @@ mod tests {
             .bind(Exact::new("urn:fn:echo"), builtins::echo());
         let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
         let cap = Capability::root();
-        let rep = block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:catalog")), &cap))
-            .unwrap();
+        let rep =
+            block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:catalog")), &cap))
+                .unwrap();
         let body = String::from_utf8(rep.bytes).unwrap();
-        assert!(body.contains("toUpper"), "catalog should describe toUpper: {body}");
-        assert!(body.contains("echo"), "catalog should describe echo: {body}");
+        assert!(
+            body.contains("toUpper"),
+            "catalog should describe toUpper: {body}"
+        );
+        assert!(
+            body.contains("echo"),
+            "catalog should describe echo: {body}"
+        );
         assert_eq!(rep.repr_type.media_type, "text/turtle");
         // Cacheable: a downstream SPARQL query inherits this so it can hit cache.
         assert_eq!(rep.expiry, Expiry::Never);
         // And it genuinely participates in the cache despite living in the
         // `urn:kernel:*` namespace — re-resolution is served from cache.
         let catalog = || Request::new(Verb::Source, iri("urn:kernel:catalog"));
-        assert!(kernel.is_cached(&catalog(), &cap), "catalog should be cached after first issue");
+        assert!(
+            kernel.is_cached(&catalog(), &cap),
+            "catalog should be cached after first issue"
+        );
         assert_eq!(kernel.cache_len(), 1, "exactly the catalog is cached");
         block_on(kernel.issue(catalog(), &cap)).unwrap();
-        assert_eq!(kernel.cache_len(), 1, "re-issue is a cache hit, not a second entry");
+        assert_eq!(
+            kernel.cache_len(),
+            1,
+            "re-issue is a cache hit, not a second entry"
+        );
     }
 
     #[test]
@@ -980,15 +995,27 @@ mod tests {
         // Cacheable upstream (Never) → result stays cacheable → it caches.
         let cacheable_up = Provenance::new(Expiry::Never, BTreeSet::new());
         block_on(kernel.issue_with_incoming(req(), &cap, cacheable_up)).unwrap();
-        assert_eq!(kernel.cache_len(), 1, "cacheable upstream keeps the result cacheable");
+        assert_eq!(
+            kernel.cache_len(),
+            1,
+            "cacheable upstream keeps the result cacheable"
+        );
 
         // Uncacheable upstream (Always) → result becomes uncacheable → not cached.
         let other = Request::new(Verb::Source, iri("urn:fn:toUpper"))
             .with_arg("in", ArgRef::Inline(b"yo".to_vec()));
         let volatile_up = Provenance::new(Expiry::Always, BTreeSet::new());
         let rep = block_on(kernel.issue_with_incoming(other, &cap, volatile_up)).unwrap();
-        assert_eq!(rep.expiry, Expiry::Always, "volatile upstream makes the result volatile");
-        assert_eq!(kernel.cache_len(), 1, "the volatile-upstream result was not cached");
+        assert_eq!(
+            rep.expiry,
+            Expiry::Always,
+            "volatile upstream makes the result volatile"
+        );
+        assert_eq!(
+            kernel.cache_len(),
+            1,
+            "the volatile-upstream result was not cached"
+        );
     }
 
     #[test]
@@ -1008,7 +1035,10 @@ mod tests {
         block_on(kernel.issue_with_incoming(req(), &cap, up)).unwrap();
         assert!(kernel.is_cached(&req(), &cap), "cached after first issue");
         kernel.cut("urn:data:source");
-        assert!(!kernel.is_cached(&req(), &cap), "cutting the inherited thread invalidates it");
+        assert!(
+            !kernel.is_cached(&req(), &cap),
+            "cutting the inherited thread invalidates it"
+        );
     }
 
     #[test]
@@ -1018,10 +1048,18 @@ mod tests {
         let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
         let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
         let cap = Capability::root();
-        for op in ["urn:kernel:cache", "urn:kernel:threads", "urn:kernel:constraint"] {
+        for op in [
+            "urn:kernel:cache",
+            "urn:kernel:threads",
+            "urn:kernel:constraint",
+        ] {
             block_on(kernel.issue(Request::new(Verb::Source, iri(op)), &cap)).unwrap();
         }
-        assert_eq!(kernel.cache_len(), 0, "live introspection must never be cached");
+        assert_eq!(
+            kernel.cache_len(),
+            0,
+            "live introspection must never be cached"
+        );
     }
 
     #[test]
@@ -1029,9 +1067,10 @@ mod tests {
         let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
         let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
         let unprivileged = Capability::scoped(["urn:cap:nothing".to_string()]);
-        assert!(block_on(
-            kernel.issue(Request::new(Verb::Source, iri("urn:kernel:catalog")), &unprivileged)
-        )
+        assert!(block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:kernel:catalog")),
+            &unprivileged
+        ))
         .is_err());
     }
 

@@ -243,7 +243,10 @@ mod tests {
     fn transreptor_builder_records_its_conversions() {
         let d = Description::new("rdf-transrept")
             .verb(Verb::Source)
-            .transreptor(["text/turtle", "application/rdf+xml"], ["text/turtle", "text/html"]);
+            .transreptor(
+                ["text/turtle", "application/rdf+xml"],
+                ["text/turtle", "text/html"],
+            );
         let t = d.transreption().expect("is a transreptor");
         assert_eq!(t.from, vec!["text/turtle", "application/rdf+xml"]);
         assert_eq!(t.to, vec!["text/turtle", "text/html"]);

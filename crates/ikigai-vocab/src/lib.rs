@@ -289,21 +289,29 @@ mod tests {
 
     #[test]
     fn renders_a_transreptor() {
-        let d = Description::new("rdf-transrept").verb(Verb::Source).transreptor(
-            ["text/turtle", "application/rdf+xml"],
-            ["text/turtle", "text/html"],
-        );
+        let d = Description::new("rdf-transrept")
+            .verb(Verb::Source)
+            .transreptor(
+                ["text/turtle", "application/rdf+xml"],
+                ["text/turtle", "text/html"],
+            );
         let ttl = to_turtle(&d);
         assert!(ttl.contains("a ik:Endpoint, ik:Transreptor"), "{ttl}");
         assert!(
             ttl.contains("ik:transreptsFrom \"text/turtle\", \"application/rdf+xml\""),
             "{ttl}"
         );
-        assert!(ttl.contains("ik:transreptsTo \"text/turtle\", \"text/html\""), "{ttl}");
+        assert!(
+            ttl.contains("ik:transreptsTo \"text/turtle\", \"text/html\""),
+            "{ttl}"
+        );
         assert!(parse_count(&ttl) > 0, "emitted transreptor turtle parses");
         // A plain endpoint stays just ik:Endpoint.
         let plain = to_turtle(&sample());
-        assert!(plain.contains("a ik:Endpoint") && !plain.contains("ik:Transreptor"), "{plain}");
+        assert!(
+            plain.contains("a ik:Endpoint") && !plain.contains("ik:Transreptor"),
+            "{plain}"
+        );
     }
 
     #[test]
@@ -317,6 +325,9 @@ mod tests {
     #[test]
     fn vocab_space_binds_the_vocab_iri() {
         let entries = space().entries().expect("space enumerates");
-        assert!(entries.iter().any(|e| e.pattern == VOCAB_IRI), "{entries:?}");
+        assert!(
+            entries.iter().any(|e| e.pattern == VOCAB_IRI),
+            "{entries:?}"
+        );
     }
 }
