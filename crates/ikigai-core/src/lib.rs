@@ -43,6 +43,7 @@ mod kernel;
 mod meta;
 mod repr;
 mod request;
+mod select;
 mod space;
 mod verb;
 
@@ -58,6 +59,9 @@ pub use kernel::{Clock, Kernel, SchedulerReporter, SystemClock, TraceEvent, Trac
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};
+pub use select::{
+    is_auto_invocable, select_transreptor, select_transreptor_in, TransreptionStep, CANONICAL,
+};
 pub use space::{
     EndpointSpace, Fallback, Mount, Resolution, Resolved, Rewrite, Scope, Space, SpaceEntry,
 };

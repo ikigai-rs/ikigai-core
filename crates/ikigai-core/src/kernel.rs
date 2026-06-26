@@ -39,6 +39,7 @@ use crate::iri::Iri;
 use crate::meta::MetaRenderer;
 use crate::repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 use crate::request::{Request, RequestId};
+use crate::select::TransreptionStep;
 use crate::space::{Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
 
@@ -225,6 +226,14 @@ impl Kernel {
             scheduler: None,
             constraint: Mutex::new(VecDeque::new()),
         }
+    }
+
+    /// Find a transreptor chain converting `from` → `to` among this kernel's mounted
+    /// endpoints — a direct single hop, else a two-hop pivot via `text/turtle`. `None` if
+    /// no auto-invocable chain exists. The basis for selection-driven metadata rendering,
+    /// content negotiation, and sniff-and-dispatch. See [`crate::select_transreptor`].
+    pub fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
+        crate::select::select_transreptor(self.root.as_ref(), from, to)
     }
 
     /// Make this kernel **schedulable**: wrap it in an `Arc` and inject `spawner`, so
