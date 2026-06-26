@@ -14,3 +14,8 @@ readme = "README.md"
 [dependencies]
 # path for local/workspace builds; version is what crates.io resolves on publish.
 ikigai-core = { path = "../ikigai-core", version = "0.1" }
+
+[dev-dependencies]
+# Test-only: parse-validate the bundled vocabulary.ttl + the emitted Turtle. Does not
+# enter the published library's dependency graph (the crate stays dependency-free).
+oxttl = "0.2"

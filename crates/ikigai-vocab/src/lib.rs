@@ -9,12 +9,22 @@
 //! revision may project to Hydra / OpenAPI from the same vocabulary.)
 
 use ikigai_core::{
-    Description, Error, InputSource, MetaRenderer, ReprType, Representation, Result, Verb,
+    Description, EndpointSpace, Error, Exact, FnEndpoint, InputSource, Invocation, MetaRenderer,
+    ReprType, Representation, Result, Verb,
 };
 
 /// The ikigai vocabulary namespace. Provisional — the canonical namespace IRI
 /// is a project decision; it is used here purely as a stable identifier.
 pub const NS: &str = "https://ikigai-rs.dev/ns#";
+
+/// The ikigai vocabulary itself, as a Turtle ontology — hand-maintained in
+/// `src/vocabulary.ttl` and bundled at compile time. Defines the `ns#` classes
+/// (`ik:Endpoint`, `ik:Transreptor ⊏ ik:Endpoint`, …) and properties. Served by
+/// [`space`] at `urn:ikigai:vocab`, and eventually at the external `ns#` URL.
+pub const VOCABULARY: &str = include_str!("vocabulary.ttl");
+
+/// The conventional IRI the vocabulary is bound to by [`space`].
+pub const VOCAB_IRI: &str = "urn:ikigai:vocab";
 
 /// Escape a string for use inside a Turtle double-quoted literal.
 fn escape_literal(s: &str) -> String {
@@ -58,8 +68,15 @@ pub fn to_turtle(description: &Description) -> String {
     // `id` is a resource identifier (no Turtle-significant characters).
     let subject = format!("<urn:ikigai:endpoint:{}>", description.id);
 
+    // A transreptor is typed as both classes explicitly (`ik:Transreptor ⊏ ik:Endpoint`),
+    // so consumers that don't reason over the subclass axiom still see `ik:Endpoint`.
+    let rdf_type = if description.transreption().is_some() {
+        "a ik:Endpoint, ik:Transreptor"
+    } else {
+        "a ik:Endpoint"
+    };
     let mut predicates: Vec<String> = vec![
-        "a ik:Endpoint".to_string(),
+        rdf_type.to_string(),
         format!("ik:id {}", lit(&description.id)),
     ];
     if !description.title.is_empty() {
@@ -85,6 +102,16 @@ pub fn to_turtle(description: &Description) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         predicates.push(format!("ik:output {outputs}"));
+    }
+    if let Some(t) = description.transreption() {
+        if !t.from.is_empty() {
+            let from = t.from.iter().map(|m| lit(m)).collect::<Vec<_>>().join(", ");
+            predicates.push(format!("ik:transreptsFrom {from}"));
+        }
+        if !t.to.is_empty() {
+            let to = t.to.iter().map(|m| lit(m)).collect::<Vec<_>>().join(", ");
+            predicates.push(format!("ik:transreptsTo {to}"));
+        }
     }
     for input in &description.inputs {
         let mut node = format!(
@@ -114,6 +141,34 @@ pub fn describe_turtle(description: &Description) -> Representation {
     )
 }
 
+/// A space binding [`VOCAB_IRI`] (`urn:ikigai:vocab`) to the [`VOCABULARY`] Turtle. Mount it
+/// in a kernel's root so the vocabulary is `source`-able as a resource — and, via the http
+/// arc, servable at the external `ns#` URL. (Cacheable; lists in the catalog as a plain
+/// endpoint.)
+pub fn space() -> EndpointSpace {
+    EndpointSpace::new().bind(
+        Exact::new(VOCAB_IRI),
+        FnEndpoint::new("ikigai-vocab", |_inv: &Invocation<'_>| {
+            Ok(Representation::new(
+                ReprType::new("text/turtle").with_param("charset", "utf-8"),
+                VOCABULARY.as_bytes().to_vec(),
+            )
+            .cacheable())
+        })
+        .with_description(
+            Description::new("ikigai-vocab")
+                .title("ikigai vocabulary")
+                .summary(
+                    "The ikigai self-description vocabulary (the ns# ontology): the endpoint and \
+                     transreptor classes and their properties.",
+                )
+                .verb(Verb::Source)
+                .verb(Verb::Meta)
+                .output("text/turtle;charset=utf-8"),
+        ),
+    )
+}
+
 /// Render a [`Description`] as human-readable plain text (for the CLI `describe`).
 pub fn to_text(description: &Description) -> String {
     let mut s = format!("{} — {}\n", description.id, description.title);
@@ -136,6 +191,13 @@ pub fn to_text(description: &Description) -> String {
     }
     if !description.outputs.is_empty() {
         s.push_str(&format!("outputs: {}\n", description.outputs.join(", ")));
+    }
+    if let Some(t) = description.transreption() {
+        s.push_str(&format!(
+            "transrepts: {} → {}\n",
+            t.from.join(", "),
+            t.to.join(", ")
+        ));
     }
     s
 }
@@ -162,7 +224,7 @@ impl MetaRenderer for TurtleRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ikigai_core::ArgSpec;
+    use ikigai_core::{ArgSpec, Space};
 
     fn sample() -> Description {
         Description::new("toUpper")
@@ -213,5 +275,59 @@ mod tests {
     fn describe_turtle_is_text_turtle() {
         let rep = describe_turtle(&sample());
         assert_eq!(rep.repr_type.media_type, "text/turtle");
+    }
+
+    /// Parse Turtle and return the triple count, panicking on any syntax error.
+    fn parse_count(ttl: &str) -> usize {
+        let mut count = 0;
+        for triple in oxttl::TurtleParser::new().for_reader(ttl.as_bytes()) {
+            triple.expect("valid turtle");
+            count += 1;
+        }
+        count
+    }
+
+    #[test]
+    fn renders_a_transreptor() {
+        let d = Description::new("rdf-transrept")
+            .verb(Verb::Source)
+            .transreptor(
+                ["text/turtle", "application/rdf+xml"],
+                ["text/turtle", "text/html"],
+            );
+        let ttl = to_turtle(&d);
+        assert!(ttl.contains("a ik:Endpoint, ik:Transreptor"), "{ttl}");
+        assert!(
+            ttl.contains("ik:transreptsFrom \"text/turtle\", \"application/rdf+xml\""),
+            "{ttl}"
+        );
+        assert!(
+            ttl.contains("ik:transreptsTo \"text/turtle\", \"text/html\""),
+            "{ttl}"
+        );
+        assert!(parse_count(&ttl) > 0, "emitted transreptor turtle parses");
+        // A plain endpoint stays just ik:Endpoint.
+        let plain = to_turtle(&sample());
+        assert!(
+            plain.contains("a ik:Endpoint") && !plain.contains("ik:Transreptor"),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn bundled_vocabulary_is_valid_turtle_with_the_subclass_axiom() {
+        assert!(parse_count(VOCABULARY) > 0, "vocabulary.ttl parses");
+        assert!(VOCABULARY.contains("ik:Transreptor"));
+        assert!(VOCABULARY.contains("rdfs:subClassOf ik:Endpoint"));
+        assert!(VOCABULARY.contains("ik:transreptsFrom") && VOCABULARY.contains("ik:transreptsTo"));
+    }
+
+    #[test]
+    fn vocab_space_binds_the_vocab_iri() {
+        let entries = space().entries().expect("space enumerates");
+        assert!(
+            entries.iter().any(|e| e.pattern == VOCAB_IRI),
+            "{entries:?}"
+        );
     }
 }
