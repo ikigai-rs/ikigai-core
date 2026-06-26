@@ -81,6 +81,46 @@ pub struct Description {
     pub inputs: Vec<ArgSpec>,
     /// The representation types it can produce (canonical media-type strings).
     pub outputs: Vec<String>,
+    /// What kind of endpoint this is. Defaults to [`EndpointKind::Endpoint`]; omitted from
+    /// serialized output for plain endpoints, so existing JSON contracts are unchanged.
+    #[serde(default, skip_serializing_if = "EndpointKind::is_endpoint")]
+    pub kind: EndpointKind,
+}
+
+/// What *kind* of endpoint this is — a first-class type that projects to an RDF class
+/// (`ik:Endpoint`, `ik:Transreptor`, …) and lets the kernel select endpoints by role.
+///
+/// The default, [`Endpoint`](EndpointKind::Endpoint), is a plain endpoint (today's
+/// behaviour). [`Transreptor`](EndpointKind::Transreptor) marks an endpoint that converts a
+/// representation between media types and carries the `from`/`to` types it handles, so a host
+/// can find "a transreptor from A to B." More kinds may follow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EndpointKind {
+    /// A plain endpoint (`ik:Endpoint`).
+    #[default]
+    Endpoint,
+    /// A transreptor (`ik:Transreptor ⊏ ik:Endpoint`) — converts a representation from one
+    /// media type to another, carrying the conversions it supports.
+    Transreptor(Transreption),
+}
+
+impl EndpointKind {
+    /// Whether this is the default plain [`Endpoint`](EndpointKind::Endpoint) kind.
+    pub fn is_endpoint(&self) -> bool {
+        matches!(self, EndpointKind::Endpoint)
+    }
+}
+
+/// The media-type conversions a transreptor supports: it can accept any of `from` and
+/// produce any of `to`. Used both to type the endpoint in RDF (`ik:transreptsFrom`/`To`) and
+/// to select a transreptor for a needed `from → to` conversion.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Transreption {
+    /// The media types it can read.
+    pub from: Vec<String>,
+    /// The media types it can produce.
+    pub to: Vec<String>,
 }
 
 impl Description {
@@ -121,6 +161,35 @@ impl Description {
         self.outputs.push(media_type.into());
         self
     }
+
+    /// Set the endpoint kind (builder).
+    pub fn kind(mut self, kind: EndpointKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Mark this endpoint a **transreptor** that converts representations from any of `from`
+    /// to any of `to` (media-type strings) — builder. Sets [`EndpointKind::Transreptor`].
+    pub fn transreptor(
+        mut self,
+        from: impl IntoIterator<Item = impl Into<String>>,
+        to: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.kind = EndpointKind::Transreptor(Transreption {
+            from: from.into_iter().map(Into::into).collect(),
+            to: to.into_iter().map(Into::into).collect(),
+        });
+        self
+    }
+
+    /// The transreption this endpoint supports, if it is a transreptor — for the vocabulary
+    /// projection and for transreptor selection.
+    pub fn transreption(&self) -> Option<&Transreption> {
+        match &self.kind {
+            EndpointKind::Transreptor(t) => Some(t),
+            EndpointKind::Endpoint => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +223,34 @@ mod tests {
             .verb(Verb::Meta)
             .input(ArgSpec::new("message").binding());
         let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(serde_json::from_str::<Description>(&json).unwrap(), d);
+    }
+
+    #[test]
+    fn kind_defaults_to_endpoint_and_is_omitted_from_json() {
+        let d = Description::new("toUpper").output("text/plain");
+        assert_eq!(d.kind, EndpointKind::Endpoint);
+        assert!(d.transreption().is_none());
+        // A plain endpoint's JSON carries no `kind` key — the engine's contract is unchanged.
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("kind"), "{json}");
+        // …and JSON without a `kind` still deserializes (back-compat).
+        let d2: Description = serde_json::from_str(&json).unwrap();
+        assert_eq!(d2.kind, EndpointKind::Endpoint);
+    }
+
+    #[test]
+    fn transreptor_builder_records_its_conversions() {
+        let d = Description::new("rdf-transrept")
+            .verb(Verb::Source)
+            .transreptor(["text/turtle", "application/rdf+xml"], ["text/turtle", "text/html"]);
+        let t = d.transreption().expect("is a transreptor");
+        assert_eq!(t.from, vec!["text/turtle", "application/rdf+xml"]);
+        assert_eq!(t.to, vec!["text/turtle", "text/html"]);
+        assert!(!d.kind.is_endpoint());
+        // The transreptor kind round-trips through serde.
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("transreptor"), "{json}");
         assert_eq!(serde_json::from_str::<Description>(&json).unwrap(), d);
     }
 }

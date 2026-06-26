@@ -1,0 +1,93 @@
+@prefix ik:   <https://ikigai-rs.dev/ns#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+# The ikigai self-description vocabulary. Endpoints project their structured
+# Description to RDF using these terms; the kernel's catalog is a graph of them.
+# Hand-maintained; bundled into ikigai-vocab via include_str! and served at
+# urn:ikigai:vocab (and, externally, at this namespace URL).
+
+<https://ikigai-rs.dev/ns#> a owl:Ontology ;
+    rdfs:label "ikigai endpoint vocabulary" ;
+    rdfs:comment "Self-description vocabulary for ikigai resource-oriented endpoints." .
+
+#
+# Classes
+#
+
+ik:Endpoint a rdfs:Class ;
+    rdfs:label "Endpoint" ;
+    rdfs:comment "A resolvable resource-oriented endpoint." .
+
+ik:Transreptor a rdfs:Class ;
+    rdfs:subClassOf ik:Endpoint ;
+    rdfs:label "Transreptor" ;
+    rdfs:comment "An endpoint that converts a representation from one media type to another (a transreption)." .
+
+#
+# Properties
+#
+
+ik:id a rdf:Property ;
+    rdfs:domain ik:Endpoint ;
+    rdfs:range xsd:string ;
+    rdfs:label "id" ;
+    rdfs:comment "The endpoint's resource identifier." .
+
+ik:title a rdf:Property ;
+    rdfs:domain ik:Endpoint ;
+    rdfs:range xsd:string ;
+    rdfs:label "title" ;
+    rdfs:comment "A short human title for the endpoint." .
+
+ik:summary a rdf:Property ;
+    rdfs:domain ik:Endpoint ;
+    rdfs:range xsd:string ;
+    rdfs:label "summary" ;
+    rdfs:comment "A longer human description of the endpoint." .
+
+ik:verb a rdf:Property ;
+    rdfs:domain ik:Endpoint ;
+    rdfs:range xsd:string ;
+    rdfs:label "verb" ;
+    rdfs:comment "A verb the endpoint answers: Source, Sink, Exists, Delete, or Meta." .
+
+ik:output a rdf:Property ;
+    rdfs:domain ik:Endpoint ;
+    rdfs:range xsd:string ;
+    rdfs:label "output" ;
+    rdfs:comment "A media type the endpoint can produce." .
+
+ik:input a rdf:Property ;
+    rdfs:domain ik:Endpoint ;
+    rdfs:label "input" ;
+    rdfs:comment "A named input the endpoint accepts; the value is a blank node with ik:inputName, ik:source, ik:required, and optionally ik:summary." .
+
+ik:inputName a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "inputName" ;
+    rdfs:comment "The name of an input parameter." .
+
+ik:source a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "source" ;
+    rdfs:comment "How an input arrives: \"argument\" (by value) or \"binding\" (captured from the resource identifier)." .
+
+ik:required a rdf:Property ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "required" ;
+    rdfs:comment "Whether an input is required." .
+
+ik:transreptsFrom a rdf:Property ;
+    rdfs:domain ik:Transreptor ;
+    rdfs:range xsd:string ;
+    rdfs:label "transreptsFrom" ;
+    rdfs:comment "A media type this transreptor can read (convert from)." .
+
+ik:transreptsTo a rdf:Property ;
+    rdfs:domain ik:Transreptor ;
+    rdfs:range xsd:string ;
+    rdfs:label "transreptsTo" ;
+    rdfs:comment "A media type this transreptor can produce (convert to)." .
