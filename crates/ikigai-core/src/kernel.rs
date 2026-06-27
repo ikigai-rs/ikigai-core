@@ -926,6 +926,11 @@ impl Issuer for Kernel {
     fn now(&self) -> Option<Time> {
         self.clock.as_ref().map(|clock| clock.now())
     }
+
+    fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
+        // Delegate to the inherent method (selection over the kernel's root space).
+        Kernel::select_transreptor(self, from, to)
+    }
 }
 
 #[cfg(test)]
@@ -1036,6 +1041,48 @@ mod tests {
         let request = Request::new(Verb::Meta, iri(target))
             .with_arg("as", ArgRef::Inline(as_type.as_bytes().to_vec()));
         block_on(kernel.issue(request, &Capability::root())).unwrap()
+    }
+
+    #[test]
+    fn an_endpoint_can_select_a_transreptor_through_its_invocation() {
+        // An endpoint reaches the kernel's transreptor selection via inv.select_transreptor
+        // (delegated through the Issuer) — the seam urn:transrept:auto / content-negotiation
+        // build on.
+        let probe = FnEndpoint::new("probe", |inv: &Invocation<'_>| {
+            let body = match inv.select_transreptor("text/turtle", "application/rdf+xml") {
+                Some(steps) => steps
+                    .iter()
+                    .map(|s| s.endpoint.clone())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                None => "none".to_string(),
+            };
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                body.into_bytes(),
+            ))
+        });
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:probe"), probe)
+            .bind(Exact::new("urn:rdf:transrept"), stub_rdf_transrept());
+        let kernel = Kernel::new(Arc::new(space));
+        let rep = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:probe")),
+            &Capability::root(),
+        ))
+        .unwrap();
+        assert_eq!(String::from_utf8(rep.bytes).unwrap(), "urn:rdf:transrept");
+    }
+
+    #[test]
+    fn a_detached_invocation_selects_nothing() {
+        let request = Request::new(Verb::Source, iri("urn:x"));
+        let bindings = crate::grammar::Bindings::default();
+        let cap = Capability::root();
+        let inv = Invocation::detached(&request, &bindings, &cap);
+        assert!(inv
+            .select_transreptor("text/turtle", "application/rdf+xml")
+            .is_none());
     }
 
     #[test]

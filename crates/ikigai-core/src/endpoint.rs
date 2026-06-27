@@ -13,6 +13,7 @@ use crate::grammar::Bindings;
 use crate::iri::Iri;
 use crate::repr::{Expiry, Representation, Thread, Time};
 use crate::request::Request;
+use crate::select::TransreptionStep;
 use crate::verb::Verb;
 
 /// Lets an endpoint issue sub-requests back through the kernel. Implemented by
@@ -42,6 +43,16 @@ pub trait Issuer: Send + Sync {
     /// `None` if it has none. An endpoint computing a time-based deadline (e.g.
     /// `now + max-age`) reads it through [`Invocation::now`]. Default `None`.
     fn now(&self) -> Option<Time> {
+        None
+    }
+
+    /// Plan a chain of transreptors converting media type `from` → `to` over the
+    /// issuer's mounted spaces (see [`select_transreptor`](crate::select_transreptor)).
+    /// The default offers none — a detached or remote issuer can't enumerate spaces; the
+    /// kernel overrides it to select over its root. An endpoint reads it through
+    /// [`Invocation::select_transreptor`].
+    fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
+        let _ = (from, to);
         None
     }
 }
@@ -206,6 +217,17 @@ impl<'a> Invocation<'a> {
     /// it as a dependency.
     pub async fn source(&self, target: &Iri) -> Result<Representation> {
         self.issue(Request::new(Verb::Source, target.clone())).await
+    }
+
+    /// Plan a transreptor chain converting media type `from` → `to` over the kernel's
+    /// mounted spaces, or `None` if there's no kernel context (detached) or no chain
+    /// exists. The endpoint then issues each [`TransreptionStep`] — piping the bytes in
+    /// as `content` and setting `as` to the step's target — to run the conversion. This
+    /// is the seam content-negotiation and octet-stream sniff-and-dispatch build on:
+    /// "find me a way from type A to type B," then drive it through the kernel like any
+    /// sub-request.
+    pub fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
+        self.issuer?.select_transreptor(from, to)
     }
 
     /// Resolve `requests` **concurrently**, returning their results in request order.
