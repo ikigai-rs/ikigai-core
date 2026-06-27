@@ -40,7 +40,7 @@ use crate::iri::Iri;
 use crate::meta::MetaRenderer;
 use crate::repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 use crate::request::{Request, RequestId};
-use crate::select::TransreptionStep;
+use crate::select::{ActionMatch, TransreptionStep};
 use crate::space::{Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
 
@@ -235,6 +235,13 @@ impl Kernel {
     /// content negotiation, and sniff-and-dispatch. See [`crate::select_transreptor`].
     pub fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
         crate::select::select_transreptor(self.root.as_ref(), from, to)
+    }
+
+    /// Find endpoints among this kernel's mounted endpoints whose required inputs are
+    /// satisfiable by the RDF classes in `present` — the actions available given a set of
+    /// typed entities. See [`crate::select_action`].
+    pub fn select_action(&self, present: &[&str]) -> Vec<ActionMatch> {
+        crate::select::select_action(self.root.as_ref(), present)
     }
 
     /// Render `description` to `target` by transrepting its canonical Turtle: render the
@@ -931,6 +938,10 @@ impl Issuer for Kernel {
         // Delegate to the inherent method (selection over the kernel's root space).
         Kernel::select_transreptor(self, from, to)
     }
+
+    fn select_action(&self, present: &[&str]) -> Vec<ActionMatch> {
+        Kernel::select_action(self, present)
+    }
 }
 
 #[cfg(test)]
@@ -1083,6 +1094,43 @@ mod tests {
         assert!(inv
             .select_transreptor("text/turtle", "application/rdf+xml")
             .is_none());
+        assert!(inv.select_action(&["https://schema.org/Person"]).is_empty());
+    }
+
+    #[test]
+    fn an_endpoint_can_select_actions_through_its_invocation() {
+        // An endpoint surfaces the actions available for a set of present types via
+        // inv.select_action (delegated through the Issuer) — the seed of layer action-inference.
+        let probe = FnEndpoint::new("probe", |inv: &Invocation<'_>| {
+            let body = inv
+                .select_action(&["https://schema.org/Person"])
+                .iter()
+                .map(|m| m.endpoint.clone())
+                .collect::<Vec<_>>()
+                .join(",");
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                body.into_bytes(),
+            ))
+        });
+        let greet = FnEndpoint::new("greet", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new("greet")
+                .verb(Verb::Source)
+                .input(crate::describe::ArgSpec::new("who").class("https://schema.org/Person")),
+        );
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:probe"), probe)
+            .bind(Exact::new("urn:demo:greet"), greet);
+        let kernel = Kernel::new(Arc::new(space));
+        let rep = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:probe")),
+            &Capability::root(),
+        ))
+        .unwrap();
+        assert_eq!(String::from_utf8(rep.bytes).unwrap(), "urn:demo:greet");
     }
 
     #[test]

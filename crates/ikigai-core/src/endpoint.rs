@@ -13,7 +13,7 @@ use crate::grammar::Bindings;
 use crate::iri::Iri;
 use crate::repr::{Expiry, Representation, Thread, Time};
 use crate::request::Request;
-use crate::select::TransreptionStep;
+use crate::select::{ActionMatch, TransreptionStep};
 use crate::verb::Verb;
 
 /// Lets an endpoint issue sub-requests back through the kernel. Implemented by
@@ -54,6 +54,16 @@ pub trait Issuer: Send + Sync {
     fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
         let _ = (from, to);
         None
+    }
+
+    /// Find endpoints whose required inputs are satisfiable by the RDF classes in `present`
+    /// (see [`select_action`](crate::select_action)) — "given these typed entities, what can
+    /// I do with them?" The default offers none (a detached or remote issuer can't enumerate
+    /// spaces); the kernel overrides it. An endpoint reads it through
+    /// [`Invocation::select_action`].
+    fn select_action(&self, present: &[&str]) -> Vec<ActionMatch> {
+        let _ = present;
+        Vec::new()
     }
 }
 
@@ -228,6 +238,18 @@ impl<'a> Invocation<'a> {
     /// sub-request.
     pub fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
         self.issuer?.select_transreptor(from, to)
+    }
+
+    /// Find endpoints whose required inputs are satisfiable by the RDF classes in `present`
+    /// — the actions available given a set of typed entities (see
+    /// [`select_action`](crate::select_action)). Empty if there's no kernel context
+    /// (detached). The seed of layer action-inference: a layer endpoint can surface "what you
+    /// can do with what's on the canvas," then issue the chosen one.
+    pub fn select_action(&self, present: &[&str]) -> Vec<ActionMatch> {
+        match self.issuer {
+            Some(issuer) => issuer.select_action(present),
+            None => Vec::new(),
+        }
     }
 
     /// Resolve `requests` **concurrently**, returning their results in request order.
