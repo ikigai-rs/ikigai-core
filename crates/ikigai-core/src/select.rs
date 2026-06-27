@@ -1,12 +1,20 @@
-//! Transreptor selection — find a chain of transreptors that converts a representation from
-//! one media type to another, using the `from`/`to` each transreptor declares
-//! ([`EndpointKind::Transreptor`](crate::EndpointKind)).
+//! Selection — match a need against the self-descriptions in a [`Space`], the same way at
+//! two scales:
 //!
-//! This is the kernel capability metadata rendering, content-negotiation, and
-//! sniff-and-dispatch all build on: "give me a way to get from media type A to B." v1 finds
-//! a **direct single hop**, else a **two-hop pivot via the canonical RDF type
-//! (`text/turtle`)** — the hub our transreptors share. (General N-hop path-finding, and
-//! caching the transreptor index, are later refinements; today it enumerates per call.)
+//! - [`select_transreptor`] — find a chain of transreptors converting a representation from
+//!   one **media type** to another, using the `from`/`to` each transreptor declares
+//!   ([`EndpointKind::Transreptor`](crate::EndpointKind)). This is what metadata rendering,
+//!   content-negotiation, and sniff-and-dispatch build on: "give me a way from media type A
+//!   to B." v1 finds a **direct single hop**, else a **two-hop pivot via the canonical RDF
+//!   type (`text/turtle`)** — the hub our transreptors share.
+//! - [`select_action`] — find endpoints whose required inputs are satisfiable by the **RDF
+//!   classes** present in a context: "given these typed entities, what can I do with them?"
+//!   (the seed of layer action-inference). Matches on [`ArgSpec::class`](crate::ArgSpec).
+//!
+//! Both are RDF-free Rust walks over the same `entries → Meta → describe` path the catalog
+//! uses (no SPARQL, no oxigraph in core). General N-hop path-finding, a cached selection
+//! index, and capability-scoped filtering are later refinements; today each enumerates per
+//! call.
 //!
 //! Only **auto-invocable** transreptors are selected — ones drivable with just a piped
 //! `content` and a target `as` (see [`is_auto_invocable`]). A *parameterized* transreptor
@@ -131,6 +139,61 @@ pub fn select_transreptor_in(
     select_transreptor(root.as_ref(), from, to)
 }
 
+/// An endpoint whose required inputs are all satisfiable by a set of available RDF classes —
+/// an action you could take given the typed entities present in a context (a layer/canvas).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionMatch {
+    /// The endpoint's IRI.
+    pub endpoint: String,
+}
+
+/// Find endpoints in `root` whose required inputs are *fully typed and satisfiable* by
+/// `present` — the RDF classes available in a context. An endpoint matches iff it has at
+/// least one required input and **every** required input declares an
+/// [`ArgSpec::class`](crate::ArgSpec) that appears in `present`. This is
+/// [`select_transreptor`]'s sibling at the RDF-class level — "given these typed entities,
+/// what can I do with them?" — the seed of layer action-inference. Optional inputs are
+/// ignored; required inputs without a declared class make an endpoint un-inferable (it can't
+/// be driven from the present types alone), so it's excluded. Capability-scoping — offering
+/// only what the caller may invoke — composes on top and is **not** applied here.
+pub fn select_action(root: &dyn Space, present: &[&str]) -> Vec<ActionMatch> {
+    let mut matches = Vec::new();
+    for entry in root.entries().unwrap_or_default() {
+        let Ok(iri) = Iri::parse(&entry.pattern) else {
+            continue;
+        };
+        if let Resolution::Hit(resolved) =
+            root.resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
+        {
+            if action_is_satisfiable(&resolved.endpoint.describe(), present) {
+                matches.push(ActionMatch {
+                    endpoint: entry.pattern.clone(),
+                });
+            }
+        }
+    }
+    matches
+}
+
+/// Whether every required input of `description` declares a class present in `present`, with
+/// at least one required input (see [`select_action`]).
+fn action_is_satisfiable(description: &Description, present: &[&str]) -> bool {
+    let mut has_required = false;
+    for input in description.inputs.iter().filter(|i| i.required) {
+        has_required = true;
+        match &input.class {
+            Some(class) if present.contains(&class.as_str()) => {}
+            _ => return false,
+        }
+    }
+    has_required
+}
+
+/// Convenience: select actions over an `Arc<dyn Space>` root (as a kernel holds).
+pub fn select_action_in(root: &Arc<dyn Space>, present: &[&str]) -> Vec<ActionMatch> {
+    select_action(root.as_ref(), present)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +293,79 @@ mod tests {
         assert!(!is_auto_invocable(&xslt.describe()));
         let space = EndpointSpace::new().bind(Exact::new("urn:xslt:transform"), xslt);
         assert!(select_transreptor(&space, "application/xml", "text/html").is_none());
+    }
+
+    // --- select_action ---
+
+    const PERSON: &str = "https://schema.org/Person";
+    const PLACE: &str = "https://schema.org/Place";
+    const DATE: &str = "https://schema.org/Date";
+
+    /// An endpoint with the given required, typed inputs (each input named `inN`, classed).
+    fn typed_action(id: &'static str, classes: &[&str]) -> FnEndpoint {
+        let mut d = Description::new(id).verb(Verb::Source);
+        for (n, class) in classes.iter().enumerate() {
+            d = d.input(crate::describe::ArgSpec::new(format!("in{n}")).class(*class));
+        }
+        FnEndpoint::new(id, |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(d)
+    }
+
+    fn action_space() -> EndpointSpace {
+        EndpointSpace::new()
+            // schedule(Person, Place, Date) — the "invite to dinner" action.
+            .bind(
+                Exact::new("urn:demo:schedule"),
+                typed_action("schedule", &[PERSON, PLACE, DATE]),
+            )
+            // greet(Person) — satisfiable from just a Person.
+            .bind(
+                Exact::new("urn:demo:greet"),
+                typed_action("greet", &[PERSON]),
+            )
+            // a plain untyped endpoint (content/as) — never an inferred action.
+            .bind(
+                Exact::new("urn:rdf:transrept"),
+                transreptor("rdf", &["text/turtle"], &["text/html"]),
+            )
+    }
+
+    fn endpoints(matches: &[ActionMatch]) -> Vec<&str> {
+        let mut v: Vec<&str> = matches.iter().map(|m| m.endpoint.as_str()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn action_matches_when_all_required_typed_inputs_are_present() {
+        // Canvas with a Person, a Place, and Date(s) → both schedule and greet are offerable.
+        let m = select_action(&action_space(), &[PERSON, PLACE, DATE]);
+        assert_eq!(endpoints(&m), vec!["urn:demo:greet", "urn:demo:schedule"]);
+    }
+
+    #[test]
+    fn action_excluded_when_a_required_type_is_missing() {
+        // Only a Person present → greet matches, schedule (needs Place + Date) does not.
+        let m = select_action(&action_space(), &[PERSON]);
+        assert_eq!(endpoints(&m), vec!["urn:demo:greet"]);
+    }
+
+    #[test]
+    fn untyped_and_no_required_endpoints_are_never_inferred_actions() {
+        // The transreptor's required inputs (content/as) carry no class → not an action,
+        // even when every present type is offered.
+        let m = select_action(&action_space(), &[PERSON, PLACE, DATE]);
+        assert!(!endpoints(&m).contains(&"urn:rdf:transrept"));
+
+        // An endpoint with no required inputs is not an inferred action either.
+        let space = EndpointSpace::new().bind(
+            Exact::new("urn:demo:ping"),
+            FnEndpoint::new("ping", |_inv| {
+                Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+            }),
+        );
+        assert!(select_action(&space, &[PERSON]).is_empty());
     }
 }
