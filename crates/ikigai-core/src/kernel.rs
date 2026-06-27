@@ -24,6 +24,9 @@
 //! root space: `sink urn:kernel:cut <thread>` cuts a thread (so an endpoint or a
 //! remote peer can invalidate by *resolving*, not via a special method), and
 //! `source urn:kernel:cache` / `urn:kernel:threads` introspect cache and threads.
+//! `source urn:kernel:catalog` is the self-describing endpoint graph, and
+//! `source urn:kernel:actions types=<classes>` lists the endpoints those typed entities
+//! could drive (selection as a resource).
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -751,6 +754,31 @@ impl Kernel {
                 )
                 .cacheable())
             }
+            // Selection as a resource: the endpoints whose required inputs are satisfiable by
+            // the RDF classes in `types` (comma/space-separated IRIs) — "given these typed
+            // entities, what can I do with them?" (see [`crate::select_action`]). One endpoint
+            // IRI per line, so it pipes into a `..` map. Cacheable like the catalog (a pure
+            // function of the binding set + `types`).
+            ("actions", Verb::Source) => {
+                require_cap(capability, "urn:cap:kernel:inspect")?;
+                let types_arg = kernel_arg(request, "types")
+                    .ok_or_else(|| Error::MissingArgument("types".to_string()))?;
+                let types: Vec<&str> = types_arg
+                    .split([',', ' ', '\n', '\t'])
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let mut body = String::new();
+                for m in self.select_action(&types) {
+                    body.push_str(&m.endpoint);
+                    body.push('\n');
+                }
+                Ok(Representation::new(
+                    ReprType::new("text/plain").with_param("charset", "utf-8"),
+                    body.into_bytes(),
+                )
+                .cacheable())
+            }
             _ => Err(Error::Unresolved(request.target.clone())),
         }
     }
@@ -1215,6 +1243,44 @@ mod tests {
             1,
             "re-issue is a cache hit, not a second entry"
         );
+    }
+
+    #[test]
+    fn actions_resource_lists_type_satisfiable_endpoints() {
+        // urn:kernel:actions exposes select_action as a resource: given the RDF classes in
+        // `types`, list the endpoints those entities could drive — one IRI per line.
+        let greet = FnEndpoint::new("greet", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new("greet")
+                .verb(Verb::Source)
+                .input(crate::describe::ArgSpec::new("who").class("https://schema.org/Person")),
+        );
+        let space = EndpointSpace::new()
+            // untyped required inputs → never an inferred action
+            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:demo:greet"), greet);
+        let kernel = Kernel::new(Arc::new(space));
+        let cap = Capability::root();
+        let req = Request::new(Verb::Source, iri("urn:kernel:actions")).with_arg(
+            "types",
+            ArgRef::Inline(b"https://schema.org/Person".to_vec()),
+        );
+        let rep = block_on(kernel.issue(req, &cap)).unwrap();
+        let body = String::from_utf8(rep.bytes).unwrap();
+        assert!(body.contains("urn:demo:greet"), "{body}");
+        assert!(
+            !body.contains("toUpper"),
+            "untyped endpoint isn't an action: {body}"
+        );
+        assert_eq!(rep.repr_type.media_type, "text/plain");
+
+        // Missing `types` is a clean error.
+        let err =
+            block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:actions")), &cap))
+                .unwrap_err();
+        assert!(matches!(err, Error::MissingArgument(a) if a == "types"));
     }
 
     #[test]
