@@ -29,6 +29,13 @@ pub struct ArgSpec {
     /// Whether the value arrives as a by-value argument or a grammar binding.
     #[serde(default)]
     pub source: InputSource,
+    /// The RDF class this input's value is expected to be, as an IRI (e.g.
+    /// `https://schema.org/Person`). Optional; when present it lets selection match an
+    /// endpoint to the *types* available in a context — "what can I do with these entities?"
+    /// (`select_action`) — the same way `transreptsFrom`/`To` drives transreptor selection.
+    /// Omitted from serialized output when absent, so existing JSON contracts are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
 }
 
 impl ArgSpec {
@@ -39,12 +46,20 @@ impl ArgSpec {
             summary: String::new(),
             required: true,
             source: InputSource::Argument,
+            class: None,
         }
     }
 
     /// Add a human summary (builder).
     pub fn summary(mut self, summary: impl Into<String>) -> Self {
         self.summary = summary.into();
+        self
+    }
+
+    /// Declare the RDF class (IRI) this input's value is expected to be (builder) — e.g.
+    /// `https://schema.org/Person`. Drives type-based selection (`select_action`).
+    pub fn class(mut self, class: impl Into<String>) -> Self {
+        self.class = Some(class.into());
         self
     }
 
@@ -85,6 +100,14 @@ pub struct Description {
     /// serialized output for plain endpoints, so existing JSON contracts are unchanged.
     #[serde(default, skip_serializing_if = "EndpointKind::is_endpoint")]
     pub kind: EndpointKind,
+    /// The capability scopes invoking this endpoint requires (descriptive labels, e.g.
+    /// `cap:net`, `cap:fs:read`) — what *authority* it demands, not a runtime
+    /// [`Capability`](crate::Capability). Lets a host project a capability-scoped catalog
+    /// (show an agent only what it may invoke) and lets a caller pre-check feasibility.
+    /// Empty for endpoints needing no special authority; omitted from serialized output when
+    /// empty, so existing JSON contracts are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
 }
 
 /// What *kind* of endpoint this is — a first-class type that projects to an RDF class
@@ -159,6 +182,14 @@ impl Description {
     /// Declare an output media type (builder).
     pub fn output(mut self, media_type: impl Into<String>) -> Self {
         self.outputs.push(media_type.into());
+        self
+    }
+
+    /// Declare a capability scope this endpoint requires to be invoked (builder), e.g.
+    /// `cap:net`. Callable multiple times; descriptive only (drives capability-scoped
+    /// catalog projection and feasibility pre-checks), not runtime enforcement.
+    pub fn requires(mut self, capability: impl Into<String>) -> Self {
+        self.requires.push(capability.into());
         self
     }
 
@@ -255,5 +286,58 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         assert!(json.contains("transreptor"), "{json}");
         assert_eq!(serde_json::from_str::<Description>(&json).unwrap(), d);
+    }
+
+    #[test]
+    fn input_class_is_optional_and_omitted_when_absent() {
+        // No class → no `class` key in the input's JSON (existing contract unchanged).
+        let plain = ArgSpec::new("content");
+        assert_eq!(plain.class, None);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("class"), "{json}");
+
+        // With a class → recorded and round-trips.
+        let typed = ArgSpec::new("who").class("https://schema.org/Person");
+        assert_eq!(typed.class.as_deref(), Some("https://schema.org/Person"));
+        assert_eq!(
+            serde_json::from_str::<ArgSpec>(&serde_json::to_string(&typed).unwrap()).unwrap(),
+            typed
+        );
+    }
+
+    #[test]
+    fn requires_is_empty_by_default_and_omitted_from_json() {
+        let d = Description::new("toUpper").output("text/plain");
+        assert!(d.requires.is_empty());
+        // A no-authority endpoint carries no `requires` key — JSON contract unchanged.
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("requires"), "{json}");
+
+        // Declared capability scopes accumulate and round-trip.
+        let gated = Description::new("httpGet")
+            .verb(Verb::Source)
+            .requires("cap:net")
+            .requires("cap:fs:read");
+        assert_eq!(gated.requires, vec!["cap:net", "cap:fs:read"]);
+        assert_eq!(
+            serde_json::from_str::<Description>(&serde_json::to_string(&gated).unwrap()).unwrap(),
+            gated
+        );
+    }
+
+    #[test]
+    fn a_plain_descriptions_json_is_byte_identical_to_before_these_fields() {
+        // Belt-and-suspenders: an endpoint using neither new field serializes with exactly
+        // the pre-existing keys — so the engine's machine contract is untouched.
+        let d = Description::new("toUpper")
+            .title("Upper-case")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("in"))
+            .output("text/plain");
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(
+            !json.contains("class") && !json.contains("requires"),
+            "{json}"
+        );
     }
 }
