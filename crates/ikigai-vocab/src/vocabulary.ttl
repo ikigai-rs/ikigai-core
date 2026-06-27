@@ -63,7 +63,7 @@ ik:output a rdf:Property ;
 ik:input a rdf:Property ;
     rdfs:domain ik:Endpoint ;
     rdfs:label "input" ;
-    rdfs:comment "A named input the endpoint accepts; the value is a blank node with ik:inputName, ik:source, ik:required, and optionally ik:summary." .
+    rdfs:comment "A named input the endpoint accepts; the value is a blank node with ik:inputName, ik:source, ik:required, and optionally ik:summary and ik:class." .
 
 ik:inputName a rdf:Property ;
     rdfs:range xsd:string ;
@@ -91,3 +91,14 @@ ik:transreptsTo a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "transreptsTo" ;
     rdfs:comment "A media type this transreptor can produce (convert to)." .
+
+ik:class a rdf:Property ;
+    rdfs:range rdfs:Class ;
+    rdfs:label "class" ;
+    rdfs:comment "The RDF class an input's value is expected to be (an IRI), on an input blank node. Drives type-based action selection: an endpoint whose required inputs' classes are present can be offered for those entities." .
+
+ik:requires a rdf:Property ;
+    rdfs:domain ik:Endpoint ;
+    rdfs:range xsd:string ;
+    rdfs:label "requires" ;
+    rdfs:comment "A capability scope invoking the endpoint requires (a descriptive label such as \"cap:net\"), not a runtime capability. Lets a host project a capability-scoped catalog and pre-check feasibility." .

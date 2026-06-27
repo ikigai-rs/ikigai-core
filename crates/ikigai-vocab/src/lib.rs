@@ -103,6 +103,15 @@ pub fn to_turtle(description: &Description) -> String {
             .join(", ");
         predicates.push(format!("ik:output {outputs}"));
     }
+    if !description.requires.is_empty() {
+        let reqs = description
+            .requires
+            .iter()
+            .map(|c| lit(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        predicates.push(format!("ik:requires {reqs}"));
+    }
     if let Some(t) = description.transreption() {
         if !t.from.is_empty() {
             let from = t.from.iter().map(|m| lit(m)).collect::<Vec<_>>().join(", ");
@@ -122,6 +131,10 @@ pub fn to_turtle(description: &Description) -> String {
         );
         if !input.summary.is_empty() {
             node.push_str(&format!(" ; ik:summary {}", lit(&input.summary)));
+        }
+        if let Some(class) = &input.class {
+            // The declared RDF class is an IRI — emit it as a resource, not a literal.
+            node.push_str(&format!(" ; ik:class <{class}>"));
         }
         node.push_str(" ]");
         predicates.push(format!("ik:input {node}"));
@@ -248,6 +261,27 @@ mod tests {
         assert!(ttl.contains("ik:source \"argument\""));
         assert!(ttl.contains("ik:required true"));
         assert!(ttl.trim_end().ends_with('.'));
+    }
+
+    #[test]
+    fn projects_typed_inputs_and_required_capabilities() {
+        let d = Description::new("schedule")
+            .verb(Verb::Source)
+            .requires("cap:net")
+            .input(ArgSpec::new("who").class("https://schema.org/Person"))
+            .input(ArgSpec::new("content")); // untyped → no ik:class
+        let ttl = to_turtle(&d);
+        // Endpoint-level required capability scope.
+        assert!(ttl.contains("ik:requires \"cap:net\""), "{ttl}");
+        // The typed input carries its RDF class as an IRI (resource, not a literal).
+        assert!(
+            ttl.contains("ik:class <https://schema.org/Person>"),
+            "{ttl}"
+        );
+        // The untyped input has no ik:class.
+        assert_eq!(ttl.matches("ik:class").count(), 1, "{ttl}");
+        // No `requires` triple when none declared.
+        assert!(!to_turtle(&sample()).contains("ik:requires"));
     }
 
     #[test]
