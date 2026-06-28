@@ -759,6 +759,24 @@ impl Kernel {
             // entities, what can I do with them?" (see [`crate::select_action`]). One endpoint
             // IRI per line, so it pipes into a `..` map. Cacheable like the catalog (a pure
             // function of the binding set + `types`).
+            // `describe urn:kernel:actions` — the selector's self-description, so the
+            // engine routes `types=` (it only names *declared* inputs) and the resource is
+            // introspectable like any bound endpoint. Rendered on this sync path in its
+            // canonical forms (JSON for the engine, Turtle for `describe`); the async
+            // transrept-to-other-types route the normal Meta path uses isn't available here,
+            // so any other requested type falls back to canonical Turtle.
+            ("actions", Verb::Meta) => {
+                let renderer = self
+                    .meta
+                    .as_ref()
+                    .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
+                let description = actions_description();
+                let target = meta_target(request);
+                let repr = renderer
+                    .render(&description, &target)
+                    .or_else(|_| renderer.render(&description, &ReprType::new("text/turtle")))?;
+                Ok(repr.cacheable())
+            }
             ("actions", Verb::Source) => {
                 require_cap(capability, "urn:cap:kernel:inspect")?;
                 let types_arg = kernel_arg(request, "types")
@@ -913,6 +931,24 @@ fn require_cap(capability: &Capability, scope: &str) -> Result<()> {
 }
 
 /// An inline argument of a kernel request, decoded as UTF-8.
+/// Self-description of the `urn:kernel:actions` selector. Declares the `types` input so the
+/// engine routes `types=` (it only names *declared* inputs) and `describe urn:kernel:actions`
+/// works — surfacing typed action-selection like any bound endpoint.
+fn actions_description() -> Description {
+    use crate::describe::ArgSpec;
+    Description::new("kernel-actions")
+        .title("Action selection")
+        .summary(
+            "Given the RDF classes of the entities you have, list the endpoints whose required \
+             typed inputs are all satisfied — \"what can I do with these?\". One endpoint IRI \
+             per line; pipe into a `..` map to act on each.",
+        )
+        .verb(Verb::Source)
+        .verb(Verb::Meta)
+        .input(ArgSpec::new("types").summary("present RDF class IRIs, comma- or space-separated"))
+        .output("text/plain;charset=utf-8")
+}
+
 fn kernel_arg<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
     match request.args.get(name) {
         Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes).ok(),
@@ -1281,6 +1317,23 @@ mod tests {
             block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:actions")), &cap))
                 .unwrap_err();
         assert!(matches!(err, Error::MissingArgument(a) if a == "types"));
+    }
+
+    #[test]
+    fn actions_resource_describes_itself() {
+        // `describe urn:kernel:actions` resolves to the selector's self-description (id
+        // "kernel-actions") instead of erroring unresolved — so it's introspectable and the
+        // engine can route `types=` (it only names declared inputs).
+        let kernel = meta_kernel();
+        let turtle =
+            String::from_utf8(meta_as(&kernel, "urn:kernel:actions", "text/turtle").bytes).unwrap();
+        assert!(turtle.contains("kernel-actions"), "described: {turtle}");
+        // A type the renderer can't emit directly falls back to canonical Turtle — the async
+        // transrept-to-other-types route isn't available on the sync intrinsic path.
+        let fallback =
+            String::from_utf8(meta_as(&kernel, "urn:kernel:actions", "application/json").bytes)
+                .unwrap();
+        assert!(fallback.contains("kernel-actions"), "fell back: {fallback}");
     }
 
     #[test]
