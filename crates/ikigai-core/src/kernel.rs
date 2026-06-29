@@ -28,7 +28,7 @@
 //! `source urn:kernel:actions types=<classes>` lists the endpoints those typed entities
 //! could drive (selection as a resource).
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -172,6 +172,11 @@ pub struct Kernel {
     /// the cache; bounded to [`CONSTRAINT_WINDOW`]. `urn:kernel:*` introspection
     /// requests are not recorded (they short-circuit before the resolution body).
     constraint: Mutex<VecDeque<ResolutionSample>>,
+    /// `rdfs:subClassOf*` closure for type-aware [`select_action`](Self::select_action):
+    /// each class mapped to itself plus all its (transitive) superclasses. Set from a
+    /// vocabulary/alignment graph via [`with_subclass_axioms`](Self::with_subclass_axioms);
+    /// empty ⇒ exact-class matching (the default, no inference).
+    subclass_closure: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// How many recent resolutions `urn:kernel:constraint` aggregates over.
@@ -211,6 +216,7 @@ impl Kernel {
             span_counter: AtomicU64::new(0),
             scheduler: None,
             constraint: Mutex::new(VecDeque::new()),
+            subclass_closure: BTreeMap::new(),
         }
     }
 
@@ -229,6 +235,7 @@ impl Kernel {
             span_counter: AtomicU64::new(0),
             scheduler: None,
             constraint: Mutex::new(VecDeque::new()),
+            subclass_closure: BTreeMap::new(),
         }
     }
 
@@ -240,11 +247,69 @@ impl Kernel {
         crate::select::select_transreptor(self.root.as_ref(), from, to)
     }
 
+    /// Install an `rdfs:subClassOf` axiom set — `(subclass, superclass)` IRI pairs, e.g.
+    /// from a vocabulary or alignment graph — so [`select_action`](Self::select_action)
+    /// reasons over the type hierarchy: an entity typed `foaf:Person` then satisfies an
+    /// action requiring `schema:Person` when `foaf:Person rdfs:subClassOf schema:Person`.
+    /// Builder; the transitive closure (each class → itself + all superclasses) is computed
+    /// once here. Without it, matching is exact-class (no inference).
+    pub fn with_subclass_axioms<I, A, B>(mut self, axioms: I) -> Self
+    where
+        I: IntoIterator<Item = (A, B)>,
+        A: Into<String>,
+        B: Into<String>,
+    {
+        // Direct sub → {super} adjacency, and the set of every class named.
+        let mut direct: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut classes: BTreeSet<String> = BTreeSet::new();
+        for (sub, sup) in axioms {
+            let (sub, sup) = (sub.into(), sup.into());
+            classes.insert(sub.clone());
+            classes.insert(sup.clone());
+            direct.entry(sub).or_default().insert(sup);
+        }
+        // Transitive closure incl. self: DFS up the hierarchy from each class (the visited
+        // set also guards against cycles).
+        let mut closure: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for class in &classes {
+            let mut supers = BTreeSet::new();
+            let mut stack = vec![class.clone()];
+            while let Some(c) = stack.pop() {
+                if supers.insert(c.clone()) {
+                    if let Some(parents) = direct.get(&c) {
+                        stack.extend(parents.iter().cloned());
+                    }
+                }
+            }
+            closure.insert(class.clone(), supers);
+        }
+        self.subclass_closure = closure;
+        self
+    }
+
     /// Find endpoints among this kernel's mounted endpoints whose required inputs are
     /// satisfiable by the RDF classes in `present` — the actions available given a set of
-    /// typed entities. See [`crate::select_action`].
+    /// typed entities. With an `rdfs:subClassOf` closure installed (see
+    /// [`with_subclass_axioms`](Self::with_subclass_axioms)) the present types are first
+    /// expanded through it, so a subclass satisfies an action requiring any of its
+    /// superclasses. See [`crate::select_action`].
     pub fn select_action(&self, present: &[&str]) -> Vec<ActionMatch> {
-        crate::select::select_action(self.root.as_ref(), present)
+        if self.subclass_closure.is_empty() {
+            return crate::select::select_action(self.root.as_ref(), present);
+        }
+        // Expand each present type to itself + its superclasses (rdfs:subClassOf*); an
+        // unknown type maps to just itself.
+        let mut expanded: BTreeSet<String> = BTreeSet::new();
+        for &p in present {
+            match self.subclass_closure.get(p) {
+                Some(supers) => expanded.extend(supers.iter().cloned()),
+                None => {
+                    expanded.insert(p.to_string());
+                }
+            }
+        }
+        let refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
+        crate::select::select_action(self.root.as_ref(), &refs)
     }
 
     /// Render `description` to `target` by transrepting its canonical Turtle: render the
@@ -1317,6 +1382,50 @@ mod tests {
             block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:actions")), &cap))
                 .unwrap_err();
         assert!(matches!(err, Error::MissingArgument(a) if a == "types"));
+    }
+
+    #[test]
+    fn select_action_reasons_over_subclass_axioms() {
+        // greet requires a schema:Person. With foaf:Person rdfs:subClassOf schema:Person
+        // installed, an entity typed foaf:Person satisfies it — the RDFS inference bridge.
+        const FOAF_PERSON: &str = "http://xmlns.com/foaf/0.1/Person";
+        const SCHEMA_PERSON: &str = "https://schema.org/Person";
+        // EndpointSpace isn't Clone, so build a fresh one per kernel.
+        let space = || {
+            let greet = FnEndpoint::new("greet", |_inv| {
+                Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+            })
+            .with_description(
+                Description::new("greet")
+                    .verb(Verb::Source)
+                    .input(crate::describe::ArgSpec::new("who").class(SCHEMA_PERSON)),
+            );
+            Arc::new(EndpointSpace::new().bind(Exact::new("urn:demo:greet"), greet))
+                as Arc<dyn Space>
+        };
+
+        // Without the axiom: foaf:Person matches nothing (exact-class only).
+        assert!(
+            Kernel::new(space())
+                .select_action(&[FOAF_PERSON])
+                .is_empty(),
+            "no axioms ⇒ exact-class only"
+        );
+
+        // With the axiom: foaf:Person ⊑ schema:Person ⇒ greet is satisfiable.
+        let reasoning = Kernel::new(space()).with_subclass_axioms([(FOAF_PERSON, SCHEMA_PERSON)]);
+        assert!(
+            reasoning
+                .select_action(&[FOAF_PERSON])
+                .iter()
+                .any(|m| m.endpoint == "urn:demo:greet"),
+            "foaf:Person should satisfy a schema:Person action via subClassOf"
+        );
+        // The direct type still matches too.
+        assert!(reasoning
+            .select_action(&[SCHEMA_PERSON])
+            .iter()
+            .any(|m| m.endpoint == "urn:demo:greet"));
     }
 
     #[test]
