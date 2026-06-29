@@ -1429,6 +1429,37 @@ mod tests {
     }
 
     #[test]
+    fn subclass_closure_is_transitive_over_many_axioms() {
+        // Multiple axioms incl. a chain foaf:Person ⊑ schema:Person ⊑ schema:Thing: an
+        // action requiring schema:Thing is reachable from a foaf:Person entity two hops up.
+        const FOAF_PERSON: &str = "http://xmlns.com/foaf/0.1/Person";
+        const SCHEMA_PERSON: &str = "https://schema.org/Person";
+        const SCHEMA_THING: &str = "https://schema.org/Thing";
+        let space = || {
+            let anything = FnEndpoint::new("anything", |_inv| {
+                Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+            })
+            .with_description(
+                Description::new("anything")
+                    .verb(Verb::Source)
+                    .input(crate::describe::ArgSpec::new("it").class(SCHEMA_THING)),
+            );
+            Arc::new(EndpointSpace::new().bind(Exact::new("urn:demo:anything"), anything))
+                as Arc<dyn Space>
+        };
+        let kernel = Kernel::new(space())
+            .with_subclass_axioms([(FOAF_PERSON, SCHEMA_PERSON), (SCHEMA_PERSON, SCHEMA_THING)]);
+        // Two hops: foaf:Person ⊑ schema:Person ⊑ schema:Thing.
+        assert!(
+            kernel
+                .select_action(&[FOAF_PERSON])
+                .iter()
+                .any(|m| m.endpoint == "urn:demo:anything"),
+            "transitive closure should reach schema:Thing from foaf:Person"
+        );
+    }
+
+    #[test]
     fn actions_resource_describes_itself() {
         // `describe urn:kernel:actions` resolves to the selector's self-description (id
         // "kernel-actions") instead of erroring unresolved — so it's introspectable and the
