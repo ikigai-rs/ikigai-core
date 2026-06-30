@@ -196,6 +196,9 @@ struct ResolutionSample {
 /// was stored. The entry is valid only while every thread is still at that
 /// generation — cut any of them and it's stale.
 struct CacheEntry {
+    /// The IRI of the request that produced this entry — kept so `urn:kernel:cache`
+    /// can name what's cached (the cache is otherwise keyed by a content hash).
+    target: String,
     representation: Representation,
     edges: Vec<(Thread, u64)>,
 }
@@ -525,6 +528,7 @@ impl Kernel {
                 self.cache.lock().expect("cache lock").insert(
                     (id, cap_key),
                     CacheEntry {
+                        target: request.target.as_str().to_string(),
                         representation: representation.clone(),
                         edges,
                     },
@@ -644,6 +648,7 @@ impl Kernel {
             self.cache.lock().expect("cache lock").insert(
                 (id, cap_key),
                 CacheEntry {
+                    target: request.target.as_str().to_string(),
                     representation: representation.clone(),
                     edges,
                 },
@@ -736,11 +741,45 @@ impl Kernel {
                 self.cut(thread);
                 Ok(kernel_text(format!("cut {thread}\n")))
             }
-            // Inspect the cache (entry count).
+            // Inspect the cache: a count, then one line per entry — the IRI it was
+            // resolved from, its representation type and size, and how many golden
+            // threads it depends on (cut any of them and this entry recomputes).
             ("cache", Verb::Source) => {
                 require_cap(capability, "urn:cap:kernel:inspect")?;
-                let entries = self.cache.lock().expect("cache lock").len();
-                Ok(kernel_text(format!("cache\n  entries  {entries}\n")))
+                let mut rows: Vec<(String, String, usize, usize)> = {
+                    let cache = self.cache.lock().expect("cache lock");
+                    cache
+                        .values()
+                        .map(|e| {
+                            (
+                                e.target.clone(),
+                                e.representation.repr_type.media_type.clone(),
+                                e.representation.bytes.len(),
+                                e.edges.len(),
+                            )
+                        })
+                        .collect()
+                };
+                rows.sort();
+                let mut body = format!("cache\n  entries  {}\n", rows.len());
+                let width = rows
+                    .iter()
+                    .map(|r| r.0.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .min(48);
+                for (target, media, size, deps) in rows {
+                    let deps = if deps == 1 {
+                        "1 thread".to_string()
+                    } else {
+                        format!("{deps} threads")
+                    };
+                    let size = human_size(size);
+                    body.push_str(&format!(
+                        "  {target:<width$}  {media:<24}  {size:>9}  {deps}\n"
+                    ));
+                }
+                Ok(kernel_text(body))
             }
             // Inspect the golden threads that have been cut, and how many times.
             ("threads", Verb::Source) => {
@@ -1027,6 +1066,17 @@ fn kernel_text(body: String) -> Representation {
         ReprType::new("text/plain").with_param("charset", "utf-8"),
         body.into_bytes(),
     )
+}
+
+/// A short human-readable byte size (`512 B`, `1.5 KB`, `2.0 MB`) for the cache readout.
+fn human_size(n: usize) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    }
 }
 
 /// The representation type a `Meta` request asks for: the `as` inline argument
@@ -2053,6 +2103,33 @@ mod tests {
 
         block_on(kernel.issue(read(), &cap)).unwrap();
         assert_eq!(CALLS.load(Ordering::SeqCst), 2, "recomputed after the cut");
+    }
+
+    #[test]
+    fn cache_readout_lists_each_entry_with_iri_type_and_threads() {
+        let ep = FnEndpoint::new("x", |_cx: &Invocation<'_>| {
+            Ok(
+                Representation::new(ReprType::new("text/plain"), b"hello".to_vec())
+                    .cacheable()
+                    .depends_on("urn:data:x"),
+            )
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:data:x"), ep),
+        ));
+        let cap = Capability::root();
+        block_on(kernel.issue(Request::new(Verb::Source, iri("urn:data:x")), &cap)).unwrap();
+        let out = block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:cache")), &cap))
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.bytes);
+        assert!(text.contains("entries  1"), "count: {text}");
+        assert!(text.contains("urn:data:x"), "names the IRI: {text}");
+        assert!(text.contains("text/plain"), "names the type: {text}");
+        assert!(text.contains("5 B"), "names the size: {text}");
+        assert!(
+            text.contains("1 thread"),
+            "names the dependency count: {text}"
+        );
     }
 
     #[test]
