@@ -29,13 +29,24 @@ pub struct ArgSpec {
     /// Whether the value arrives as a by-value argument or a grammar binding.
     #[serde(default)]
     pub source: InputSource,
-    /// The RDF class this input's value is expected to be, as an IRI (e.g.
-    /// `https://schema.org/Person`). Optional; when present it lets selection match an
-    /// endpoint to the *types* available in a context — "what can I do with these entities?"
-    /// (`select_action`) — the same way `transreptsFrom`/`To` drives transreptor selection.
-    /// Omitted from serialized output when absent, so existing JSON contracts are unchanged.
+    /// The RDF class OR datatype this input's value is expected to be, as an IRI: an
+    /// `rdfs:Class` for entity-valued inputs (e.g. `https://schema.org/Person`), an XSD
+    /// datatype for scalars (e.g. `xsd:dateTime`). Optional; when present it lets selection
+    /// match an endpoint to the *types* available in a context — "what can I do with these
+    /// entities?" (`select_action`) — the same way `transreptsFrom`/`To` drives transreptor
+    /// selection. Omitted from serialized output when absent, so existing JSON contracts are
+    /// unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
+    /// The value assumed when the argument is omitted. Omitted from serialized output when
+    /// absent, so existing JSON contracts are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// The closed set of accepted values, when the argument is an enumeration (e.g.
+    /// `mode=added|removed`). Empty = open-valued. Omitted from serialized output when
+    /// empty, so existing JSON contracts are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub one_of: Vec<String>,
 }
 
 impl ArgSpec {
@@ -47,6 +58,8 @@ impl ArgSpec {
             required: true,
             source: InputSource::Argument,
             class: None,
+            default: None,
+            one_of: Vec::new(),
         }
     }
 
@@ -63,6 +76,21 @@ impl ArgSpec {
         self
     }
 
+    /// Declare the value assumed when the argument is omitted (builder). Implies the
+    /// argument is optional.
+    pub fn default_value(mut self, value: impl Into<String>) -> Self {
+        self.default = Some(value.into());
+        self.required = false;
+        self
+    }
+
+    /// Declare the closed set of accepted values (builder) — e.g. `["added", "removed"]`
+    /// for a `mode=` argument.
+    pub fn one_of(mut self, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.one_of = values.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// Mark the argument optional (builder).
     pub fn optional(mut self) -> Self {
         self.required = false;
@@ -73,6 +101,72 @@ impl ArgSpec {
     /// resolving grammar rather than passed as a by-value argument (builder).
     pub fn binding(mut self) -> Self {
         self.source = InputSource::Binding;
+        self
+    }
+}
+
+/// One verb's contract on an endpoint: the inputs it reads, the outputs it can produce,
+/// and the capability scopes invoking it requires. The **action** — an (endpoint, verb)
+/// pair — is the unit of selection: a calendar endpoint's `Source` (read, under a read
+/// capability) and `Sink` (write, different arguments, write capability) are different
+/// actions with different contracts.
+///
+/// Most endpoints never construct one: a single-verb endpoint's flat
+/// [`Description`] fields ARE its action spec, and [`Description::action_specs`]
+/// synthesizes the per-verb view. Declare explicit `ActionSpec`s only when verbs
+/// genuinely differ.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionSpec {
+    /// The verb this contract applies to.
+    pub verb: Verb,
+    /// A short human summary of what this verb does on this endpoint (optional).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+    /// The named inputs this verb reads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<ArgSpec>,
+    /// The representation types this verb can produce.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<String>,
+    /// The capability scopes invoking this verb requires (IRIs like
+    /// `urn:cap:personal:calendar:write`, or legacy descriptive labels).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+}
+
+impl ActionSpec {
+    /// An action spec for the given verb.
+    pub fn new(verb: Verb) -> Self {
+        ActionSpec {
+            verb,
+            summary: String::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            requires: Vec::new(),
+        }
+    }
+
+    /// Set the summary (builder).
+    pub fn summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = summary.into();
+        self
+    }
+
+    /// Declare an input (builder).
+    pub fn input(mut self, input: ArgSpec) -> Self {
+        self.inputs.push(input);
+        self
+    }
+
+    /// Declare an output media type (builder).
+    pub fn output(mut self, media_type: impl Into<String>) -> Self {
+        self.outputs.push(media_type.into());
+        self
+    }
+
+    /// Declare a required capability scope (builder).
+    pub fn requires(mut self, capability: impl Into<String>) -> Self {
+        self.requires.push(capability.into());
         self
     }
 }
@@ -108,6 +202,13 @@ pub struct Description {
     /// empty, so existing JSON contracts are unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
+    /// Per-verb contracts, for endpoints whose verbs genuinely differ (a calendar's Source
+    /// vs Sink). An explicit action WINS over the flat fields for its verb; verbs with no
+    /// explicit action get one synthesized from the flat fields
+    /// ([`action_specs`](Self::action_specs)). Empty for the common single-verb endpoint;
+    /// omitted from serialized output when empty, so existing JSON contracts are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionSpec>,
 }
 
 /// What *kind* of endpoint this is — a first-class type that projects to an RDF class
@@ -199,6 +300,42 @@ impl Description {
         self
     }
 
+    /// Declare a per-verb contract (builder). The verb is added to
+    /// [`verbs`](Self::verbs) if not already declared.
+    pub fn action(mut self, action: ActionSpec) -> Self {
+        if !self.verbs.contains(&action.verb) {
+            self.verbs.push(action.verb);
+        }
+        self.actions.push(action);
+        self
+    }
+
+    /// The normalized per-verb view: one [`ActionSpec`] per declared verb (Meta excluded —
+    /// every endpoint answers Meta with this description; it is not a selectable action).
+    /// An explicitly declared action wins for its verb; any other verb gets a spec
+    /// synthesized from the flat `inputs`/`outputs`/`requires` fields — so the two
+    /// authoring forms normalize to the same view, and catalog consumers never know which
+    /// form authored an endpoint.
+    pub fn action_specs(&self) -> Vec<ActionSpec> {
+        self.verbs
+            .iter()
+            .filter(|v| **v != Verb::Meta)
+            .map(|verb| {
+                self.actions
+                    .iter()
+                    .find(|a| a.verb == *verb)
+                    .cloned()
+                    .unwrap_or_else(|| ActionSpec {
+                        verb: *verb,
+                        summary: String::new(),
+                        inputs: self.inputs.clone(),
+                        outputs: self.outputs.clone(),
+                        requires: self.requires.clone(),
+                    })
+            })
+            .collect()
+    }
+
     /// Mark this endpoint a **transreptor** that converts representations from any of `from`
     /// to any of `to` (media-type strings) — builder. Sets [`EndpointKind::Transreptor`].
     pub fn transreptor(
@@ -226,6 +363,42 @@ impl Description {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_specs_normalize_both_authoring_forms() {
+        // flat single-verb: the flat fields ARE the (synthesized) action
+        let flat = Description::new("toUpper")
+            .verb(Verb::Source)
+            .verb(Verb::Meta) // Meta is universal, never a selectable action
+            .input(ArgSpec::new("in"))
+            .output("text/plain")
+            .requires("cap:demo");
+        let specs = flat.action_specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].verb, Verb::Source);
+        assert_eq!(specs[0].inputs[0].name, "in");
+        assert_eq!(specs[0].requires, vec!["cap:demo".to_string()]);
+
+        // explicit action WINS for its verb; other declared verbs synthesize
+        let mixed = Description::new("calendar")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("calendar").optional()) // flat = Source's shape
+            .action(
+                ActionSpec::new(Verb::Sink)
+                    .requires("urn:cap:personal:calendar:write")
+                    .input(ArgSpec::new("start")),
+            );
+        assert!(
+            mixed.verbs.contains(&Verb::Sink),
+            ".action() declares its verb"
+        );
+        let specs = mixed.action_specs();
+        assert_eq!(specs.len(), 2);
+        let sink = specs.iter().find(|a| a.verb == Verb::Sink).unwrap();
+        assert_eq!(sink.inputs[0].name, "start", "explicit action wins");
+        let source = specs.iter().find(|a| a.verb == Verb::Source).unwrap();
+        assert_eq!(source.inputs[0].name, "calendar", "synthesized from flat");
+    }
 
     #[test]
     fn builds_a_description() {

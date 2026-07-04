@@ -42,6 +42,16 @@ ik:title a rdf:Property ;
     rdfs:label "title" ;
     rdfs:comment "A short human title for the endpoint." .
 
+ik:Action a rdfs:Class ;
+    rdfs:label "Action" ;
+    rdfs:comment "One verb's contract on an endpoint — the (endpoint, verb) pair is the unit of selection. Carries its own ik:verb, ik:input set, ik:output set, and ik:requires capability scopes. Normalized from the endpoint description: single-verb endpoints' flat declarations synthesize one, per-verb declarations author them explicitly." .
+
+ik:action a rdf:Property ;
+    rdfs:domain ik:Endpoint ;
+    rdfs:range ik:Action ;
+    rdfs:label "action" ;
+    rdfs:comment "Links an endpoint to one of its per-verb contracts." .
+
 ik:summary a rdf:Property ;
     rdfs:domain ik:Endpoint ;
     rdfs:range xsd:string ;
@@ -63,7 +73,7 @@ ik:output a rdf:Property ;
 ik:input a rdf:Property ;
     rdfs:domain ik:Endpoint ;
     rdfs:label "input" ;
-    rdfs:comment "A named input the endpoint accepts; the value is a blank node with ik:inputName, ik:source, ik:required, and optionally ik:summary and ik:class." .
+    rdfs:comment "A named input the endpoint (or one of its ik:Action nodes) accepts; the value node carries ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, and ik:oneOf." .
 
 ik:inputName a rdf:Property ;
     rdfs:range xsd:string ;
@@ -93,15 +103,22 @@ ik:transreptsTo a rdf:Property ;
     rdfs:comment "A media type this transreptor can produce (convert to)." .
 
 ik:class a rdf:Property ;
-    rdfs:range rdfs:Class ;
     rdfs:label "class" ;
-    rdfs:comment "The RDF class an input's value is expected to be (an IRI), on an input blank node. Drives type-based action selection: an endpoint whose required inputs' classes are present can be offered for those entities." .
+    rdfs:comment "The RDF class or XSD datatype an input's value is expected to be (an IRI), on an input node — rdfs:Class for entity-valued inputs, xsd datatype for scalars. Drives type-based action selection: an endpoint whose required inputs' classes are present can be offered for those entities." .
+
+ik:default a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "default" ;
+    rdfs:comment "The value an input assumes when omitted." .
+
+ik:oneOf a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "oneOf" ;
+    rdfs:comment "One accepted value of an enumerated input (repeated per value); absent = open-valued." .
 
 ik:requires a rdf:Property ;
-    rdfs:domain ik:Endpoint ;
-    rdfs:range xsd:string ;
     rdfs:label "requires" ;
-    rdfs:comment "A capability scope invoking the endpoint requires (a descriptive label such as \"cap:net\"), not a runtime capability. Lets a host project a capability-scoped catalog and pre-check feasibility." .
+    rdfs:comment "A capability scope invoking the endpoint (or one of its ik:Action nodes) requires — a capability IRI such as urn:cap:personal:calendar:write, or a legacy descriptive label. Descriptive, not a runtime capability; selection uses it to project a capability-scoped catalog (an agent only sees actions its capability satisfies), and enforcement at invoke time is the authority." .
 
 # ---- events (the calendar/agenda event graph) --------------------------------
 # Events themselves are typed with the iCalendar vocabulary

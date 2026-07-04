@@ -63,6 +63,57 @@ fn source_name(source: InputSource) -> &'static str {
     }
 }
 
+/// A capability scope is an IRI when it looks like one (`urn:…`, `http(s)://…`) — emitted
+/// as a resource so selection can join on it — else a legacy descriptive label (literal).
+fn cap_term(scope: &str) -> String {
+    if scope.starts_with("urn:") || scope.starts_with("http://") || scope.starts_with("https://") {
+        format!("<{scope}>")
+    } else {
+        lit(scope)
+    }
+}
+
+/// The predicates of one input node (shared by the endpoint-level and action-level forms).
+fn input_predicates(input: &ikigai_core::ArgSpec) -> String {
+    let mut node = format!(
+        "ik:inputName {} ;
+    ik:source {} ;
+    ik:required {}",
+        lit(&input.name),
+        lit(source_name(input.source)),
+        input.required
+    );
+    if !input.summary.is_empty() {
+        node.push_str(&format!(
+            " ;
+    ik:summary {}",
+            lit(&input.summary)
+        ));
+    }
+    if let Some(class) = &input.class {
+        // The declared class/datatype is an IRI — emit it as a resource, not a literal.
+        node.push_str(&format!(
+            " ;
+    ik:class <{class}>"
+        ));
+    }
+    if let Some(default) = &input.default {
+        node.push_str(&format!(
+            " ;
+    ik:default {}",
+            lit(default)
+        ));
+    }
+    for value in &input.one_of {
+        node.push_str(&format!(
+            " ;
+    ik:oneOf {}",
+            lit(value)
+        ));
+    }
+    node
+}
+
 /// Render a [`Description`] as a Turtle document using the ikigai vocabulary.
 pub fn to_turtle(description: &Description) -> String {
     // `id` is a resource identifier (no Turtle-significant characters).
@@ -107,7 +158,7 @@ pub fn to_turtle(description: &Description) -> String {
         let reqs = description
             .requires
             .iter()
-            .map(|c| lit(c))
+            .map(|c| cap_term(c))
             .collect::<Vec<_>>()
             .join(", ");
         predicates.push(format!("ik:requires {reqs}"));
@@ -122,28 +173,59 @@ pub fn to_turtle(description: &Description) -> String {
             predicates.push(format!("ik:transreptsTo {to}"));
         }
     }
+    // Flat inputs: skolemized under the endpoint (stable IRIs — catalogs SPARQL and
+    // diff cleanly; no blank nodes). Actions synthesized from the flat form REFERENCE
+    // these same nodes, so the spec body is stated once.
+    let endpoint_iri = format!("urn:ikigai:endpoint:{}", description.id);
+    let mut extra_nodes: Vec<String> = Vec::new();
     for input in &description.inputs {
-        let mut node = format!(
-            "[ ik:inputName {} ; ik:source {} ; ik:required {}",
-            lit(&input.name),
-            lit(source_name(input.source)),
-            input.required
-        );
-        if !input.summary.is_empty() {
-            node.push_str(&format!(" ; ik:summary {}", lit(&input.summary)));
-        }
-        if let Some(class) = &input.class {
-            // The declared RDF class is an IRI — emit it as a resource, not a literal.
-            node.push_str(&format!(" ; ik:class <{class}>"));
-        }
-        node.push_str(" ]");
-        predicates.push(format!("ik:input {node}"));
+        let node_iri = format!("{endpoint_iri}:input:{}", input.name);
+        predicates.push(format!("ik:input <{node_iri}>"));
+        extra_nodes.push(format!("<{node_iri}> {} .", input_predicates(input)));
     }
 
-    format!(
+    // The per-verb ACTION view — the unit of selection. One ik:Action node per
+    // non-Meta verb, normalized from either authoring form (explicit ActionSpec
+    // wins; flat fields synthesize the rest), so catalog consumers never know
+    // which form authored an endpoint.
+    for action in description.action_specs() {
+        let verb = verb_name(action.verb);
+        let action_iri = format!("{endpoint_iri}:action:{}", verb.to_lowercase());
+        predicates.push(format!("ik:action <{action_iri}>"));
+        let mut preds: Vec<String> =
+            vec!["a ik:Action".to_string(), format!("ik:verb {}", lit(verb))];
+        if !action.summary.is_empty() {
+            preds.push(format!("ik:summary {}", lit(&action.summary)));
+        }
+        for output in &action.outputs {
+            preds.push(format!("ik:output {}", lit(output)));
+        }
+        for cap in &action.requires {
+            preds.push(format!("ik:requires {}", cap_term(cap)));
+        }
+        let synthesized = !description.actions.iter().any(|a| a.verb == action.verb);
+        for input in &action.inputs {
+            let node_iri = if synthesized {
+                // the flat input node already emitted above — reference it
+                format!("{endpoint_iri}:input:{}", input.name)
+            } else {
+                let iri = format!("{action_iri}:input:{}", input.name);
+                extra_nodes.push(format!("<{iri}> {} .", input_predicates(input)));
+                iri
+            };
+            preds.push(format!("ik:input <{node_iri}>"));
+        }
+        extra_nodes.push(format!("<{action_iri}> {} .", preds.join(" ;\n    ")));
+    }
+
+    let mut ttl = format!(
         "@prefix ik: <{NS}> .\n\n{subject} {} .\n",
         predicates.join(" ;\n    ")
-    )
+    );
+    for node in extra_nodes {
+        ttl.push_str(&format!("\n{node}\n"));
+    }
+    ttl
 }
 
 /// Render a [`Description`] as a `text/turtle` [`Representation`].
@@ -261,6 +343,97 @@ mod tests {
         assert!(ttl.contains("ik:source \"argument\""));
         assert!(ttl.contains("ik:required true"));
         assert!(ttl.trim_end().ends_with('.'));
+    }
+
+    #[test]
+    fn a_multi_verb_endpoint_projects_per_verb_actions() {
+        // The design's worked example: a calendar whose Source (read cap, read args)
+        // and Sink (write cap, write args) are DIFFERENT actions.
+        use ikigai_core::ActionSpec;
+        let d = Description::new("personal-calendar")
+            .action(
+                ActionSpec::new(Verb::Source)
+                    .requires("urn:cap:personal:calendar:read:detail")
+                    .output("text/turtle")
+                    .input(ArgSpec::new("calendar").optional()),
+            )
+            .action(
+                ActionSpec::new(Verb::Sink)
+                    .requires("urn:cap:personal:calendar:write")
+                    .input(
+                        ArgSpec::new("start")
+                            .class("http://www.w3.org/2001/XMLSchema#dateTime")
+                            .summary("event start"),
+                    )
+                    .input(ArgSpec::new("alert").optional()),
+            );
+        let ttl = to_turtle(&d);
+        // skolemized action nodes, typed and linked
+        assert!(ttl.contains("ik:action <urn:ikigai:endpoint:personal-calendar:action:source>"));
+        assert!(
+            ttl.contains("<urn:ikigai:endpoint:personal-calendar:action:sink> a ik:Action"),
+            "{ttl}"
+        );
+        // capability IRIs are resources, not literals
+        assert!(
+            ttl.contains("ik:requires <urn:cap:personal:calendar:write>"),
+            "{ttl}"
+        );
+        assert!(
+            !ttl.contains("\"urn:cap:"),
+            "cap IRIs must not be literals: {ttl}"
+        );
+        // action-scoped skolemized inputs with datatype
+        assert!(ttl.contains(
+            "<urn:ikigai:endpoint:personal-calendar:action:sink:input:start> ik:inputName \"start\""
+        ));
+        assert!(ttl.contains("ik:class <http://www.w3.org/2001/XMLSchema#dateTime>"));
+        // the Sink action does not carry the Source's args or cap
+        let sink = ttl
+            .split("action:sink> ")
+            .nth(1)
+            .unwrap()
+            .split(" .")
+            .next()
+            .unwrap();
+        assert!(
+            !sink.contains("calendar:read"),
+            "sink action carries only its own cap"
+        );
+    }
+
+    #[test]
+    fn a_single_verb_endpoint_synthesizes_its_action_from_flat_fields() {
+        // The 93% case: flat authoring IS the action spec — one ik:Action node,
+        // referencing the endpoint-level input nodes (no duplicated bodies).
+        let d = Description::new("toUpper")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("in").summary("the string"))
+            .output("text/plain");
+        let ttl = to_turtle(&d);
+        assert!(ttl.contains("<urn:ikigai:endpoint:toUpper:action:source> a ik:Action"));
+        // the synthesized action references the endpoint-level input node
+        assert!(
+            ttl.contains("ik:input <urn:ikigai:endpoint:toUpper:input:in>"),
+            "{ttl}"
+        );
+        // the input body is stated exactly once
+        assert_eq!(ttl.matches("ik:inputName \"in\"").count(), 1, "{ttl}");
+        // Meta is never a selectable action
+        assert!(!ttl.contains("action:meta"), "{ttl}");
+    }
+
+    #[test]
+    fn enumerated_inputs_project_default_and_one_of() {
+        let d = Description::new("diff").verb(Verb::Source).input(
+            ArgSpec::new("mode")
+                .one_of(["added", "removed"])
+                .default_value("added"),
+        );
+        let ttl = to_turtle(&d);
+        assert!(ttl.contains("ik:default \"added\""), "{ttl}");
+        assert!(ttl.contains("ik:oneOf \"added\""), "{ttl}");
+        assert!(ttl.contains("ik:oneOf \"removed\""), "{ttl}");
     }
 
     #[test]
