@@ -176,3 +176,8 @@ ik:routesTo a rdf:Property ;
     rdfs:range rdfs:Resource ;
     rdfs:label "routesTo" ;
     rdfs:comment "Where a facade resolves by default — e.g. urn:llm:ask routesTo the configured default backend." .
+
+ik:alert a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:label "alert" ;
+    rdfs:comment "An alarm on an event: minutes before the start (multi-valued — an event may alert at 60 and 1440). Sourced from an org :ALERT: property (\"1h 1d\") or a calendar alarm; changes flow through view derivation like any other edit." .
