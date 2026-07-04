@@ -102,3 +102,77 @@ ik:requires a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "requires" ;
     rdfs:comment "A capability scope invoking the endpoint requires (a descriptive label such as \"cap:net\"), not a runtime capability. Lets a host project a capability-scoped catalog and pre-check feasibility." .
+
+# ---- events (the calendar/agenda event graph) --------------------------------
+# Events themselves are typed with the iCalendar vocabulary
+# (http://www.w3.org/2002/12/cal/ical# — ical:Vevent, ical:uid, ical:summary,
+# ical:dtstart/dtend, ical:location); these terms carry what iCal doesn't.
+
+ik:calendar a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "calendar" ;
+    rdfs:comment "The source a calendar event came from — a native calendar's title (\"Bosatsu\") or an org file's short name (\"calendar.org\"). Provenance for consolidated views." .
+
+ik:allDay a rdf:Property ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "allDay" ;
+    rdfs:comment "Whether an event is all-day (date-valued rather than timed)." .
+
+# ---- LLM backends (the urn:llm trait graph) -----------------------------------
+
+ik:LlmBackend a rdfs:Class ;
+    rdfs:label "LlmBackend" ;
+    rdfs:comment "A configured LLM inference backend (one urn:llm:<provider>:ask), described by its trait profile so selection can be capability-based (\"a vision model with ≥32k context, not from this vendor\") rather than by name." .
+
+ik:model a rdf:Property ;
+    rdfs:domain ik:LlmBackend ;
+    rdfs:range xsd:string ;
+    rdfs:label "model" ;
+    rdfs:comment "The backend's default model id, e.g. \"llama3.2:3b\"." .
+
+ik:context a rdf:Property ;
+    rdfs:domain ik:LlmBackend ;
+    rdfs:range xsd:integer ;
+    rdfs:label "context" ;
+    rdfs:comment "The model's context window, in tokens." .
+
+ik:modality a rdf:Property ;
+    rdfs:domain ik:LlmBackend ;
+    rdfs:range xsd:string ;
+    rdfs:label "modality" ;
+    rdfs:comment "An input modality the model supports: \"text\", \"vision\", \"audio\"." .
+
+ik:tools a rdf:Property ;
+    rdfs:domain ik:LlmBackend ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "tools" ;
+    rdfs:comment "Whether the model supports tool / function calling." .
+
+ik:jsonMode a rdf:Property ;
+    rdfs:domain ik:LlmBackend ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "jsonMode" ;
+    rdfs:comment "Whether the model supports a structured-output (JSON) mode." .
+
+ik:cost a rdf:Property ;
+    rdfs:domain ik:LlmBackend ;
+    rdfs:range xsd:string ;
+    rdfs:label "cost" ;
+    rdfs:comment "The backend's cost tier: \"local\" < \"cheap\" < \"premium\". Selection policy is cheapest-that-fits." .
+
+ik:vendor a rdf:Property ;
+    rdfs:domain ik:LlmBackend ;
+    rdfs:range xsd:string ;
+    rdfs:label "vendor" ;
+    rdfs:comment "The service behind the endpoint (\"ollama\", \"openai\", \"anthropic\", \"mlx\") — the governance axis: a vendor!= requirement excludes it, and an undeclared vendor cannot pass the exclusion." .
+
+ik:params a rdf:Property ;
+    rdfs:domain ik:LlmBackend ;
+    rdfs:range xsd:string ;
+    rdfs:label "params" ;
+    rdfs:comment "Display-only parameter count, e.g. \"3B\", \"70B\"." .
+
+ik:routesTo a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "routesTo" ;
+    rdfs:comment "Where a facade resolves by default — e.g. urn:llm:ask routesTo the configured default backend." .
