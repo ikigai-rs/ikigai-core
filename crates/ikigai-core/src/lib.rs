@@ -61,7 +61,7 @@ pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};
 pub use select::{
     is_auto_invocable, select_action, select_action_in, select_transreptor, select_transreptor_in,
-    ActionMatch, TransreptionStep, CANONICAL,
+    ActionMatch, ActionQuery, TransreptionStep, CANONICAL,
 };
 pub use space::{
     EndpointSpace, Fallback, Mount, Resolution, Resolved, Rewrite, Scope, Space, SpaceEntry,
