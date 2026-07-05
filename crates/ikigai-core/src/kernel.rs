@@ -900,7 +900,11 @@ impl Kernel {
                 Ok(repr.cacheable())
             }
             ("actions", Verb::Source) => {
-                require_cap(capability, "urn:cap:kernel:inspect")?;
+                // NO inspect gate, deliberately: unlike the catalog (which discloses the
+                // whole kernel), the manifold is SELF-LIMITING — it only ever contains
+                // actions the asking capability can invoke. "What can I do?" must be
+                // answerable by any capability about itself; denying it just forces an
+                // attenuated agent into trial-and-error probing.
                 // Every axis optional: bare `urn:kernel:actions` is the caller's whole
                 // capability-scoped action manifold — "what can I do at all?".
                 let types_arg = kernel_arg(request, "types").unwrap_or_default();
@@ -1585,7 +1589,8 @@ mod tests {
         assert!(all.contains("cal:action:sink> a ik:ActionMatch"), "{all}");
         assert!(all.contains("ik:requires <urn:cap:cal:write>"), "{all}");
 
-        let reader = Capability::scoped(["urn:cap:kernel:inspect", "urn:cap:cal:read"]);
+        // No kernel:inspect in the scope — an agent may always read its OWN manifold.
+        let reader = Capability::scoped(["urn:cap:cal:read"]);
         let scoped = turtle(&reader);
         assert!(scoped.contains("cal:action:source>"), "{scoped}");
         assert!(
