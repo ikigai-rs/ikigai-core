@@ -139,12 +139,43 @@ pub fn select_transreptor_in(
     select_transreptor(root.as_ref(), from, to)
 }
 
-/// An endpoint whose required inputs are all satisfiable by a set of available RDF classes —
-/// an action you could take given the typed entities present in a context (a layer/canvas).
+/// One selected action — an (endpoint, verb) pair whose contract the query satisfied: its
+/// required capability scopes are allowed, its verb/output fit the asked-for shape, and its
+/// required typed inputs are satisfiable by the present RDF classes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionMatch {
-    /// The endpoint's IRI.
+    /// The endpoint's resolvable IRI (the bound pattern — what you invoke).
     pub endpoint: String,
+    /// The endpoint's description id (the catalog subject is `urn:ikigai:endpoint:{id}`).
+    pub id: String,
+    /// The matched verb.
+    pub verb: Verb,
+    /// The action node's catalog IRI (`urn:ikigai:endpoint:{id}:action:{verb}`) — joins
+    /// this match to the full contract in the catalog graph.
+    pub action: String,
+    /// The capability scopes the action requires (all satisfied by the query's capability).
+    pub requires: Vec<String>,
+    /// How many *optional typed* inputs the present classes could not fill — the v1
+    /// ranking: fewer = a better-fitted match.
+    pub missing_optional: usize,
+}
+
+/// A selection query — every axis optional, so the degenerate query lists the caller's
+/// whole capability-scoped action manifold ("what can I do at all?").
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ActionQuery<'a> {
+    /// RDF classes present in the context (entities you hold). Empty = no type filter.
+    pub present: &'a [&'a str],
+    /// Only actions with this verb.
+    pub verb: Option<Verb>,
+    /// Only actions that can produce this media type.
+    pub want: Option<&'a str>,
+    /// The caller's capability: actions whose `requires` it does not allow are NOT
+    /// offered. This is the same [`Capability::allows`](crate::Capability::allows) check
+    /// enforcement uses at invoke time — selection is a pre-flight of enforcement, never a
+    /// substitute — so an attenuated agent's manifold simply lacks what it may not do.
+    /// `None` = no capability filter (equivalent to root).
+    pub capability: Option<&'a crate::Capability>,
 }
 
 /// Find endpoints in `root` whose required inputs are *fully typed and satisfiable* by
@@ -157,29 +188,90 @@ pub struct ActionMatch {
 /// be driven from the present types alone), so it's excluded. Capability-scoping — offering
 /// only what the caller may invoke — composes on top and is **not** applied here.
 pub fn select_action(root: &dyn Space, present: &[&str]) -> Vec<ActionMatch> {
+    let query = ActionQuery {
+        present,
+        ..Default::default()
+    };
+    // The historical per-endpoint view: dedup the per-action matches by endpoint.
+    let mut matches = select_actions(root, &query);
+    let mut seen = std::collections::BTreeSet::new();
+    matches.retain(|m| seen.insert(m.endpoint.clone()));
+    matches
+}
+
+/// The action-level selection funnel: walk every bound endpoint's normalized per-verb
+/// contracts ([`Description::action_specs`]) and keep the actions the query satisfies —
+/// capability first (the caller never sees what it may not invoke), then verb, then the
+/// wanted output type, then type-satisfiability of required inputs. Ordered
+/// best-fitted-first ([`ActionMatch::missing_optional`], then endpoint/verb for
+/// determinism).
+pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch> {
     let mut matches = Vec::new();
     for entry in root.entries().unwrap_or_default() {
         let Ok(iri) = Iri::parse(&entry.pattern) else {
             continue;
         };
-        if let Resolution::Hit(resolved) =
+        let Resolution::Hit(resolved) =
             root.resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
-        {
-            if action_is_satisfiable(&resolved.endpoint.describe(), present) {
-                matches.push(ActionMatch {
-                    endpoint: entry.pattern.clone(),
-                });
+        else {
+            continue;
+        };
+        let description = resolved.endpoint.describe();
+        for action in description.action_specs() {
+            if let Some(verb) = query.verb {
+                if action.verb != verb {
+                    continue;
+                }
             }
+            if let Some(want) = query.want {
+                if !action.outputs.iter().any(|o| o == want) {
+                    continue;
+                }
+            }
+            if let Some(capability) = query.capability {
+                if !action.requires.iter().all(|scope| capability.allows(scope)) {
+                    continue;
+                }
+            }
+            if !query.present.is_empty() && !spec_satisfiable(&action, query.present) {
+                continue;
+            }
+            let missing_optional = action
+                .inputs
+                .iter()
+                .filter(|i| !i.required)
+                .filter(|i| {
+                    i.class
+                        .as_deref()
+                        .is_some_and(|c| !query.present.contains(&c))
+                })
+                .count();
+            let verb_name = format!("{:?}", action.verb).to_lowercase();
+            matches.push(ActionMatch {
+                endpoint: entry.pattern.clone(),
+                id: description.id.clone(),
+                verb: action.verb,
+                action: format!("urn:ikigai:endpoint:{}:action:{verb_name}", description.id),
+                requires: action.requires.clone(),
+                missing_optional,
+            });
         }
     }
+    matches.sort_by(|a, b| {
+        (a.missing_optional, &a.endpoint, a.verb as u8).cmp(&(
+            b.missing_optional,
+            &b.endpoint,
+            b.verb as u8,
+        ))
+    });
     matches
 }
 
-/// Whether every required input of `description` declares a class present in `present`, with
+/// Whether every required input of `action` declares a class present in `present`, with
 /// at least one required input (see [`select_action`]).
-fn action_is_satisfiable(description: &Description, present: &[&str]) -> bool {
+fn spec_satisfiable(action: &crate::describe::ActionSpec, present: &[&str]) -> bool {
     let mut has_required = false;
-    for input in description.inputs.iter().filter(|i| i.required) {
+    for input in action.inputs.iter().filter(|i| i.required) {
         has_required = true;
         match &input.class {
             Some(class) if present.contains(&class.as_str()) => {}

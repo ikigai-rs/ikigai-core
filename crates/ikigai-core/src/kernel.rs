@@ -297,11 +297,30 @@ impl Kernel {
     /// expanded through it, so a subclass satisfies an action requiring any of its
     /// superclasses. See [`crate::select_action`].
     pub fn select_action(&self, present: &[&str]) -> Vec<ActionMatch> {
+        let expanded = self.expand_present(present);
+        let refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
+        crate::select::select_action(self.root.as_ref(), &refs)
+    }
+
+    /// The action-level selection funnel over this kernel's bindings (see
+    /// [`crate::select::select_actions`]): capability-scoped, verb- and output-aware,
+    /// with the present types expanded through the `rdfs:subClassOf` closure first.
+    pub fn select_actions(&self, query: &crate::select::ActionQuery<'_>) -> Vec<ActionMatch> {
+        let expanded = self.expand_present(query.present);
+        let refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
+        let expanded_query = crate::select::ActionQuery {
+            present: &refs,
+            ..*query
+        };
+        crate::select::select_actions(self.root.as_ref(), &expanded_query)
+    }
+
+    /// Expand each present type to itself + its superclasses (`rdfs:subClassOf*`); an
+    /// unknown type maps to just itself. No closure installed ⇒ identity.
+    fn expand_present(&self, present: &[&str]) -> Vec<String> {
         if self.subclass_closure.is_empty() {
-            return crate::select::select_action(self.root.as_ref(), present);
+            return present.iter().map(|p| p.to_string()).collect();
         }
-        // Expand each present type to itself + its superclasses (rdfs:subClassOf*); an
-        // unknown type maps to just itself.
         let mut expanded: BTreeSet<String> = BTreeSet::new();
         for &p in present {
             match self.subclass_closure.get(p) {
@@ -311,8 +330,7 @@ impl Kernel {
                 }
             }
         }
-        let refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
-        crate::select::select_action(self.root.as_ref(), &refs)
+        expanded.into_iter().collect()
     }
 
     /// Render `description` to `target` by transrepting its canonical Turtle: render the
@@ -883,17 +901,75 @@ impl Kernel {
             }
             ("actions", Verb::Source) => {
                 require_cap(capability, "urn:cap:kernel:inspect")?;
-                let types_arg = kernel_arg(request, "types")
-                    .ok_or_else(|| Error::MissingArgument("types".to_string()))?;
+                // Every axis optional: bare `urn:kernel:actions` is the caller's whole
+                // capability-scoped action manifold — "what can I do at all?".
+                let types_arg = kernel_arg(request, "types").unwrap_or_default();
                 let types: Vec<&str> = types_arg
                     .split([',', ' ', '\n', '\t'])
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .collect();
+                let verb = match kernel_arg(request, "verb") {
+                    None => None,
+                    Some(v) => Some(parse_verb(v)?),
+                };
+                let want = kernel_arg(request, "want");
+                let query = crate::select::ActionQuery {
+                    present: &types,
+                    verb,
+                    want,
+                    // The AMBIENT capability: selection is cap-scoped by construction,
+                    // with the same `allows` check enforcement runs at invoke time. The
+                    // representation cache keys on the capability fingerprint, so a
+                    // cached manifold is only ever served back to the authority it was
+                    // computed for.
+                    capability: Some(capability),
+                };
+                let matches = self.select_actions(&query);
+                let turtle = kernel_arg(request, "as") == Some("text/turtle");
+                if turtle {
+                    // The auditable face: each match an ik:ActionMatch node joining the
+                    // selection to the full contract in the catalog graph.
+                    let mut body = String::from("@prefix ik: <https://ikigai-rs.dev/ns#> .\n");
+                    for m in &matches {
+                        body.push_str(&format!(
+                            "\n<{}> a ik:ActionMatch ;\n    ik:endpoint <{}> ;\n    ik:verb \"{:?}\"",
+                            m.action, m.endpoint, m.verb
+                        ));
+                        for scope in &m.requires {
+                            let term = if scope.starts_with("urn:")
+                                || scope.starts_with("http://")
+                                || scope.starts_with("https://")
+                            {
+                                format!("<{scope}>")
+                            } else {
+                                format!("\"{}\"", scope.replace('\\', "\\\\").replace('"', "\\\""))
+                            };
+                            body.push_str(&format!(" ;\n    ik:requires {term}"));
+                        }
+                        if m.missing_optional > 0 {
+                            body.push_str(&format!(
+                                " ;\n    ik:missingOptional {}",
+                                m.missing_optional
+                            ));
+                        }
+                        body.push_str(" .\n");
+                    }
+                    return Ok(Representation::new(
+                        ReprType::new("text/turtle").with_param("charset", "utf-8"),
+                        body.into_bytes(),
+                    )
+                    .cacheable());
+                }
+                // The plain face stays one RESOLVABLE endpoint IRI per line (deduped
+                // across its matched actions), so it pipes into a `..` map unchanged.
                 let mut body = String::new();
-                for m in self.select_action(&types) {
-                    body.push_str(&m.endpoint);
-                    body.push('\n');
+                let mut seen = BTreeSet::new();
+                for m in &matches {
+                    if seen.insert(&m.endpoint) {
+                        body.push_str(&m.endpoint);
+                        body.push('\n');
+                    }
                 }
                 Ok(Representation::new(
                     ReprType::new("text/plain").with_param("charset", "utf-8"),
@@ -1024,6 +1100,20 @@ fn capability_key(capability: &Capability) -> u64 {
 const KERNEL_NS: &str = "urn:kernel:";
 
 /// Authorize a kernel operation, or report a capability denial.
+/// Parse a `verb=` argument (case-insensitive verb name).
+fn parse_verb(name: &str) -> Result<Verb> {
+    match name.to_ascii_lowercase().as_str() {
+        "source" => Ok(Verb::Source),
+        "sink" => Ok(Verb::Sink),
+        "exists" => Ok(Verb::Exists),
+        "delete" => Ok(Verb::Delete),
+        "meta" => Ok(Verb::Meta),
+        other => Err(Error::Endpoint(format!(
+            "unknown verb \"{other}\" (source, sink, exists, delete, meta)"
+        ))),
+    }
+}
+
 fn require_cap(capability: &Capability, scope: &str) -> Result<()> {
     if capability.allows(scope) {
         Ok(())
@@ -1049,7 +1139,28 @@ fn actions_description() -> Description {
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)
-        .input(ArgSpec::new("types").summary("present RDF class IRIs, comma- or space-separated"))
+        .input(
+            ArgSpec::new("types")
+                .summary("present RDF class IRIs, comma- or space-separated")
+                .optional(),
+        )
+        .input(
+            ArgSpec::new("verb")
+                .summary("only actions answering this verb")
+                .one_of(["source", "sink", "exists", "delete"])
+                .optional(),
+        )
+        .input(
+            ArgSpec::new("want")
+                .summary("only actions that can produce this media type")
+                .optional(),
+        )
+        .input(
+            ArgSpec::new("as")
+                .summary("response face")
+                .one_of(["text/plain", "text/turtle"])
+                .default_value("text/plain"),
+        )
         .output("text/plain;charset=utf-8")
 }
 
@@ -1427,11 +1538,71 @@ mod tests {
         );
         assert_eq!(rep.repr_type.media_type, "text/plain");
 
-        // Missing `types` is a clean error.
-        let err =
+        // Bare `urn:kernel:actions` is the whole (capability-scoped) action manifold —
+        // every axis of the query is optional.
+        let rep =
             block_on(kernel.issue(Request::new(Verb::Source, iri("urn:kernel:actions")), &cap))
-                .unwrap_err();
-        assert!(matches!(err, Error::MissingArgument(a) if a == "types"));
+                .unwrap();
+        let body = String::from_utf8(rep.bytes).unwrap();
+        assert!(body.contains("urn:demo:greet"), "{body}");
+        assert!(
+            body.contains("urn:fn:toUpper"),
+            "no type filter applied: {body}"
+        );
+    }
+
+    #[test]
+    fn the_action_manifold_is_capability_scoped() {
+        // An endpoint whose Source and Sink are different actions under different
+        // capabilities — the calendar shape. An attenuated agent's manifold simply
+        // lacks the write action; root sees both. Selection uses the same `allows`
+        // check enforcement runs, so the two can never drift.
+        use crate::describe::ActionSpec;
+        let cal = FnEndpoint::new("cal", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new("cal")
+                .action(
+                    ActionSpec::new(Verb::Source)
+                        .requires("urn:cap:cal:read")
+                        .output("text/turtle"),
+                )
+                .action(ActionSpec::new(Verb::Sink).requires("urn:cap:cal:write")),
+        );
+        let space = EndpointSpace::new().bind(Exact::new("urn:demo:cal"), cal);
+        let kernel = Kernel::new(Arc::new(space));
+
+        let turtle = |cap: &Capability| {
+            let req = Request::new(Verb::Source, iri("urn:kernel:actions"))
+                .with_arg("as", ArgRef::Inline(b"text/turtle".to_vec()));
+            let rep = block_on(kernel.issue(req, cap)).unwrap();
+            String::from_utf8(rep.bytes).unwrap()
+        };
+
+        let all = turtle(&Capability::root());
+        assert!(all.contains("cal:action:source> a ik:ActionMatch"), "{all}");
+        assert!(all.contains("cal:action:sink> a ik:ActionMatch"), "{all}");
+        assert!(all.contains("ik:requires <urn:cap:cal:write>"), "{all}");
+
+        let reader = Capability::scoped(["urn:cap:kernel:inspect", "urn:cap:cal:read"]);
+        let scoped = turtle(&reader);
+        assert!(scoped.contains("cal:action:source>"), "{scoped}");
+        assert!(
+            !scoped.contains("action:sink"),
+            "the write action must not be OFFERED to a read capability: {scoped}"
+        );
+
+        // verb= and want= narrow the funnel deterministically.
+        let req = Request::new(Verb::Source, iri("urn:kernel:actions"))
+            .with_arg("verb", ArgRef::Inline(b"sink".to_vec()));
+        let rep = block_on(kernel.issue(req, &Capability::root())).unwrap();
+        let body = String::from_utf8(rep.bytes).unwrap();
+        assert!(body.contains("urn:demo:cal"), "{body}");
+        let req = Request::new(Verb::Source, iri("urn:kernel:actions"))
+            .with_arg("want", ArgRef::Inline(b"text/html".to_vec()));
+        let rep = block_on(kernel.issue(req, &Capability::root())).unwrap();
+        assert!(rep.bytes.is_empty(), "nothing produces text/html");
     }
 
     #[test]
