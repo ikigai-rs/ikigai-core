@@ -106,6 +106,20 @@ ik:class a rdf:Property ;
     rdfs:label "class" ;
     rdfs:comment "The RDF class or XSD datatype an input's value is expected to be (an IRI), on an input node — rdfs:Class for entity-valued inputs, xsd datatype for scalars. Drives type-based action selection: an endpoint whose required inputs' classes are present can be offered for those entities." .
 
+ik:ActionMatch a rdfs:Class ;
+    rdfs:label "ActionMatch" ;
+    rdfs:comment "One result of an action selection (urn:kernel:actions): the subject is the matched ik:Action node, joining the selection back to the full contract in the catalog graph. The selection is a resource — cacheable per capability, auditable, SPARQL-able." .
+
+ik:endpoint a rdf:Property ;
+    rdfs:domain ik:ActionMatch ;
+    rdfs:label "endpoint" ;
+    rdfs:comment "The resolvable IRI of the matched endpoint — what you invoke." .
+
+ik:missingOptional a rdf:Property ;
+    rdfs:domain ik:ActionMatch ;
+    rdfs:range xsd:integer ;
+    rdfs:comment "How many optional typed inputs the present classes could not fill — the selection's fit ranking (fewer is better-fitted)." .
+
 ik:default a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "default" ;
