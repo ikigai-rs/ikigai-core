@@ -911,13 +911,13 @@ impl Kernel {
                     .collect();
                 let verb = match kernel_arg(request, "verb") {
                     None => None,
-                    Some(v) => Some(parse_verb(&v)?),
+                    Some(v) => Some(parse_verb(v)?),
                 };
                 let want = kernel_arg(request, "want");
                 let query = crate::select::ActionQuery {
                     present: &types,
                     verb,
-                    want: want.as_deref(),
+                    want,
                     // The AMBIENT capability: selection is cap-scoped by construction,
                     // with the same `allows` check enforcement runs at invoke time. The
                     // representation cache keys on the capability fingerprint, so a
@@ -926,7 +926,7 @@ impl Kernel {
                     capability: Some(capability),
                 };
                 let matches = self.select_actions(&query);
-                let turtle = kernel_arg(request, "as").as_deref() == Some("text/turtle");
+                let turtle = kernel_arg(request, "as") == Some("text/turtle");
                 if turtle {
                     // The auditable face: each match an ik:ActionMatch node joining the
                     // selection to the full contract in the catalog graph.
