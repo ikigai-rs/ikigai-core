@@ -315,6 +315,22 @@ impl Kernel {
         crate::select::select_actions(self.root.as_ref(), &expanded_query)
     }
 
+    /// The typed self-description of the endpoint bound at `iri`, or `None` if the
+    /// IRI resolves to nothing. Returns the [`Description`] struct — not the
+    /// rendered Meta representation — so a caller projecting the catalog or the
+    /// action manifold (e.g. an MCP tool list) gets typed [`ArgSpec`](crate::ArgSpec)
+    /// contracts without re-parsing Turtle. The companion to [`select_actions`](Self::select_actions):
+    /// list the allowed actions, then `describe` each endpoint for its schema.
+    pub fn describe(&self, iri: &Iri) -> Option<Description> {
+        match self
+            .root
+            .resolve(&Request::new(Verb::Meta, iri.clone()), &Scope::empty())
+        {
+            Resolution::Hit(resolved) => Some(resolved.endpoint.describe()),
+            _ => None,
+        }
+    }
+
     /// Find a bound endpoint's description by its `Description::id` (the catalog
     /// subject identity) — the reverse of the entries → describe walk.
     fn description_for_id(&self, id: &str) -> Result<Option<Description>> {
@@ -1902,6 +1918,29 @@ mod tests {
             .with_arg("want", ArgRef::Inline(b"text/html".to_vec()));
         let rep = block_on(kernel.issue(req, &Capability::root())).unwrap();
         assert!(rep.bytes.is_empty(), "nothing produces text/html");
+    }
+
+    #[test]
+    fn describe_returns_the_typed_struct() {
+        let greet = FnEndpoint::new("greet", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new("greet")
+                .verb(Verb::Source)
+                .input(crate::describe::ArgSpec::new("who").class("https://schema.org/Person")),
+        );
+        let space = EndpointSpace::new().bind(Exact::new("urn:demo:greet"), greet);
+        let kernel = Kernel::new(Arc::new(space));
+
+        let d = kernel.describe(&iri("urn:demo:greet")).expect("resolves");
+        assert_eq!(d.id, "greet");
+        assert_eq!(d.inputs[0].name, "who");
+        assert_eq!(
+            d.inputs[0].class.as_deref(),
+            Some("https://schema.org/Person")
+        );
+        assert!(kernel.describe(&iri("urn:demo:absent")).is_none());
     }
 
     #[test]
