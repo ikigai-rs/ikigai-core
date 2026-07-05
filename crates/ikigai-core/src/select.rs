@@ -278,7 +278,7 @@ pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch>
 /// they require, because authorization depends on the argument (which selection doesn't
 /// have yet). Offering-level semantics only — enforcement at invoke time still checks the
 /// exact target against the ACL.
-fn cap_satisfies(capability: &crate::Capability, scope: &str) -> bool {
+pub(crate) fn cap_satisfies(capability: &crate::Capability, scope: &str) -> bool {
     match scope.strip_suffix('*') {
         Some(prefix) => match capability.scopes() {
             None => true, // root

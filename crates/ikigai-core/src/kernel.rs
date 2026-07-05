@@ -315,6 +315,26 @@ impl Kernel {
         crate::select::select_actions(self.root.as_ref(), &expanded_query)
     }
 
+    /// Find a bound endpoint's description by its `Description::id` (the catalog
+    /// subject identity) — the reverse of the entries → describe walk.
+    fn description_for_id(&self, id: &str) -> Result<Option<Description>> {
+        for entry in self.root.entries().unwrap_or_default() {
+            let Ok(iri) = Iri::parse(&entry.pattern) else {
+                continue;
+            };
+            if let Resolution::Hit(resolved) = self
+                .root
+                .resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
+            {
+                let description = resolved.endpoint.describe();
+                if description.id == id {
+                    return Ok(Some(description));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Expand each present type to itself + its superclasses (`rdfs:subClassOf*`); an
     /// unknown type maps to just itself. No closure installed ⇒ identity.
     fn expand_present(&self, present: &[&str]) -> Vec<String> {
@@ -981,6 +1001,101 @@ impl Kernel {
                 )
                 .cacheable())
             }
+            ("validate", Verb::Meta) => {
+                let renderer = self
+                    .meta
+                    .as_ref()
+                    .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
+                let description = validate_description();
+                let target = meta_target(request);
+                let repr = renderer
+                    .render(&description, &target)
+                    .or_else(|_| renderer.render(&description, &ReprType::new("text/turtle")))?;
+                Ok(repr.cacheable())
+            }
+            // Validated invoke, stage four of the selection funnel: check a PROPOSED
+            // invocation against the action's declared contract BEFORE firing it —
+            // required inputs present, one_of respected, XSD scalars plausible, no
+            // unknown argument names, and the ambient capability satisfies the
+            // action's requires (the same checks selection and enforcement run).
+            // The report is genuine SHACL vocabulary: violations are data, and
+            // sh:resultPath joins each one back to the catalog's input node. Pure
+            // function of (action, args, capability) — cacheable; the cache key
+            // carries the capability fingerprint.
+            ("validate", Verb::Source) => {
+                let description = match (
+                    kernel_arg(request, "action"),
+                    kernel_arg(request, "endpoint"),
+                ) {
+                    (Some(action), _) => {
+                        let rest = action.strip_prefix("urn:ikigai:endpoint:").ok_or_else(|| {
+                            Error::Endpoint(format!(
+                                "validate: action must be a catalog action IRI (urn:ikigai:endpoint:<id>:action:<verb>), not `{action}`"
+                            ))
+                        })?;
+                        let (id, verb_name) = rest.split_once(":action:").ok_or_else(|| {
+                            Error::Endpoint(format!(
+                                "validate: `{action}` names no :action: segment"
+                            ))
+                        })?;
+                        self.description_for_id(id)?
+                            .map(|d| (d, parse_verb(verb_name)))
+                            .ok_or_else(|| {
+                                Error::Endpoint(format!("validate: no endpoint with id `{id}`"))
+                            })?
+                    }
+                    (None, Some(endpoint)) => {
+                        let iri = Iri::parse(endpoint).map_err(|e| {
+                            Error::Endpoint(format!("validate: bad endpoint IRI: {e}"))
+                        })?;
+                        let Resolution::Hit(resolved) = self
+                            .root
+                            .resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
+                        else {
+                            return Err(Error::Unresolved(Iri::parse(endpoint).expect("parsed")));
+                        };
+                        let verb_name = kernel_arg(request, "verb")
+                            .ok_or_else(|| Error::MissingArgument("verb".to_string()))?;
+                        (resolved.endpoint.describe(), parse_verb(verb_name))
+                    }
+                    (None, None) => {
+                        return Err(Error::MissingArgument(
+                            "action (or endpoint + verb)".to_string(),
+                        ))
+                    }
+                };
+                let (description, verb) = description;
+                let verb = verb?;
+                let Some(spec) = description
+                    .action_specs()
+                    .into_iter()
+                    .find(|a| a.verb == verb)
+                else {
+                    return Err(Error::Endpoint(format!(
+                        "validate: `{}` declares no {verb:?} action",
+                        description.id
+                    )));
+                };
+                let proposed = kernel_arg(request, "args").unwrap_or_default();
+                let verb_lower = format!("{verb:?}").to_lowercase();
+                let action_iri =
+                    format!("urn:ikigai:endpoint:{}:action:{verb_lower}", description.id);
+                // resultPath must join to the catalog: explicitly authored actions own
+                // action-scoped input nodes; synthesized ones reference endpoint-level.
+                let explicit = description.actions.iter().any(|a| a.verb == verb);
+                let input_ns = if explicit {
+                    format!("{action_iri}:input:")
+                } else {
+                    format!("urn:ikigai:endpoint:{}:input:", description.id)
+                };
+                let report =
+                    validate_against_spec(&action_iri, &input_ns, &spec, proposed, capability);
+                Ok(Representation::new(
+                    ReprType::new("text/turtle").with_param("charset", "utf-8"),
+                    report.into_bytes(),
+                )
+                .cacheable())
+            }
             _ => Err(Error::Unresolved(request.target.clone())),
         }
     }
@@ -1166,6 +1281,163 @@ fn actions_description() -> Description {
                 .default_value("text/plain"),
         )
         .output("text/plain;charset=utf-8")
+}
+
+/// The self-description of `urn:kernel:validate`.
+fn validate_description() -> Description {
+    use crate::describe::ArgSpec;
+    Description::new("validate")
+        .title("Validate a proposed invocation")
+        .summary(
+            "Stage four of the selection funnel: check a proposed invocation against the \
+             action's declared contract BEFORE firing it — required inputs present, one_of \
+             respected, XSD scalars plausible, no unknown arguments, and the ambient \
+             capability satisfying the action's requires. The answer is a SHACL validation \
+             report: violations are data, and sh:resultPath joins each one back to the \
+             catalog's input node.",
+        )
+        .verb(Verb::Source)
+        .verb(Verb::Meta)
+        .input(
+            ArgSpec::new("action")
+                .summary("the catalog action IRI (urn:ikigai:endpoint:<id>:action:<verb>)")
+                .optional(),
+        )
+        .input(
+            ArgSpec::new("endpoint")
+                .summary("alternative: the bound endpoint IRI, with verb=")
+                .optional(),
+        )
+        .input(
+            ArgSpec::new("verb")
+                .summary("the verb, when addressing by endpoint=")
+                .one_of(["source", "sink", "exists", "delete"])
+                .optional(),
+        )
+        .input(
+            ArgSpec::new("args")
+                .summary("the proposed arguments: key=value pairs joined with & (or newlines)")
+                .optional(),
+        )
+        .output("text/turtle")
+}
+
+/// Check `proposed` (key=value pairs joined by `&`/newlines) against `spec`,
+/// including the capability pre-flight, and render the SHACL report.
+/// `input_ns` is the IRI prefix of the spec's input nodes in the catalog
+/// (action-scoped for explicitly authored actions, endpoint-scoped for
+/// synthesized ones), so `sh:resultPath` joins violations to the contract.
+fn validate_against_spec(
+    action_iri: &str,
+    input_ns: &str,
+    spec: &crate::describe::ActionSpec,
+    proposed: &str,
+    capability: &Capability,
+) -> String {
+    use crate::describe::InputSource;
+    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut provided: Vec<(&str, &str)> = Vec::new();
+    for pair in proposed.split(['&', '\n']) {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        match pair.split_once('=') {
+            Some((k, v)) => provided.push((k.trim(), v.trim())),
+            None => provided.push((pair, "")),
+        }
+    }
+
+    // (message, Some(input node IRI)) per violation.
+    let mut violations: Vec<(String, Option<String>)> = Vec::new();
+
+    for scope in &spec.requires {
+        if !crate::select::cap_satisfies(capability, scope) {
+            violations.push((format!("the capability does not grant `{scope}`"), None));
+        }
+    }
+    for input in &spec.inputs {
+        let node = format!("{input_ns}{}", input.name);
+        let value = provided
+            .iter()
+            .find(|(k, _)| *k == input.name)
+            .map(|(_, v)| *v);
+        if input.required && input.source != InputSource::Binding && value.is_none() {
+            violations.push((
+                format!("required input `{}` is missing", input.name),
+                Some(node),
+            ));
+            continue;
+        }
+        let Some(value) = value else { continue };
+        if !input.one_of.is_empty() && !input.one_of.iter().any(|v| v == value) {
+            violations.push((
+                format!(
+                    "`{value}` is not an accepted value of `{}` (one of: {})",
+                    input.name,
+                    input.one_of.join(", ")
+                ),
+                Some(node),
+            ));
+            continue;
+        }
+        if let Some(class) = &input.class {
+            let plausible = match class.as_str() {
+                "http://www.w3.org/2001/XMLSchema#boolean" => value == "true" || value == "false",
+                "http://www.w3.org/2001/XMLSchema#integer" => value.parse::<i64>().is_ok(),
+                "http://www.w3.org/2001/XMLSchema#dateTime" => {
+                    let b = value.as_bytes();
+                    b.len() >= 10
+                        && b[..4].iter().all(u8::is_ascii_digit)
+                        && b[4] == b'-'
+                        && b[5..7].iter().all(u8::is_ascii_digit)
+                        && b[7] == b'-'
+                        && b[8..10].iter().all(u8::is_ascii_digit)
+                }
+                _ => true, // entity classes are not statically checkable
+            };
+            if !plausible {
+                violations.push((
+                    format!(
+                        "`{value}` does not look like a {} for `{}`",
+                        class, input.name
+                    ),
+                    Some(node),
+                ));
+            }
+        }
+    }
+    for (k, _) in &provided {
+        if !spec.inputs.iter().any(|i| i.name == *k) {
+            violations.push((
+                format!("unknown argument `{k}` — not in this action's contract"),
+                None,
+            ));
+        }
+    }
+
+    let mut ttl = String::from("@prefix sh: <http://www.w3.org/ns/shacl#> .\n\n");
+    if violations.is_empty() {
+        ttl.push_str(
+            "<urn:ikigai:validation:report> a sh:ValidationReport ;\n    sh:conforms true .\n",
+        );
+        return ttl;
+    }
+    ttl.push_str("<urn:ikigai:validation:report> a sh:ValidationReport ;\n    sh:conforms false");
+    for (message, path) in &violations {
+        ttl.push_str(" ;\n    sh:result [ a sh:ValidationResult ;\n        sh:resultSeverity sh:Violation ;\n        sh:focusNode <");
+        ttl.push_str(action_iri);
+        ttl.push('>');
+        if let Some(path) = path {
+            ttl.push_str(&format!(" ;\n        sh:resultPath <{path}>"));
+        }
+        ttl.push_str(&format!(
+            " ;\n        sh:resultMessage \"{}\" ]",
+            escape(message)
+        ));
+    }
+    ttl.push_str(" .\n");
+    ttl
 }
 
 fn kernel_arg<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
@@ -1630,6 +1902,70 @@ mod tests {
             .with_arg("want", ArgRef::Inline(b"text/html".to_vec()));
         let rep = block_on(kernel.issue(req, &Capability::root())).unwrap();
         assert!(rep.bytes.is_empty(), "nothing produces text/html");
+    }
+
+    #[test]
+    fn validate_reports_violations_as_shacl() {
+        use crate::describe::ActionSpec;
+        let cal = FnEndpoint::new("cal", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new("cal").action(
+                ActionSpec::new(Verb::Sink)
+                    .requires("urn:cap:cal:write")
+                    .input(
+                        crate::describe::ArgSpec::new("start")
+                            .class("http://www.w3.org/2001/XMLSchema#dateTime"),
+                    )
+                    .input(
+                        crate::describe::ArgSpec::new("mode")
+                            .one_of(["add", "move"])
+                            .optional(),
+                    ),
+            ),
+        );
+        let space = EndpointSpace::new().bind(Exact::new("urn:demo:cal"), cal);
+        let kernel = Kernel::new(Arc::new(space));
+        let validate = |args: &str, cap: &Capability| {
+            let req = Request::new(Verb::Source, iri("urn:kernel:validate"))
+                .with_arg(
+                    "action",
+                    ArgRef::Inline(b"urn:ikigai:endpoint:cal:action:sink".to_vec()),
+                )
+                .with_arg("args", ArgRef::Inline(args.as_bytes().to_vec()));
+            let rep = block_on(kernel.issue(req, cap)).unwrap();
+            String::from_utf8(rep.bytes).unwrap()
+        };
+
+        // Clean: everything declared, capability satisfied.
+        let ok = validate("start=2026-07-10T10:00:00&mode=add", &Capability::root());
+        assert!(ok.contains("sh:conforms true"), "{ok}");
+
+        // The violation matrix: missing required, bad enum value, implausible
+        // datetime, unknown argument — each a sh:ValidationResult with a message,
+        // and the input-node paths join back to the catalog contract.
+        let bad = validate("mode=destroy&when=now", &Capability::root());
+        assert!(bad.contains("sh:conforms false"), "{bad}");
+        assert!(bad.contains("required input `start` is missing"), "{bad}");
+        assert!(bad.contains("not an accepted value of `mode`"), "{bad}");
+        assert!(bad.contains("unknown argument `when`"), "{bad}");
+        assert!(
+            bad.contains("sh:resultPath <urn:ikigai:endpoint:cal:action:sink:input:start>"),
+            "explicit action inputs are action-scoped: {bad}"
+        );
+        let odd = validate("start=whenever", &Capability::root());
+        assert!(odd.contains("does not look like a"), "{odd}");
+
+        // Capability pre-flight: a read-only capability fails validation BEFORE
+        // any invocation is attempted — the same allows check enforcement runs.
+        let scoped = Capability::scoped(["urn:cap:cal:read"]);
+        let denied = validate("start=2026-07-10T10:00:00", &scoped);
+        assert!(denied.contains("sh:conforms false"), "{denied}");
+        assert!(
+            denied.contains("does not grant `urn:cap:cal:write`"),
+            "{denied}"
+        );
     }
 
     #[test]
