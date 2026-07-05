@@ -229,7 +229,11 @@ pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch>
                 }
             }
             if let Some(capability) = query.capability {
-                if !action.requires.iter().all(|scope| capability.allows(scope)) {
+                if !action
+                    .requires
+                    .iter()
+                    .all(|scope| cap_satisfies(capability, scope))
+                {
                     continue;
                 }
             }
@@ -265,6 +269,23 @@ pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch>
         ))
     });
     matches
+}
+
+/// Whether `capability` satisfies one required scope — [`Capability::allows`] for a plain
+/// scope, or, for a `…:*` wildcard, "holds ANY grant under this prefix". The wildcard is
+/// how parameterized capability grammars (`urn:cap:net:<host-rule>`,
+/// `urn:cap:fs:<action>:<path>`) annotate their actions: no single static IRI names what
+/// they require, because authorization depends on the argument (which selection doesn't
+/// have yet). Offering-level semantics only — enforcement at invoke time still checks the
+/// exact target against the ACL.
+fn cap_satisfies(capability: &crate::Capability, scope: &str) -> bool {
+    match scope.strip_suffix('*') {
+        Some(prefix) => match capability.scopes() {
+            None => true, // root
+            Some(held) => held.iter().any(|s| s.starts_with(prefix)),
+        },
+        None => capability.allows(scope),
+    }
 }
 
 /// Whether every required input of `action` declares a class present in `present`, with

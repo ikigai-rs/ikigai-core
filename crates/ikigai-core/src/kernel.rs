@@ -1598,6 +1598,28 @@ mod tests {
             "the write action must not be OFFERED to a read capability: {scoped}"
         );
 
+        // A wildcard requires ("urn:cap:net:*") offers to any capability holding
+        // SOME grant under the prefix — the parameterized-ACL annotation form.
+        let net = FnEndpoint::new("net", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new("net")
+                .verb(Verb::Source)
+                .requires("urn:cap:net:*"),
+        );
+        let space2 = EndpointSpace::new().bind(Exact::new("urn:demo:net"), net);
+        let kernel2 = Kernel::new(Arc::new(space2));
+        let query = |cap: &Capability| {
+            let req = Request::new(Verb::Source, iri("urn:kernel:actions"));
+            let rep = block_on(kernel2.issue(req, cap)).unwrap();
+            String::from_utf8(rep.bytes).unwrap()
+        };
+        let host_scoped = Capability::scoped(["urn:cap:net:api.example.com"]);
+        assert!(query(&host_scoped).contains("urn:demo:net"));
+        let no_net = Capability::scoped(["urn:cap:cal:read"]);
+        assert!(!query(&no_net).contains("urn:demo:net"));
+
         // verb= and want= narrow the funnel deterministically.
         let req = Request::new(Verb::Source, iri("urn:kernel:actions"))
             .with_arg("verb", ArgRef::Inline(b"sink".to_vec()));
