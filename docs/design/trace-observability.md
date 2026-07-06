@@ -99,6 +99,58 @@ The MCP bridge synthesizes a root span per `tools/call` so a cross-process grant
 crossing appears in a trace. Lower priority: external MCP clients won't send a
 context, so this is server-side synthesis, not propagation.
 
+## Phase 3 seams — confirmed (Phase 0 read, 2026-07-06)
+
+Read: `ikigai-wire/src/lib.rs`, `ikigai-resolve/src/lib.rs`, `ikigai-ipc/src/lib.rs`.
+
+**Prerequisite (core, one line).** `TraceEvent` derives only `Clone, Debug` — **no
+serde** — so spans cannot cross the wire as-is. Phase 3 begins by adding
+`Serialize, Deserialize` to `TraceEvent`; every field already serializes (`Time`
+derives serde, and `Option<Vec<String>>` is trivial). A core bump + publish gates
+the wire work.
+
+**Wire frame (`ikigai-wire`).** Postcard, non-self-describing (client+server ship
+together), `PROTOCOL_VERSION` bumps **2 → 3**. Add *appended* variants so existing
+discriminants are unchanged:
+- client→server: `Call::IssueTraced(Request, Capability, TraceContext)` where
+  `TraceContext { trace_id: u64, parent_span: u64 }`. (`IssueAs` is the
+  cap-carrying form; the traced form extends it; only a traced session sends it.)
+- server→client: `Reply::ResolvedTraced(Representation, CacheStatus, Vec<TraceEvent>)`
+  — the representation plus the spans the server recorded for this call.
+
+**Server (`ikigai-ipc::dispatch` / `handle_connection`).** On `IssueTraced`: install
+a `TraceCollector` (`Kernel::set_tracer`), seed the span counter so recorded spans
+carry `ctx.trace_id` and parent under `ctx.parent_span`, run `issue_as`, drain the
+collector, `clear_tracer`, return `ResolvedTraced`. `ikigai-quic` shares the same
+`encode`/`decode` and a one-stream-per-call model → identical dispatch change.
+
+**Client (`ikigai-resolve` wire `Resolver` — the current no-op `set_tracer`).** Make
+it real: store the tracer; when one is installed, send `IssueTraced` with the
+active context and, on `ResolvedTraced`, forward each returned `TraceEvent` to the
+stored tracer.
+
+**Do the easy, high-value half first:**
+- **3a — whole-session `--connect` trace.** The entire resolution runs on the remote
+  kernel; the client only forwards. All spans are in ONE (remote) namespace — no
+  re-basing, render as-is. This alone satisfies "trace a resolution that crossed the
+  wire" and turns the no-op real. Smallest shippable Phase 3.
+- **3b — mount-stitch.** A *local* kernel resolving through a wire-mounted sub-space
+  records local spans while the remote records its own; the local mount-point span
+  must parent the remote root, and remote span ids must be **re-based** into the
+  caller's space (offset per mount). Depends on the mount-over-wire Space
+  (multi-connect / reverse-mount). Follow-on.
+
+**Design risk — the tracer is process-global.** `Kernel`'s tracer is a single
+`Mutex<Option<Arc<dyn Tracer>>>`, and `handle_connection` spawns a thread per
+connection, so two *concurrent* traced calls on one server would interleave into
+one collector. Fine for the one-shot interactive `trace`; before concurrent traced
+use, either serialize traced calls, filter recorded events by `trace_id`, or thread
+a per-call context through invocation instead of a global tracer. Note, don't fix now.
+
+**MCP boundary (Phase 4, unchanged).** External MCP clients won't send a
+`TraceContext`, so that boundary is server-side root-span *synthesis*, not
+propagation — out of Phase 3 scope.
+
 ## Logistics & constitution
 
 - **Hub work, not a satellite repo:** the arc spans ikigai-core (`TraceEvent`) and
