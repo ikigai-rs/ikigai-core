@@ -80,7 +80,7 @@ impl Clock for SystemClock {
 ///
 /// Serializable so a traced resolution can cross the wire: a remote kernel records
 /// its own events and ships them back to be stitched into the caller's tree.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TraceEvent {
     /// The resolved request's target IRI.
     pub target: String,
