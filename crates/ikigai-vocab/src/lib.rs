@@ -309,6 +309,13 @@ impl MetaRenderer for TurtleRenderer {
                 ReprType::new("text/plain").with_param("charset", "utf-8"),
                 to_text(description).into_bytes(),
             )),
+            // The JSON Meta face: the Description via its serde derive. A client
+            // engine fetches this to learn an endpoint's declared arguments and
+            // route `key=value` — over a socket as much as in-process — so every
+            // server that mounts this renderer supports remote argument routing.
+            "application/json" => serde_json::to_vec(description)
+                .map(|bytes| Representation::new(ReprType::new("application/json"), bytes))
+                .map_err(|e| Error::Endpoint(format!("describe as json: {e}"))),
             other => Err(Error::Endpoint(format!(
                 "meta renderer does not support target `{other}`"
             ))),
@@ -329,6 +336,23 @@ mod tests {
             .verb(Verb::Meta)
             .input(ArgSpec::new("in").summary("the string"))
             .output("text/plain;charset=utf-8")
+    }
+
+    #[test]
+    fn renders_the_json_meta_face() {
+        use ikigai_core::{ArgSpec, Verb};
+        let d = Description::new("wc")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("count").one_of(["lines", "words"]));
+        let repr = TurtleRenderer
+            .render(&d, &ReprType::new("application/json"))
+            .unwrap();
+        assert_eq!(repr.repr_type.media_type, "application/json");
+        // round-trips back into the same Description (what a client engine does)
+        let back: Description = serde_json::from_slice(&repr.bytes).unwrap();
+        assert_eq!(back.id, "wc");
+        assert_eq!(back.inputs[0].name, "count");
+        assert_eq!(back.inputs[0].one_of, vec!["lines", "words"]);
     }
 
     #[test]
