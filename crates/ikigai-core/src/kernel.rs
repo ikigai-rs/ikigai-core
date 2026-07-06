@@ -77,7 +77,10 @@ impl Clock for SystemClock {
 /// The `trace` command turns a stream of these (from one real resolution) into the
 /// execution tree — which **worker thread** each node ran on, how long it took, and
 /// whether the cache served it.
-#[derive(Clone, Debug)]
+///
+/// Serializable so a traced resolution can cross the wire: a remote kernel records
+/// its own events and ships them back to be stitched into the caller's tree.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TraceEvent {
     /// The resolved request's target IRI.
     pub target: String,
