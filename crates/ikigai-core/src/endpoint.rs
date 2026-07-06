@@ -39,6 +39,16 @@ pub trait Issuer: Send + Sync {
         self.issue(request, capability).await
     }
 
+    /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s produced by *another*
+    /// kernel — a remote one reached through a mounted `RemoteSpace` — into this
+    /// issuer's trace, re-based under `parent` (the span of the invocation that
+    /// forwarded the request). The default ignores them (a detached or remote issuer
+    /// has no trace to merge into); the kernel overrides it to re-map the span ids
+    /// and record. Reached by an endpoint through [`Invocation::record_subtree`].
+    fn record_subtree(&self, parent: Option<u64>, spans: Vec<crate::TraceEvent>) {
+        let _ = (parent, spans);
+    }
+
     /// The current time per the issuer's injected [`Clock`](crate::Clock), or
     /// `None` if it has none. An endpoint computing a time-based deadline (e.g.
     /// `now + max-age`) reads it through [`Invocation::now`]. Default `None`.
@@ -179,6 +189,25 @@ impl<'a> Invocation<'a> {
         self.spawner = spawner;
         self.issuer_arc = issuer_arc;
         self
+    }
+
+    /// This invocation's trace span, or `None` when the kernel isn't recording. An
+    /// endpoint that forwards to another kernel checks this to decide whether to
+    /// trace the forward, then passes it — via [`record_subtree`](Self::record_subtree)
+    /// — as the parent to re-base the returned spans under.
+    pub fn trace_span(&self) -> Option<u64> {
+        self.span
+    }
+
+    /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s from another kernel into
+    /// this invocation's trace, re-based under this node — so a resolution forwarded
+    /// to a remote kernel (through a mounted `RemoteSpace`) shows the remote's
+    /// execution stitched under the mount, not collapsed into one node. A no-op off
+    /// the trace path or when detached.
+    pub fn record_subtree(&self, spans: Vec<crate::TraceEvent>) {
+        if let Some(issuer) = self.issuer {
+            issuer.record_subtree(self.span, spans);
+        }
     }
 
     /// The bytes of an inline argument, or an error if absent / not inline.

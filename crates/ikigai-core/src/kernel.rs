@@ -1537,6 +1537,38 @@ impl Issuer for Kernel {
     fn select_action(&self, present: &[&str]) -> Vec<ActionMatch> {
         Kernel::select_action(self, present)
     }
+
+    fn record_subtree(&self, parent: Option<u64>, spans: Vec<TraceEvent>) {
+        if !self.tracing.load(Ordering::Relaxed) || spans.is_empty() {
+            return;
+        }
+        let Some(tracer) = self.tracer.lock().expect("tracer lock").clone() else {
+            return;
+        };
+        // Re-base: give each incoming span a fresh local id (a remote kernel's ids
+        // must not collide with this kernel's), remap parent links within the
+        // subtree, and parent the subtree's roots (parent `None` on the remote)
+        // under `parent` — the local mount node that forwarded the request.
+        let mut remap = std::collections::HashMap::new();
+        for event in &spans {
+            remap.insert(
+                event.span,
+                self.span_counter.fetch_add(1, Ordering::Relaxed),
+            );
+        }
+        for event in spans {
+            let span = remap[&event.span];
+            let parent = match event.parent {
+                Some(p) => remap.get(&p).copied().or(parent),
+                None => parent,
+            };
+            tracer.record(TraceEvent {
+                span,
+                parent,
+                ..event
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1545,7 +1577,7 @@ mod tests {
     use crate::arg::ArgRef;
     use crate::builtins;
     use crate::describe::Description;
-    use crate::endpoint::{BoxFuture, Endpoint, FnEndpoint, Invocation, Spawner};
+    use crate::endpoint::{BoxFuture, Endpoint, FnEndpoint, Invocation, Issuer, Spawner};
     use crate::grammar::Exact;
     use crate::iri::Iri;
     use crate::repr::ReprType;
@@ -3118,6 +3150,63 @@ mod tests {
         // A cleared tracer records nothing for subsequent resolutions.
         block_on(kernel.issue(parent(), &cap)).unwrap();
         assert_eq!(recorder.0.lock().expect("recorder").len(), 4);
+    }
+
+    #[test]
+    fn record_subtree_rebases_a_remote_subtree_under_the_mount() {
+        struct Recorder(std::sync::Mutex<Vec<TraceEvent>>);
+        impl Tracer for Recorder {
+            fn record(&self, event: TraceEvent) {
+                self.0.lock().expect("recorder").push(event);
+            }
+        }
+        let recorder = Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+        let kernel = Kernel::new(Arc::new(fan_space()));
+        kernel.set_tracer(recorder.clone());
+
+        // A remote kernel's subtree: a root (parent None) with one child, in the
+        // remote's own span namespace.
+        let ev = |target: &str, span: u64, parent: Option<u64>| TraceEvent {
+            target: target.to_string(),
+            thread: "remote".to_string(),
+            started: None,
+            ended: None,
+            cache_hit: false,
+            span,
+            parent,
+            capability: None,
+        };
+        let remote = vec![
+            ev("urn:remote:root", 0, None),
+            ev("urn:remote:child", 1, Some(0)),
+        ];
+        // Forwarded from a local mount node whose span is 42.
+        Issuer::record_subtree(&kernel, Some(42), remote);
+        kernel.clear_tracer();
+
+        let events = recorder.0.lock().expect("recorder").clone();
+        assert_eq!(events.len(), 2);
+        let root = events
+            .iter()
+            .find(|e| e.target == "urn:remote:root")
+            .unwrap();
+        let child = events
+            .iter()
+            .find(|e| e.target == "urn:remote:child")
+            .unwrap();
+        // The remote root is re-parented under the mount node; the child follows the
+        // root's *re-based* span, not its original remote id.
+        assert_eq!(
+            root.parent,
+            Some(42),
+            "remote root re-parented under the mount"
+        );
+        assert_eq!(
+            child.parent,
+            Some(root.span),
+            "child follows the re-based root"
+        );
+        assert_ne!(root.span, child.span, "distinct re-based span ids");
     }
 
     #[test]
