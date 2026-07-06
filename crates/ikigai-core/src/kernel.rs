@@ -96,6 +96,11 @@ pub struct TraceEvent {
     /// `(span, parent)` edges reconstruct the real execution tree, including the
     /// concurrent branches a `fan_out` spawns onto different workers.
     pub parent: Option<u64>,
+    /// The authority this invocation ran under: `None` for root (full authority),
+    /// else the sorted scope set. So an attenuation down the call chain — or across
+    /// a grant boundary — is visible in the tree, node by node: "under which
+    /// capability" alongside "against which cache state".
+    pub capability: Option<Vec<String>>,
 }
 
 /// Receives a [`TraceEvent`] per invocation while installed. The kernel records
@@ -499,6 +504,7 @@ impl Kernel {
     fn trace_record(
         &self,
         request: &Request,
+        capability: &Capability,
         span: Option<u64>,
         parent: Option<u64>,
         started: Option<Time>,
@@ -516,6 +522,10 @@ impl Kernel {
                 cache_hit,
                 span: span.unwrap_or(0),
                 parent,
+                // The authority this hop ran under, mirrored from `Capability::scopes`
+                // (None = root). Recorded only while tracing, so the clone is off the
+                // hot path.
+                capability: capability.scopes().map(|s| s.iter().cloned().collect()),
             });
         }
     }
@@ -604,7 +614,7 @@ impl Kernel {
         let cap_key = capability_key(capability);
         if cacheable_verb {
             if let Some(cached) = self.valid_cached(&id, cap_key) {
-                self.trace_record(&request, span, parent, started, true);
+                self.trace_record(&request, capability, span, parent, started, true);
                 self.record_resolution(&request, started, true);
                 return Ok(cached);
             }
@@ -676,7 +686,7 @@ impl Kernel {
             representation.with_expiry(effective).with_threads(threads)
         };
         // Computed (not served from cache) — record after the invocation completes.
-        self.trace_record(&request, span, parent, started, false);
+        self.trace_record(&request, capability, span, parent, started, false);
         self.record_resolution(&request, started, false);
 
         // A successful mutating verb invalidates its target: cut the thread named
@@ -3097,9 +3107,42 @@ mod tests {
                 .all(|leaf| leaf.parent == Some(root.span)),
             "each fanned-out leaf links to the parent's span"
         );
+        assert!(
+            events.iter().all(|e| e.capability.is_none()),
+            "under root authority every hop records capability = None"
+        );
 
         // A cleared tracer records nothing for subsequent resolutions.
         block_on(kernel.issue(parent(), &cap)).unwrap();
         assert_eq!(recorder.0.lock().expect("recorder").len(), 4);
+    }
+
+    #[test]
+    fn each_event_records_the_capability_it_ran_under() {
+        struct Recorder(std::sync::Mutex<Vec<TraceEvent>>);
+        impl Tracer for Recorder {
+            fn record(&self, event: TraceEvent) {
+                self.0.lock().expect("recorder").push(event);
+            }
+        }
+        let recorder = Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+        let kernel = Kernel::new(Arc::new(fan_space()));
+        // A scoped (non-root) authority — passed out of input order to prove the
+        // recorded set is sorted (the fingerprint's stability property).
+        let cap = Capability::scoped(["urn:cap:b", "urn:cap:a"]);
+
+        kernel.set_tracer(recorder.clone());
+        block_on(kernel.issue(Request::new(Verb::Source, iri("urn:fan:parent")), &cap)).unwrap();
+        kernel.clear_tracer();
+
+        let events = recorder.0.lock().expect("recorder").clone();
+        assert!(!events.is_empty(), "the scoped resolution recorded events");
+        assert!(
+            events
+                .iter()
+                .all(|e| e.capability
+                    == Some(vec!["urn:cap:a".to_string(), "urn:cap:b".to_string()])),
+            "each hop names the sorted scope set it ran under — attenuation is visible"
+        );
     }
 }
