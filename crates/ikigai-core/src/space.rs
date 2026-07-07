@@ -60,6 +60,30 @@ pub struct SpaceEntry {
     pub pattern: String,
     /// The bound endpoint's name.
     pub endpoint: String,
+    /// Where this binding came from, for a **federated** catalog: `None` for this
+    /// kernel's own spaces; `Some(label)` for a binding surfaced from a mounted
+    /// remote (its mount alias or connection name). So an overlap reads
+    /// "`urn:fn:compose` — local / via `beefybox`" instead of an anonymous
+    /// concatenation, and a listing can show *where* each resource resolves.
+    pub origin: Option<String>,
+}
+
+impl SpaceEntry {
+    /// A binding from this kernel's own space (`origin` = `None`).
+    pub fn new(pattern: impl Into<String>, endpoint: impl Into<String>) -> Self {
+        SpaceEntry {
+            pattern: pattern.into(),
+            endpoint: endpoint.into(),
+            origin: None,
+        }
+    }
+
+    /// Stamp this entry's origin — a mounted remote's alias or connection name — so
+    /// a federated catalog records where the binding resolves.
+    pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
+        self.origin = Some(origin.into());
+        self
+    }
 }
 
 /// A space maps requests to endpoints by resolution. Spaces compose via the
@@ -129,10 +153,7 @@ impl Space for EndpointSpace {
         Some(
             self.bindings
                 .iter()
-                .map(|(grammar, endpoint)| SpaceEntry {
-                    pattern: grammar.pattern(),
-                    endpoint: endpoint.name().to_string(),
-                })
+                .map(|(grammar, endpoint)| SpaceEntry::new(grammar.pattern(), endpoint.name()))
                 .collect(),
         )
     }
@@ -262,14 +283,8 @@ mod tests {
         assert_eq!(
             entries,
             vec![
-                SpaceEntry {
-                    pattern: "urn:fn:toUpper".to_string(),
-                    endpoint: "toUpper".to_string(),
-                },
-                SpaceEntry {
-                    pattern: "urn:demo:echo/{message}".to_string(),
-                    endpoint: "echo".to_string(),
-                },
+                SpaceEntry::new("urn:fn:toUpper", "toUpper"),
+                SpaceEntry::new("urn:demo:echo/{message}", "echo"),
             ]
         );
     }
