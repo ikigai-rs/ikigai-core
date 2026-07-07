@@ -1266,8 +1266,8 @@ fn require_cap(capability: &Capability, scope: &str) -> Result<()> {
     if capability.allows(scope) {
         Ok(())
     } else {
-        Err(Error::Endpoint(format!(
-            "kernel: capability does not grant `{scope}`"
+        Err(Error::Denied(format!(
+            "capability does not grant `{scope}`"
         )))
     }
 }
