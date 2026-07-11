@@ -27,6 +27,13 @@ pub enum Error {
     /// and a future structured wire error recognize a 403-equivalent without
     /// sniffing the message text.
     Denied(String),
+    /// The named resource is absent — a **permanent** not-found. Typed (rather than a
+    /// generic `Endpoint` string) so a caller, the trace, and a structured wire error
+    /// can recognize a 404-equivalent — an upstream "it isn't here" — without sniffing
+    /// the message text. Distinct from [`Unresolved`](Error::Unresolved), which is the
+    /// *kernel* finding no binding for the target; `NotFound` is a bound endpoint
+    /// reporting that the thing it fronts does not exist.
+    NotFound(String),
     /// The operation exceeded its time budget. **Transient** — re-issuing an
     /// idempotent verb may succeed (see [`is_transient`](Error::is_transient)).
     Timeout(String),
@@ -41,7 +48,8 @@ impl Error {
     /// denied, or a domain endpoint error). The retry / circuit-breaker / failover
     /// overlays gate on this. Note the request *verb* separately governs whether a
     /// re-issue is *safe*: a non-idempotent `Sink` needs an idempotency key even
-    /// when the error is transient.
+    /// when the error is transient. `NotFound` and `Denied` are permanent — re-issuing
+    /// won't conjure the resource or the grant.
     pub fn is_transient(&self) -> bool {
         matches!(self, Error::Timeout(_) | Error::Unavailable(_))
     }
@@ -57,6 +65,7 @@ impl fmt::Display for Error {
             }
             Error::Endpoint(msg) => write!(f, "endpoint error: {msg}"),
             Error::Denied(msg) => write!(f, "denied: {msg}"),
+            Error::NotFound(msg) => write!(f, "not found: {msg}"),
             Error::Timeout(msg) => write!(f, "timeout: {msg}"),
             Error::Unavailable(msg) => write!(f, "unavailable: {msg}"),
         }
@@ -75,6 +84,7 @@ mod tests {
         assert!(Error::Unavailable("down".into()).is_transient());
         // Permanent — re-issuing the same request won't change the answer.
         assert!(!Error::Denied("no grant".into()).is_transient());
+        assert!(!Error::NotFound("gone".into()).is_transient());
         assert!(!Error::Endpoint("boom".into()).is_transient());
         assert!(!Error::MissingArgument("in".into()).is_transient());
         assert!(!Error::Unresolved(Iri::parse("urn:x").unwrap()).is_transient());
