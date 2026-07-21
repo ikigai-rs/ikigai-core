@@ -23,6 +23,16 @@ pub const NS: &str = "https://ikigai-rs.dev/ns#";
 /// [`space`] at `urn:ikigai:vocab`, and eventually at the external `ns#` URL.
 pub const VOCABULARY: &str = include_str!("vocabulary.ttl");
 
+/// A JSON-LD `@context` for the whole vocabulary — every `ns#` term mapped to its
+/// short name, with datatype/`@id` coercions (integers, booleans, and IRI-valued
+/// properties like `ik:cors`/`ik:shape` typed correctly). **Generated from
+/// [`VOCABULARY`]**, so it never drifts from the terms. Serve it at the external
+/// `ns#` URL under content negotiation (`application/ld+json`) alongside the Turtle,
+/// so a document's `"@context": "https://ikigai-rs.dev/ns"` resolves — letting
+/// config surfaces (e.g. the `urn:web:routes` route table) be authored in plain
+/// JSON/YAML that lifts to the same RDF.
+pub const CONTEXT: &str = include_str!("context.jsonld");
+
 /// The conventional IRI the vocabulary is bound to by [`space`].
 pub const VOCAB_IRI: &str = "urn:ikigai:vocab";
 
@@ -560,5 +570,25 @@ mod tests {
             entries.iter().any(|e| e.pattern == VOCAB_IRI),
             "{entries:?}"
         );
+    }
+
+    #[test]
+    fn bundled_context_is_valid_jsonld_covering_the_whole_vocab() {
+        let v: serde_json::Value = serde_json::from_str(CONTEXT).expect("CONTEXT is valid JSON");
+        let ctx = &v["@context"];
+        assert_eq!(ctx["ik"], NS);
+        // classes map to their ik: term
+        assert_eq!(ctx["Route"], "ik:Route");
+        assert_eq!(ctx["Endpoint"], "ik:Endpoint");
+        // datatype coercions
+        assert_eq!(ctx["order"]["@type"], "xsd:integer");
+        assert_eq!(ctx["corsCredentials"]["@type"], "xsd:boolean");
+        // IRI-valued property coerced to @id (so a string value is an IRI ref)
+        assert_eq!(ctx["cors"]["@type"], "@id");
+        assert_eq!(ctx["shape"]["@type"], "@id");
+        // plain string term
+        assert_eq!(ctx["match"], "ik:match");
+        // whole-vocab, not just routes — an unrelated term is present
+        assert_eq!(ctx["verb"], "ik:verb");
     }
 }
