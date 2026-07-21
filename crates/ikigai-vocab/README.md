@@ -32,6 +32,10 @@ Turtle, and a document's `"@context": "https://ikigai-rs.dev/ns"` resolves — s
 config surfaces (e.g. the `urn:web:routes` route table) can be authored in plain
 JSON/YAML that lifts to the same RDF.
 
+When you change `vocabulary.ttl`, regenerate it with
+`python3 crates/ikigai-vocab/context.gen.py`. A test
+(`context_covers_every_vocabulary_term`) fails if the context drifts from the terms.
+
 ## License
 
 Licensed under either of [MIT](../../LICENSE-MIT) or

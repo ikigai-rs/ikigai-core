@@ -591,4 +591,35 @@ mod tests {
         // whole-vocab, not just routes — an unrelated term is present
         assert_eq!(ctx["verb"], "ik:verb");
     }
+
+    // Drift guard: the JSON-LD context must map exactly the vocabulary's terms — no
+    // more, no fewer. Fails if a term was added/removed in vocabulary.ttl without
+    // regenerating context.jsonld (`python3 crates/ikigai-vocab/context.gen.py`).
+    #[test]
+    fn context_covers_every_vocabulary_term() {
+        let vocab_terms: std::collections::BTreeSet<String> = VOCABULARY
+            .lines()
+            .filter_map(|l| {
+                let rest = l.trim_start().strip_prefix("ik:")?;
+                let (name, tail) = rest.split_once(' ')?;
+                (tail.starts_with("a rdf:Property") || tail.starts_with("a rdfs:Class"))
+                    .then(|| name.to_string())
+            })
+            .collect();
+
+        let ctx: serde_json::Value = serde_json::from_str(CONTEXT).unwrap();
+        let context_terms: std::collections::BTreeSet<String> = ctx["@context"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| *k != "ik" && *k != "xsd")
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            vocab_terms, context_terms,
+            "context.jsonld is out of sync with vocabulary.ttl — regenerate it: \
+             `python3 crates/ikigai-vocab/context.gen.py`"
+        );
+    }
 }

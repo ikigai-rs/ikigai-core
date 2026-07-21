@@ -8,6 +8,11 @@
 # Description to RDF using these terms; the kernel's catalog is a graph of them.
 # Hand-maintained; bundled into ikigai-vocab via include_str! and served at
 # urn:ikigai:vocab (and, externally, at this namespace URL).
+#
+# ⚠ When you add/change/remove a term here, regenerate the JSON-LD @context:
+#     python3 crates/ikigai-vocab/context.gen.py
+# (the test `context_covers_every_vocabulary_term` fails if they drift). And a
+# published namespace change also needs a vocab publish + an ikigai-rs.dev/ns deploy.
 
 <https://ikigai-rs.dev/ns#> a owl:Ontology ;
     rdfs:label "ikigai endpoint vocabulary" ;
