@@ -21,6 +21,17 @@ let kernel = Kernel::with_meta_renderer(space, Arc::new(TurtleRenderer));
 
 Turtle rendering is dependency-free, keeping the crate lean and WebAssembly-friendly.
 
+## JSON-LD context
+
+`CONTEXT` is a JSON-LD `@context` for the whole vocabulary — every `ns#` term
+mapped to its short name, with datatype and `@id` coercions (integers, booleans,
+and IRI-valued properties like `ik:cors`/`ik:shape` typed correctly). It is
+**generated from `VOCABULARY`**, so it never drifts from the terms. Serve it at the
+external `ns#` URL under content negotiation (`application/ld+json`) beside the
+Turtle, and a document's `"@context": "https://ikigai-rs.dev/ns"` resolves — so
+config surfaces (e.g. the `urn:web:routes` route table) can be authored in plain
+JSON/YAML that lifts to the same RDF.
+
 ## License
 
 Licensed under either of [MIT](../../LICENSE-MIT) or

@@ -1,0 +1,111 @@
+{
+  "@context": {
+    "ik": "https://ikigai-rs.dev/ns#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "Action": "ik:Action",
+    "ActionMatch": "ik:ActionMatch",
+    "Binding": "ik:Binding",
+    "CorsPolicy": "ik:CorsPolicy",
+    "Endpoint": "ik:Endpoint",
+    "LlmBackend": "ik:LlmBackend",
+    "Route": "ik:Route",
+    "RouteRequest": "ik:RouteRequest",
+    "Transreptor": "ik:Transreptor",
+    "action": {
+      "@id": "ik:action",
+      "@type": "@id"
+    },
+    "alert": {
+      "@id": "ik:alert",
+      "@type": "xsd:integer"
+    },
+    "allDay": {
+      "@id": "ik:allDay",
+      "@type": "xsd:boolean"
+    },
+    "bind": {
+      "@id": "ik:bind",
+      "@type": "@id"
+    },
+    "calendar": "ik:calendar",
+    "cap": "ik:cap",
+    "class": {
+      "@id": "ik:class",
+      "@type": "@id"
+    },
+    "context": {
+      "@id": "ik:context",
+      "@type": "xsd:integer"
+    },
+    "cors": {
+      "@id": "ik:cors",
+      "@type": "@id"
+    },
+    "corsCredentials": {
+      "@id": "ik:corsCredentials",
+      "@type": "xsd:boolean"
+    },
+    "corsHeader": "ik:corsHeader",
+    "corsMaxAge": {
+      "@id": "ik:corsMaxAge",
+      "@type": "xsd:integer"
+    },
+    "corsMethod": "ik:corsMethod",
+    "corsOrigin": "ik:corsOrigin",
+    "cost": "ik:cost",
+    "csp": "ik:csp",
+    "default": "ik:default",
+    "endpoint": {
+      "@id": "ik:endpoint",
+      "@type": "@id"
+    },
+    "from": "ik:from",
+    "id": "ik:id",
+    "input": "ik:input",
+    "inputName": "ik:inputName",
+    "jsonMode": {
+      "@id": "ik:jsonMode",
+      "@type": "xsd:boolean"
+    },
+    "match": "ik:match",
+    "missingOptional": {
+      "@id": "ik:missingOptional",
+      "@type": "xsd:integer"
+    },
+    "modality": "ik:modality",
+    "model": "ik:model",
+    "oneOf": "ik:oneOf",
+    "order": {
+      "@id": "ik:order",
+      "@type": "xsd:integer"
+    },
+    "output": "ik:output",
+    "params": "ik:params",
+    "required": {
+      "@id": "ik:required",
+      "@type": "xsd:boolean"
+    },
+    "requires": "ik:requires",
+    "routesTo": {
+      "@id": "ik:routesTo",
+      "@type": "@id"
+    },
+    "shape": {
+      "@id": "ik:shape",
+      "@type": "@id"
+    },
+    "source": "ik:source",
+    "summary": "ik:summary",
+    "target": "ik:target",
+    "title": "ik:title",
+    "tools": {
+      "@id": "ik:tools",
+      "@type": "xsd:boolean"
+    },
+    "transreptsFrom": "ik:transreptsFrom",
+    "transreptsTo": "ik:transreptsTo",
+    "var": "ik:var",
+    "vendor": "ik:vendor",
+    "verb": "ik:verb"
+  }
+}
