@@ -212,3 +212,116 @@ ik:alert a rdf:Property ;
     rdfs:range xsd:integer ;
     rdfs:label "alert" ;
     rdfs:comment "An alarm on an event: minutes before the start (multi-valued — an event may alert at 60 and 1440). Sourced from an org :ALERT: property (\"1h 1d\") or a calendar alarm; changes flow through view derivation like any other edit." .
+
+# ---- HTTP routing (the urn:web:routes edge route table) ----------------------
+# A route table is a graph of ik:Route nodes the inbound HTTP face (ikigai-web)
+# consults: a request path is matched against ik:match patterns in ik:order; the
+# first hit resolves ik:target (an IRI template, {var} captures substituted in) and
+# applies the route's optional ik:cap, ik:cors, ik:csp, and ik:shape. A path
+# matching no route falls through to the mechanical /noun/partition/key -> urn:.
+
+ik:Route a rdfs:Class ;
+    rdfs:label "Route" ;
+    rdfs:comment "An inbound-HTTP routing rule: a path pattern (ik:match) mapped to a target IRI template (ik:target), with optional per-route capability (ik:cap), CORS (ik:cors), Content-Security-Policy (ik:csp), request-validation shape (ik:shape), and identity bindings (ik:bind). Ordered by ik:order; first match wins." .
+
+ik:match a rdf:Property ;
+    rdfs:domain ik:Route ;
+    rdfs:range xsd:string ;
+    rdfs:label "match" ;
+    rdfs:comment "A route's path pattern, e.g. \"/book/{host}\". A {var} segment captures one path segment; a literal segment must match exactly." .
+
+ik:target a rdf:Property ;
+    rdfs:domain ik:Route ;
+    rdfs:range xsd:string ;
+    rdfs:label "target" ;
+    rdfs:comment "The IRI template a route resolves to, e.g. \"urn:schedule:{host}\". Each {var} captured by ik:match (or supplied by an ik:bind) is substituted in." .
+
+ik:order a rdf:Property ;
+    rdfs:domain ik:Route ;
+    rdfs:range xsd:integer ;
+    rdfs:label "order" ;
+    rdfs:comment "A route's match priority — routes are tried in ascending order and the first match wins. Makes first-match-wins deterministic in an unordered graph." .
+
+ik:cap a rdf:Property ;
+    rdfs:domain ik:Route ;
+    rdfs:range xsd:string ;
+    rdfs:label "cap" ;
+    rdfs:comment "A capability scope the route resolves its request under — the per-route ceiling (the multi-tenant seam: a public server with a route granting a specific authority). Multi-valued. Absent means the server's default capability applies." .
+
+ik:cors a rdf:Property ;
+    rdfs:domain ik:Route ;
+    rdfs:range ik:CorsPolicy ;
+    rdfs:label "cors" ;
+    rdfs:comment "The route's cross-origin policy. Absent means the server default (closed)." .
+
+ik:csp a rdf:Property ;
+    rdfs:domain ik:Route ;
+    rdfs:range xsd:string ;
+    rdfs:label "csp" ;
+    rdfs:comment "A Content-Security-Policy the route emits instead of the server default — e.g. a looser policy for an HTML / code-on-demand face." .
+
+ik:shape a rdf:Property ;
+    rdfs:domain ik:Route ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "shape" ;
+    rdfs:comment "A SHACL NodeShape validating a route's resolved request (its captured bindings plus the authenticated principal, as an ik:RouteRequest) before dispatch — a pre-flight gate against IRI injection and unauthorized object references (IDOR). Run through urn:kernel:validate; failure rejects the request." .
+
+ik:bind a rdf:Property ;
+    rdfs:domain ik:Route ;
+    rdfs:range ik:Binding ;
+    rdfs:label "bind" ;
+    rdfs:comment "Binds a template variable in ik:target from a source other than the path — chiefly the authenticated principal — so an identity-owned id is never client-supplied (the structural IDOR fix: /account/me -> urn:account:id:{sub})." .
+
+ik:Binding a rdfs:Class ;
+    rdfs:label "Binding" ;
+    rdfs:comment "A template-variable binding: ik:var names the {var} it fills, ik:from names its source." .
+
+ik:var a rdf:Property ;
+    rdfs:domain ik:Binding ;
+    rdfs:range xsd:string ;
+    rdfs:label "var" ;
+    rdfs:comment "The template variable name this binding fills (without braces)." .
+
+ik:from a rdf:Property ;
+    rdfs:domain ik:Binding ;
+    rdfs:range xsd:string ;
+    rdfs:label "from" ;
+    rdfs:comment "The source of a bound variable: \"principal\" (the credential's subject IRI) or \"principalId\" (its bare id)." .
+
+ik:RouteRequest a rdfs:Class ;
+    rdfs:label "RouteRequest" ;
+    rdfs:comment "The resolved request a route produced: a skolemized node carrying each captured path variable (as ik:<var>) plus ik:principal / ik:principalId from the credential. The target of a route's ik:shape validation." .
+
+ik:CorsPolicy a rdfs:Class ;
+    rdfs:label "CorsPolicy" ;
+    rdfs:comment "A CORS policy: the origins (ik:corsOrigin), methods (ik:corsMethod), and request headers (ik:corsHeader) allowed cross-origin, whether credentials are permitted (ik:corsCredentials), and the preflight cache lifetime (ik:corsMaxAge)." .
+
+ik:corsOrigin a rdf:Property ;
+    rdfs:domain ik:CorsPolicy ;
+    rdfs:range xsd:string ;
+    rdfs:label "corsOrigin" ;
+    rdfs:comment "An allowed origin, e.g. \"https://app.example.com\", or \"*\" for any (avoid with credentials). Multi-valued; empty means closed." .
+
+ik:corsMethod a rdf:Property ;
+    rdfs:domain ik:CorsPolicy ;
+    rdfs:range xsd:string ;
+    rdfs:label "corsMethod" ;
+    rdfs:comment "A method advertised on preflight. Multi-valued; empty means the matched resource's own Allow list." .
+
+ik:corsHeader a rdf:Property ;
+    rdfs:domain ik:CorsPolicy ;
+    rdfs:range xsd:string ;
+    rdfs:label "corsHeader" ;
+    rdfs:comment "A request header allowed on preflight. Multi-valued; empty means echo the requested headers." .
+
+ik:corsCredentials a rdf:Property ;
+    rdfs:domain ik:CorsPolicy ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "corsCredentials" ;
+    rdfs:comment "Whether to send Access-Control-Allow-Credentials: true (with a wildcard origin, the concrete origin is echoed per the Fetch spec)." .
+
+ik:corsMaxAge a rdf:Property ;
+    rdfs:domain ik:CorsPolicy ;
+    rdfs:range xsd:integer ;
+    rdfs:label "corsMaxAge" ;
+    rdfs:comment "Access-Control-Max-Age — how long (seconds) a preflight result may be cached; 0 means omit." .
