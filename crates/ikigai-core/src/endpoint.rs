@@ -39,6 +39,23 @@ pub trait Issuer: Send + Sync {
         self.issue(request, capability).await
     }
 
+    /// Like [`issue_with_parent`](Issuer::issue_with_parent), additionally carrying
+    /// the [`TraceScope`](crate::TraceScope) of the resolution this sub-request
+    /// belongs to — so concurrent traced resolutions on one shared kernel each
+    /// record into their *own* collector, never a neighbor's. The default drops the
+    /// scope and delegates (a detached or remote issuer has no trace to record
+    /// into); the kernel overrides it. `trace` is `None` off the trace path.
+    async fn issue_scoped(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<crate::TraceScope>,
+    ) -> Result<Representation> {
+        let _ = trace;
+        self.issue_with_parent(request, capability, parent).await
+    }
+
     /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s produced by *another*
     /// kernel — a remote one reached through a mounted `RemoteSpace` — into this
     /// issuer's trace, re-based under `parent` (the span of the invocation that
@@ -117,6 +134,10 @@ pub struct Invocation<'a> {
     /// This invocation's trace span, when the kernel is recording — so a sub-request
     /// it issues is linked to this node as its parent. `None` off the trace path.
     span: Option<u64>,
+    /// The trace scope this invocation records into, when the kernel is recording —
+    /// threaded into every sub-request so concurrent traced resolutions on one
+    /// shared kernel stay isolated. `None` off the trace path.
+    trace: Option<crate::TraceScope>,
     deps: Mutex<Vec<Expiry>>,
     /// Union of the golden threads of every sub-resource resolved during this
     /// invocation — so the kernel can propagate them onto the result.
@@ -139,6 +160,7 @@ impl<'a> Invocation<'a> {
             spawner: None,
             issuer_arc: None,
             span: None,
+            trace: None,
             deps: Mutex::new(Vec::new()),
             dep_threads: Mutex::new(BTreeSet::new()),
         }
@@ -165,6 +187,7 @@ impl<'a> Invocation<'a> {
             spawner: None,
             issuer_arc: None,
             span: None,
+            trace: None,
             deps: Mutex::new(Vec::new()),
             dep_threads: Mutex::new(BTreeSet::new()),
         }
@@ -174,6 +197,13 @@ impl<'a> Invocation<'a> {
     /// sub-requests issued from it link to this node as their parent.
     pub(crate) fn with_span(mut self, span: Option<u64>) -> Self {
         self.span = span;
+        self
+    }
+
+    /// Attach the trace scope this invocation belongs to (set by the kernel when
+    /// recording), threaded into sub-requests so they record into the same trace.
+    pub(crate) fn with_trace(mut self, trace: Option<crate::TraceScope>) -> Self {
+        self.trace = trace;
         self
     }
 
@@ -237,7 +267,7 @@ impl<'a> Invocation<'a> {
             .issuer
             .ok_or_else(|| Error::Endpoint("sub-requests require a kernel context".to_string()))?;
         let representation = issuer
-            .issue_with_parent(request, self.capability, self.span)
+            .issue_scoped(request, self.capability, self.span, self.trace.clone())
             .await?;
         self.deps
             .lock()
@@ -312,12 +342,17 @@ impl<'a> Invocation<'a> {
                 let issuer = Arc::clone(issuer);
                 let capability = self.capability.clone();
                 let slot = Arc::clone(slot);
-                // Carry this invocation's span across the spawn, so each spawned
-                // sub-request links to this node as its parent — that's what lets the
-                // recorded events reconstruct the real (concurrent) execution tree.
+                // Carry this invocation's span AND trace scope across the spawn, so
+                // each spawned sub-request links to this node as its parent and
+                // records into this resolution's own trace — that's what lets the
+                // recorded events reconstruct the real (concurrent) execution tree
+                // without bleeding into a concurrently-traced neighbor.
                 let parent = self.span;
+                let trace = self.trace.clone();
                 spawner.spawn(Box::pin(async move {
-                    let result = issuer.issue_with_parent(request, &capability, parent).await;
+                    let result = issuer
+                        .issue_scoped(request, &capability, parent, trace)
+                        .await;
                     *slot.lock().expect("fan-out slot") = Some(result);
                 }))
             })

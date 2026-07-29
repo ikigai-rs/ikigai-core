@@ -115,6 +115,45 @@ pub trait Tracer: Send + Sync {
     fn record(&self, event: TraceEvent);
 }
 
+/// One traced resolution's recording context: the collector its events go to and
+/// the span-id source its nodes draw from. Created per traced call
+/// ([`Kernel::issue_traced`]) — or from the kernel's globally-installed tracer
+/// ([`Kernel::set_tracer`]) at the root of an ordinary issue — and threaded down
+/// the invocation chain (including across `fan_out` spawns, via the
+/// [`Issuer::issue_scoped`](crate::Issuer::issue_scoped) seam), so **concurrent**
+/// traced resolutions on one shared kernel each record into their own collector,
+/// never a neighbor's. Opaque: an [`Issuer`](crate::Issuer) implementor just
+/// passes it through.
+#[derive(Clone)]
+pub struct TraceScope {
+    tracer: Arc<dyn Tracer>,
+    spans: Arc<AtomicU64>,
+}
+
+impl TraceScope {
+    /// A fresh scope over `tracer`; span ids start at 0, private to this trace.
+    fn new(tracer: Arc<dyn Tracer>) -> Self {
+        TraceScope {
+            tracer,
+            spans: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// A scope over the kernel's global tracer slot, sharing the kernel-lifetime
+    /// span counter (successive one-shot `trace` runs keep unique ids).
+    fn global(tracer: Arc<dyn Tracer>, spans: Arc<AtomicU64>) -> Self {
+        TraceScope { tracer, spans }
+    }
+
+    fn next_span(&self) -> u64 {
+        self.spans.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn record(&self, event: TraceEvent) {
+        self.tracer.record(event);
+    }
+}
+
 /// A read-only view of the host scheduler's live state, injected into the kernel
 /// like a [`Clock`] so `urn:kernel:scheduler` can report it **intrinsically** — over
 /// the wire and without the host binding an endpoint, uniform with `urn:kernel:cache`
@@ -166,12 +205,15 @@ pub struct Kernel {
     self_ref: Option<Weak<Kernel>>,
     /// Execution tracer, installed only while the `trace` command captures one
     /// resolution. `tracing` is a fast-path gate so an untraced issue pays just an
-    /// atomic load, never the lock.
+    /// atomic load, never the lock. This global slot is the single-tenant
+    /// compatibility path; concurrent tracing uses the per-call
+    /// [`issue_traced`](Self::issue_traced), which never consults it.
     tracer: Mutex<Option<Arc<dyn Tracer>>>,
     tracing: AtomicBool,
-    /// Monotonic span-id source, advanced once per traced invocation so each node
-    /// gets a unique id and its children can name it as their parent.
-    span_counter: AtomicU64,
+    /// Monotonic span-id source for GLOBAL-slot traces (shared into their
+    /// [`TraceScope`]s so successive one-shot traces keep unique ids). Per-call
+    /// traces carry their own counter.
+    span_counter: Arc<AtomicU64>,
     /// Read-only handle to the host scheduler, for `urn:kernel:scheduler`. Injected
     /// by a scheduled host (the [`Clock`] pattern); absent ⇒ single-threaded default.
     scheduler: Option<Arc<dyn SchedulerReporter>>,
@@ -224,7 +266,7 @@ impl Kernel {
             self_ref: None,
             tracer: Mutex::new(None),
             tracing: AtomicBool::new(false),
-            span_counter: AtomicU64::new(0),
+            span_counter: Arc::new(AtomicU64::new(0)),
             scheduler: None,
             constraint: Mutex::new(VecDeque::new()),
             subclass_closure: BTreeMap::new(),
@@ -243,7 +285,7 @@ impl Kernel {
             self_ref: None,
             tracer: Mutex::new(None),
             tracing: AtomicBool::new(false),
-            span_counter: AtomicU64::new(0),
+            span_counter: Arc::new(AtomicU64::new(0)),
             scheduler: None,
             constraint: Mutex::new(VecDeque::new()),
             subclass_closure: BTreeMap::new(),
@@ -492,20 +534,28 @@ impl Kernel {
         });
     }
 
-    /// A fresh span id for an invocation while tracing; `None` off the trace path,
-    /// so an untraced issue never touches the counter.
-    fn next_span(&self) -> Option<u64> {
-        if self.tracing.load(Ordering::Relaxed) {
-            Some(self.span_counter.fetch_add(1, Ordering::Relaxed))
-        } else {
-            None
+    /// The recording scope for the kernel's globally-installed tracer, if one is
+    /// set — the single-tenant compatibility path behind
+    /// [`set_tracer`](Self::set_tracer), consulted only at resolution roots.
+    /// Per-call tracing ([`issue_traced`](Self::issue_traced)) never reads it.
+    fn global_scope(&self) -> Option<TraceScope> {
+        if !self.tracing.load(Ordering::Relaxed) {
+            return None;
         }
+        self.tracer
+            .lock()
+            .expect("tracer lock")
+            .clone()
+            .map(|tracer| TraceScope::global(tracer, Arc::clone(&self.span_counter)))
     }
 
-    /// Report one resolved invocation to the installed tracer, if any — tagged with
-    /// its own `span` and its issuer's `parent` span, so the events form a tree.
+    /// Report one resolved invocation into its resolution's [`TraceScope`], if the
+    /// resolution is being traced — tagged with its own `span` and its issuer's
+    /// `parent` span, so the events form a tree.
+    #[allow(clippy::too_many_arguments)]
     fn trace_record(
         &self,
+        trace: &Option<TraceScope>,
         request: &Request,
         capability: &Capability,
         span: Option<u64>,
@@ -513,31 +563,55 @@ impl Kernel {
         started: Option<Time>,
         cache_hit: bool,
     ) {
-        if !self.tracing.load(Ordering::Relaxed) {
+        let Some(scope) = trace else {
             return;
-        }
-        if let Some(tracer) = self.tracer.lock().expect("tracer lock").clone() {
-            tracer.record(TraceEvent {
-                target: request.target.as_str().to_string(),
-                thread: thread_label(),
-                started,
-                ended: self.clock.as_ref().map(|clock| clock.now()),
-                cache_hit,
-                span: span.unwrap_or(0),
-                parent,
-                // The authority this hop ran under, mirrored from `Capability::scopes`
-                // (None = root). Recorded only while tracing, so the clone is off the
-                // hot path.
-                capability: capability.scopes().map(|s| s.iter().cloned().collect()),
-            });
-        }
+        };
+        scope.record(TraceEvent {
+            target: request.target.as_str().to_string(),
+            thread: thread_label(),
+            started,
+            ended: self.clock.as_ref().map(|clock| clock.now()),
+            cache_hit,
+            span: span.unwrap_or(0),
+            parent,
+            // The authority this hop ran under, mirrored from `Capability::scopes`
+            // (None = root). Recorded only while tracing, so the clone is off the
+            // hot path.
+            capability: capability.scopes().map(|s| s.iter().cloned().collect()),
+        });
     }
 
     /// Issue a request: return a valid cached representation if one exists,
     /// otherwise resolve, invoke the endpoint, and cache the result if cacheable.
     pub async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation> {
-        // Top-level entry: no parent span (this is a trace root if one is recording).
-        self.issue_inner(request, capability, None, None).await
+        // Top-level entry: no parent span (this is a trace root if one is recording
+        // via the globally-installed tracer).
+        let trace = self.global_scope();
+        self.issue_inner(request, capability, None, None, trace)
+            .await
+    }
+
+    /// Issue a request, recording every invocation of **this resolution** into
+    /// `tracer` — isolated from any other traced resolution running concurrently on
+    /// the same kernel. Each call gets its own span-id space (starting at 0), so
+    /// returned spans are self-contained and re-basable. This is the
+    /// concurrency-safe form of [`set_tracer`](Self::set_tracer) + issue: a wire
+    /// server tracing one connection's call must use this, or concurrent tenants'
+    /// events interleave into whichever collector was installed last.
+    pub async fn issue_traced(
+        &self,
+        request: Request,
+        capability: &Capability,
+        tracer: Arc<dyn Tracer>,
+    ) -> Result<Representation> {
+        self.issue_inner(
+            request,
+            capability,
+            None,
+            None,
+            Some(TraceScope::new(tracer)),
+        )
+        .await
     }
 
     /// Issue a request whose input was produced by an upstream pipe stage, folding
@@ -552,7 +626,8 @@ impl Kernel {
         capability: &Capability,
         incoming: Provenance,
     ) -> Result<Representation> {
-        self.issue_inner(request, capability, None, Some(incoming))
+        let trace = self.global_scope();
+        self.issue_inner(request, capability, None, Some(incoming), trace)
             .await
     }
 
@@ -567,6 +642,7 @@ impl Kernel {
         capability: &Capability,
         parent: Option<u64>,
         incoming: Option<Provenance>,
+        trace: Option<TraceScope>,
     ) -> Result<Representation> {
         // The kernel-behavior namespace (`urn:kernel:*`) is resolved by the kernel
         // itself — before the root space, which cannot shadow it — exposing the
@@ -607,9 +683,9 @@ impl Kernel {
         let id = request.id();
         let cacheable_verb = request.verb.is_cacheable();
         // Start stamp, shared by the trace event and the always-on constraint window
-        // (one clock read); the span only advances while tracing.
+        // (one clock read); the span only advances while this resolution is traced.
         let started = self.now_stamp();
-        let span = self.next_span();
+        let span = trace.as_ref().map(TraceScope::next_span);
 
         // Representation-cache lookup (idempotent verbs only): serve a cached entry
         // whose golden-thread edges are all still current. A cut entry is evicted
@@ -617,7 +693,7 @@ impl Kernel {
         let cap_key = capability_key(capability);
         if cacheable_verb {
             if let Some(cached) = self.valid_cached(&id, cap_key) {
-                self.trace_record(&request, capability, span, parent, started, true);
+                self.trace_record(&trace, &request, capability, span, parent, started, true);
                 self.record_resolution(&request, started, true);
                 return Ok(cached);
             }
@@ -665,7 +741,8 @@ impl Kernel {
             let invocation =
                 Invocation::with_issuer(&request, &resolved.bindings, capability, self)
                     .with_concurrency(self.spawner.clone(), issuer_arc)
-                    .with_span(span);
+                    .with_span(span)
+                    .with_trace(trace.clone());
             let representation = resolved.endpoint.invoke(&invocation).await?;
             // Effective expiry propagates from the dependencies: the result is no
             // fresher than its most volatile part. The endpoint's own expiry is met
@@ -689,7 +766,7 @@ impl Kernel {
             representation.with_expiry(effective).with_threads(threads)
         };
         // Computed (not served from cache) — record after the invocation completes.
-        self.trace_record(&request, capability, span, parent, started, false);
+        self.trace_record(&trace, &request, capability, span, parent, started, false);
         self.record_resolution(&request, started, false);
 
         // A successful mutating verb invalidates its target: cut the thread named
@@ -1519,10 +1596,28 @@ impl Issuer for Kernel {
         capability: &Capability,
         parent: Option<u64>,
     ) -> Result<Representation> {
-        // Re-entrant sub-request: thread the issuing node's span through so the
-        // recorded events link parent → child (across the fan-out spawn). A
-        // sub-resource resolves on its own merits — no pipe upstream here.
-        self.issue_inner(request, capability, parent, None).await
+        // Compatibility path (no scope threaded — an external Issuer wrapper that
+        // predates issue_scoped): record into the global tracer if one is set,
+        // preserving pre-scope behavior. A sub-resource resolves on its own
+        // merits — no pipe upstream here.
+        let trace = self.global_scope();
+        self.issue_inner(request, capability, parent, None, trace)
+            .await
+    }
+
+    async fn issue_scoped(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<TraceScope>,
+    ) -> Result<Representation> {
+        // Re-entrant sub-request: thread the issuing node's span AND its
+        // resolution's trace scope through, so the recorded events link
+        // parent → child (across the fan-out spawn) inside the RIGHT trace —
+        // concurrent traced resolutions never bleed into each other's collectors.
+        self.issue_inner(request, capability, parent, None, trace)
+            .await
     }
 
     fn now(&self) -> Option<Time> {
@@ -3097,6 +3192,89 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(out.bytes, b"123");
+    }
+
+    #[test]
+    fn issue_traced_records_a_self_contained_tree() {
+        struct Rec(std::sync::Mutex<Vec<TraceEvent>>);
+        impl Tracer for Rec {
+            fn record(&self, event: TraceEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        let kernel = Kernel::new(Arc::new(fan_space())).into_scheduled(Arc::new(InlineSpawner));
+        let rec = Arc::new(Rec(std::sync::Mutex::new(Vec::new())));
+        block_on(kernel.issue_traced(
+            Request::new(Verb::Source, iri("urn:fan:parent")),
+            &Capability::root(),
+            rec.clone(),
+        ))
+        .unwrap();
+        let events = rec.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 4, "parent + three leaves");
+        // Span ids are private to this trace: 0-based, self-contained.
+        let mut spans: Vec<u64> = events.iter().map(|e| e.span).collect();
+        spans.sort_unstable();
+        assert_eq!(spans, vec![0, 1, 2, 3]);
+        let root = events
+            .iter()
+            .find(|e| e.target == "urn:fan:parent")
+            .unwrap();
+        assert_eq!(root.parent, None);
+        for leaf in events.iter().filter(|e| e.target.starts_with("urn:leaf:")) {
+            assert_eq!(
+                leaf.parent,
+                Some(root.span),
+                "each leaf links to the fan parent"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_traced_resolutions_stay_isolated() {
+        // Two resolutions traced CONCURRENTLY on one shared kernel: each collector
+        // must receive only its own resolution's events. Under the global-slot
+        // scheme this interleaved — the second set_tracer displaced the first and
+        // one tenant's spans landed in the other's collector (the cross-tenant
+        // trace leak from the 2026-07-21 security review).
+        struct Rec(std::sync::Mutex<Vec<TraceEvent>>);
+        impl Tracer for Rec {
+            fn record(&self, event: TraceEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        let kernel = Kernel::new(Arc::new(fan_space())).into_scheduled(Arc::new(InlineSpawner));
+        let rec_a = Arc::new(Rec(std::sync::Mutex::new(Vec::new())));
+        let rec_b = Arc::new(Rec(std::sync::Mutex::new(Vec::new())));
+        let (a, b) = block_on(futures_util::future::join(
+            kernel.issue_traced(
+                Request::new(Verb::Source, iri("urn:fan:parent")),
+                &Capability::root(),
+                rec_a.clone(),
+            ),
+            kernel.issue_traced(
+                Request::new(Verb::Source, iri("urn:leaf:1")),
+                &Capability::root(),
+                rec_b.clone(),
+            ),
+        ));
+        a.unwrap();
+        b.unwrap();
+        let a_events = rec_a.0.lock().unwrap().clone();
+        let b_events = rec_b.0.lock().unwrap().clone();
+        assert_eq!(a_events.len(), 4, "A sees its whole tree");
+        assert_eq!(b_events.len(), 1, "B sees exactly its one resolution");
+        assert!(
+            b_events.iter().all(|e| e.target == "urn:leaf:1"),
+            "none of A's spans leaked into B's collector: {b_events:?}"
+        );
+        assert!(
+            a_events.iter().any(|e| e.target == "urn:fan:parent"),
+            "A's root is in A's collector"
+        );
+        // Each trace's span ids are independent and 0-based.
+        assert_eq!(b_events[0].span, 0);
+        assert_eq!(b_events[0].parent, None);
     }
 
     #[test]
