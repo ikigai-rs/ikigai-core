@@ -104,6 +104,13 @@ pub struct TraceEvent {
     /// a grant boundary — is visible in the tree, node by node: "under which
     /// capability" alongside "against which cache state".
     pub capability: Option<Vec<String>>,
+    /// Facts the endpoint attached to its own span via
+    /// [`Invocation::trace_note`](crate::Invocation::trace_note) — e.g. the LLM
+    /// facade noting which `model`/`provider` it resolved to, or the HTTP client
+    /// noting the redirect hops it followed. Empty unless the endpoint annotated.
+    /// (Wire note: adding this field changes the postcard layout — a host shipping
+    /// `TraceEvent`s over the wire must bump its protocol version when adopting.)
+    pub notes: Vec<(String, String)>,
 }
 
 /// Receives a [`TraceEvent`] per invocation while installed. The kernel records
@@ -562,6 +569,7 @@ impl Kernel {
         parent: Option<u64>,
         started: Option<Time>,
         cache_hit: bool,
+        notes: Vec<(String, String)>,
     ) {
         let Some(scope) = trace else {
             return;
@@ -578,6 +586,7 @@ impl Kernel {
             // (None = root). Recorded only while tracing, so the clone is off the
             // hot path.
             capability: capability.scopes().map(|s| s.iter().cloned().collect()),
+            notes,
         });
     }
 
@@ -693,7 +702,16 @@ impl Kernel {
         let cap_key = capability_key(capability);
         if cacheable_verb {
             if let Some(cached) = self.valid_cached(&id, cap_key) {
-                self.trace_record(&trace, &request, capability, span, parent, started, true);
+                self.trace_record(
+                    &trace,
+                    &request,
+                    capability,
+                    span,
+                    parent,
+                    started,
+                    true,
+                    Vec::new(),
+                );
                 self.record_resolution(&request, started, true);
                 return Ok(cached);
             }
@@ -705,6 +723,9 @@ impl Kernel {
             Resolution::Miss => return Err(Error::Unresolved(request.target.clone())),
         };
 
+        // Facts the endpoint attaches to its own span via `Invocation::trace_note`
+        // (hoisted out of the invocation arm — the Meta arm has no invocation).
+        let mut trace_notes = Vec::new();
         let representation = if request.verb == Verb::Meta {
             // Selection-driven Meta: the renderer emits the endpoint's description in its
             // *canonical* serializations (Turtle, and JSON/text where the renderer supports
@@ -763,10 +784,20 @@ impl Kernel {
                 effective = effective.most_restrictive(incoming.expiry);
                 threads.extend(incoming.threads);
             }
+            trace_notes = invocation.take_trace_notes();
             representation.with_expiry(effective).with_threads(threads)
         };
         // Computed (not served from cache) — record after the invocation completes.
-        self.trace_record(&trace, &request, capability, span, parent, started, false);
+        self.trace_record(
+            &trace,
+            &request,
+            capability,
+            span,
+            parent,
+            started,
+            false,
+            trace_notes,
+        );
         self.record_resolution(&request, started, false);
 
         // A successful mutating verb invalidates its target: cut the thread named
@@ -3231,6 +3262,48 @@ mod tests {
     }
 
     #[test]
+    fn trace_note_lands_on_the_endpoints_own_span() {
+        struct Rec(std::sync::Mutex<Vec<TraceEvent>>);
+        impl Tracer for Rec {
+            fn record(&self, event: TraceEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        let space = EndpointSpace::new().bind(
+            Exact::new("urn:noted"),
+            FnEndpoint::new("noted", |inv: &Invocation<'_>| {
+                inv.trace_note("model", "llama3.2:3b");
+                inv.trace_note("provider", "ollama");
+                Ok(Representation::new(ReprType::new("text/plain"), vec![]))
+            }),
+        );
+        let kernel = Kernel::new(Arc::new(space));
+        let rec = Arc::new(Rec(std::sync::Mutex::new(Vec::new())));
+        block_on(kernel.issue_traced(
+            Request::new(Verb::Source, iri("urn:noted")),
+            &Capability::root(),
+            rec.clone(),
+        ))
+        .unwrap();
+        let events = rec.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].notes,
+            vec![
+                ("model".to_string(), "llama3.2:3b".to_string()),
+                ("provider".to_string(), "ollama".to_string()),
+            ]
+        );
+
+        // Untraced: the same endpoint invokes fine and the note is a free no-op.
+        block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:noted")),
+            &Capability::root(),
+        ))
+        .unwrap();
+    }
+
+    #[test]
     fn concurrent_traced_resolutions_stay_isolated() {
         // Two resolutions traced CONCURRENTLY on one shared kernel: each collector
         // must receive only its own resolution's events. Under the global-slot
@@ -3353,6 +3426,7 @@ mod tests {
             span,
             parent,
             capability: None,
+            notes: Vec::new(),
         };
         let remote = vec![
             ev("urn:remote:root", 0, None),

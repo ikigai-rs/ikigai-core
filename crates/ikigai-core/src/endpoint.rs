@@ -138,6 +138,11 @@ pub struct Invocation<'a> {
     /// threaded into every sub-request so concurrent traced resolutions on one
     /// shared kernel stay isolated. `None` off the trace path.
     trace: Option<crate::TraceScope>,
+    /// Facts the endpoint attached to its own span via
+    /// [`trace_note`](Self::trace_note); drained by the kernel into the
+    /// [`TraceEvent`](crate::TraceEvent) once the invocation completes. Only
+    /// collected while tracing (no cost, no growth off the trace path).
+    trace_notes: Mutex<Vec<(String, String)>>,
     deps: Mutex<Vec<Expiry>>,
     /// Union of the golden threads of every sub-resource resolved during this
     /// invocation — so the kernel can propagate them onto the result.
@@ -161,6 +166,7 @@ impl<'a> Invocation<'a> {
             issuer_arc: None,
             span: None,
             trace: None,
+            trace_notes: Mutex::new(Vec::new()),
             deps: Mutex::new(Vec::new()),
             dep_threads: Mutex::new(BTreeSet::new()),
         }
@@ -188,6 +194,7 @@ impl<'a> Invocation<'a> {
             issuer_arc: None,
             span: None,
             trace: None,
+            trace_notes: Mutex::new(Vec::new()),
             deps: Mutex::new(Vec::new()),
             dep_threads: Mutex::new(BTreeSet::new()),
         }
@@ -227,6 +234,27 @@ impl<'a> Invocation<'a> {
     /// — as the parent to re-base the returned spans under.
     pub fn trace_span(&self) -> Option<u64> {
         self.span
+    }
+
+    /// Attach a `key = value` fact to this invocation's own trace span — e.g. the
+    /// LLM facade noting `model` / `provider` it resolved to, or the HTTP client
+    /// noting the redirect hops it followed. A no-op unless this resolution is
+    /// being traced, so it is free on the hot path; notes land on the
+    /// [`TraceEvent`](crate::TraceEvent) the kernel records for this node.
+    pub fn trace_note(&self, key: impl Into<String>, value: impl Into<String>) {
+        if self.trace.is_none() {
+            return;
+        }
+        self.trace_notes
+            .lock()
+            .expect("trace notes lock")
+            .push((key.into(), value.into()));
+    }
+
+    /// Drain the notes recorded during this invocation (kernel-side, at
+    /// trace-record time).
+    pub(crate) fn take_trace_notes(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.trace_notes.lock().expect("trace notes lock"))
     }
 
     /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s from another kernel into
