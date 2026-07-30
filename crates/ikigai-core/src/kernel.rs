@@ -696,6 +696,26 @@ impl Kernel {
         let started = self.now_stamp();
         let span = trace.as_ref().map(TraceScope::next_span);
 
+        // Resolution is synchronous, pure routing — and it runs BEFORE the cache
+        // lookup, so the declared-capability floor below gates cached and computed
+        // answers alike (a cached representation must never be served to a caller
+        // the endpoint's own declaration would refuse).
+        let resolved = match self.root.resolve(&request, &Scope::empty()) {
+            Resolution::Hit(resolved) => resolved,
+            Resolution::Miss => return Err(Error::Unresolved(request.target.clone())),
+        };
+
+        // The baseline capability floor: **declared = enforced**. Every `requires`
+        // the endpoint declares for this verb must be satisfied — on the SAME
+        // `cap_satisfies` predicate selection and `urn:kernel:validate` use, so
+        // what the manifold offers is exactly what the kernel admits. Declarations
+        // are the coarse floor (parameterized families use the wildcard form,
+        // `urn:cap:net:*`); a module's finer runtime gate (path/host ACL) remains
+        // its ceiling on top. An endpoint declaring nothing is public, unchanged.
+        // (`Meta` is exempt by construction: `action_specs()` carries no Meta
+        // spec — self-description stays readable wherever the catalog offers it.)
+        enforce_requires(&resolved.endpoint.describe(), &request, capability)?;
+
         // Representation-cache lookup (idempotent verbs only): serve a cached entry
         // whose golden-thread edges are all still current. A cut entry is evicted
         // here and recomputed below. The guard is dropped before any await.
@@ -716,12 +736,6 @@ impl Kernel {
                 return Ok(cached);
             }
         }
-
-        // Resolution is synchronous, pure routing.
-        let resolved = match self.root.resolve(&request, &Scope::empty()) {
-            Resolution::Hit(resolved) => resolved,
-            Resolution::Miss => return Err(Error::Unresolved(request.target.clone())),
-        };
 
         // Facts the endpoint attaches to its own span via `Invocation::trace_note`
         // (hoisted out of the invocation arm — the Meta arm has no invocation).
@@ -1333,23 +1347,56 @@ fn generation_of(generations: &HashMap<Thread, u64>, thread: &Thread) -> u64 {
 /// A stable fingerprint of a capability's authority, used to namespace cache entries.
 /// Root (full authority) gets its own namespace; a scoped capability's namespace is
 /// derived from its sorted scope set (so two equal capabilities share a namespace, and
-/// a narrower one cannot collide with a broader one). Cheap, allocation-free, and
-/// recomputed per request — the cache holds the `u64`, never the capability.
+/// a narrower one cannot collide with a broader one). BLAKE3-based (truncated to the
+/// cache key's `u64`): `DefaultHasher` is not collision-resistant, and this key
+/// partitions cached representations BY AUTHORITY — an engineered collision would
+/// serve one authority's cached result to another. Recomputed per request; the cache
+/// holds the `u64`, never the capability.
 fn capability_key(capability: &Capability) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = blake3::Hasher::new();
     match capability.scopes() {
         // Root authority — a fixed namespace distinct from any scoped set.
-        None => 0u8.hash(&mut hasher),
+        None => crate::hashing::feed_u8(&mut hasher, 0),
         Some(scopes) => {
-            1u8.hash(&mut hasher);
-            // `scopes` is a `BTreeSet`, so iteration is sorted ⇒ a stable fingerprint.
+            crate::hashing::feed_u8(&mut hasher, 1);
+            // `scopes` is a `BTreeSet`, so iteration is sorted ⇒ a stable
+            // fingerprint; `feed_str` length-prefixes, so scope boundaries can't
+            // be forged by concatenation.
             for scope in scopes {
-                scope.hash(&mut hasher);
+                crate::hashing::feed_str(&mut hasher, scope);
             }
         }
     }
-    hasher.finish()
+    let digest = hasher.finalize();
+    u64::from_le_bytes(digest.as_bytes()[..8].try_into().expect("8-byte prefix"))
+}
+
+/// The kernel's baseline capability floor for a resolved endpoint: every scope the
+/// endpoint's description `requires` for the request's verb must be satisfied by
+/// the caller's capability (all of them — an action needing net AND a secret needs
+/// both). Predicate = [`cap_satisfies`](crate::select) — identical to selection
+/// and validation, so offer, preflight, and enforcement agree. A verb the
+/// description doesn't declare carries no spec and passes (dispatch behavior for
+/// undeclared verbs is unchanged).
+fn enforce_requires(
+    description: &crate::describe::Description,
+    request: &Request,
+    capability: &Capability,
+) -> Result<()> {
+    for spec in description.action_specs() {
+        if spec.verb != request.verb {
+            continue;
+        }
+        for scope in &spec.requires {
+            if !crate::select::cap_satisfies(capability, scope) {
+                return Err(Error::Denied(format!(
+                    "capability does not grant `{scope}` (declared by `{}`)",
+                    request.target.as_str()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The reserved kernel-behavior namespace prefix.
@@ -3223,6 +3270,122 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(out.bytes, b"123");
+    }
+
+    #[test]
+    fn declared_requires_is_kernel_enforced_before_dispatch() {
+        use std::sync::atomic::AtomicU32;
+        // An endpoint that DECLARES a capability. The invoke counter proves a
+        // denial happens before dispatch — declared = enforced is the kernel's
+        // guarantee now, not module discipline.
+        struct Gated(Arc<AtomicU32>);
+        #[async_trait::async_trait]
+        impl Endpoint for Gated {
+            async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Representation::new(ReprType::new("text/plain"), b"in".to_vec()).cacheable())
+            }
+            fn name(&self) -> &str {
+                "gated"
+            }
+            fn describe(&self) -> Description {
+                Description::new("gated")
+                    .verb(Verb::Source)
+                    .requires("urn:cap:demo:read")
+            }
+        }
+        let invokes = Arc::new(AtomicU32::new(0));
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:gated"), Gated(invokes.clone())),
+        ));
+        let req = || Request::new(Verb::Source, iri("urn:gated"));
+
+        // Without the declared cap: typed Denied, endpoint never entered.
+        let narrow = Capability::root().attenuate(["urn:cap:other".to_string()]);
+        let err = block_on(kernel.issue(req(), &narrow)).unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got {err:?}");
+        assert_eq!(invokes.load(Ordering::SeqCst), 0, "denied before dispatch");
+
+        // With it (exact grant), and as root: both pass.
+        let holder = Capability::root().attenuate(["urn:cap:demo:read".to_string()]);
+        block_on(kernel.issue(req(), &holder)).unwrap();
+        block_on(kernel.issue(req(), &Capability::root())).unwrap();
+        assert_eq!(invokes.load(Ordering::SeqCst), 2);
+
+        // The floor also fences the CACHE: root's issue above cached the result;
+        // a later caller without the declared cap is denied, not served.
+        let err = block_on(kernel.issue(req(), &narrow)).unwrap_err();
+        assert!(matches!(err, Error::Denied(_)));
+    }
+
+    #[test]
+    fn wildcard_requires_passes_any_grant_under_the_family() {
+        struct NetLike;
+        #[async_trait::async_trait]
+        impl Endpoint for NetLike {
+            async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+                Ok(Representation::new(
+                    ReprType::new("text/plain"),
+                    b"ok".to_vec(),
+                ))
+            }
+            fn name(&self) -> &str {
+                "netlike"
+            }
+            fn describe(&self) -> Description {
+                Description::new("netlike")
+                    .verb(Verb::Source)
+                    .requires("urn:cap:net:*")
+            }
+        }
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:net"), NetLike),
+        ));
+        let req = || Request::new(Verb::Source, iri("urn:net"));
+        // A host-scoped grant under the family passes the wildcard floor (the
+        // module's own per-host ACL stays its ceiling).
+        let host_scoped = Capability::root().attenuate(["urn:cap:net:localhost:11434".to_string()]);
+        block_on(kernel.issue(req(), &host_scoped)).unwrap();
+        // No grant under the family: denied at the floor.
+        let unrelated = Capability::root().attenuate(["urn:cap:fs:read:/tmp".to_string()]);
+        let err = block_on(kernel.issue(req(), &unrelated)).unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn per_verb_action_specs_enforce_independently() {
+        struct Calendarish;
+        #[async_trait::async_trait]
+        impl Endpoint for Calendarish {
+            async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+                Ok(Representation::new(
+                    ReprType::new("text/plain"),
+                    b"ok".to_vec(),
+                ))
+            }
+            fn name(&self) -> &str {
+                "calendarish"
+            }
+            fn describe(&self) -> Description {
+                use crate::describe::ActionSpec;
+                Description::new("calendarish")
+                    .verb(Verb::Source)
+                    .verb(Verb::Sink)
+                    .action(ActionSpec::new(Verb::Source).requires("urn:cap:cal:read"))
+                    .action(ActionSpec::new(Verb::Sink).requires("urn:cap:cal:write"))
+            }
+        }
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:cal"), Calendarish),
+        ));
+        let reader = Capability::root().attenuate(["urn:cap:cal:read".to_string()]);
+        block_on(kernel.issue(Request::new(Verb::Source, iri("urn:cal")), &reader)).unwrap();
+        let err =
+            block_on(kernel.issue(Request::new(Verb::Sink, iri("urn:cal")), &reader)).unwrap_err();
+        assert!(
+            matches!(err, Error::Denied(_)),
+            "a reader must not pass the write action's floor: {err:?}"
+        );
     }
 
     #[test]
