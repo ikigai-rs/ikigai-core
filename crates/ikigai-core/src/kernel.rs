@@ -3652,4 +3652,238 @@ mod tests {
             "each hop names the sorted scope set it ran under — attenuation is visible"
         );
     }
+
+    // ---- scope_sync: the sync-issue bridge -------------------------------
+
+    /// A composite endpoint whose body is a SYNC closure on its own thread,
+    /// issuing sub-requests through the blocking [`SyncIssuer`] — the shape
+    /// every embedded evaluator (Steel, Python, JS) needs.
+    struct SyncComposite;
+    #[async_trait::async_trait]
+    impl Endpoint for SyncComposite {
+        async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+            let out = inv
+                .scope_sync(|issuer| {
+                    let a = issuer.source(&Iri::parse("urn:data:a").unwrap())?;
+                    let upper = issuer.issue(
+                        Request::new(Verb::Source, Iri::parse("urn:fn:toUpper").unwrap())
+                            .with_arg("in", ArgRef::Inline(a.bytes.clone())),
+                    )?;
+                    Ok(format!("{}!", String::from_utf8_lossy(&upper.bytes)))
+                })
+                .await??;
+            Ok(Representation::new(ReprType::new("text/plain"), out.into_bytes()).cacheable())
+        }
+        fn name(&self) -> &str {
+            "sync-composite"
+        }
+    }
+
+    fn sync_scope_kernel(volatile_counter: Arc<AtomicU32>) -> Kernel {
+        let space = EndpointSpace::new()
+            .bind(
+                Exact::new("urn:data:a"),
+                FnEndpoint::new("a", move |_inv| {
+                    // VOLATILE on purpose (no .cacheable()): each read is a new
+                    // value, so anything derived from it must not be cached.
+                    let n = volatile_counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(Representation::new(
+                        ReprType::new("text/plain"),
+                        format!("a{n}").into_bytes(),
+                    ))
+                }),
+            )
+            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:demo:composite"), SyncComposite);
+        Kernel::new(Arc::new(space))
+    }
+
+    #[test]
+    fn a_sync_scope_issues_through_the_kernel() {
+        let kernel = sync_scope_kernel(Arc::new(AtomicU32::new(0)));
+        let cap = Capability::root();
+        let rep =
+            block_on(kernel.issue(Request::new(Verb::Source, iri("urn:demo:composite")), &cap))
+                .unwrap();
+        assert_eq!(rep.bytes, b"A0!");
+    }
+
+    /// The bridge preserves cache CORRECTNESS: the closure's sub-requests are
+    /// dependencies of the composite, so a volatile dependency keeps the
+    /// (nominally cacheable) composite OUT of the cache — same rule as
+    /// `inv.issue` from async code.
+    #[test]
+    fn a_sync_scopes_volatile_dependency_defeats_the_composite_cache() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let kernel = sync_scope_kernel(Arc::clone(&counter));
+        let cap = Capability::root();
+        let request = || Request::new(Verb::Source, iri("urn:demo:composite"));
+        let first = block_on(kernel.issue(request(), &cap)).unwrap();
+        let second = block_on(kernel.issue(request(), &cap)).unwrap();
+        assert_eq!(first.bytes, b"A0!");
+        assert_eq!(
+            second.bytes, b"A1!",
+            "recomputed — the volatile dependency crossed the bridge"
+        );
+    }
+
+    /// Authority does not widen across the bridge: the closure's calls run
+    /// under the MINTING invocation's capability, so a gated sub-resource
+    /// stays gated.
+    #[test]
+    fn a_sync_scope_cannot_widen_authority() {
+        struct GatedProbe;
+        #[async_trait::async_trait]
+        impl Endpoint for GatedProbe {
+            async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+                let result = inv
+                    .scope_sync(|issuer| issuer.source(&Iri::parse("urn:data:secret").unwrap()))
+                    .await?;
+                match result {
+                    Ok(_) => Ok(Representation::new(
+                        ReprType::new("text/plain"),
+                        b"reached".to_vec(),
+                    )),
+                    Err(e) => Err(e),
+                }
+            }
+            fn name(&self) -> &str {
+                "gated-probe"
+            }
+        }
+        let space = EndpointSpace::new()
+            .bind(
+                Exact::new("urn:data:secret"),
+                FnEndpoint::new("secret", |_inv| {
+                    Ok(Representation::new(
+                        ReprType::new("text/plain"),
+                        b"s3cr3t".to_vec(),
+                    ))
+                })
+                .with_description(
+                    Description::new("secret")
+                        .verb(Verb::Source)
+                        .requires("urn:cap:secret:read"),
+                ),
+            )
+            .bind(Exact::new("urn:demo:probe"), GatedProbe);
+        let kernel = Kernel::new(Arc::new(space));
+
+        // Insufficient capability: the sub-request is denied INSIDE the scope.
+        let narrow = Capability::scoped(["urn:cap:unrelated"]);
+        let denied =
+            block_on(kernel.issue(Request::new(Verb::Source, iri("urn:demo:probe")), &narrow));
+        assert!(denied.is_err(), "the bridge must not widen authority");
+
+        // Sufficient capability: the same probe reaches it.
+        let held = Capability::scoped(["urn:cap:secret:read"]);
+        let reached =
+            block_on(kernel.issue(Request::new(Verb::Source, iri("urn:demo:probe")), &held))
+                .unwrap();
+        assert_eq!(reached.bytes, b"reached");
+    }
+
+    /// The handle is cloneable and Send: the closure may fan work across its
+    /// OWN threads, each holding a clone; the drain serves them all.
+    #[test]
+    fn sync_issuer_clones_serve_multiple_threads() {
+        struct Fanning;
+        #[async_trait::async_trait]
+        impl Endpoint for Fanning {
+            async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+                let out = inv
+                    .scope_sync(|issuer| {
+                        let handles: Vec<_> = (0..2)
+                            .map(|_| {
+                                let issuer = issuer.clone();
+                                std::thread::spawn(move || {
+                                    issuer
+                                        .issue(
+                                            Request::new(
+                                                Verb::Source,
+                                                Iri::parse("urn:fn:toUpper").unwrap(),
+                                            )
+                                            .with_arg("in", ArgRef::Inline(b"hi".to_vec())),
+                                        )
+                                        .map(|r| String::from_utf8_lossy(&r.bytes).into_owned())
+                                })
+                            })
+                            .collect();
+                        let mut parts: Vec<String> = Vec::new();
+                        for h in handles {
+                            parts.push(h.join().expect("worker thread")?);
+                        }
+                        Ok(parts.join("+"))
+                    })
+                    .await??;
+                Ok(Representation::new(
+                    ReprType::new("text/plain"),
+                    out.into_bytes(),
+                ))
+            }
+            fn name(&self) -> &str {
+                "fanning"
+            }
+        }
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:demo:fanning"), Fanning);
+        let kernel = Kernel::new(Arc::new(space));
+        let rep = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:demo:fanning")),
+            &Capability::root(),
+        ))
+        .unwrap();
+        assert_eq!(rep.bytes, b"HI+HI");
+    }
+
+    /// A panic in the closure surfaces as an ERROR from the scope — the
+    /// kernel (and its executor) survive to serve the next request.
+    #[test]
+    fn a_panicking_sync_scope_is_an_error_not_a_poisoned_kernel() {
+        struct Panicking;
+        #[async_trait::async_trait]
+        impl Endpoint for Panicking {
+            async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+                let _: String = inv
+                    .scope_sync(|_issuer| panic!("evaluator blew up"))
+                    .await?;
+                unreachable!("the scope must error")
+            }
+            fn name(&self) -> &str {
+                "panicking"
+            }
+        }
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:demo:panic"), Panicking);
+        let kernel = Kernel::new(Arc::new(space));
+        let err = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:demo:panic")),
+            &Capability::root(),
+        ))
+        .unwrap_err();
+        assert!(format!("{err}").contains("panicked"), "{err}");
+        // The kernel still answers.
+        let ok = block_on(
+            kernel.issue(
+                Request::new(Verb::Source, iri("urn:fn:toUpper"))
+                    .with_arg("in", ArgRef::Inline(b"alive".to_vec())),
+                &Capability::root(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(ok.bytes, b"ALIVE");
+    }
+
+    /// Detached invocations (no kernel) refuse the scope with a clean error.
+    #[test]
+    fn a_detached_invocation_refuses_a_sync_scope() {
+        let request = Request::new(Verb::Source, iri("urn:x:y"));
+        let bindings = crate::grammar::Bindings::default();
+        let cap = Capability::root();
+        let inv = Invocation::detached(&request, &bindings, &cap);
+        let result: Result<()> = block_on(inv.scope_sync(|_issuer| ()));
+        assert!(result.is_err());
+    }
 }

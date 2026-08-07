@@ -51,6 +51,8 @@ pub use arg::ArgRef;
 pub use capability::Capability;
 pub use content::{ContentId, ContentIdError};
 pub use describe::{ActionSpec, ArgSpec, Description, EndpointKind, InputSource, Transreption};
+#[cfg(not(target_family = "wasm"))]
+pub use endpoint::SyncIssuer;
 pub use endpoint::{BoxFuture, Endpoint, FnEndpoint, Invocation, Issuer, Spawner};
 pub use error::{Error, Result};
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};

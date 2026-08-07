@@ -20,6 +20,7 @@ blake3 = "1"
 # `compose` can fork its `$a{}` sub-resolutions and join them. Spawns nothing;
 # the executor is still chosen at the edge.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-channel = { version = "0.3", default-features = false, features = ["alloc", "std"] }
 oxiri = "0.2"
 serde = { version = "1", features = ["derive"] }
 

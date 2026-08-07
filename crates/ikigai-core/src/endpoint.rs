@@ -410,6 +410,61 @@ impl<'a> Invocation<'a> {
         results
     }
 
+    /// Run a **synchronous** closure on its own thread, giving it a cloneable,
+    /// `'static`, blocking [`SyncIssuer`] whose calls are served by THIS
+    /// invocation — the bridge every embedded evaluator needs.
+    ///
+    /// The problem this solves: [`issue`](Self::issue) is async and borrows the
+    /// invocation, but a sync embedded runtime (a Steel `register_fn` builtin,
+    /// a Python callable under the GIL, a JS threadsafe function) needs a
+    /// `Send + Sync + 'static` handle it can call BLOCKING, and a naive
+    /// `block_on` inside would nest executors and deadlock. ikigai-lisp proved
+    /// the working shape — a dedicated thread plus a channel the async side
+    /// drains — and this is that bridge, in core, for every consumer.
+    ///
+    /// Mechanics: `f` runs on a fresh thread holding a [`SyncIssuer`]; each
+    /// `issuer.issue(req)` crosses a channel and is served here via
+    /// [`issue`](Self::issue) — so capability attenuation and enforcement,
+    /// cache dependency/golden-thread recording, and trace parentage are all
+    /// EXACTLY as if the endpoint had issued the sub-request itself. The scope
+    /// returns when `f` does (all issuer clones dropped ⇒ the drain ends).
+    /// Sub-requests are served one at a time, in arrival order.
+    ///
+    /// A panic in `f` surfaces as an error, not a poisoned kernel. Requires a
+    /// kernel context (errors when detached) and real threads (unavailable
+    /// under wasm — module endpoints there use the host-call seam instead).
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn scope_sync<R, F>(&self, f: F) -> Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(SyncIssuer) -> R + Send + 'static,
+    {
+        use futures_util::StreamExt;
+        if self.issuer.is_none() {
+            return Err(Error::Endpoint(
+                "sub-requests require a kernel context".to_string(),
+            ));
+        }
+        let (tx, mut rx) = futures_channel::mpsc::unbounded::<SyncCall>();
+        let handle = std::thread::Builder::new()
+            .name("ikigai-sync-scope".to_string())
+            .spawn(move || f(SyncIssuer { tx }))
+            .map_err(|e| Error::Endpoint(format!("sync scope thread failed to start: {e}")))?;
+        // Serve the closure's sub-requests until every issuer clone is gone —
+        // which is when `f` has returned (or unwound). Each one goes through
+        // `self.issue`, so this invocation records it as a dependency.
+        while let Some(call) = rx.next().await {
+            let result = self.issue(call.request).await;
+            // A dropped receiver just means the closure gave up waiting; the
+            // dependency accounting above already happened, so nothing to undo.
+            let _ = call.reply.send(result);
+        }
+        // The channel closed, so `f` is done; this join is immediate.
+        handle
+            .join()
+            .map_err(|_| Error::Endpoint("sync scope panicked".to_string()))
+    }
+
     /// The current time per the kernel's injected [`Clock`](crate::Clock), or
     /// `None` if the kernel has no clock (or the invocation is detached). An
     /// endpoint turns a relative freshness window into an absolute deadline with
@@ -434,6 +489,52 @@ impl<'a> Invocation<'a> {
     /// invocation — the kernel unions these onto the result's own threads.
     pub(crate) fn dependency_threads(&self) -> BTreeSet<Thread> {
         self.dep_threads.lock().expect("dep threads lock").clone()
+    }
+}
+
+/// One bridged sub-request: the request and the channel its answer returns on.
+#[cfg(not(target_family = "wasm"))]
+struct SyncCall {
+    request: Request,
+    reply: std::sync::mpsc::SyncSender<Result<Representation>>,
+}
+
+/// A cloneable, `Send + Sync + 'static`, **blocking** handle for issuing
+/// sub-requests from synchronous code — minted by
+/// [`Invocation::scope_sync`], served by the invocation that minted it.
+///
+/// This is what a sync embedded runtime's callbacks capture: a Steel builtin,
+/// a Python callable, a JS function. Authority is NOT carried here — every
+/// call is resolved under the minting invocation's capability, so a handle
+/// cannot widen what its endpoint could reach, and everything it resolves is
+/// recorded as a dependency (cache expiry, golden threads, trace parentage)
+/// of that invocation's result.
+///
+/// Blocking [`issue`](Self::issue) parks the CALLING thread (the closure's own
+/// dedicated thread), never the kernel's executor. Once the scope that minted
+/// this handle has ended, calls fail with a clean error.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone)]
+pub struct SyncIssuer {
+    tx: futures_channel::mpsc::UnboundedSender<SyncCall>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl SyncIssuer {
+    /// Issue a sub-request and BLOCK until its representation (or error)
+    /// comes back. Fails cleanly when the minting scope has ended.
+    pub fn issue(&self, request: Request) -> Result<Representation> {
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        self.tx
+            .unbounded_send(SyncCall { request, reply })
+            .map_err(|_| Error::Endpoint("the sync scope has ended".to_string()))?;
+        rx.recv()
+            .map_err(|_| Error::Endpoint("the sync scope ended mid-request".to_string()))?
+    }
+
+    /// `SOURCE` a resource by IRI — the common case, as sugar.
+    pub fn source(&self, target: &Iri) -> Result<Representation> {
+        self.issue(Request::new(Verb::Source, target.clone()))
     }
 }
 
