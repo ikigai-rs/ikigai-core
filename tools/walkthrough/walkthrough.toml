@@ -184,9 +184,14 @@ bullets = [
   "`describe()` returns a structured, RDF-agnostic `Description`; the kernel routes `Meta` through it.",
 ]
 [[file.note]]
-anchor = "pub fn with_description"
+anchor = "pub struct FnEndpoint"
 bullets = [
   "`FnEndpoint` wraps a plain closure — the simplest endpoint. `with_description` lets it declare its full parameter contract; without one, `describe()` reports just the name.",
+]
+[[file.note]]
+anchor = "pub struct AsyncFnEndpoint"
+bullets = [
+  "`AsyncFnEndpoint` is the async twin: the closure returns a boxed future over the invocation borrow, so a flat-authored endpoint can `await` sub-requests (`inv.issue` / `inv.source`) without hand-implementing `Endpoint`.",
 ]
 
 [[file]]
