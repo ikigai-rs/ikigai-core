@@ -608,3 +608,233 @@ impl Endpoint for FnEndpoint {
             .unwrap_or_else(|| Description::new(&self.name))
     }
 }
+
+/// A pinned, boxed, `Send` future that may borrow the invocation it serves —
+/// what an [`AsyncFnEndpoint`] closure returns. Unlike [`BoxFuture`] (which is
+/// `'static`, for [`Spawner`] tasks) this is bounded by the invocation borrow,
+/// which is what lets the future call [`Invocation::issue`] /
+/// [`Invocation::source`] on its way to a result.
+pub type InvokeFuture<'a> = Pin<Box<dyn Future<Output = Result<Representation>> + Send + 'a>>;
+
+/// The boxed invocation function behind an [`AsyncFnEndpoint`].
+type AsyncInvokeFn = Box<dyn for<'a, 'b> Fn(&'a Invocation<'b>) -> InvokeFuture<'a> + Send + Sync>;
+
+/// An endpoint backed by an **async** Rust closure — [`FnEndpoint`]'s twin for
+/// the composite case.
+///
+/// [`FnEndpoint`] takes a sync closure, so an endpoint that issues
+/// sub-requests ([`Invocation::issue`] / [`Invocation::source`] are async) has
+/// had to hand-implement [`Endpoint`] with `#[async_trait]` plus the
+/// name/describe plumbing. This type is that boilerplate, once: the same flat
+/// single-verb authoring as `FnEndpoint`, with an async body. Pure async
+/// plumbing — no threads, no spawning — so it is wasm-clean.
+///
+/// The closure returns a boxed future over the invocation borrow (the shape
+/// `#[async_trait]` expands to); author it as `|inv| Box::pin(async move
+/// { … })`:
+///
+/// ```
+/// use ikigai_core::{ArgRef, AsyncFnEndpoint, Error, Representation, ReprType};
+///
+/// let upcase_of = AsyncFnEndpoint::new("upcaseOf", |inv| {
+///     Box::pin(async move {
+///         let src = match inv.request.args.get("src") {
+///             Some(ArgRef::Reference(iri)) => iri.clone(),
+///             _ => return Err(Error::MissingArgument("src".to_string())),
+///         };
+///         let body = inv.source(&src).await?; // async sub-request through the kernel
+///         Ok(Representation::new(
+///             ReprType::new("text/plain"),
+///             body.bytes.to_ascii_uppercase(),
+///         ))
+///     })
+/// });
+/// ```
+pub struct AsyncFnEndpoint {
+    name: String,
+    invoke: AsyncInvokeFn,
+    description: Option<Description>,
+}
+
+impl AsyncFnEndpoint {
+    /// Build an endpoint from a name and an async invocation function (a
+    /// closure returning a boxed [`InvokeFuture`], typically
+    /// `|inv| Box::pin(async move { … })`).
+    pub fn new<F>(name: impl Into<String>, invoke: F) -> Self
+    where
+        F: for<'a, 'b> Fn(&'a Invocation<'b>) -> InvokeFuture<'a> + Send + Sync + 'static,
+    {
+        AsyncFnEndpoint {
+            name: name.into(),
+            invoke: Box::new(invoke),
+            description: None,
+        }
+    }
+
+    /// Attach a self-description declaring this endpoint's parameter contract,
+    /// verbs, and outputs (builder). Without one, [`Endpoint::describe`] reports
+    /// just the name.
+    pub fn with_description(mut self, description: Description) -> Self {
+        self.description = Some(description);
+        self
+    }
+}
+
+#[async_trait]
+impl Endpoint for AsyncFnEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        (self.invoke)(inv).await
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn describe(&self) -> Description {
+        self.description
+            .clone()
+            .unwrap_or_else(|| Description::new(&self.name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::Capability;
+    use crate::describe::ArgSpec;
+    use crate::grammar::{Bindings, Exact};
+    use crate::kernel::Kernel;
+    use crate::repr::ReprType;
+    use crate::space::EndpointSpace;
+    use futures::executor::block_on;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn iri(s: &str) -> Iri {
+        Iri::parse(s).unwrap()
+    }
+
+    #[test]
+    fn an_async_closure_endpoint_invokes_detached() {
+        // The async twin of FnEndpoint's basic contract: name + closure, invoked
+        // directly against a detached invocation (no kernel).
+        let greet = AsyncFnEndpoint::new("greet", |inv| {
+            Box::pin(async move {
+                let who = inv.inline_str("who")?;
+                Ok(Representation::new(
+                    ReprType::new("text/plain"),
+                    format!("hi {who}").into_bytes(),
+                ))
+            })
+        });
+        assert_eq!(greet.name(), "greet");
+
+        let request = Request::new(Verb::Source, iri("urn:demo:greet"))
+            .with_arg("who", ArgRef::Inline(b"ada".to_vec()));
+        let bindings = Bindings::default();
+        let cap = Capability::root();
+        let inv = Invocation::detached(&request, &bindings, &cap);
+        let rep = block_on(greet.invoke(&inv)).unwrap();
+        assert_eq!(rep.bytes, b"hi ada");
+    }
+
+    #[test]
+    fn describe_defaults_to_the_name_and_honors_with_description() {
+        // Catalog/manifold parity with FnEndpoint: no description reports just
+        // the name; with_description reports exactly what was declared.
+        let bare = AsyncFnEndpoint::new("bare", |_inv| {
+            Box::pin(async { Ok(Representation::new(ReprType::new("text/plain"), Vec::new())) })
+        });
+        assert_eq!(bare.describe().id, "bare");
+
+        let described = AsyncFnEndpoint::new("described", |_inv| {
+            Box::pin(async { Ok(Representation::new(ReprType::new("text/plain"), Vec::new())) })
+        })
+        .with_description(
+            Description::new("described")
+                .verb(Verb::Source)
+                .requires("urn:cap:demo")
+                .input(ArgSpec::new("who")),
+        );
+        let description = described.describe();
+        assert_eq!(description.id, "described");
+        assert_eq!(description.verbs, vec![Verb::Source]);
+        assert_eq!(description.requires, vec!["urn:cap:demo".to_string()]);
+        let inputs: Vec<&str> = description.inputs.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(inputs, ["who"]);
+    }
+
+    #[test]
+    fn an_async_endpoint_issues_sub_requests_through_the_kernel() {
+        // The whole reason the type exists: the closure's future issues a
+        // sub-request (async, borrowing the invocation) and the result flows
+        // through — no hand-rolled Endpoint impl in sight.
+        static LEAF: AtomicU32 = AtomicU32::new(0);
+        let leaf = FnEndpoint::new("leaf", |_inv: &Invocation<'_>| {
+            LEAF.fetch_add(1, Ordering::SeqCst);
+            Ok(
+                Representation::new(ReprType::new("text/plain"), b"hello".to_vec())
+                    .cacheable()
+                    .depends_on("urn:leaf"),
+            )
+        });
+        let upcase_of = AsyncFnEndpoint::new("upcaseOf", |inv| {
+            Box::pin(async move {
+                let src = match inv.request.args.get("src") {
+                    Some(ArgRef::Reference(iri)) => iri.clone(),
+                    _ => return Err(Error::MissingArgument("src".to_string())),
+                };
+                let upstream = inv.source(&src).await?;
+                let upper = String::from_utf8_lossy(&upstream.bytes).to_uppercase();
+                Ok(
+                    Representation::new(ReprType::new("text/plain"), upper.into_bytes())
+                        .cacheable(),
+                )
+            })
+        });
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:data:leaf"), leaf)
+            .bind(Exact::new("urn:fn:upcaseOf"), upcase_of);
+        let kernel = Kernel::new(Arc::new(space));
+        let cap = Capability::root();
+        let req = || {
+            Request::new(Verb::Source, iri("urn:fn:upcaseOf"))
+                .with_arg("src", ArgRef::Reference(iri("urn:data:leaf")))
+        };
+
+        let rep = block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(rep.bytes, b"HELLO");
+        assert_eq!(LEAF.load(Ordering::SeqCst), 1);
+
+        // Dependency plumbing flows exactly as through a hand-rolled endpoint:
+        // the composite is cached, and cutting the LEAF's golden thread (which
+        // the composite never declared itself) invalidates the composite too.
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(LEAF.load(Ordering::SeqCst), 1, "composite + leaf cached");
+        kernel.cut("urn:leaf");
+        let rep = block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(rep.bytes, b"HELLO");
+        assert_eq!(
+            LEAF.load(Ordering::SeqCst),
+            2,
+            "cutting the inherited thread recomputed the composite"
+        );
+    }
+
+    #[test]
+    fn a_detached_async_endpoint_cannot_issue() {
+        // Mirror of the detached FnEndpoint behaviour: no kernel context means
+        // sub-requests fail cleanly, not silently.
+        let needs_kernel = AsyncFnEndpoint::new("needsKernel", |inv| {
+            Box::pin(async move { inv.source(&iri("urn:data:leaf")).await })
+        });
+        let request = Request::new(Verb::Source, iri("urn:demo:needsKernel"));
+        let bindings = Bindings::default();
+        let cap = Capability::root();
+        let inv = Invocation::detached(&request, &bindings, &cap);
+        let err = block_on(needs_kernel.invoke(&inv)).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("kernel context"),
+            "detached issue fails cleanly: {err:?}"
+        );
+    }
+}
