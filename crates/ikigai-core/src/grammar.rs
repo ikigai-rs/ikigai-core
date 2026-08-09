@@ -132,6 +132,16 @@ impl UriTemplate {
         &self.source
     }
 
+    /// The template's variable names, in order of appearance — the binding
+    /// arguments a caller must supply (via [`expand`](Self::expand)) to form a
+    /// concrete IRI from this pattern.
+    pub fn variables(&self) -> impl Iterator<Item = &str> {
+        self.parts.iter().filter_map(|part| match part {
+            Part::Var(name) => Some(name.as_str()),
+            Part::Lit(_) => None,
+        })
+    }
+
     /// Expand the template with the given bindings, or `None` if a variable is
     /// missing.
     pub fn expand(&self, bindings: &Bindings) -> Option<String> {

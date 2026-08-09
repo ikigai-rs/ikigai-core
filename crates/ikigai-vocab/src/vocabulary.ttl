@@ -120,6 +120,12 @@ ik:endpoint a rdf:Property ;
     rdfs:label "endpoint" ;
     rdfs:comment "The resolvable IRI of the matched endpoint — what you invoke." .
 
+ik:template a rdf:Property ;
+    rdfs:domain ik:ActionMatch ;
+    rdfs:range xsd:string ;
+    rdfs:label "template" ;
+    rdfs:comment "The URI-template pattern (RFC 6570 level 1, e.g. urn:file:{path}) of a matched endpoint bound by a template grammar — substitute each {var} with its Binding-source argument to form the invokable IRI. Carried in place of ik:endpoint, which names a directly resolvable IRI; a template pattern is not an IRI, so it is a literal." .
+
 ik:missingOptional a rdf:Property ;
     rdfs:domain ik:ActionMatch ;
     rdfs:range xsd:integer ;

@@ -23,10 +23,11 @@
 
 use std::sync::Arc;
 
-use crate::describe::Description;
+use crate::describe::{Description, InputSource};
+use crate::grammar::{Bindings, UriTemplate};
 use crate::iri::Iri;
 use crate::request::Request;
-use crate::space::{Resolution, Scope, Space};
+use crate::space::{Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
 
 /// The canonical RDF media type the transreptor graph hubs on — the pivot for two-hop
@@ -105,7 +106,9 @@ pub fn select_transreptor(root: &dyn Space, from: &str, to: &str) -> Option<Vec<
 }
 
 /// Enumerate `root`'s auto-invocable transreptors (the same `entries → Meta → describe`
-/// walk the catalog uses).
+/// walk the catalog uses). Template-bound entries are deliberately excluded: a
+/// transreption step invokes its endpoint with only `content` + `as`, so a pattern
+/// needing binding arguments to form its IRI can never be auto-invoked.
 fn collect(root: &dyn Space) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     for entry in root.entries().unwrap_or_default() {
@@ -139,12 +142,91 @@ pub fn select_transreptor_in(
     select_transreptor(root.as_ref(), from, to)
 }
 
+/// The placeholder each `{var}` takes when a template pattern is probe-expanded into a
+/// concrete IRI for `Meta` resolution (see [`describe_entry`]). The value is arbitrary:
+/// `describe()` does not depend on bindings, and the guard on the resolved endpoint's
+/// name catches the (unlikely) case where the probe IRI resolves elsewhere.
+const PROBE: &str = "probe";
+
+/// A space entry's self-description, with how its pattern names the endpoint: `None`
+/// for an exact, directly resolvable IRI; `Some(vars)` for a URI-template pattern
+/// whose variables must be supplied (as `Binding`-source arguments) to form one.
+pub(crate) struct EntryDescription {
+    /// The bound endpoint's `describe()`.
+    pub description: Description,
+    /// The template's variable names, when the pattern is a template grammar.
+    pub template_vars: Option<Vec<String>>,
+}
+
+/// Describe one space entry — the shared step of every `entries → Meta → describe`
+/// walk (catalog, selection, validate's id lookup). An exact pattern IS the IRI to
+/// `Meta`-resolve. A template pattern (`urn:file:{path}`) is not an IRI at all, so it is
+/// **probe-expanded**: each `{var}` takes a placeholder, and the concrete probe IRI is
+/// resolved the normal way — reaching the same endpoint the template binds, since
+/// `describe()` does not depend on bindings. Resolution is first-match-wins, so a probe
+/// IRI *could* land on a different binding; a hit whose endpoint name differs from the
+/// entry's is discarded (better invisible than misdescribed). `None` for patterns that
+/// are neither parseable IRIs nor parseable templates, and for misses.
+pub(crate) fn describe_entry(root: &dyn Space, entry: &SpaceEntry) -> Option<EntryDescription> {
+    if let Ok(iri) = Iri::parse(&entry.pattern) {
+        let Resolution::Hit(resolved) =
+            root.resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
+        else {
+            return None;
+        };
+        return Some(EntryDescription {
+            description: resolved.endpoint.describe(),
+            template_vars: None,
+        });
+    }
+    let template = UriTemplate::parse(&entry.pattern).ok()?;
+    let vars: Vec<String> = template.variables().map(str::to_string).collect();
+    if vars.is_empty() {
+        return None; // no variables ⇒ just a malformed IRI, not a template
+    }
+    let mut bindings = Bindings::new();
+    for var in &vars {
+        bindings.insert(var.clone(), PROBE);
+    }
+    let probe = Iri::parse(template.expand(&bindings)?).ok()?;
+    let Resolution::Hit(resolved) = root.resolve(&Request::new(Verb::Meta, probe), &Scope::empty())
+    else {
+        return None;
+    };
+    if resolved.endpoint.name() != entry.endpoint {
+        return None;
+    }
+    Some(EntryDescription {
+        description: resolved.endpoint.describe(),
+        template_vars: Some(vars),
+    })
+}
+
+/// Whether a template action is drivable from its declared contract: every template
+/// variable must be a declared `Binding`-source input ([`ArgSpec::binding`]
+/// (crate::ArgSpec::binding)), so a caller — engine, MCP projection, agent — knows to
+/// substitute it into the pattern to form the concrete IRI. A template variable that is
+/// undeclared (or declared as a by-value argument) leaves the IRI unconstructible from
+/// the contract alone, so the action stays out of the manifold — the same principle that
+/// keeps untyped required inputs out of typed selection.
+fn template_drivable(action: &crate::describe::ActionSpec, vars: &[String]) -> bool {
+    vars.iter().all(|var| {
+        action
+            .inputs
+            .iter()
+            .any(|i| i.name == *var && i.source == InputSource::Binding)
+    })
+}
+
 /// One selected action — an (endpoint, verb) pair whose contract the query satisfied: its
 /// required capability scopes are allowed, its verb/output fit the asked-for shape, and its
 /// required typed inputs are satisfiable by the present RDF classes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionMatch {
-    /// The endpoint's resolvable IRI (the bound pattern — what you invoke).
+    /// The bound pattern — what you invoke. For an exact grammar this is the endpoint's
+    /// resolvable IRI; for a template grammar it is the URI-template pattern itself
+    /// (`urn:file:{path}`), whose `Binding`-source arguments substitute in to form the
+    /// concrete IRI.
     pub endpoint: String,
     /// The endpoint's description id (the catalog subject is `urn:ikigai:endpoint:{id}`).
     pub id: String,
@@ -208,16 +290,16 @@ pub fn select_action(root: &dyn Space, present: &[&str]) -> Vec<ActionMatch> {
 pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch> {
     let mut matches = Vec::new();
     for entry in root.entries().unwrap_or_default() {
-        let Ok(iri) = Iri::parse(&entry.pattern) else {
+        let Some(described) = describe_entry(root, &entry) else {
             continue;
         };
-        let Resolution::Hit(resolved) =
-            root.resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
-        else {
-            continue;
-        };
-        let description = resolved.endpoint.describe();
+        let description = described.description;
         for action in description.action_specs() {
+            if let Some(vars) = &described.template_vars {
+                if !template_drivable(&action, vars) {
+                    continue;
+                }
+            }
             if let Some(verb) = query.verb {
                 if action.verb != verb {
                     continue;
@@ -463,6 +545,104 @@ mod tests {
         // Only a Person present → greet matches, schedule (needs Place + Date) does not.
         let m = select_action(&action_space(), &[PERSON]);
         assert_eq!(endpoints(&m), vec!["urn:demo:greet"]);
+    }
+
+    // --- template grammars in the manifold ---
+
+    use crate::describe::ActionSpec;
+    use crate::grammar::UriTemplate;
+
+    /// A file-like endpoint bound by template: one Source action, capability-gated,
+    /// with its template variable declared as a Binding-source input.
+    fn template_file_endpoint() -> FnEndpoint {
+        FnEndpoint::new("file", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new("file").action(
+                ActionSpec::new(Verb::Source)
+                    .requires("urn:cap:fs:read:*")
+                    .input(
+                        crate::describe::ArgSpec::new("path")
+                            .summary("captured from the IRI")
+                            .binding(),
+                    ),
+            ),
+        )
+    }
+
+    #[test]
+    fn a_template_action_with_declared_binding_args_joins_the_manifold() {
+        let space = EndpointSpace::new().bind(
+            UriTemplate::parse("urn:file:{path}").unwrap(),
+            template_file_endpoint(),
+        );
+
+        // Under a capability holding a grant beneath the wildcard, the action is offered
+        // — and the match carries the PATTERN string round-trip, not a probe IRI.
+        let reader = crate::Capability::scoped(["urn:cap:fs:read:/notes"]);
+        let query = ActionQuery {
+            capability: Some(&reader),
+            ..Default::default()
+        };
+        let m = select_actions(&space, &query);
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert_eq!(m[0].endpoint, "urn:file:{path}");
+        assert_eq!(m[0].id, "file");
+        assert_eq!(m[0].verb, Verb::Source);
+        assert_eq!(m[0].action, "urn:ikigai:endpoint:file:action:source");
+
+        // Under a capability with no fs grant, the manifold simply lacks it.
+        let denied = crate::Capability::scoped(["urn:cap:unrelated"]);
+        let query = ActionQuery {
+            capability: Some(&denied),
+            ..Default::default()
+        };
+        assert!(select_actions(&space, &query).is_empty());
+    }
+
+    #[test]
+    fn a_template_whose_variables_lack_binding_argspecs_stays_out() {
+        // `path` declared as a by-value ARGUMENT, not a Binding: the contract gives a
+        // caller no way to construct the concrete IRI, so the action is not offered —
+        // the same principle that keeps untyped required inputs out of typed selection.
+        let undeclared = FnEndpoint::new("file", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new("file")
+                .verb(Verb::Source)
+                .input(crate::describe::ArgSpec::new("path")),
+        );
+        let space =
+            EndpointSpace::new().bind(UriTemplate::parse("urn:file:{path}").unwrap(), undeclared);
+        assert!(select_actions(&space, &ActionQuery::default()).is_empty());
+    }
+
+    #[test]
+    fn a_shadowed_probe_is_discarded_not_misattributed() {
+        // The probe IRI for `urn:t:{v}:x` is `urn:t:probe:x` — bound here, FIRST, to a
+        // different endpoint. Resolution hands back the shadow; the name guard rejects
+        // it rather than attaching the shadow's description to the template pattern.
+        let shadow = FnEndpoint::new("shadow", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(Description::new("shadow").verb(Verb::Source).input(
+            crate::describe::ArgSpec::new("v").binding(), // even "drivable" on paper
+        ));
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:t:probe:x"), shadow)
+            .bind(
+                UriTemplate::parse("urn:t:{v}:x").unwrap(),
+                template_file_endpoint(),
+            );
+        let matches = select_actions(&space, &ActionQuery::default());
+        assert!(
+            !matches.iter().any(|m| m.endpoint == "urn:t:{v}:x"),
+            "shadowed template must stay invisible, not lie: {matches:?}"
+        );
+        // The exact binding itself is still offered normally.
+        assert!(matches.iter().any(|m| m.endpoint == "urn:t:probe:x"));
     }
 
     #[test]
