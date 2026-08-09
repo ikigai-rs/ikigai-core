@@ -6,10 +6,14 @@
     "ActionMatch": "ik:ActionMatch",
     "Binding": "ik:Binding",
     "CorsPolicy": "ik:CorsPolicy",
+    "Directory": "ik:Directory",
     "Endpoint": "ik:Endpoint",
+    "Explanation": "ik:Explanation",
+    "File": "ik:File",
     "LlmBackend": "ik:LlmBackend",
     "Route": "ik:Route",
     "RouteRequest": "ik:RouteRequest",
+    "Symlink": "ik:Symlink",
     "Transreptor": "ik:Transreptor",
     "action": {
       "@id": "ik:action",
@@ -27,12 +31,17 @@
       "@id": "ik:bind",
       "@type": "@id"
     },
+    "byteSize": {
+      "@id": "ik:byteSize",
+      "@type": "xsd:integer"
+    },
     "calendar": "ik:calendar",
     "cap": "ik:cap",
     "class": {
       "@id": "ik:class",
       "@type": "@id"
     },
+    "contentHash": "ik:contentHash",
     "context": {
       "@id": "ik:context",
       "@type": "xsd:integer"
@@ -55,10 +64,20 @@
     "cost": "ik:cost",
     "csp": "ik:csp",
     "default": "ik:default",
+    "derivedAt": {
+      "@id": "ik:derivedAt",
+      "@type": "xsd:dateTime"
+    },
     "endpoint": {
       "@id": "ik:endpoint",
       "@type": "@id"
     },
+    "entry": {
+      "@id": "ik:entry",
+      "@type": "@id"
+    },
+    "explanation": "ik:explanation",
+    "fileName": "ik:fileName",
     "from": "ik:from",
     "id": "ik:id",
     "input": "ik:input",
@@ -79,8 +98,19 @@
       "@id": "ik:order",
       "@type": "xsd:integer"
     },
+    "orphaned": {
+      "@id": "ik:orphaned",
+      "@type": "xsd:boolean"
+    },
     "output": "ik:output",
     "params": "ik:params",
+    "path": "ik:path",
+    "promptKind": "ik:promptKind",
+    "reanchored": {
+      "@id": "ik:reanchored",
+      "@type": "xsd:boolean"
+    },
+    "repo": "ik:repo",
     "required": {
       "@id": "ik:required",
       "@type": "xsd:boolean"
@@ -106,6 +136,7 @@
     "transreptsTo": "ik:transreptsTo",
     "var": "ik:var",
     "vendor": "ik:vendor",
-    "verb": "ik:verb"
+    "verb": "ik:verb",
+    "versionTag": "ik:versionTag"
   }
 }

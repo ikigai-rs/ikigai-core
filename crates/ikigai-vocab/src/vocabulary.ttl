@@ -161,10 +161,9 @@ ik:LlmBackend a rdfs:Class ;
     rdfs:comment "A configured LLM inference backend (one urn:llm:<provider>:ask), described by its trait profile so selection can be capability-based (\"a vision model with ≥32k context, not from this vendor\") rather than by name." .
 
 ik:model a rdf:Property ;
-    rdfs:domain ik:LlmBackend ;
     rdfs:range xsd:string ;
     rdfs:label "model" ;
-    rdfs:comment "The backend's default model id, e.g. \"llama3.2:3b\"." .
+    rdfs:comment "A model identity. On an ik:LlmBackend: the backend's configured default model id, e.g. \"llama3.2:3b\". On an ik:Explanation: the model that derived it — the resolved identity also folded into its ik:versionTag. The domain is deliberately open; the property crosses both graphs." .
 
 ik:context a rdf:Property ;
     rdfs:domain ik:LlmBackend ;
@@ -236,10 +235,8 @@ ik:match a rdf:Property ;
     rdfs:comment "A route's path pattern, e.g. \"/book/{host}\". A {var} segment captures one path segment; a literal segment must match exactly." .
 
 ik:target a rdf:Property ;
-    rdfs:domain ik:Route ;
-    rdfs:range xsd:string ;
     rdfs:label "target" ;
-    rdfs:comment "The IRI template a route resolves to, e.g. \"urn:schedule:{host}\". Each {var} captured by ik:match (or supplied by an ik:bind) is substituted in." .
+    rdfs:comment "What a node points at, in two families (domain and range deliberately open). On an ik:Route: the IRI template the route resolves to, e.g. \"urn:schedule:{host}\" — a string, each {var} captured by ik:match (or supplied by an ik:bind) substituted in. On an ik:Explanation or oa:Annotation (ikigai-browse): the resolvable urn:repo: IRI of the browse resource the entry is about — there it deliberately flattens the W3C oa:hasTarget intermediate node away (the house skolemization: the target IS the resource)." .
 
 ik:order a rdf:Property ;
     rdfs:domain ik:Route ;
@@ -330,3 +327,102 @@ ik:corsMaxAge a rdf:Property ;
     rdfs:range xsd:integer ;
     rdfs:label "corsMaxAge" ;
     rdfs:comment "Access-Control-Max-Age — how long (seconds) a preflight result may be cached; 0 means omit." .
+
+# ---- repository browsing (the urn:repo:* tree graph) -------------------------
+# The browse module's Turtle face (ikigai-browse): a directory listing is a
+# skolemized graph of ik:Directory / ik:File / ik:Symlink nodes under stable
+# urn:repo:{repo}:tree[:{path}] / urn:repo:{repo}:file:{path} IRIs — every node
+# also RESOLVES, so the graph is diffable, SPARQL-able, and navigable.
+
+ik:Directory a rdfs:Class ;
+    rdfs:label "Directory" ;
+    rdfs:comment "A directory within a configured browse root, named by its resolvable urn:repo:{repo}:tree[:{path}] IRI. Its ik:entry links list the children." .
+
+ik:File a rdfs:Class ;
+    rdfs:label "File" ;
+    rdfs:comment "A file within a configured browse root, named by its resolvable urn:repo:{repo}:file:{path} IRI (which serves the content)." .
+
+ik:Symlink a rdfs:Class ;
+    rdfs:label "Symlink" ;
+    rdfs:comment "A symbolic link within a configured browse root. Listed as itself, never followed in the listing; resolving through one is jailed to the canonical root." .
+
+ik:entry a rdf:Property ;
+    rdfs:domain ik:Directory ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "entry" ;
+    rdfs:comment "Links a directory to a child's resolvable IRI — a tree: IRI for a subdirectory, a file: IRI for a file or link. Multi-valued." .
+
+ik:fileName a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "fileName" ;
+    rdfs:comment "An entry's bare name within its directory — no path separators; ik:path carries the root-relative location." .
+
+ik:path a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "path" ;
+    rdfs:comment "The root-relative path of a browse node, as decoded text (\"src/lib.rs\") — the IRI carries its percent-encoded form. Absent on a root directory (the root is path-less). Also stamped on archive entries (ik:Explanation, oa:Annotation) so they stay queryable by path after the content moves on." .
+
+ik:repo a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "repo" ;
+    rdfs:comment "The configured browse root a node belongs to — the {repo} segment of its urn:repo: IRI. Also stamped on archive entries." .
+
+ik:byteSize a rdf:Property ;
+    rdfs:domain ik:File ;
+    rdfs:range xsd:integer ;
+    rdfs:label "byteSize" ;
+    rdfs:comment "A file's size in bytes. Files only — a directory's disk size is not its meaning." .
+
+# ---- explanation archive (urn:repo:*:explain) --------------------------------
+# LLM-derived orientation explanations, ARCHIVED rather than cached: derived
+# once per (path, content-hash, version-tag) and kept addressable forever —
+# prior versions stay resolvable, so derivation is citable.
+
+ik:Explanation a rdfs:Class ;
+    rdfs:label "Explanation" ;
+    rdfs:comment "One archived LLM-derived orientation explanation of a browse resource, keyed by (path, content hash, version tag) under a stable urn:ikigai:browse:explain:… IRI. The archive outlives the content: a re-derivation adds an entry, never replaces one." .
+
+ik:contentHash a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "contentHash" ;
+    rdfs:comment "The content version an entry was derived against — sha256:<hex> of a file's bytes, or the merkle construction over a directory's entries. Half of an explanation's archive key; on an annotation, the drift detector (a differing current hash triggers re-anchoring)." .
+
+ik:versionTag a rdf:Property ;
+    rdfs:domain ik:Explanation ;
+    rdfs:range xsd:string ;
+    rdfs:label "versionTag" ;
+    rdfs:comment "The derivation-identity half of the archive key: {prompt-version}@{model-label}, e.g. \"code-v1@qwen3-coder:30b\" (canned binary stubs involve no model, so no @). A prompt edit or model swap re-keys the archive; old tags stay addressable via version=." .
+
+ik:promptKind a rdf:Property ;
+    rdfs:domain ik:Explanation ;
+    rdfs:range xsd:string ;
+    rdfs:label "promptKind" ;
+    rdfs:comment "Which grain's prompt derived the explanation: \"code\", \"note\", \"skill\", \"text\", \"binary\", or \"directory\"." .
+
+ik:explanation a rdf:Property ;
+    rdfs:domain ik:Explanation ;
+    rdfs:range xsd:string ;
+    rdfs:label "explanation" ;
+    rdfs:comment "The explanation text itself — plain prose. Its presence is what makes an archive entry complete; a subject without it is a miss." .
+
+ik:derivedAt a rdf:Property ;
+    rdfs:domain ik:Explanation ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "derivedAt" ;
+    rdfs:comment "When the explanation was derived (UTC). Orders the explain-versions listing, newest first." .
+
+# ---- annotation drift (what the oa: model lacks) -----------------------------
+# Browse annotations are W3C Web Annotations (oa:) under the house skolemization
+# (stable IRIs, no blank nodes; ik:target flattens oa:hasTarget away). The oa:
+# model has no vocabulary for anchor drift, so these two flags are deliberately
+# ours. Both are stored only when true.
+
+ik:reanchored a rdf:Property ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "reanchored" ;
+    rdfs:comment "The annotation's selectors were re-derived after its target's content drifted: the quote was found in the new content, and the selectors and recorded ik:contentHash were updated to match. Stored only when true — absent means never re-anchored." .
+
+ik:orphaned a rdf:Property ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "orphaned" ;
+    rdfs:comment "The annotation's quote is gone from its target's current content (or the target itself is gone or binary): it still renders, flagged, against its recorded positions — never silently dropped — and is re-searched on later reads, since content may come back." .
