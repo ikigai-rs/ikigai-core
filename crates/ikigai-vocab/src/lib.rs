@@ -622,4 +622,45 @@ mod tests {
              `python3 crates/ikigai-vocab/context.gen.py`"
         );
     }
+
+    // The generator must fail loudly when vocabulary.ttl declares a term twice —
+    // a duplicate once last-won silently and flipped a term's mapping to an @id
+    // coercion. Runs the real script against a fixture tree with a duplicate.
+    #[test]
+    fn context_generator_rejects_duplicate_term_declarations() {
+        let dir = std::env::temp_dir().join(format!("ikigai-vocab-dupe-{}", std::process::id()));
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).expect("fixture tree");
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/context.gen.py"),
+            dir.join("context.gen.py"),
+        )
+        .expect("copy generator");
+        std::fs::write(
+            src.join("vocabulary.ttl"),
+            "ik:target a rdf:Property ;\n    rdfs:range rdfs:Resource .\n\n\
+             ik:other a rdf:Property .\n\n\
+             ik:target a rdf:Property ;\n    rdfs:range xsd:string .\n",
+        )
+        .expect("write fixture ttl");
+
+        let out = std::process::Command::new("python3")
+            .arg(dir.join("context.gen.py"))
+            .output()
+            .expect("python3 runs the generator");
+        let wrote_context = src.join("context.jsonld").exists();
+        std::fs::remove_dir_all(&dir).ok();
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "generator must fail on a duplicate declaration; stderr: {stderr}"
+        );
+        assert!(stderr.contains("ik:target"), "names the term: {stderr}");
+        assert!(
+            stderr.contains("lines 1 and 6"),
+            "names both declaration lines: {stderr}"
+        );
+        assert!(!wrote_context, "must not write context.jsonld on failure");
+    }
 }
