@@ -15,6 +15,10 @@
     "RouteRequest": "ik:RouteRequest",
     "Symlink": "ik:Symlink",
     "Transreptor": "ik:Transreptor",
+    "about": {
+      "@id": "ik:about",
+      "@type": "@id"
+    },
     "action": {
       "@id": "ik:action",
       "@type": "@id"
@@ -26,6 +30,10 @@
     "allDay": {
       "@id": "ik:allDay",
       "@type": "xsd:boolean"
+    },
+    "annotates": {
+      "@id": "ik:annotates",
+      "@type": "@id"
     },
     "bind": {
       "@id": "ik:bind",
