@@ -389,23 +389,36 @@ impl Kernel {
     }
 
     /// Find a bound endpoint's description by its `Description::id` (the catalog
-    /// subject identity) — the reverse of the entries → describe walk.
+    /// subject identity) — the reverse of the entries → describe walk. Covers
+    /// template-bound entries too (via [`crate::select::describe_entry`]'s probe), so
+    /// `urn:kernel:validate` can pre-flight a template action's catalog IRI.
     fn description_for_id(&self, id: &str) -> Result<Option<Description>> {
         for entry in self.root.entries().unwrap_or_default() {
-            let Ok(iri) = Iri::parse(&entry.pattern) else {
-                continue;
-            };
-            if let Resolution::Hit(resolved) = self
-                .root
-                .resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
-            {
-                let description = resolved.endpoint.describe();
-                if description.id == id {
-                    return Ok(Some(description));
+            if let Some(described) = crate::select::describe_entry(self.root.as_ref(), &entry) {
+                if described.description.id == id {
+                    return Ok(Some(described.description));
                 }
             }
         }
         Ok(None)
+    }
+
+    /// The typed self-description of the endpoint a catalog or manifold row names.
+    /// `pattern` is what [`ActionMatch::endpoint`] carries: an exact IRI (delegates to
+    /// [`describe`](Self::describe)) or a URI-template pattern (`urn:file:{path}`), which
+    /// no `Iri` can hold — so a projector (e.g. an MCP tool list) holding a template
+    /// match gets its contract without parsing the pattern itself.
+    pub fn describe_pattern(&self, pattern: &str) -> Option<Description> {
+        if let Ok(iri) = Iri::parse(pattern) {
+            return self.describe(&iri);
+        }
+        let entry = self
+            .root
+            .entries()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|e| e.pattern == pattern)?;
+        crate::select::describe_entry(self.root.as_ref(), &entry).map(|d| d.description)
     }
 
     /// Expand each present type to itself + its superclasses (`rdfs:subClassOf*`); an
@@ -1016,7 +1029,10 @@ impl Kernel {
             // (Turtle) graph — so the kernel is queryable *about itself* with SPARQL and
             // renderable to HTML via transreption. Cacheable: the binding set is stable
             // within a session. Each Exact-bound endpoint is resolved and rendered via the
-            // meta renderer; template patterns (not concrete IRIs) are skipped.
+            // meta renderer; template patterns (not concrete IRIs) render after them via
+            // the probe walk, once per description id — an endpoint bound both exactly
+            // and by template (the calendar shape) is not described twice, and an
+            // endpoint bound ONLY by template (urn:file:{path}) is no longer invisible.
             ("catalog", Verb::Source) => {
                 require_cap(capability, "urn:cap:kernel:inspect")?;
                 let renderer = self
@@ -1025,19 +1041,39 @@ impl Kernel {
                     .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
                 let turtle = ReprType::new("text/turtle");
                 let mut body = String::new();
+                let mut rendered_ids = BTreeSet::new();
+                let mut templates = Vec::new();
                 for entry in self.root.entries().unwrap_or_default() {
                     let Ok(iri) = Iri::parse(&entry.pattern) else {
+                        templates.push(entry);
                         continue;
                     };
                     if let Resolution::Hit(resolved) = self
                         .root
                         .resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
                     {
-                        if let Ok(repr) = renderer.render(&resolved.endpoint.describe(), &turtle) {
+                        let description = resolved.endpoint.describe();
+                        rendered_ids.insert(description.id.clone());
+                        if let Ok(repr) = renderer.render(&description, &turtle) {
                             if let Ok(text) = String::from_utf8(repr.bytes) {
                                 body.push_str(text.trim_end());
                                 body.push('\n');
                             }
+                        }
+                    }
+                }
+                for entry in templates {
+                    let Some(described) = crate::select::describe_entry(self.root.as_ref(), &entry)
+                    else {
+                        continue;
+                    };
+                    if !rendered_ids.insert(described.description.id.clone()) {
+                        continue;
+                    }
+                    if let Ok(repr) = renderer.render(&described.description, &turtle) {
+                        if let Ok(text) = String::from_utf8(repr.bytes) {
+                            body.push_str(text.trim_end());
+                            body.push('\n');
                         }
                     }
                 }
@@ -1104,12 +1140,24 @@ impl Kernel {
                 let turtle = kernel_arg(request, "as") == Some("text/turtle");
                 if turtle {
                     // The auditable face: each match an ik:ActionMatch node joining the
-                    // selection to the full contract in the catalog graph.
+                    // selection to the full contract in the catalog graph. An exact match
+                    // carries its resolvable IRI as ik:endpoint; a template match carries
+                    // its pattern as the ik:template LITERAL — `<urn:file:{path}>` would
+                    // not be a legal IRI in Turtle, and downstream RDF parsers must keep
+                    // parsing the whole manifold.
                     let mut body = String::from("@prefix ik: <https://ikigai-rs.dev/ns#> .\n");
                     for m in &matches {
+                        let named = if Iri::parse(&m.endpoint).is_ok() {
+                            format!("ik:endpoint <{}>", m.endpoint)
+                        } else {
+                            format!(
+                                "ik:template \"{}\"",
+                                m.endpoint.replace('\\', "\\\\").replace('"', "\\\"")
+                            )
+                        };
                         body.push_str(&format!(
-                            "\n<{}> a ik:ActionMatch ;\n    ik:endpoint <{}> ;\n    ik:verb \"{:?}\"",
-                            m.action, m.endpoint, m.verb
+                            "\n<{}> a ik:ActionMatch ;\n    {named} ;\n    ik:verb \"{:?}\"",
+                            m.action, m.verb
                         ));
                         for scope in &m.requires {
                             let term = if scope.starts_with("urn:")
@@ -1136,8 +1184,10 @@ impl Kernel {
                     )
                     .cacheable());
                 }
-                // The plain face stays one RESOLVABLE endpoint IRI per line (deduped
-                // across its matched actions), so it pipes into a `..` map unchanged.
+                // The plain face stays one endpoint identifier per line (deduped across
+                // its matched actions): a resolvable IRI for an exact binding, the
+                // URI-template pattern for a template one. Exact lines still pipe into a
+                // `..` map unchanged; a template line names the pattern to fill in.
                 let mut body = String::new();
                 let mut seen = BTreeSet::new();
                 for m in &matches {
@@ -2015,6 +2065,159 @@ mod tests {
             1,
             "re-issue is a cache hit, not a second entry"
         );
+    }
+
+    /// A file-like endpoint for the template-grammar tests: one capability-gated Source
+    /// action whose template variable is a declared Binding-source input.
+    fn template_file_endpoint() -> FnEndpoint {
+        use crate::describe::ActionSpec;
+        FnEndpoint::new("file", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new("file").action(
+                ActionSpec::new(Verb::Source)
+                    .requires("urn:cap:fs:read:*")
+                    .input(crate::describe::ArgSpec::new("path").binding()),
+            ),
+        )
+    }
+
+    #[test]
+    fn the_catalog_describes_template_bound_endpoints_once() {
+        use crate::grammar::UriTemplate;
+        // A calendar-shaped endpoint bound BOTH exactly (bare = week) and by template,
+        // plus an endpoint bound ONLY by template — the previously-invisible case.
+        let cal = || {
+            FnEndpoint::new("cal", |_inv| {
+                Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+            })
+            .with_description(Description::new("cal").verb(Verb::Source))
+        };
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:personal:calendar"), cal())
+            .bind(
+                UriTemplate::parse("urn:personal:calendar:{period}").unwrap(),
+                cal(),
+            )
+            .bind(
+                UriTemplate::parse("urn:file:{path}").unwrap(),
+                template_file_endpoint(),
+            );
+        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
+        let rep = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:kernel:catalog")),
+            &Capability::root(),
+        ))
+        .unwrap();
+        let body = String::from_utf8(rep.bytes).unwrap();
+        assert_eq!(
+            body.matches("cal").count(),
+            1,
+            "a dual-bound endpoint is described once, not per binding: {body}"
+        );
+        assert_eq!(
+            body.matches("file").count(),
+            1,
+            "a template-only endpoint joins the catalog: {body}"
+        );
+    }
+
+    #[test]
+    fn the_manifold_offers_template_actions_on_both_faces() {
+        use crate::grammar::UriTemplate;
+        let space = EndpointSpace::new().bind(
+            UriTemplate::parse("urn:file:{path}").unwrap(),
+            template_file_endpoint(),
+        );
+        let kernel = Kernel::new(Arc::new(space));
+        let manifold = |cap: &Capability, as_turtle: bool| {
+            let mut req = Request::new(Verb::Source, iri("urn:kernel:actions"));
+            if as_turtle {
+                req = req.with_arg("as", ArgRef::Inline(b"text/turtle".to_vec()));
+            }
+            let rep = block_on(kernel.issue(req, cap)).unwrap();
+            String::from_utf8(rep.bytes).unwrap()
+        };
+
+        // The plain face lists the pattern; the turtle face carries it as the
+        // ik:template LITERAL — never an illegal `<…{…}>` IRI a downstream RDF
+        // parser would choke on mid-manifold.
+        let reader = Capability::scoped(["urn:cap:fs:read:/notes"]);
+        assert!(manifold(&reader, false).contains("urn:file:{path}"));
+        let turtle = manifold(&reader, true);
+        assert!(
+            turtle.contains("<urn:ikigai:endpoint:file:action:source> a ik:ActionMatch"),
+            "{turtle}"
+        );
+        assert!(
+            turtle.contains("ik:template \"urn:file:{path}\""),
+            "{turtle}"
+        );
+        assert!(!turtle.contains("<urn:file:{"), "{turtle}");
+
+        // Under a capability with no fs grant, both faces simply lack it.
+        let denied = Capability::scoped(["urn:cap:unrelated"]);
+        assert!(!manifold(&denied, false).contains("urn:file"));
+        assert!(!manifold(&denied, true).contains("urn:file"));
+    }
+
+    #[test]
+    fn validate_pre_flights_a_template_action_by_catalog_iri() {
+        use crate::grammar::UriTemplate;
+        // Stage four of the funnel reaches template-bound endpoints: the catalog action
+        // IRI a template match carries resolves to its contract via the id lookup.
+        let space = EndpointSpace::new().bind(
+            UriTemplate::parse("urn:file:{path}").unwrap(),
+            template_file_endpoint(),
+        );
+        let kernel = Kernel::new(Arc::new(space));
+        let validate = |args: &str| {
+            let req = Request::new(Verb::Source, iri("urn:kernel:validate"))
+                .with_arg(
+                    "action",
+                    ArgRef::Inline(b"urn:ikigai:endpoint:file:action:source".to_vec()),
+                )
+                .with_arg("args", ArgRef::Inline(args.as_bytes().to_vec()));
+            let rep = block_on(kernel.issue(req, &Capability::root())).unwrap();
+            String::from_utf8(rep.bytes).unwrap()
+        };
+        assert!(validate("path=notes.md").contains("sh:conforms true"));
+        // A Binding-source input may live in the IRI rather than the args, so its
+        // absence from `args` is NOT a violation (existing validate semantics) — but
+        // the contract is genuinely live: an undeclared argument is still caught.
+        assert!(validate("").contains("sh:conforms true"));
+        let unknown = validate("bogus=1");
+        assert!(
+            unknown.contains("unknown argument `bogus`"),
+            "the template action's contract is enforced: {unknown}"
+        );
+    }
+
+    #[test]
+    fn describe_pattern_covers_templates_and_exact_iris() {
+        use crate::grammar::UriTemplate;
+        let greet = FnEndpoint::new("greet", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(Description::new("greet").verb(Verb::Source));
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:demo:greet"), greet)
+            .bind(
+                UriTemplate::parse("urn:file:{path}").unwrap(),
+                template_file_endpoint(),
+            );
+        let kernel = Kernel::new(Arc::new(space));
+        assert_eq!(
+            kernel.describe_pattern("urn:demo:greet").unwrap().id,
+            "greet"
+        );
+        assert_eq!(
+            kernel.describe_pattern("urn:file:{path}").unwrap().id,
+            "file",
+            "a template pattern — unparseable as an Iri — still yields its contract"
+        );
+        assert!(kernel.describe_pattern("urn:absent:{x}").is_none());
     }
 
     #[test]

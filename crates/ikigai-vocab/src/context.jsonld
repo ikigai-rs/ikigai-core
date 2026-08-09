@@ -135,6 +135,7 @@
     "source": "ik:source",
     "summary": "ik:summary",
     "target": "ik:target",
+    "template": "ik:template",
     "title": "ik:title",
     "tools": {
       "@id": "ik:tools",
