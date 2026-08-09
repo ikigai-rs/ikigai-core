@@ -235,8 +235,10 @@ ik:match a rdf:Property ;
     rdfs:comment "A route's path pattern, e.g. \"/book/{host}\". A {var} segment captures one path segment; a literal segment must match exactly." .
 
 ik:target a rdf:Property ;
+    rdfs:domain ik:Route ;
+    rdfs:range xsd:string ;
     rdfs:label "target" ;
-    rdfs:comment "What a node points at, in two families (domain and range deliberately open). On an ik:Route: the IRI template the route resolves to, e.g. \"urn:schedule:{host}\" — a string, each {var} captured by ik:match (or supplied by an ik:bind) substituted in. On an ik:Explanation or oa:Annotation (ikigai-browse): the resolvable urn:repo: IRI of the browse resource the entry is about — there it deliberately flattens the W3C oa:hasTarget intermediate node away (the house skolemization: the target IS the resource)." .
+    rdfs:comment "The IRI template a route resolves to, e.g. \"urn:schedule:{host}\". Each {var} captured by ik:match (or supplied by an ik:bind) is substituted in." .
 
 ik:order a rdf:Property ;
     rdfs:domain ik:Route ;
@@ -382,6 +384,12 @@ ik:Explanation a rdfs:Class ;
     rdfs:label "Explanation" ;
     rdfs:comment "One archived LLM-derived orientation explanation of a browse resource, keyed by (path, content hash, version tag) under a stable urn:ikigai:browse:explain:… IRI. The archive outlives the content: a re-derivation adds an entry, never replaces one." .
 
+ik:about a rdf:Property ;
+    rdfs:domain ik:Explanation ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "about" ;
+    rdfs:comment "The browse resource an explanation is about — the resolvable urn:repo: IRI it was derived from. The subject link of the archive: every entry for a resource is found by matching this." .
+
 ik:contentHash a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "contentHash" ;
@@ -413,9 +421,14 @@ ik:derivedAt a rdf:Property ;
 
 # ---- annotation drift (what the oa: model lacks) -----------------------------
 # Browse annotations are W3C Web Annotations (oa:) under the house skolemization
-# (stable IRIs, no blank nodes; ik:target flattens oa:hasTarget away). The oa:
-# model has no vocabulary for anchor drift, so these two flags are deliberately
-# ours. Both are stored only when true.
+# (stable IRIs, no blank nodes; ik:annotates flattens oa:hasTarget away). The
+# oa: model has no vocabulary for anchor drift, so the two flags below are
+# deliberately ours. Both are stored only when true.
+
+ik:annotates a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "annotates" ;
+    rdfs:comment "The browse resource an oa:Annotation is on — its resolvable urn:repo: IRI. Deliberately flattens the W3C oa:hasTarget intermediate node away (the house skolemization: the target IS the resource). The domain is left open — oa:Annotation is an external class, and this vocabulary declares only its own." .
 
 ik:reanchored a rdf:Property ;
     rdfs:range xsd:boolean ;
