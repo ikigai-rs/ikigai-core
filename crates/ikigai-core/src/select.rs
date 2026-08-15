@@ -144,8 +144,8 @@ pub fn select_transreptor_in(
 
 /// The placeholder each `{var}` takes when a template pattern is probe-expanded into a
 /// concrete IRI for `Meta` resolution (see [`describe_entry`]). The value is arbitrary:
-/// `describe()` does not depend on bindings, and the guard on the resolved endpoint's
-/// name catches the (unlikely) case where the probe IRI resolves elsewhere.
+/// `describe()` does not depend on bindings, and [`describe_entry`]'s identity guard
+/// catches the case where the probe IRI resolves elsewhere.
 const PROBE: &str = "probe";
 
 /// A space entry's self-description, with how its pattern names the endpoint: `None`
@@ -164,9 +164,22 @@ pub(crate) struct EntryDescription {
 /// **probe-expanded**: each `{var}` takes a placeholder, and the concrete probe IRI is
 /// resolved the normal way — reaching the same endpoint the template binds, since
 /// `describe()` does not depend on bindings. Resolution is first-match-wins, so a probe
-/// IRI *could* land on a different binding; a hit whose endpoint name differs from the
-/// entry's is discarded (better invisible than misdescribed). `None` for patterns that
-/// are neither parseable IRIs nor parseable templates, and for misses.
+/// IRI *could* land on a different binding; such a hit is discarded (better invisible
+/// than misdescribed). `None` for patterns that are neither parseable IRIs nor parseable
+/// templates, and for misses.
+///
+/// The guard takes **either witness**: the resolved endpoint's `name()`, or the id of the
+/// description it hands back — the very artifact about to be attached to this pattern.
+/// One witness is not enough, because over a **mounted** space they are not equally
+/// authoritative. A mount resolves nothing locally: it always hits with a forwarder whose
+/// `name()` is the client's *guess*, replayed from the remote's pattern STRINGS
+/// first-match-wins and blind to the remote's real grammar semantics (ikigai-browse's PR
+/// row rejects an `n` spanning a `:`, which no pattern string can express). The forwarder's
+/// `describe()` is a Meta round-trip to the remote — its own answer for that very IRI —
+/// so the description is right where the label is wrong. On a name-only guard the two
+/// PR-grain rows (`…:pr:{n}:explain`, `…:pr:{n}:review`) were swallowed by the shorter
+/// `…:pr:{n}` sibling's guess and vanished from every mounted manifold and MCP tool list,
+/// while resolving correctly through the REPL.
 pub(crate) fn describe_entry(root: &dyn Space, entry: &SpaceEntry) -> Option<EntryDescription> {
     if let Ok(iri) = Iri::parse(&entry.pattern) {
         let Resolution::Hit(resolved) =
@@ -193,11 +206,12 @@ pub(crate) fn describe_entry(root: &dyn Space, entry: &SpaceEntry) -> Option<Ent
     else {
         return None;
     };
-    if resolved.endpoint.name() != entry.endpoint {
+    let description = resolved.endpoint.describe();
+    if resolved.endpoint.name() != entry.endpoint && description.id != entry.endpoint {
         return None;
     }
     Some(EntryDescription {
-        description: resolved.endpoint.describe(),
+        description,
         template_vars: Some(vars),
     })
 }
@@ -643,6 +657,141 @@ mod tests {
         );
         // The exact binding itself is still offered normally.
         assert!(matches.iter().any(|m| m.endpoint == "urn:t:probe:x"));
+    }
+
+    // --- template rows behind a MOUNT ---
+
+    /// The two rows a mounted browse family binds for one root, in the remote's own
+    /// order: the shorter one ends in a variable and is a prefix of the longer.
+    const MOUNTED_ROWS: [(&str, &str); 2] = [
+        ("urn:t:pr:{n}", "pr-page"),
+        ("urn:t:pr:{n}:explain", "pr-explain"),
+    ];
+
+    /// The REMOTE's honest resolution of a concrete IRI: its `pr:{n}` grammar rejects an
+    /// `n` spanning a `:` (exactly what ikigai-browse's PR row does), so the probe IRI
+    /// `urn:t:pr:probe:explain` genuinely reaches the `:explain` endpoint over there.
+    fn remote_endpoint_of(target: &str) -> Option<&'static str> {
+        let rest = target.strip_prefix("urn:t:pr:")?;
+        match rest.strip_suffix(":explain") {
+            Some(n) if !n.is_empty() && !n.contains(':') => Some("pr-explain"),
+            _ => (!rest.is_empty() && !rest.contains(':')).then_some("pr-page"),
+        }
+    }
+
+    /// The CLIENT's guess at the remote endpoint's name: the remote's pattern strings
+    /// replayed first-match-wins, which is all a mount has locally (`RemoteNames` in
+    /// ikigai-resolve). It cannot see the `:`-rejection above, so the shorter row's
+    /// trailing variable swallows the longer row's probe IRI.
+    fn guessed_endpoint_of(target: &Iri) -> Option<&'static str> {
+        use crate::grammar::Grammar;
+        MOUNTED_ROWS.iter().find_map(|(pattern, endpoint)| {
+            UriTemplate::parse(*pattern)
+                .ok()?
+                .match_iri(target)
+                .map(|_| *endpoint)
+        })
+    }
+
+    /// A stand-in for a mounted remote space (ikigai-cli's `MountedRemote`): it resolves
+    /// nothing itself — every request is forwarded — so it always hands back a forwarder
+    /// whose `name()` is the local guess and whose `describe()` is the remote's own
+    /// answer for that very IRI.
+    struct MountFace;
+
+    struct Forwarder {
+        guessed: &'static str,
+        described: Description,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::Endpoint for Forwarder {
+        async fn invoke(&self, _inv: &crate::Invocation<'_>) -> crate::Result<Representation> {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        }
+
+        fn name(&self) -> &str {
+            self.guessed
+        }
+
+        fn describe(&self) -> Description {
+            self.described.clone()
+        }
+    }
+
+    fn mounted_description(id: &str) -> Description {
+        Description::new(id).action(
+            ActionSpec::new(Verb::Source).input(crate::describe::ArgSpec::new("n").binding()),
+        )
+    }
+
+    impl Space for MountFace {
+        fn resolve(&self, request: &Request, _scope: &Scope) -> Resolution {
+            // A mount never misses: routing is the prefix's job.
+            Resolution::Hit(crate::space::Resolved {
+                endpoint: Arc::new(Forwarder {
+                    guessed: guessed_endpoint_of(&request.target).unwrap_or("remote"),
+                    described: mounted_description(
+                        remote_endpoint_of(request.target.as_str()).unwrap_or("remote"),
+                    ),
+                }),
+                bindings: Bindings::new(),
+            })
+        }
+
+        fn entries(&self) -> Option<Vec<SpaceEntry>> {
+            Some(
+                MOUNTED_ROWS
+                    .iter()
+                    .map(|(pattern, endpoint)| SpaceEntry::new(*pattern, *endpoint))
+                    .collect(),
+            )
+        }
+    }
+
+    #[test]
+    fn a_mounted_template_row_survives_a_sibling_that_shadows_only_the_local_guess() {
+        let matches = select_actions(&MountFace, &ActionQuery::default());
+        assert_eq!(
+            endpoints(&matches),
+            vec!["urn:t:pr:{n}", "urn:t:pr:{n}:explain"],
+            "both mounted rows join the manifold: the longer row's probe IRI is what the \
+             REMOTE resolves, and its description says so, even though the local \
+             first-match-wins guess labels it with the shorter sibling's endpoint"
+        );
+        // The right description is attached — not the shadowing sibling's.
+        let explain = matches
+            .iter()
+            .find(|m| m.endpoint == "urn:t:pr:{n}:explain")
+            .expect("the explain row is offered");
+        assert_eq!(explain.id, "pr-explain");
+        assert_eq!(
+            explain.action,
+            "urn:ikigai:endpoint:pr-explain:action:source"
+        );
+    }
+
+    #[test]
+    fn a_row_whose_description_also_disowns_it_stays_invisible() {
+        // Neither witness names the entry's endpoint — the guard still discards it, so a
+        // genuinely misresolved probe never attaches a foreign contract to a pattern.
+        struct Disowned;
+        impl Space for Disowned {
+            fn resolve(&self, _request: &Request, _scope: &Scope) -> Resolution {
+                Resolution::Hit(crate::space::Resolved {
+                    endpoint: Arc::new(Forwarder {
+                        guessed: "someone-else",
+                        described: mounted_description("someone-else"),
+                    }),
+                    bindings: Bindings::new(),
+                })
+            }
+
+            fn entries(&self) -> Option<Vec<SpaceEntry>> {
+                Some(vec![SpaceEntry::new("urn:t:pr:{n}:explain", "pr-explain")])
+            }
+        }
+        assert!(select_actions(&Disowned, &ActionQuery::default()).is_empty());
     }
 
     #[test]
