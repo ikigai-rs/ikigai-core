@@ -16,6 +16,10 @@
 //! [`Space`] to an [`Endpoint`] that produces a [`Representation`]. Spaces
 //! compose via [`Mount`], [`Fallback`], and [`Rewrite`].
 //!
+//! Beside the resolution spine, [`config`] holds the config-home path algebra —
+//! pure path computation, no I/O — so hosts, modules and tools that do not depend
+//! on one another still agree on where configuration lives.
+//!
 //! # Naming conventions
 //!
 //! Two namespaces, two conventions:
@@ -32,6 +36,7 @@
 mod arg;
 pub mod builtins;
 mod capability;
+pub mod config;
 mod content;
 mod describe;
 mod endpoint;
