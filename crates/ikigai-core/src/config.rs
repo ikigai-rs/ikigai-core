@@ -145,6 +145,15 @@ pub fn data_path_in(home: &Path, stem: &str) -> Option<PathBuf> {
 /// The app-scoped file is a SIBLING of the shared one rather than a child of a per-app
 /// subdirectory, so the whole config home stays a flat listing and a `cms-web.` prefix
 /// reads as what it is: an override of the file it prefixes.
+///
+/// **`app` is the caller's to supply, and core will not supply it ambiently.** A binary
+/// knows its own name; a library must be told, and the way it is told is an explicit
+/// argument taken at mount time — never a process-global set once at startup. Core holds
+/// no mutable global state, an unset one would load the shared layer silently and read as
+/// success, and one process legitimately has two answers (a test binary mounting both a
+/// named and an unnamed space is the ordinary case, not a corner). The rationale, the
+/// shape every consumer's knob should share, and the evidence that would reopen it are in
+/// `docs/design/ambient-app-name.md`.
 pub fn layered_paths(stem: &str, app: Option<&str>) -> Vec<PathBuf> {
     config_home().map_or_else(Vec::new, |home| layered_paths_in(&home, stem, app))
 }
