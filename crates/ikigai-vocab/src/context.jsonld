@@ -2,6 +2,7 @@
   "@context": {
     "ik": "https://ikigai-rs.dev/ns#",
     "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "AccessibilityConfig": "ik:AccessibilityConfig",
     "Action": "ik:Action",
     "ActionMatch": "ik:ActionMatch",
     "Binding": "ik:Binding",
@@ -35,6 +36,11 @@
       "@id": "ik:annotates",
       "@type": "@id"
     },
+    "app": "ik:app",
+    "appLayer": {
+      "@id": "ik:appLayer",
+      "@type": "@id"
+    },
     "bind": {
       "@id": "ik:bind",
       "@type": "@id"
@@ -53,6 +59,14 @@
     "context": {
       "@id": "ik:context",
       "@type": "xsd:integer"
+    },
+    "contrastMin": {
+      "@id": "ik:contrastMin",
+      "@type": "xsd:decimal"
+    },
+    "contrastMinLarge": {
+      "@id": "ik:contrastMinLarge",
+      "@type": "xsd:decimal"
     },
     "cors": {
       "@id": "ik:cors",
@@ -118,6 +132,10 @@
       "@id": "ik:reanchored",
       "@type": "xsd:boolean"
     },
+    "reduceMotion": {
+      "@id": "ik:reduceMotion",
+      "@type": "xsd:boolean"
+    },
     "repo": "ik:repo",
     "required": {
       "@id": "ik:required",
@@ -132,10 +150,20 @@
       "@id": "ik:shape",
       "@type": "@id"
     },
+    "sharedLayer": {
+      "@id": "ik:sharedLayer",
+      "@type": "@id"
+    },
     "source": "ik:source",
     "summary": "ik:summary",
     "target": "ik:target",
     "template": "ik:template",
+    "textScale": {
+      "@id": "ik:textScale",
+      "@type": "xsd:decimal"
+    },
+    "themeDark": "ik:themeDark",
+    "themeLight": "ik:themeLight",
     "title": "ik:title",
     "tools": {
       "@id": "ik:tools",
@@ -143,6 +171,10 @@
     },
     "transreptsFrom": "ik:transreptsFrom",
     "transreptsTo": "ik:transreptsTo",
+    "underlineLinks": {
+      "@id": "ik:underlineLinks",
+      "@type": "xsd:boolean"
+    },
     "var": "ik:var",
     "vendor": "ik:vendor",
     "verb": "ik:verb",
