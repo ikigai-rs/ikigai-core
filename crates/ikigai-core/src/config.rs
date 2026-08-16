@@ -112,7 +112,27 @@ pub fn data_home() -> Option<PathBuf> {
 /// `.ikigai`, which is the failure dressed as success.
 pub fn data_home_from(home: Option<OsString>) -> Option<PathBuf> {
     home.filter(|value| !value.is_empty())
-        .map(|home| PathBuf::from(home).join(DATA_DIR))
+        .map(|home| data_home_in(Path::new(&home)))
+}
+
+/// The data home inside an explicit home directory: `{home}/.ikigai`. Infallible — the
+/// caller already holds the directory, so there is nothing left to fail at.
+///
+/// For the consumers that thread a real `home: &Path` through their own configuration layer
+/// rather than reading the environment at the point of use. Those callers had to spell
+/// `data_home_from(Some(home.as_os_str().to_os_string()))` and then unwrap an `Option` that
+/// could not be `None`, which reads as ceremony and invites a local `join(".ikigai")` instead
+/// — and a local join is how there came to be eight spellings of this directory.
+///
+/// **There is deliberately no `config_home_in` twin.** For the config home, `$HOME` is only
+/// the *fallback* base: `XDG_CONFIG_HOME` outranks it. A function taking a home directory and
+/// returning a config home would have to either ignore the variable — which is precisely the
+/// bug that started this arc, where one crate read `~/.config/ikigai` while everything else
+/// read `$XDG_CONFIG_HOME/ikigai` — or take it as a second argument, at which point it is
+/// [`config_home_from`] with extra steps. The data home has no such step, which is exactly
+/// why it can have this function and the config home cannot.
+pub fn data_home_in(home: &Path) -> PathBuf {
+    home.join(DATA_DIR)
 }
 
 /// The path of one `stem` in the data home — a file (`cms-tags-approved.ttl`) or a directory
@@ -169,8 +189,8 @@ pub fn layered_paths_in(home: &Path, stem: &str, app: Option<&str>) -> Vec<PathB
 #[cfg(test)]
 mod tests {
     use super::{
-        config_home, config_home_from, data_home, data_home_from, data_path, data_path_in,
-        layered_paths, layered_paths_in, APP_DIR, DATA_DIR,
+        config_home, config_home_from, data_home, data_home_from, data_home_in, data_path,
+        data_path_in, layered_paths, layered_paths_in, APP_DIR, DATA_DIR,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -304,6 +324,37 @@ mod tests {
     fn an_unknown_or_empty_home_has_no_data_home() {
         assert_eq!(data_home_from(None), None);
         assert_eq!(data_home_from(Some(OsString::new())), None);
+    }
+
+    /// Given a home directory outright there is nothing to fail at, so no `Option` — the
+    /// point of the function is to spare a caller that already holds the path an unwrap that
+    /// can never fire, because that unwrap is what tempts a local `join(".ikigai")`.
+    #[test]
+    fn an_explicit_home_directory_needs_no_option() {
+        assert_eq!(
+            data_home_in(Path::new("/home/b")),
+            PathBuf::from("/home/b/.ikigai")
+        );
+        // A tempdir standing in for `$HOME` is the motivating case: hermetic, and no
+        // environment variable in sight.
+        assert_eq!(
+            data_home_in(Path::new("/tmp/fixture")),
+            PathBuf::from("/tmp/fixture/.ikigai")
+        );
+    }
+
+    /// The two forms are ONE rule: whatever `data_home_from` accepts, it answers with
+    /// `data_home_in` on the same directory. Asserted rather than assumed, because a second
+    /// spelling of the join is exactly what this module exists to prevent — including inside
+    /// this module.
+    #[test]
+    fn the_two_injected_forms_agree() {
+        for home in ["/home/b", "/tmp/fixture", "/"] {
+            assert_eq!(
+                data_home_from(Some(home.into())),
+                Some(data_home_in(Path::new(home)))
+            );
+        }
     }
 
     /// The env-reading sugar agrees with the pure rule on whatever environment the harness
