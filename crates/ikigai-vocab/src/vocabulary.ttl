@@ -2,6 +2,7 @@
 @prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
 @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
 
 # The ikigai self-description vocabulary. Endpoints project their structured
@@ -445,3 +446,69 @@ ik:orphaned a rdf:Property ;
     rdfs:range xsd:boolean ;
     rdfs:label "orphaned" ;
     rdfs:comment "The annotation's quote is gone from its target's current content (or the target itself is gone or binary): it still renders, flagged, against its recorded positions — never silently dropped — and is re-searched on later reads, since content may come back." .
+
+ik:AccessibilityConfig a rdfs:Class ;
+    rdfs:label "AccessibilityConfig" ;
+    rdfs:comment "The EFFECTIVE accessibility settings one application resolves — the built-in defaults with the config home's a11y.toml and {app}.a11y.toml folded in key-wise. Not any single file's contents: a subject of this class is the answer, and its ik:sharedLayer / ik:appLayer say which files produced it." .
+
+ik:app a rdf:Property ;
+    rdfs:domain ik:AccessibilityConfig ;
+    rdfs:range xsd:string ;
+    rdfs:label "app" ;
+    rdfs:comment "The application whose override layer applies — the PROCESS's name (cms-web, dev-server, web), never a module's. Absent on the shared configuration, which belongs to no one application." .
+
+ik:themeLight a rdf:Property ;
+    rdfs:domain ik:AccessibilityConfig ;
+    rdfs:range xsd:string ;
+    rdfs:label "themeLight" ;
+    rdfs:comment "The syntax theme for the light colour scheme, as an embedded theme's identifier (InspiredGithub, CatppuccinLatte). One theme per scheme: both are always stated, because a page is rendered by whichever the reader's system asks for." .
+
+ik:themeDark a rdf:Property ;
+    rdfs:domain ik:AccessibilityConfig ;
+    rdfs:range xsd:string ;
+    rdfs:label "themeDark" ;
+    rdfs:comment "The syntax theme for the dark colour scheme (Base16OceanDark, Nord). See ik:themeLight — the two are a pair, and a generated stylesheet confines each to its own prefers-color-scheme block so neither can outrank the other by selector specificity." .
+
+ik:contrastMin a rdf:Property ;
+    rdfs:domain ik:AccessibilityConfig ;
+    rdfs:range xsd:decimal ;
+    rdfs:label "contrastMin" ;
+    rdfs:comment "The minimum WCAG contrast ratio required of BODY text against its background — 4.5 is AA. A generated stylesheet lifts any rule below this floor to the theme's own foreground, which is high-contrast against that theme's ground by construction and so repairs in-palette without inventing a colour." .
+
+ik:contrastMinLarge a rdf:Property ;
+    rdfs:domain ik:AccessibilityConfig ;
+    rdfs:range xsd:decimal ;
+    rdfs:label "contrastMinLarge" ;
+    rdfs:comment "The minimum WCAG contrast ratio for LARGE text (at least 18pt, or 14pt bold) and for UI components — 3.0 is AA. Distinct from ik:contrastMin on purpose: WCAG has no single number, and one floor either over-constrains headings and chrome or quietly drops body text below AA." .
+
+ik:reduceMotion a rdf:Property ;
+    rdfs:domain ik:AccessibilityConfig ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "reduceMotion" ;
+    rdfs:comment "Animation should be suppressed. THREE-VALUED in effect: absent means UNSTATED, which is not the same as false — an unstated preference defers to the reader's own prefers-reduced-motion setting, while false asserts that motion is wanted and overrides it." .
+
+ik:textScale a rdf:Property ;
+    rdfs:domain ik:AccessibilityConfig ;
+    rdfs:range xsd:decimal ;
+    rdfs:label "textScale" ;
+    rdfs:comment "A multiplier applied to body text size; 1.0 is the design default. A layout that claims to honour this must survive the whole configured range rather than only degrade gracefully at the top of it." .
+
+ik:underlineLinks a rdf:Property ;
+    rdfs:domain ik:AccessibilityConfig ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "underlineLinks" ;
+    rdfs:comment "Links carry an underline rather than relying on colour alone to distinguish them — the redundant-encoding rule, which matters most to readers who cannot separate the link colour from the surrounding text." .
+
+ik:sharedLayer a rdf:Property ;
+    rdfs:subPropertyOf prov:wasDerivedFrom ;
+    rdfs:domain ik:AccessibilityConfig ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "sharedLayer" ;
+    rdfs:comment "The machine-wide a11y.toml that contributed, by its urn:file: IRI — the LOWER precedence layer. A sub-property of prov:wasDerivedFrom, which states the same fact for a reader that knows PROV and not this vocabulary; the specific property exists because RDF triples are unordered and precedence cannot otherwise be recovered from the graph." .
+
+ik:appLayer a rdf:Property ;
+    rdfs:subPropertyOf prov:wasDerivedFrom ;
+    rdfs:domain ik:AccessibilityConfig ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "appLayer" ;
+    rdfs:comment "The {app}.a11y.toml override that contributed, by its urn:file: IRI — the HIGHER precedence layer, so where both name a key this one won. Determined by the file's NAME, never by position: only files that exist are recorded, so an app override sits at index 0 whenever the shared file is absent." .

@@ -31,6 +31,8 @@ def coercion(name: str, rng: str | None):
         return {"@id": f"ik:{name}", "@type": "xsd:integer"}
     if rng == "xsd:boolean":
         return {"@id": f"ik:{name}", "@type": "xsd:boolean"}
+    if rng == "xsd:decimal":
+        return {"@id": f"ik:{name}", "@type": "xsd:decimal"}
     if rng == "xsd:dateTime":
         return {"@id": f"ik:{name}", "@type": "xsd:dateTime"}
     if rng == "rdfs:Resource" or (rng and rng.startswith("ik:")) or name in IRI_PROPS:
