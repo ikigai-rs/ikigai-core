@@ -108,6 +108,38 @@ pub trait Spawner: Send + Sync {
     /// blocking, until they finish (which is what keeps re-entrant fan-out from
     /// pinning a thread while its children run).
     fn spawn(&self, task: BoxFuture<()>) -> BoxFuture<()>;
+
+    /// How many spawned tasks can make progress **simultaneously** — this executor's
+    /// achievable concurrency, and only that. It is **not** a queue depth, not a count
+    /// of tasks outstanding or completed, and not how many branches a caller intends to
+    /// dispatch: it is how many of them would actually be running at one instant if the
+    /// caller handed over more work than the executor can carry at once.
+    ///
+    /// A caller reads it to *size* a fan-out — to know how much concurrency a shared
+    /// downstream (an inference backend, a rate-limited API) will really see — so an
+    /// honest small answer is worth more than a flattering large one.
+    ///
+    /// **A single-threaded executor answers `Some(1)`, never `None`.** An executor that
+    /// runs one task to completion before the next has width 1, and saying so is the
+    /// entire point of this accessor. That covers the inline case as well as the
+    /// threaded one: a spawner that returns the task's own future to be polled
+    /// cooperatively on the calling thread interleaves nothing when the work inside
+    /// blocks, so its width is 1, not the number of tasks handed to it.
+    ///
+    /// `None` means **unknown** — reserved for a spawner that genuinely cannot answer
+    /// (an elastic or remote pool whose size is not observable). It is not a shorthand
+    /// for "small". Returning it forces the caller to guess, and the damaging guess is
+    /// the likely one: read as "wide", a serialized workload gets routed to a batching
+    /// backend and runs slower than sequencing it would have.
+    ///
+    /// Defaulted to `None` so every existing implementor keeps compiling untouched;
+    /// override it wherever the number is known. This is a **read**, deliberately: the
+    /// kernel never drives the scheduler, which lives above it and stays runtime-free
+    /// (see [`SchedulerReporter`](crate::SchedulerReporter)), so there is no setter and
+    /// no resize — a host that changes its executor's width reports the new number here.
+    fn width(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// The context handed to an endpoint when it is invoked.
@@ -835,6 +867,84 @@ mod tests {
         assert!(
             format!("{err:?}").contains("kernel context"),
             "detached issue fails cleanly: {err:?}"
+        );
+    }
+
+    // --- Spawner::width (achievable concurrency, read-only) -------------------
+
+    /// The single-threaded shape: the task's own future, polled cooperatively on the
+    /// calling thread. Nothing interleaves, so the honest answer is `Some(1)` — never
+    /// `None`, which would make a caller guess "wide" about a serialized executor.
+    struct SingleThreaded;
+    impl Spawner for SingleThreaded {
+        fn spawn(&self, task: BoxFuture<()>) -> BoxFuture<()> {
+            task
+        }
+        fn width(&self) -> Option<usize> {
+            Some(1)
+        }
+    }
+
+    /// A pool-shaped spawner reporting the number of tasks it can carry at once.
+    struct Pool(usize);
+    impl Spawner for Pool {
+        fn spawn(&self, task: BoxFuture<()>) -> BoxFuture<()> {
+            task
+        }
+        fn width(&self) -> Option<usize> {
+            Some(self.0)
+        }
+    }
+
+    /// An implementor written before `width` existed, left exactly as it was: it
+    /// compiles untouched and answers `None` (unknown).
+    struct Unhinted;
+    impl Spawner for Unhinted {
+        fn spawn(&self, task: BoxFuture<()>) -> BoxFuture<()> {
+            task
+        }
+    }
+
+    #[test]
+    fn a_spawner_reports_its_width_through_the_trait_object() {
+        // The kernel and the host both hold `Arc<dyn Spawner>`, so the number has to
+        // survive dynamic dispatch — that is the whole path a caller reads it over.
+        let single: Arc<dyn Spawner> = Arc::new(SingleThreaded);
+        let pool: Arc<dyn Spawner> = Arc::new(Pool(8));
+        let unhinted: Arc<dyn Spawner> = Arc::new(Unhinted);
+
+        assert_eq!(
+            single.width(),
+            Some(1),
+            "a single-threaded executor says 1, not unknown"
+        );
+        assert_eq!(pool.width(), Some(8), "a pool reports its achievable width");
+        assert_eq!(
+            unhinted.width(),
+            None,
+            "no override means unknown, and the default supplies it"
+        );
+    }
+
+    #[test]
+    fn the_width_default_changes_no_spawn_behaviour() {
+        // Additive by construction: `width` is a read. Whatever it answers — 1, 8, or
+        // unknown — the task still runs exactly as it did before the accessor existed.
+        static RAN: AtomicU32 = AtomicU32::new(0);
+        let spawners: Vec<Arc<dyn Spawner>> = vec![
+            Arc::new(SingleThreaded),
+            Arc::new(Pool(8)),
+            Arc::new(Unhinted),
+        ];
+        for spawner in &spawners {
+            block_on(spawner.spawn(Box::pin(async {
+                RAN.fetch_add(1, Ordering::SeqCst);
+            })));
+        }
+        assert_eq!(
+            RAN.load(Ordering::SeqCst),
+            3,
+            "every spawner ran its task regardless of the width it reports"
         );
     }
 }
