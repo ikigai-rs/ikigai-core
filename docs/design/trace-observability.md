@@ -40,9 +40,12 @@ work," across the boundary.
 
 ## Current shape (verified)
 
-- `TraceEvent { target, thread, started, ended, cache_hit, span, parent }`
-  (`ikigai-core/crates/ikigai-core/src/kernel.rs`). `(span, parent)` edges rebuild
-  the tree. Recorded only while a `Tracer` is installed (off the hot path otherwise).
+- `TraceEvent { target, thread, started, ended, cache_hit, span, parent, capability,
+  notes }` (`ikigai-core/crates/ikigai-core/src/kernel.rs`). `(span, parent)` edges
+  rebuild the tree. Recorded only while a `Tracer` is installed (off the hot path
+  otherwise). **`capability` (Phase 1) and `notes` have since landed** — the field
+  list above was written before them; Phase 2's annotation channel became `notes`,
+  populated by `Invocation::trace_note` and, now, by capability denials.
 - `Kernel::set_tracer` / `clear_tracer`; `Tracer::record(&self, TraceEvent)`.
 - `Resolver` (ikigai-resolve) forwards `set_tracer` to the in-process kernel;
   **the wire resolver's `set_tracer` is a documented no-op** — this is gap #3.
@@ -150,6 +153,55 @@ a per-call context through invocation instead of a global tracer. Note, don't fi
 **MCP boundary (Phase 4, unchanged).** External MCP clients won't send a
 `TraceContext`, so that boundary is server-side root-span *synthesis*, not
 propagation — out of Phase 3 scope.
+
+## Capability denials — the event that names something which never RAN
+
+**Status: built.** Found by ikigai-log T2, 2026-08-23.
+
+Every event above describes an invocation that HAPPENED. A capability denial is the
+one fact on this surface that describes one that did not, and it was invisible.
+
+The kernel enforces a bound endpoint's declared `requires` **before dispatch** —
+that is the whole point of "declared = enforced" (0.1.49), and it means the endpoint
+is never entered. So `Tracer` never saw a denial, `trace_note` could not reach it,
+and the refusal reached **no in-kernel observer at all**. For ikigai-log that bites
+exactly: `log:CapabilityDenied` is an always-land class *because a refused authority
+is a security fact*, and `urn:log:write` is the one action that cannot write it — a
+denied write was never entered. **The one action that could record the refusal is
+the one that was refused.**
+
+The kernel now records a `TraceEvent` on denial, noted `(DENIED_NOTE, "<scope>")`
+with the scope the caller lacked. `target` and `capability` were already the two
+facts such an entry needs, and `notes` already existed — so **no struct change and
+no postcard layout bump**, which matters because `TraceEvent` crosses the wire and
+adding a field forces a protocol-version bump on every host shipping it.
+`started`/`ended` are `None` and `cache_hit` is `false`: the honest reading of a
+request that never ran. Both enforcement points report — bound endpoints
+(`unsatisfied_scope`) and the `urn:kernel:*` builtins (`issue_kernel`'s gate).
+
+**Deliberate asymmetry:** a *successful* `urn:kernel:*` builtin records no event at
+all — that arm returns before the trace path and is likewise absent from the
+constraint window, because these are introspection, not throughput. An observer
+therefore sees denials from that namespace and never successes. The refusal is the
+fact worth keeping.
+
+### ★ The coupling this creates, and the API it argues for
+
+A `TraceEvent` lands only into a `TraceScope`, and `Kernel::global_scope()`
+short-circuits on the `tracing` atomic that `set_tracer` flips. So **a host that
+installs a `Tracer` in order to see denials thereby builds an event for every
+resolution** and must filter in its own `record()`. "Capability denials always land"
+costs "trace everything".
+
+The sharp form: the cost is **an allocation per resolution even at `error` level,
+where the log writes nothing** — you pay to build an event you then discard.
+
+That is the concrete argument for a future opt-in reporter trait alongside `Tracer`,
+letting a host observe *only* refusals without paying per resolution. It was
+deliberately NOT built here: it is new public surface in core, and designing it
+before its first consumer (ikigai-log T5) has used this seam risks the wrong shape.
+Adding it later is additive and non-breaking. **This belongs in the T5 brief, where
+it changes a decision.**
 
 ## Logistics & constitution
 
