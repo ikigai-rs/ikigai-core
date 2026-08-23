@@ -176,6 +176,19 @@ pub struct TraceEvent {
     pub notes: Vec<(String, String)>,
 }
 
+/// The [`TraceEvent::notes`] key under which the kernel reports a CAPABILITY
+/// DENIAL, paired with the scope the caller lacked — e.g. `("denied",
+/// "urn:cap:fs:read")`. Public so an observer can match the key without
+/// re-spelling the literal (a log deciding an entry's class, a dashboard
+/// coloring a refused hop).
+///
+/// A denial event is the one kind that names something which never RAN: the
+/// capability floor is enforced before dispatch, so `started`/`ended` are `None`
+/// and `cache_hit` is `false`. That is the point of recording it — the endpoint
+/// is never entered, so nothing inside it can report the refusal, and without
+/// this the refusal reaches no in-kernel observer at all.
+pub const DENIED_NOTE: &str = "denied";
+
 /// Receives a [`TraceEvent`] per invocation while installed. The kernel records
 /// only when one is set ([`Kernel::set_tracer`]) — off the hot path otherwise — so
 /// the `trace` command can capture one real resolution and render it. The host
@@ -666,6 +679,50 @@ impl Kernel {
         });
     }
 
+    /// Report a CAPABILITY DENIAL into the resolution's [`TraceScope`] — the
+    /// refusal itself, as an event, tagged [`DENIED_NOTE`] with the scope the
+    /// caller lacked.
+    ///
+    /// A sibling of [`trace_record`](Self::trace_record) rather than a call into
+    /// it, because the two disagree about time on purpose: `trace_record` stamps
+    /// `ended` from the clock, and nothing ran here. `started`/`ended` stay
+    /// `None` and `cache_hit` is `false`, which is the honest reading of a
+    /// request that was refused before dispatch.
+    ///
+    /// Why the kernel is the only place this can be reported: the capability
+    /// floor is enforced BEFORE the endpoint is entered (that is the whole point
+    /// of "declared = enforced"), so no in-endpoint observer — and no
+    /// `trace_note` — can ever see it. A refused authority is a security fact,
+    /// and this is the sole point that holds both the target and the authority
+    /// it was refused under.
+    fn trace_denial(
+        &self,
+        trace: &Option<TraceScope>,
+        request: &Request,
+        capability: &Capability,
+        span: Option<u64>,
+        parent: Option<u64>,
+        scope: &str,
+    ) {
+        let Some(trace_scope) = trace else {
+            return;
+        };
+        trace_scope.record(TraceEvent {
+            target: request.target.as_str().to_string(),
+            thread: thread_label(),
+            // Nothing ran: no start, no end.
+            started: None,
+            ended: None,
+            cache_hit: false,
+            span: span.unwrap_or(0),
+            parent,
+            // The authority that was NOT enough — the other half of the fact,
+            // beside the scope named in the note.
+            capability: capability.scopes().map(|s| s.iter().cloned().collect()),
+            notes: vec![(DENIED_NOTE.to_string(), scope.to_string())],
+        });
+    }
+
     /// Issue a request: return a valid cached representation if one exists,
     /// otherwise resolve, invoke the endpoint, and cache the result if cacheable.
     pub async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation> {
@@ -744,7 +801,7 @@ impl Kernel {
                     return Ok(cached);
                 }
             }
-            let representation = self.issue_kernel(op, &request, capability)?;
+            let representation = self.issue_kernel(op, &request, capability, &trace, parent)?;
             let storable = cacheable_verb
                 && match representation.expiry {
                     Expiry::Always => false,
@@ -790,7 +847,17 @@ impl Kernel {
         // its ceiling on top. An endpoint declaring nothing is public, unchanged.
         // (`Meta` is exempt by construction: `action_specs()` carries no Meta
         // spec — self-description stays readable wherever the catalog offers it.)
-        enforce_requires(&resolved.endpoint.describe(), &request, capability)?;
+        // A denial is REPORTED before it is returned: enforcement happens before
+        // dispatch, so the endpoint is never entered and no observer inside it can
+        // ever see the refusal. This is the only point that holds it.
+        if let Some(scope) = unsatisfied_scope(&resolved.endpoint.describe(), &request, capability)
+        {
+            self.trace_denial(&trace, &request, capability, span, parent, &scope);
+            return Err(Error::Denied(format!(
+                "capability does not grant `{scope}` (declared by `{}`)",
+                request.target.as_str()
+            )));
+        }
 
         // Representation-cache lookup (idempotent verbs only): serve a cached entry
         // whose golden-thread edges are all still current. A cut entry is evicted
@@ -994,12 +1061,37 @@ impl Kernel {
         op: &str,
         request: &Request,
         capability: &Capability,
+        trace: &Option<TraceScope>,
+        parent: Option<u64>,
     ) -> Result<Representation> {
+        // The capability gate for these operations. A refusal is REPORTED, not just
+        // returned — a denied `urn:kernel:cut` is the same kind of security fact as
+        // a denied endpoint, and the same reasoning applies: the operation never
+        // runs, so nothing downstream can report it.
+        //
+        // ★ Asymmetry, deliberate: a SUCCESSFUL kernel builtin records no event at
+        // all (this whole arm returns before the trace path, and is likewise absent
+        // from the constraint window — these are introspection, not throughput). So
+        // an observer sees denials from `urn:kernel:*` and never successes. That is
+        // the security-correct trade, not an oversight: the refusal is the fact
+        // worth keeping.
+        let require_cap = |scope: &str| -> Result<()> {
+            if capability.allows(scope) {
+                return Ok(());
+            }
+            // Spans are allocated lazily here: this arm short-circuits before the
+            // resolution path's span, so a denial is the only thing that needs one.
+            let span = trace.as_ref().map(TraceScope::next_span);
+            self.trace_denial(trace, request, capability, span, parent, scope);
+            Err(Error::Denied(format!(
+                "capability does not grant `{scope}`"
+            )))
+        };
         match (op, request.verb) {
             // Cut a golden thread. The thread is the sunk content — so
             // `sink urn:kernel:cut <thread>` works — or an explicit `thread` arg.
             ("cut", Verb::Sink) => {
-                require_cap(capability, "urn:cap:kernel:cut")?;
+                require_cap("urn:cap:kernel:cut")?;
                 let thread = kernel_arg(request, "thread")
                     .or_else(|| kernel_arg(request, "content"))
                     .ok_or_else(|| Error::MissingArgument("thread".to_string()))?;
@@ -1010,7 +1102,7 @@ impl Kernel {
             // resolved from, its representation type and size, and how many golden
             // threads it depends on (cut any of them and this entry recomputes).
             ("cache", Verb::Source) => {
-                require_cap(capability, "urn:cap:kernel:inspect")?;
+                require_cap("urn:cap:kernel:inspect")?;
                 let mut rows: Vec<(String, String, usize, usize)> = {
                     let cache = self.cache.lock().expect("cache lock");
                     cache
@@ -1048,7 +1140,7 @@ impl Kernel {
             }
             // Inspect the golden threads that have been cut, and how many times.
             ("threads", Verb::Source) => {
-                require_cap(capability, "urn:cap:kernel:inspect")?;
+                require_cap("urn:cap:kernel:inspect")?;
                 let gens = self.generations.lock().expect("generations lock");
                 let mut body = String::from("threads (cut generations)\n");
                 if gens.is_empty() {
@@ -1064,7 +1156,7 @@ impl Kernel {
             }
             // Inspect the host scheduler (backend, threads, live task counts).
             ("scheduler", Verb::Source) => {
-                require_cap(capability, "urn:cap:kernel:inspect")?;
+                require_cap("urn:cap:kernel:inspect")?;
                 let mut body = String::from("scheduler\n");
                 match &self.scheduler {
                     Some(reporter) => {
@@ -1085,7 +1177,7 @@ impl Kernel {
             // window. Cache hits are excluded from the total (they cost nothing); the
             // heaviest target is the bottleneck (Goldratt step 1).
             ("constraint", Verb::Source) => {
-                require_cap(capability, "urn:cap:kernel:inspect")?;
+                require_cap("urn:cap:kernel:inspect")?;
                 Ok(kernel_text(self.render_constraint()))
             }
             // The kernel's own catalog: every bound endpoint's `describe()` as one RDF
@@ -1097,7 +1189,7 @@ impl Kernel {
             // and by template (the calendar shape) is not described twice, and an
             // endpoint bound ONLY by template (urn:file:{path}) is no longer invisible.
             ("catalog", Verb::Source) => {
-                require_cap(capability, "urn:cap:kernel:inspect")?;
+                require_cap("urn:cap:kernel:inspect")?;
                 let renderer = self
                     .meta
                     .as_ref()
@@ -1491,31 +1583,27 @@ fn capability_key(capability: &Capability) -> u64 {
 /// and validation, so offer, preflight, and enforcement agree. A verb the
 /// description doesn't declare carries no spec and passes (dispatch behavior for
 /// undeclared verbs is unchanged).
-fn enforce_requires(
+///
+/// Yields the first scope the caller lacks rather than the finished error, so the
+/// call site can REPORT the denial ([`Kernel::trace_denial`]) before returning it.
+/// `None` means the floor is met. Short-circuits on the first failure, as the
+/// error form did.
+fn unsatisfied_scope(
     description: &crate::describe::Description,
     request: &Request,
     capability: &Capability,
-) -> Result<()> {
-    for spec in description.action_specs() {
-        if spec.verb != request.verb {
-            continue;
-        }
-        for scope in &spec.requires {
-            if !crate::select::cap_satisfies(capability, scope) {
-                return Err(Error::Denied(format!(
-                    "capability does not grant `{scope}` (declared by `{}`)",
-                    request.target.as_str()
-                )));
-            }
-        }
-    }
-    Ok(())
+) -> Option<String> {
+    description
+        .action_specs()
+        .into_iter()
+        .filter(|spec| spec.verb == request.verb)
+        .flat_map(|spec| spec.requires)
+        .find(|scope| !crate::select::cap_satisfies(capability, scope))
 }
 
 /// The reserved kernel-behavior namespace prefix.
 const KERNEL_NS: &str = "urn:kernel:";
 
-/// Authorize a kernel operation, or report a capability denial.
 /// Parse a `verb=` argument (case-insensitive verb name).
 fn parse_verb(name: &str) -> Result<Verb> {
     match name.to_ascii_lowercase().as_str() {
@@ -1530,17 +1618,6 @@ fn parse_verb(name: &str) -> Result<Verb> {
     }
 }
 
-fn require_cap(capability: &Capability, scope: &str) -> Result<()> {
-    if capability.allows(scope) {
-        Ok(())
-    } else {
-        Err(Error::Denied(format!(
-            "capability does not grant `{scope}`"
-        )))
-    }
-}
-
-/// An inline argument of a kernel request, decoded as UTF-8.
 /// Self-description of the `urn:kernel:actions` selector. Declares the `types` input so the
 /// engine routes `types=` (it only names *declared* inputs) and `describe urn:kernel:actions`
 /// works — surfacing typed action-selection like any bound endpoint.
@@ -1737,6 +1814,7 @@ fn validate_against_spec(
     ttl
 }
 
+/// An inline argument of a kernel request, decoded as UTF-8.
 fn kernel_arg<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
     match request.args.get(name) {
         Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes).ok(),
@@ -3572,26 +3650,9 @@ mod tests {
 
     #[test]
     fn declared_requires_is_kernel_enforced_before_dispatch() {
-        use std::sync::atomic::AtomicU32;
-        // An endpoint that DECLARES a capability. The invoke counter proves a
-        // denial happens before dispatch — declared = enforced is the kernel's
-        // guarantee now, not module discipline.
-        struct Gated(Arc<AtomicU32>);
-        #[async_trait::async_trait]
-        impl Endpoint for Gated {
-            async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(Representation::new(ReprType::new("text/plain"), b"in".to_vec()).cacheable())
-            }
-            fn name(&self) -> &str {
-                "gated"
-            }
-            fn describe(&self) -> Description {
-                Description::new("gated")
-                    .verb(Verb::Source)
-                    .requires("urn:cap:demo:read")
-            }
-        }
+        // `Gated` DECLARES a capability and counts its own entries, so the counter
+        // proves a denial happens before dispatch — declared = enforced is the
+        // kernel's guarantee now, not module discipline.
         let invokes = Arc::new(AtomicU32::new(0));
         let kernel = Kernel::new(Arc::new(
             EndpointSpace::new().bind(Exact::new("urn:gated"), Gated(invokes.clone())),
@@ -3684,6 +3745,154 @@ mod tests {
             matches!(err, Error::Denied(_)),
             "a reader must not pass the write action's floor: {err:?}"
         );
+    }
+
+    /// A tracer that keeps every event, for the denial tests below.
+    struct Rec(std::sync::Mutex<Vec<TraceEvent>>);
+    impl Tracer for Rec {
+        fn record(&self, event: TraceEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+    impl Rec {
+        fn new() -> Arc<Rec> {
+            Arc::new(Rec(std::sync::Mutex::new(Vec::new())))
+        }
+        fn events(&self) -> Vec<TraceEvent> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// An endpoint that declares a capability and counts its own entries.
+    struct Gated(Arc<AtomicU32>);
+    #[async_trait::async_trait]
+    impl Endpoint for Gated {
+        async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Representation::new(ReprType::new("text/plain"), b"in".to_vec()).cacheable())
+        }
+        fn name(&self) -> &str {
+            "gated"
+        }
+        fn describe(&self) -> Description {
+            Description::new("gated")
+                .verb(Verb::Source)
+                .requires("urn:cap:demo:read")
+        }
+    }
+
+    #[test]
+    fn a_denied_bound_endpoint_reports_the_refusal() {
+        // The point of the whole change: enforcement happens BEFORE dispatch, so
+        // the endpoint is never entered and cannot report its own refusal. Without
+        // the kernel reporting it, a denial reaches no observer at all.
+        let invokes = Arc::new(AtomicU32::new(0));
+        // WITH a clock installed — otherwise `started`/`ended` would be `None` for
+        // every event and the assertion below would prove nothing.
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:gated"), Gated(invokes.clone())),
+        ))
+        .with_clock(Arc::new(TestClock::at(1_000)));
+
+        let narrow = Capability::root().attenuate(["urn:cap:other".to_string()]);
+        let rec = Rec::new();
+        let err = block_on(kernel.issue_traced(
+            Request::new(Verb::Source, iri("urn:gated")),
+            &narrow,
+            rec.clone(),
+        ))
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Denied(_)), "got {err:?}");
+        assert_eq!(invokes.load(Ordering::SeqCst), 0, "denied before dispatch");
+
+        let events = rec.events();
+        assert_eq!(events.len(), 1, "the refusal IS the event: {events:?}");
+        let event = &events[0];
+        assert_eq!(event.target, "urn:gated");
+        // The two facts a denial entry needs, already carried by `TraceEvent`:
+        // which scope was missing, and the authority it was missing from.
+        assert_eq!(
+            event.notes,
+            vec![(DENIED_NOTE.to_string(), "urn:cap:demo:read".to_string())],
+        );
+        assert_eq!(
+            event.capability,
+            Some(vec!["urn:cap:other".to_string()]),
+            "the authority that was not enough"
+        );
+        // Nothing ran, and the clock is installed — so these are `None` by
+        // decision, not by absence.
+        assert!(
+            event.started.is_none() && event.ended.is_none(),
+            "a refused request never ran: {event:?}"
+        );
+        assert!(!event.cache_hit);
+    }
+
+    #[test]
+    fn a_denied_kernel_builtin_reports_the_refusal_too() {
+        // A denied `urn:kernel:cut` is the same kind of security fact as a denied
+        // endpoint. Note the deliberate asymmetry documented at `issue_kernel`: a
+        // SUCCESSFUL builtin records nothing, so the denial is the only event this
+        // namespace ever produces.
+        let kernel = Kernel::new(Arc::new(EndpointSpace::new()));
+        let narrow = Capability::root().attenuate(["urn:cap:other".to_string()]);
+        let rec = Rec::new();
+        let err = block_on(kernel.issue_traced(
+            Request::new(Verb::Sink, iri("urn:kernel:cut")),
+            &narrow,
+            rec.clone(),
+        ))
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Denied(_)), "got {err:?}");
+        let events = rec.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].target, "urn:kernel:cut");
+        assert_eq!(
+            events[0].notes,
+            vec![(DENIED_NOTE.to_string(), "urn:cap:kernel:cut".to_string())],
+        );
+        assert!(events[0].started.is_none() && events[0].ended.is_none());
+    }
+
+    #[test]
+    fn the_globally_installed_tracer_sees_denials_and_permitted_hops_differ() {
+        // The other tracer path (`set_tracer`, the global slot) reports denials
+        // too — that is the one ikigai-log installs, so it is the one that decides
+        // whether "capability denials always land" is true.
+        //
+        // And the negative half, which is what makes the note meaningful: a
+        // PERMITTED resolution carries no denial note. An observer keying on
+        // `DENIED_NOTE` must not see false positives.
+        let invokes = Arc::new(AtomicU32::new(0));
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:gated"), Gated(invokes.clone())),
+        ));
+        let rec = Rec::new();
+        kernel.set_tracer(rec.clone());
+
+        let holder = Capability::root().attenuate(["urn:cap:demo:read".to_string()]);
+        block_on(kernel.issue(Request::new(Verb::Source, iri("urn:gated")), &holder)).unwrap();
+        let narrow = Capability::root().attenuate(["urn:cap:other".to_string()]);
+        block_on(kernel.issue(Request::new(Verb::Source, iri("urn:gated")), &narrow)).unwrap_err();
+
+        let events = rec.events();
+        assert_eq!(events.len(), 2, "{events:?}");
+        let denials: Vec<_> = events
+            .iter()
+            .filter(|e| e.notes.iter().any(|(k, _)| k == DENIED_NOTE))
+            .collect();
+        assert_eq!(denials.len(), 1, "exactly the refused hop: {events:?}");
+        assert_eq!(
+            denials[0].notes,
+            vec![(DENIED_NOTE.to_string(), "urn:cap:demo:read".to_string())],
+        );
+        // The permitted hop ran, so it is the one with a span the tree can hang
+        // off and no denial note.
+        assert_eq!(invokes.load(Ordering::SeqCst), 1);
+        assert!(events[0].notes.is_empty(), "{:?}", events[0]);
     }
 
     #[test]
