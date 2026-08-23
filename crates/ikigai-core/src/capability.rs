@@ -95,11 +95,19 @@ impl Capability {
         }
     }
 
-    /// Whether this capability grants `scope`.
+    /// Whether this capability grants `scope`, matched **exactly**.
     ///
-    /// Matching is exact today; prefix/wildcard matching over the `urn:cap:`
-    /// hierarchy (so `urn:cap:personal:*:read` would cover
-    /// `urn:cap:personal:calendar:read:detail`) can be added later without
+    /// This is the primitive, not the whole predicate. Enforcement, selection, and
+    /// `urn:kernel:validate` all go through `select::cap_satisfies`, which layers the
+    /// trailing-`*` family form on top of this: `urn:cap:net:*` means "holds ANY grant
+    /// under this prefix." That form is how a parameterized capability grammar
+    /// (`urn:cap:net:<host-rule>`, `urn:cap:fs:<action>:<path>`) annotates an action
+    /// whose authorization depends on an argument, so a declared `urn:cap:net:*` IS
+    /// satisfied by a held `urn:cap:net:example.com` — through `cap_satisfies`, never
+    /// through this method. Callers wanting the enforced semantics want that one.
+    ///
+    /// What is still absent is INFIX matching over the hierarchy — `urn:cap:personal:*:read`
+    /// covering `urn:cap:personal:calendar:read:detail`. That can be added later without
     /// changing any tokens.
     pub fn allows(&self, scope: &str) -> bool {
         match &self.kind {
