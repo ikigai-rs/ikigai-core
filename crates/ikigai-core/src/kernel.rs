@@ -73,6 +73,69 @@ impl Clock for SystemClock {
     }
 }
 
+/// A [`Clock`] stopped at one instant — the only kind a test should reason against,
+/// and the reason this ships from core rather than from each crate that needs one.
+///
+/// **The duplication is not the argument.** Two crates had written this exact
+/// three-line body by 2026-08-23 (`ikigai-lisp::FixedClock`, `ikigai-log::Fixed`),
+/// which is friction and no more. The argument is what the friction produced where
+/// nobody wrote one: `ikigai-browse` has five endpoints that stamp their output from
+/// [`Invocation::now`](crate::Invocation::now) and twenty-three test kernels, none of
+/// which installs a clock — so every one of those five has only ever taken its `None`
+/// branch under test, and no test would notice if the other branch were wrong. A
+/// branch no test has ever entered is behaviour nobody has verified. Making the fixed
+/// clock free is how it stops being the expensive option.
+///
+/// `Copy`, so a kernel and the test that asserts against it can hold the same instant
+/// without ceremony:
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use ikigai_core::{Clock, FixedClock, Kernel, Space};
+/// # fn example(space: Arc<dyn Space>) {
+/// let clock = FixedClock::at(1_700_000_000_000);
+/// let kernel = Kernel::new(space).with_clock(Arc::new(clock));
+/// assert_eq!(clock.now().as_millis(), 1_700_000_000_000);
+/// # }
+/// ```
+///
+/// It does not move, deliberately — and there is deliberately no settable twin beside
+/// it, though a settable clock is the MORE duplicated of the two shapes:
+/// `ikigai-core`'s own tests, `ikigai-http` and `ikigai-cms-web` each carry an
+/// `AtomicU64`-backed `TestClock` with a `set`, because testing that an
+/// [`Expiry::At`](crate::Expiry) entry goes stale means moving time past a deadline,
+/// which this type cannot do. Three copies is a larger count than the two this
+/// replaces. It is not a larger case: all three are correct, none has drifted from
+/// another, and no behaviour goes untested because of them. The bar for pushing a
+/// shape down here is a count *plus* observed drift or unverified behaviour — the
+/// same bar `docs/design/ambient-app-name.md` sets — and the settable clock clears
+/// only the count. A crate that needs to advance time keeps writing its own until it
+/// does; `docs/design/hermetic-endpoint-tests.md` records what would change that.
+///
+/// So a test that needs two instants builds two of these, and a test that needs time
+/// to *move* wants the atomic clock it already has.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FixedClock(Time);
+
+impl FixedClock {
+    /// A clock stopped at `millis` since the Unix epoch.
+    pub fn at(millis: u64) -> FixedClock {
+        FixedClock(Time::from_millis(millis))
+    }
+
+    /// A clock stopped at an existing [`Time`] — for advancing a scenario by handing
+    /// the next kernel a clock derived from the last one's instant.
+    pub fn from_time(time: Time) -> FixedClock {
+        FixedClock(time)
+    }
+}
+
+impl Clock for FixedClock {
+    fn now(&self) -> Time {
+        self.0
+    }
+}
+
 /// One resolved invocation, as the kernel reports it to an installed [`Tracer`].
 /// The `trace` command turns a stream of these (from one real resolution) into the
 /// execution tree — which **worker thread** each node ran on, how long it took, and
@@ -3275,6 +3338,38 @@ mod tests {
                 None => repr.cacheable_until(Time::from_millis(window)),
             })
         })
+    }
+
+    /// The shipped fixed clock drives a real `Expiry::At` entry, so a crate reaching
+    /// for it gets the same caching behaviour its hand-rolled copy gave it — and gets
+    /// it without the copy. Stopped, so the entry stays fresh no matter how many reads
+    /// consult the deadline; that immobility is the property, not a limitation.
+    #[test]
+    fn the_shipped_fixed_clock_drives_a_deadline_and_does_not_move() {
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        let clock = FixedClock::at(1_000);
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:t:fixed"), timed_endpoint("f", 500, &CALLS)),
+        ))
+        .with_clock(Arc::new(clock));
+
+        let read = || {
+            block_on(kernel.issue(
+                Request::new(Verb::Source, iri("urn:t:fixed")),
+                &Capability::root(),
+            ))
+            .unwrap()
+        };
+        let first = read();
+        assert_eq!(first.expiry, Expiry::At(Time::from_millis(1_500)));
+        read();
+        read();
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            1,
+            "time never passed the deadline, so the cache served every later read"
+        );
+        assert_eq!(clock.now(), Time::from_millis(1_000), "still stopped");
     }
 
     #[test]

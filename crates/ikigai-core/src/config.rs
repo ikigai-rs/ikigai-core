@@ -19,6 +19,19 @@
 //! Two of the four also took a set-but-empty `XDG_CONFIG_HOME` literally, resolving a
 //! relative `ikigai/…` against the working directory — a config home that moved with `cd`.
 //!
+//! **An ENDPOINT must not call the ambient functions here.** [`config_home`], [`data_home`],
+//! [`data_path`] and [`layered_paths`] read a process-global environment, so an endpoint whose
+//! body calls one reads the developer's real `~/.config/ikigai` under `cargo test`, cannot be
+//! handed a different home by a test (`set_var` races the harness's own threads), and gives two
+//! tests in one binary no way to disagree. The `_in`/`_from` twins beside each of them are the
+//! injected form, and they exist for this: a module's handle takes its home **at construction**
+//! — `Handle::new(home, app, config)`, with an `ambient()` sugar over it for a host configuring
+//! itself — so the environment is read once, in a binary, at startup. `ikigai-log` is the
+//! reference implementation and `ikigai-a11y` is the near-miss worth reading: it takes the home
+//! in its LOADER and reads ambiently in its endpoints, so its endpoint tests assert only that
+//! fields have the right type. The pattern, the rules and the bar for changing this are in
+//! `docs/design/hermetic-endpoint-tests.md`.
+//!
 //! `XDG_CONFIG_HOME` and `HOME` are the ONLY environment variables this module reads, and no
 //! new one belongs here: config home plus flags is the rule, and an environment variable is
 //! the banned third channel. The overrides that predate that rule — `IKIGAI_FILES`,
