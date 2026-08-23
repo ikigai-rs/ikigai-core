@@ -73,6 +73,60 @@ impl Clock for SystemClock {
     }
 }
 
+/// A [`Clock`] stopped at one instant — the only kind a test should reason against,
+/// and the reason this ships from core rather than from each crate that needs one.
+///
+/// Five crates had written it independently by 2026-08-23 (`ikigai-core`,
+/// `ikigai-http` and `ikigai-cms-web` each called it `TestClock`, `ikigai-lisp`
+/// `FixedClock`, `ikigai-log` `Fixed`) with the same three-line body, which is a
+/// duplication worth removing but is NOT the argument for this type. The argument is
+/// what the friction produced where nobody wrote one: `ikigai-browse` has five
+/// endpoints that stamp their output from [`Invocation::now`](crate::Invocation::now)
+/// and twenty-three test kernels, none of which installs a clock — so every one of
+/// those five has only ever taken its `None` branch under test, and no test would
+/// notice if the other branch were wrong. A branch no test has ever entered is
+/// behaviour nobody has verified; making the fixed clock free is how it stops being
+/// the expensive option.
+///
+/// `Copy`, so a kernel and the test that asserts against it can hold the same instant
+/// without ceremony:
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use ikigai_core::{Clock, FixedClock, Kernel, Space};
+/// # fn example(space: Arc<dyn Space>) {
+/// let clock = FixedClock::at(1_700_000_000_000);
+/// let kernel = Kernel::new(space).with_clock(Arc::new(clock));
+/// assert_eq!(clock.now().as_millis(), 1_700_000_000_000);
+/// # }
+/// ```
+///
+/// It does not move, deliberately. A test clock that advances on read reproduces the
+/// problem it was reached for: an assertion whose expected value depends on how many
+/// times something happened to look at the time. A test that needs two instants
+/// builds two of these.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FixedClock(Time);
+
+impl FixedClock {
+    /// A clock stopped at `millis` since the Unix epoch.
+    pub fn at(millis: u64) -> FixedClock {
+        FixedClock(Time::from_millis(millis))
+    }
+
+    /// A clock stopped at an existing [`Time`] — for advancing a scenario by handing
+    /// the next kernel a clock derived from the last one's instant.
+    pub fn from_time(time: Time) -> FixedClock {
+        FixedClock(time)
+    }
+}
+
+impl Clock for FixedClock {
+    fn now(&self) -> Time {
+        self.0
+    }
+}
+
 /// One resolved invocation, as the kernel reports it to an installed [`Tracer`].
 /// The `trace` command turns a stream of these (from one real resolution) into the
 /// execution tree — which **worker thread** each node ran on, how long it took, and
