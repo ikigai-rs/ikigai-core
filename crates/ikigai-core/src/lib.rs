@@ -64,7 +64,9 @@ pub use endpoint::{
 pub use error::{Error, Result};
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{Iri, IriError};
-pub use kernel::{Clock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer};
+pub use kernel::{
+    Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
+};
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};

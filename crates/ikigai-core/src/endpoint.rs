@@ -1004,4 +1004,81 @@ mod tests {
             "every spawner ran its task regardless of the width it reports"
         );
     }
+
+    /// The gap this closes. A detached invocation has no issuer, `now()` is the
+    /// issuer's clock, so an endpoint that stamps its output from the kernel clock
+    /// produced `None` in every detached test — and `None` is a plausible-looking
+    /// answer, so the test that asserted around it passed forever.
+    #[test]
+    fn a_detached_invocation_has_no_time_until_it_is_given_one() {
+        let request = Request::new(Verb::Source, iri("urn:demo:stamp"));
+        let bindings = Bindings::default();
+        let cap = Capability::root();
+
+        let bare = Invocation::detached(&request, &bindings, &cap);
+        assert_eq!(bare.now(), None, "no issuer and no clock is no time");
+
+        let stamped = Invocation::detached(&request, &bindings, &cap)
+            .with_clock(Arc::new(crate::FixedClock::at(1_700_000_000_000)));
+        assert_eq!(stamped.now(), Some(Time::from_millis(1_700_000_000_000)));
+    }
+
+    /// An endpoint reading the kernel clock is now testable detached — which is the
+    /// whole point, since `detached` is the idiom eight repos test their endpoints
+    /// with. Asserted through a real endpoint rather than on `now()` directly,
+    /// because what regressed silently was an endpoint's OUTPUT.
+    #[test]
+    fn an_endpoint_that_stamps_from_the_clock_is_testable_detached() {
+        let stamp = FnEndpoint::new("stamp", |inv: &Invocation| {
+            let at = inv
+                .now()
+                .map(|t| t.as_millis().to_string())
+                .unwrap_or_else(|| "no clock".to_string());
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                at.into_bytes(),
+            ))
+        });
+        let request = Request::new(Verb::Source, iri("urn:demo:stamp"));
+        let bindings = Bindings::default();
+        let cap = Capability::root();
+
+        let unclocked = Invocation::detached(&request, &bindings, &cap);
+        assert_eq!(
+            block_on(stamp.invoke(&unclocked)).unwrap().bytes,
+            b"no clock",
+            "the branch every detached test used to take"
+        );
+
+        let clocked = Invocation::detached(&request, &bindings, &cap)
+            .with_clock(Arc::new(crate::FixedClock::at(42)));
+        assert_eq!(block_on(stamp.invoke(&clocked)).unwrap().bytes, b"42");
+    }
+
+    /// An explicitly attached clock beats the issuer's, on the rule that what a
+    /// caller stated beats what it inherited. Nothing in the kernel path attaches
+    /// one, so the two never disagree in production — but the precedence is a
+    /// promise, so it is pinned here rather than left to whichever branch of `now()`
+    /// happens to be written first.
+    #[test]
+    fn an_attached_clock_outranks_the_issuers() {
+        let space = EndpointSpace::new().bind(
+            Exact::new("urn:demo:stamp"),
+            FnEndpoint::new("stamp", |_: &Invocation| {
+                Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+            }),
+        );
+        let kernel = Kernel::new(Arc::new(space)).with_clock(Arc::new(crate::FixedClock::at(1)));
+
+        let request = Request::new(Verb::Source, iri("urn:demo:stamp"));
+        let bindings = Bindings::default();
+        let cap = Capability::root();
+
+        let inherited = Invocation::with_issuer(&request, &bindings, &cap, &kernel);
+        assert_eq!(inherited.now(), Some(Time::from_millis(1)));
+
+        let stated = Invocation::with_issuer(&request, &bindings, &cap, &kernel)
+            .with_clock(Arc::new(crate::FixedClock::at(2)));
+        assert_eq!(stated.now(), Some(Time::from_millis(2)));
+    }
 }
