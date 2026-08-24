@@ -31,12 +31,15 @@ core cannot see.
 
 ## What it costs when the read stays ambient
 
-`ikigai-a11y` is the case to look at, because it got the loader right and the endpoints
-wrong, which is what makes it evidence rather than an oversight. `load::complete_in(home,
-app)` and `load::threads_in(home, app)` take the home; `endpoints.rs` calls the ambient
-`complete(app)` / `threads(app)` instead.
+`ikigai-a11y` **as it stood when this note was written** is the case to look at, because
+it got the loader right and the endpoints wrong, which is what makes it evidence rather
+than an oversight. `load::complete_in(home, app)` and `load::threads_in(home, app)` took
+the home; `endpoints.rs` called the ambient `complete(app)` / `threads(app)` instead.
+(It has since been fixed — `A11yHandle`, a11y PR #4, 2026-08-23 — so read this section
+as the diagnosis it came from, not as a description of that crate today.)
 
-Read its test module and the consequence is visible without running anything. Five
+Read the test module it had then and the consequence is visible without running
+anything. Five
 endpoint tests, and every one of them either bails —
 
 ```rust
@@ -53,9 +56,18 @@ on this machine they assert against a file that is not theirs.
 That is the shape to recognize: tests written *around* a read rather than *of* it. They
 pass, they stay passing, and they are not evidence about the endpoint.
 
-## The shape: the handle takes its home at construction
+## The shape: the home is taken at construction and exposed
 
-`ikigai-log` is the reference implementation.
+**The rule is *taken at construction and exposed*. A handle is one way to hold it;
+a builder is another.** `ikigai-log` is the reference implementation of the handle
+form, and the rules below are written in its dialect — but a module that already
+has a construction seam uses the one it has. `ikigai-browse` (PR #21, merged
+2026-08-23) meets all five rules with **no handle at all**: the home rides
+`Mount::config_home(Option<PathBuf>)`, a builder method beside the `Mount::app` it
+already had, and travels down to the endpoint bodies as `Option<&Path>`. Do not
+grow a handle beside an existing builder just to match the shape of the example.
+
+`ikigai-log` as the handle form:
 
 ```rust
 // The honest form: the caller states the home. A test hands it a tempdir.
@@ -88,13 +100,49 @@ A test then builds the handle over a `tempdir`, writes the exact layers it wants
 assert about, and asserts values — with no environment variable in sight and no race
 with the test beside it.
 
+**One refinement the builder form needs and the constructor form does not.** In a
+constructor the ambient read is a *different function* (`ambient()` vs `new()`), so
+`Option<PathBuf>` carries everything rule 2 asks of it. A builder has a default —
+not calling it at all — and that is a third statement: *read this machine's home*.
+`None` is already spoken for as a legal stated value (*this process has no config
+home*), so the two cannot share it. `ikigai-browse` holds a private
+`enum ConfigHome { Ambient, Stated(Option<PathBuf>) }` and resolves the `Ambient`
+arm inside `Mount::space`, which keeps rule 1 intact: the ambient read still happens
+once, at the point the host builds its mount.
+
 ## Why this is documentation and not a core helper
 
-Core cannot own the handle. The handle holds the module's *config*, parsed by the
-module, in the module's own type; `LogHandle` carries a `LogConfig` and an app name,
-and the equivalent for `ikigai-a11y` carries an `A11y`. A core type generic enough to
-hold all of them would hold nothing, and would still leave every module to write the
+Core cannot own the handle. What a module holds at construction is its own — its
+config home, its app name, and in some modules its *parsed config*, in the module's
+own type: `LogHandle` carries a `LogConfig`. A core type generic enough to hold all
+of them would hold nothing, and would still leave every module to write the
 constructor pair that is the actual pattern.
+
+### Whether the handle holds a PARSED config is not a style choice
+
+`ikigai-a11y`'s `A11yHandle` deliberately does **not** carry an `A11y`. It holds the
+home and the app name, and re-reads the layers per resolution. The reason is golden
+threads: `urn:a11y:config` is `.cacheable()` with a thread on every candidate file,
+and the contract of that thread is that **cutting it recomputes**. A handle that
+parsed its config at construction would defeat exactly that — the watcher cuts, the
+kernel dutifully re-resolves, and the endpoint hands back the struct the process
+started with, forever. The layering is cheap and the cache is what makes repeating
+it cheap, so the read stays per-resolution and the *home* is what gets held.
+
+`LogHandle` holding a parsed `LogConfig` is right **there** for the opposite reason:
+log's config is process state that a Sink mutates in place, so the handle is the
+authority on it rather than a stale copy of a file.
+
+The test to apply is therefore: **is the config a file the kernel owns freshness
+for, or process state this module owns?** File → hold the home. Process state →
+hold the parsed value. The two reference implementations differ on this on purpose;
+it is not an inconsistency between them.
+
+The consequence to expect from that choice is the constructor's fallibility.
+`A11yHandle::ambient` is **infallible** because nothing is parsed at construction —
+an unreadable layer surfaces at the resolution that reads it, which is where a
+reader can act on it. `LogHandle::ambient` returns `Result<_, ConfigError>` because
+it does parse, and a config it cannot parse is a host that should not start.
 
 What core *can* own, it already owns. The `_in` / `_from` functions are the seam, they
 are public, and they are documented as the testable form. Nothing is missing from the
@@ -130,6 +178,15 @@ Not a preference for less boilerplate. The bar is `ambient-app-name.md`'s — a 
   ambient sugar re-reads the environment per call.
 
 Two modules writing the same small constructor pair correctly is the pattern working.
+
+**The count reached three on the day this note landed** — `ikigai-log`,
+`ikigai-a11y`, `ikigai-browse` — and the bar is still not met, which is the point of
+having two halves to it. The three do not even share a spelling: two constructor
+pairs and one builder. They disagree about nothing that matters — all three take the
+home at construction, all three treat an absent home as a legal state, none re-reads
+the environment per call — and the one place they differ (whether a parsed config is
+held) is the difference the section above says is *required* by the two configs'
+different owners. Count without drift again.
 
 A related count is already accumulating next door and deliberately not acted on, as the
 worked example of this bar: **three** crates (`ikigai-core`'s own tests, `ikigai-http`,
