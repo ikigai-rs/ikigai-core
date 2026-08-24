@@ -188,6 +188,35 @@ pub struct Invocation<'a> {
 impl<'a> Invocation<'a> {
     /// A context with no kernel attached: `source`/`issue` are unavailable.
     /// Useful for invoking an endpoint directly in tests.
+    ///
+    /// ## ★ Nothing fills in the bindings for you
+    ///
+    /// `bindings` is whatever the caller passes, and the caller is a test, so the
+    /// usual value is `Bindings::default()` — **empty**. Template capture happens
+    /// during resolution: [`Kernel::issue`](crate::Kernel::issue) matches the target
+    /// against the grammars in scope and hands the endpoint whatever the matching
+    /// [`Grammar`](crate::Grammar) captured. A detached invocation skips that step
+    /// entirely, so an endpoint bound to `urn:thing:{app}` invoked detached sees no
+    /// `app`, and behaves exactly as it would for the bare `urn:thing` — silently,
+    /// on the branch that reads like success.
+    ///
+    /// That has already cost a session a failing test that looked like a golden-thread
+    /// bug: the endpoint was reading the right layers, the test was resolving an IRI
+    /// with an `{app}` segment in it, and the binding was never there to be read.
+    /// If the behaviour under test depends on a captured variable, state it:
+    ///
+    /// ```
+    /// # use ikigai_core::{Bindings, Capability, Invocation, Iri, Request, Verb};
+    /// # let request = Request::new(Verb::Source, Iri::parse("urn:thing:cms-web").unwrap());
+    /// # let capability = Capability::root();
+    /// let mut bindings = Bindings::new();
+    /// bindings.insert("app", "cms-web"); // the grammar would have captured this
+    /// let inv = Invocation::detached(&request, &bindings, &capability);
+    /// assert_eq!(inv.bindings.get("app"), Some("cms-web"));
+    /// ```
+    ///
+    /// The IRI is not the source of truth here and writing it out in full does not
+    /// help: the endpoint reads `inv.bindings`, not the target's text.
     pub fn detached(
         request: &'a Request,
         bindings: &'a Bindings,
