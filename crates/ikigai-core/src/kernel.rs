@@ -23,7 +23,9 @@
 //! operations as capability-gated resources, resolved intrinsically before the
 //! root space: `sink urn:kernel:cut <thread>` cuts a thread (so an endpoint or a
 //! remote peer can invalidate by *resolving*, not via a special method), and
-//! `source urn:kernel:cache` / `urn:kernel:threads` introspect cache and threads.
+//! `source urn:kernel:cache` / `urn:kernel:threads` introspect cache and threads,
+//! and `source urn:kernel:aliases` reads out the installed logical-rewrite table
+//! (see [`alias`](crate::alias)) with its per-rule hop and miss counters.
 //! `source urn:kernel:catalog` is the self-describing endpoint graph, and
 //! `source urn:kernel:actions types=<classes>` lists the endpoints those typed entities
 //! could drive (selection as a resource).
@@ -34,6 +36,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 
+use crate::alias::{Alias, AliasHop, AliasTable, Canonical};
 use crate::arg::ArgRef;
 use crate::capability::Capability;
 use crate::describe::Description;
@@ -189,6 +192,30 @@ pub struct TraceEvent {
 /// this the refusal reaches no in-kernel observer at all.
 pub const DENIED_NOTE: &str = "denied";
 
+/// The [`TraceEvent::notes`] key under which the kernel reports that a request's
+/// target arrived through a **logical rewrite**, paired with the hop — e.g.
+/// `("alias", "urn:fn:toUpper -> urn:iki:fn:toUpper")`. Public so an observer can
+/// match the key without re-spelling the literal.
+///
+/// Every event for an aliased request carries it: the computed invocation, the
+/// cache hit, the capability denial, and the miss. That last pair is the point.
+/// "It resolves under the old name but not the new one" with no indication an
+/// alias was involved is a bad afternoon, and a *denial* on a rewritten target is
+/// the exact shape that has cost this ecosystem months twice — a capability that
+/// fails by simply not holding, with nothing in any log. The note, the per-rule
+/// counters at `urn:kernel:aliases`, and the hop named in the denial message are
+/// three independent ways to see it, because the tracer is opt-in and the other
+/// two are not.
+pub const ALIAS_NOTE: &str = "alias";
+
+/// The [`TraceEvent::notes`] key marking that a rewritten target resolved to
+/// **nothing** — paired with the backing name that had no binding. It appears only
+/// alongside [`ALIAS_NOTE`], on an event that records a resolution which never
+/// happened. Ordinary (un-aliased) misses record no event, unchanged: this one
+/// exists because the caller asked for a name that *does* look bound and the
+/// rewrite is the part they cannot see.
+pub const ALIAS_MISS_NOTE: &str = "alias-unresolved";
+
 /// Receives a [`TraceEvent`] per invocation while installed. The kernel records
 /// only when one is set ([`Kernel::set_tracer`]) — off the hot path otherwise — so
 /// the `trace` command can capture one real resolution and render it. The host
@@ -305,6 +332,12 @@ pub struct Kernel {
     /// the cache; bounded to [`CONSTRAINT_WINDOW`]. `urn:kernel:*` introspection
     /// requests are not recorded (they short-circuit before the resolution body).
     constraint: Mutex<VecDeque<ResolutionSample>>,
+    /// The installed logical-rewrite table, if any. The kernel holds it (rather than
+    /// only wrapping the root space in an [`Alias`]) because canonicalization must
+    /// happen BEFORE the cache key and the auto-cut are computed from the target —
+    /// that is what makes a logical name and its backing name share one cache entry
+    /// and one golden thread. See `alias.rs` for the full decision record.
+    aliases: Option<Arc<AliasTable>>,
     /// `rdfs:subClassOf*` closure for type-aware [`select_action`](Self::select_action):
     /// each class mapped to itself plus all its (transitive) superclasses. Set from a
     /// vocabulary/alignment graph via [`with_subclass_axioms`](Self::with_subclass_axioms);
@@ -352,6 +385,7 @@ impl Kernel {
             span_counter: Arc::new(AtomicU64::new(0)),
             scheduler: None,
             constraint: Mutex::new(VecDeque::new()),
+            aliases: None,
             subclass_closure: BTreeMap::new(),
         }
     }
@@ -371,6 +405,7 @@ impl Kernel {
             span_counter: Arc::new(AtomicU64::new(0)),
             scheduler: None,
             constraint: Mutex::new(VecDeque::new()),
+            aliases: None,
             subclass_closure: BTreeMap::new(),
         }
     }
@@ -577,6 +612,71 @@ impl Kernel {
         self
     }
 
+    /// Install a logical-rewrite table (builder): stable logical names resolve to
+    /// different backing resources, invisibly to the caller. `urn:fn:toUpper` →
+    /// `urn:iki:fn:toUpper` for a namespace migration; `urn:log:config` →
+    /// `file:/logConfig.yaml` for an indirection. See [`alias`](crate::alias) for
+    /// the design and its five forced decisions.
+    ///
+    /// This does two things, and both are needed:
+    ///
+    /// 1. It wraps the root space in an [`Alias`], so anything resolving against
+    ///    the kernel's space directly (a host walking `Kernel::entries`, a
+    ///    `describe`) sees the same rewrite.
+    /// 2. It keeps the table in the kernel, so the target is canonicalized at the
+    ///    top of the resolution path — **before** the request id that keys the
+    ///    cache, before the capability floor, before the auto-cut that fires on a
+    ///    mutating verb, and before the [`Invocation`] the endpoint receives. That
+    ///    single point is what makes the logical and backing names one resource
+    ///    rather than two that happen to agree.
+    ///
+    /// Installing it twice stacks the wrap and keeps only the newest table; call it
+    /// once, with the whole table.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use ikigai_core::{AliasTable, Kernel, Space};
+    /// # fn example(root: Arc<dyn Space>) {
+    /// let kernel = Kernel::new(root)
+    ///     .with_aliases(Arc::new(AliasTable::new().prefix("urn:fn:", "urn:iki:fn:")));
+    /// # let _ = kernel; }
+    /// ```
+    pub fn with_aliases(mut self, table: Arc<AliasTable>) -> Self {
+        self.root = Arc::new(Alias::new(Arc::clone(&table), self.root));
+        self.aliases = Some(table);
+        self
+    }
+
+    /// The installed rewrite table, if any.
+    pub fn aliases(&self) -> Option<&Arc<AliasTable>> {
+        self.aliases.as_ref()
+    }
+
+    /// Canonicalize a target through the installed table. `Ok(None)` means the name
+    /// stands as written (no table, or no rule matched); `Ok(Some(hop))` carries the
+    /// rewrite; `Err` is a deliberate refusal (a cycle, an over-long chain, or a
+    /// substitution that is not a valid IRI) — never a half-applied rewrite, which
+    /// would resolve to whichever name the walk happened to stop on.
+    ///
+    /// The refusal is an `Endpoint` error rather than a new variant: it is
+    /// permanent (`is_transient() == false`, correctly — re-issuing cannot fix a
+    /// table), and adding a variant to the error enum would silently re-route every
+    /// consumer's catch-all arm for a condition only an operator can fix.
+    fn canonicalize(&self, target: &Iri) -> Result<Option<AliasHop>> {
+        match self
+            .aliases
+            .as_ref()
+            .map(|table| table.canonicalize(target))
+        {
+            None | Some(Canonical::Direct) => Ok(None),
+            Some(Canonical::Aliased(hop)) => Ok(Some(hop)),
+            Some(Canonical::Refused(refusal)) => Err(Error::Endpoint(format!(
+                "alias table refused `{}`: {refusal}",
+                refusal.logical
+            ))),
+        }
+    }
+
     /// Inject a [`SchedulerReporter`] so `urn:kernel:scheduler` reports the host
     /// scheduler's live state (builder). Without one it reports the single-threaded
     /// default. A scheduled host injects this alongside
@@ -695,6 +795,7 @@ impl Kernel {
     /// `trace_note` — can ever see it. A refused authority is a security fact,
     /// and this is the sole point that holds both the target and the authority
     /// it was refused under.
+    #[allow(clippy::too_many_arguments)]
     fn trace_denial(
         &self,
         trace: &Option<TraceScope>,
@@ -703,10 +804,18 @@ impl Kernel {
         span: Option<u64>,
         parent: Option<u64>,
         scope: &str,
+        alias: Option<&AliasHop>,
     ) {
         let Some(trace_scope) = trace else {
             return;
         };
+        // A denial on a REWRITTEN target is the failure shape this whole primitive
+        // has to defend against: the capability check runs against the backing name
+        // (decision 1), so a grant that still names the pre-alias scope fails by
+        // simply not holding. Carrying the hop on the denial event is what stops
+        // that from being invisible.
+        let mut notes = vec![(DENIED_NOTE.to_string(), scope.to_string())];
+        notes.extend(alias_notes(alias));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
             thread: thread_label(),
@@ -719,8 +828,79 @@ impl Kernel {
             // The authority that was NOT enough — the other half of the fact,
             // beside the scope named in the note.
             capability: capability.scopes().map(|s| s.iter().cloned().collect()),
-            notes: vec![(DENIED_NOTE.to_string(), scope.to_string())],
+            notes,
         });
+    }
+
+    /// Record a resolution that MISSED after a rewrite: the alias fired, and nothing
+    /// was bound at the name it produced. Nothing ran, so — like a denial — no
+    /// observer inside an endpoint can ever report it.
+    fn trace_miss(
+        &self,
+        trace: &Option<TraceScope>,
+        request: &Request,
+        capability: &Capability,
+        span: Option<u64>,
+        parent: Option<u64>,
+        alias: &AliasHop,
+    ) {
+        let Some(trace_scope) = trace else {
+            return;
+        };
+        let mut notes = alias_notes(Some(alias));
+        notes.push((
+            ALIAS_MISS_NOTE.to_string(),
+            request.target.as_str().to_string(),
+        ));
+        trace_scope.record(TraceEvent {
+            target: request.target.as_str().to_string(),
+            thread: thread_label(),
+            started: None,
+            ended: None,
+            cache_hit: false,
+            span: span.unwrap_or(0),
+            parent,
+            capability: capability.scopes().map(|s| s.iter().cloned().collect()),
+            notes,
+        });
+    }
+
+    /// The denial message for an unmet capability floor. When the target arrived
+    /// through a rewrite it names the hop, and — if the caller's own grants mention
+    /// a namespace this table rewrites — says plainly that the grant looks
+    /// un-migrated. Authority is never rewritten to make the check pass (that is how
+    /// a silent *grant* is manufactured); the mismatch is reported instead.
+    fn denial_message(
+        &self,
+        scope: &str,
+        request: &Request,
+        capability: &Capability,
+        alias: Option<&AliasHop>,
+    ) -> String {
+        let mut message = format!(
+            "capability does not grant `{scope}` (declared by `{}`)",
+            request.target.as_str()
+        );
+        let Some(hop) = alias else {
+            return message;
+        };
+        message.push_str(&format!(" — target arrived via alias `{hop}`"));
+        let (Some(table), Some(held)) = (self.aliases.as_ref(), capability.scopes()) else {
+            return message;
+        };
+        let stale = table.scopes_naming_stale_namespaces(held.iter());
+        if !stale.is_empty() {
+            message.push_str(&format!(
+                "; the capability holds {} — scope(s) naming a namespace this table \
+                 rewrites, so the grant may not have been migrated with the resource",
+                stale
+                    .iter()
+                    .map(|s| format!("`{s}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        message
     }
 
     /// Issue a request: return a valid cached representation if one exists,
@@ -786,6 +966,35 @@ impl Kernel {
         incoming: Option<Provenance>,
         trace: Option<TraceScope>,
     ) -> Result<Representation> {
+        // ★ LOGICAL REWRITE, FIRST. The target is canonicalized before ANYTHING else
+        // reads it: before the `urn:kernel:*` dispatch, before the request id that
+        // keys the representation cache, before the declared-capability floor, before
+        // the auto-cut that a mutating verb fires, and before the `Invocation` the
+        // endpoint receives. Every one of the five decisions in `alias.rs` falls out
+        // of this one placement:
+        //
+        //   1. Capability BEFORE/AFTER — after. Authority is evaluated against the
+        //      backing resource, the thing that will actually be touched. Checking
+        //      the logical name first would make an alias an escalation device.
+        //   2. `Meta` reports the BACKING name — the description is the endpoint's
+        //      own, and the endpoint is reached under its real name.
+        //   3. ONE cache entry, ONE golden thread for both names — the id and the
+        //      cut are computed from the canonical target below.
+        //   5. A refusal (cycle / over-long chain / malformed rewrite) stops here
+        //      rather than resolving a half-applied name.
+        //
+        // (Decision 4, what the catalog lists, is `Alias::entries`.)
+        let alias = self.canonicalize(&request.target)?;
+        let request = match &alias {
+            None => request,
+            Some(hop) => {
+                let mut rewritten = request;
+                rewritten.target = hop.canonical().clone();
+                rewritten
+            }
+        };
+        let alias = alias.as_ref();
+
         // The kernel-behavior namespace (`urn:kernel:*`) is resolved by the kernel
         // itself — before the root space, which cannot shadow it — exposing the
         // kernel's own operations (cut a thread, inspect cache and threads) as
@@ -835,7 +1044,21 @@ impl Kernel {
         // the endpoint's own declaration would refuse).
         let resolved = match self.root.resolve(&request, &Scope::empty()) {
             Resolution::Hit(resolved) => resolved,
-            Resolution::Miss => return Err(Error::Unresolved(request.target.clone())),
+            Resolution::Miss => {
+                // A rewrite that lands on nothing is reported as a rewrite. The error
+                // names the CANONICAL target — the caller already knows what they
+                // typed, and the name they have never seen is the informative half
+                // ("why is it saying `urn:iki:`?" *is* the discovery). Beside it: a
+                // trace event marking the miss, and an always-on per-rule counter at
+                // `urn:kernel:aliases` for the operator with no tracer installed.
+                if let Some(hop) = alias {
+                    if let Some(table) = self.aliases.as_ref() {
+                        table.record_unresolved(hop);
+                    }
+                    self.trace_miss(&trace, &request, capability, span, parent, hop);
+                }
+                return Err(Error::Unresolved(request.target.clone()));
+            }
         };
 
         // The baseline capability floor: **declared = enforced**. Every `requires`
@@ -852,11 +1075,10 @@ impl Kernel {
         // ever see the refusal. This is the only point that holds it.
         if let Some(scope) = unsatisfied_scope(&resolved.endpoint.describe(), &request, capability)
         {
-            self.trace_denial(&trace, &request, capability, span, parent, &scope);
-            return Err(Error::Denied(format!(
-                "capability does not grant `{scope}` (declared by `{}`)",
-                request.target.as_str()
-            )));
+            self.trace_denial(&trace, &request, capability, span, parent, &scope, alias);
+            return Err(Error::Denied(
+                self.denial_message(&scope, &request, capability, alias),
+            ));
         }
 
         // Representation-cache lookup (idempotent verbs only): serve a cached entry
@@ -873,7 +1095,7 @@ impl Kernel {
                     parent,
                     started,
                     true,
-                    Vec::new(),
+                    alias_notes(alias),
                 );
                 self.record_resolution(&request, started, true);
                 return Ok(cached);
@@ -942,8 +1164,18 @@ impl Kernel {
                 threads.extend(incoming.threads);
             }
             trace_notes = invocation.take_trace_notes();
+            // The rewrite is provenance of the invocation, so it leads the endpoint's
+            // own notes rather than being appended after them.
+            let mut notes = alias_notes(alias);
+            notes.append(&mut trace_notes);
+            trace_notes = notes;
             representation.with_expiry(effective).with_threads(threads)
         };
+        if request.verb == Verb::Meta {
+            // The Meta arm takes no invocation, so it never reached the note-merging
+            // above; the rewrite still has to show on the event.
+            trace_notes = alias_notes(alias);
+        }
         // Computed (not served from cache) — record after the invocation completes.
         self.trace_record(
             &trace,
@@ -1082,7 +1314,7 @@ impl Kernel {
             // Spans are allocated lazily here: this arm short-circuits before the
             // resolution path's span, so a denial is the only thing that needs one.
             let span = trace.as_ref().map(TraceScope::next_span);
-            self.trace_denial(trace, request, capability, span, parent, scope);
+            self.trace_denial(trace, request, capability, span, parent, scope, None);
             Err(Error::Denied(format!(
                 "capability does not grant `{scope}`"
             )))
@@ -1151,6 +1383,44 @@ impl Kernel {
                     for (thread, generation) in rows {
                         body.push_str(&format!("  {}  gen {generation}\n", thread.as_str()));
                     }
+                }
+                Ok(kernel_text(body))
+            }
+            // ★ The rewrite table AS A RESOURCE — not a hardcode. An operator can read
+            // the live table out of the kernel: which logical names are being
+            // rewritten, to what, and — the part that matters when something is
+            // mysteriously not resolving — how often each rule has FIRED and how
+            // often it fired onto a name nothing was bound to. That readout needs no
+            // tracer installed, which is the whole point: the tracer is opt-in and
+            // this question arrives unannounced.
+            ("aliases", Verb::Source) => {
+                require_cap("urn:cap:kernel:inspect")?;
+                let mut body = String::from("aliases\n");
+                let Some(table) = self.aliases.as_ref() else {
+                    body.push_str("  (no rewrite table installed)\n");
+                    return Ok(kernel_text(body));
+                };
+                body.push_str(&format!("  rules     {}\n", table.rules().len()));
+                body.push_str(&format!("  max hops  {}\n", table.max_hops()));
+                let width = table
+                    .rules()
+                    .iter()
+                    .map(|rule| rule.from().chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .min(40);
+                for rule in table.rules() {
+                    let from = rule.from();
+                    let kind = rule.kind().keyword();
+                    body.push_str(&format!("  {kind:<6}  {from:<width$}  ->  {}", rule.to()));
+                    body.push_str(&format!("   {} hops", rule.hops()));
+                    if rule.unresolved() > 0 {
+                        body.push_str(&format!(", {} unresolved", rule.unresolved()));
+                    }
+                    if rule.refused() > 0 {
+                        body.push_str(&format!(", {} refused", rule.refused()));
+                    }
+                    body.push('\n');
                 }
                 Ok(kernel_text(body))
             }
@@ -1526,6 +1796,20 @@ impl Kernel {
         if !request.verb.is_cacheable() {
             return false;
         }
+        // The probe canonicalizes exactly as the serving path does, or it would
+        // answer "not cached" for a logical name whose backing name IS cached —
+        // the two disagreeing about one entry, which is the whole failure mode
+        // decision 3 exists to close. A refused rewrite resolves to nothing, so it
+        // is not cached either.
+        let id = match self.canonicalize(&request.target) {
+            Err(_) => return false,
+            Ok(None) => request.id(),
+            Ok(Some(hop)) => {
+                let mut canonical = request.clone();
+                canonical.target = hop.canonical().clone();
+                canonical.id()
+            }
+        };
         // Read-only probe: an entry that is cut (a thread bumped) or expired (its
         // deadline passed) is not "cached", matching what `valid_cached` would
         // serve. Keyed by capability too, so the probe answers "cached *for this
@@ -1533,7 +1817,7 @@ impl Kernel {
         // Does not evict — eviction happens on the serving path.
         let cache = self.cache.lock().expect("cache lock");
         cache
-            .get(&(request.id(), capability_key(capability)))
+            .get(&(id, capability_key(capability)))
             .is_some_and(|entry| self.entry_is_valid(entry))
     }
 
@@ -1599,6 +1883,14 @@ fn unsatisfied_scope(
         .filter(|spec| spec.verb == request.verb)
         .flat_map(|spec| spec.requires)
         .find(|scope| !crate::select::cap_satisfies(capability, scope))
+}
+
+/// The trace notes disclosing a logical rewrite: empty when the target was not
+/// aliased, so an un-aliased request's events are byte-identical to before.
+fn alias_notes(alias: Option<&AliasHop>) -> Vec<(String, String)> {
+    alias
+        .map(|hop| vec![(ALIAS_NOTE.to_string(), hop.to_string())])
+        .unwrap_or_default()
 }
 
 /// The reserved kernel-behavior namespace prefix.
@@ -2734,6 +3026,7 @@ mod tests {
             "urn:kernel:cache",
             "urn:kernel:threads",
             "urn:kernel:constraint",
+            "urn:kernel:aliases",
         ] {
             block_on(kernel.issue(Request::new(Verb::Source, iri(op)), &cap)).unwrap();
         }
