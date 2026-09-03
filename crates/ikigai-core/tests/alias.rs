@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 use ikigai_core::{
-    builtins, ActionSpec, AliasTable, ArgRef, Capability, Description, EndpointSpace, Exact,
-    FnEndpoint, Iri, Kernel, MetaRenderer, ReprType, Representation, Request, Space, TraceEvent,
+    builtins, ActionSpec, Alias, AliasTable, ArgRef, Capability, Description, Endpoint,
+    EndpointSpace, Exact, Fallback, FnEndpoint, Invocation, Iri, Kernel, MetaRenderer, Mount,
+    ReprType, Representation, Request, Resolution, Resolved, Rewrite, Scope, Space, TraceEvent,
     Tracer, Verb, ALIAS_MISS_NOTE, ALIAS_NOTE, DENIED_NOTE,
 };
 
@@ -463,4 +464,328 @@ fn the_kernel_namespace_cannot_be_aliased_away() {
         String::from_utf8(source(&kernel, "urn:kernel:aliases", &Capability::root()).unwrap())
             .unwrap();
     assert!(readout.starts_with("aliases"), "{readout}");
+}
+
+// ================================================================ nested alias
+//
+// The hole the resolver-reports-what-it-rewrote change closes. `Kernel::with_aliases`
+// canonicalizes at the top of the resolution path from a table the kernel HOLDS;
+// an `Alias` composed by hand under another overlay — `RateLimit::new(Alias::new(…))`
+// is the real shape — rewrote correctly and the kernel never learned of it, so the
+// logical and the backing name got a cache entry and a golden thread each. Every
+// test below runs on a kernel with **no** table of its own.
+
+/// The interception-overlay shape `ikigai-throttle` uses: resolve through, then
+/// decorate the endpoint. Written the correct way — [`Resolution::map_endpoint`]
+/// keeps everything the inner resolution reported, including its canonical.
+struct Decorating(Arc<dyn Space>);
+
+impl Space for Decorating {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        self.0
+            .resolve(request, scope)
+            .map_endpoint(|endpoint| Arc::new(PassThrough(endpoint)) as Arc<dyn Endpoint>)
+    }
+
+    fn entries(&self) -> Option<Vec<ikigai_core::SpaceEntry>> {
+        self.0.entries()
+    }
+}
+
+/// The same overlay written the WRONG way: it rebuilds the `Resolved` from parts
+/// instead of forwarding it, so the inner space's report is dropped on the floor.
+struct Rebuilding(Arc<dyn Space>);
+
+impl Space for Rebuilding {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        match self.0.resolve(request, scope) {
+            Resolution::Hit(hit) => Resolution::Hit(Resolved::new(
+                Arc::new(PassThrough(hit.endpoint)),
+                hit.bindings,
+            )),
+            Resolution::Miss => Resolution::Miss,
+        }
+    }
+}
+
+/// An endpoint decorator that changes nothing — the overlay's behaviour is not
+/// what is under test, only whether the resolution survives being wrapped.
+struct PassThrough(Arc<dyn Endpoint>);
+
+#[async_trait::async_trait]
+impl Endpoint for PassThrough {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    async fn invoke(&self, inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        self.0.invoke(inv).await
+    }
+
+    fn describe(&self) -> Description {
+        self.0.describe()
+    }
+}
+
+/// A kernel holding NO alias table, with the `Alias` composed by hand one overlay
+/// down — resolution rewrites, and only the report tells the kernel about it.
+fn kernel_with_a_nested_alias(cell_value: Arc<Mutex<String>>) -> Kernel {
+    Kernel::new(Arc::new(Decorating(Arc::new(Alias::new(
+        migration(),
+        backing_space(cell_value),
+    )))))
+}
+
+#[test]
+fn a_sink_through_one_name_cuts_the_other_when_the_alias_is_nested() {
+    // ★ THE ACCEPTANCE TEST FOR THIS ARC. Identical in shape to
+    // `a_sink_through_one_name_invalidates_a_source_through_the_other`, but the
+    // kernel holds no table: the only thing that can make these one resource is
+    // the canonical the nested `Alias` reported.
+    let value = Arc::new(Mutex::new("one".to_string()));
+    let kernel = kernel_with_a_nested_alias(Arc::clone(&value));
+    let cap = Capability::root();
+
+    assert_eq!(source(&kernel, "urn:store:x", &cap).unwrap(), b"one");
+    assert_eq!(
+        kernel.cache_len(),
+        1,
+        "the logical name should have been cached under the backing name's id"
+    );
+
+    block_on(
+        kernel.issue(
+            Request::new(Verb::Sink, iri("urn:iki:store:x"))
+                .with_arg("content", ArgRef::Inline(b"two".to_vec())),
+            &cap,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        source(&kernel, "urn:store:x", &cap).unwrap(),
+        b"two",
+        "the logical name served a stale representation after a sink through the backing name"
+    );
+
+    // …and the reverse direction: write the OLD name, read the NEW one.
+    block_on(
+        kernel.issue(
+            Request::new(Verb::Sink, iri("urn:store:x"))
+                .with_arg("content", ArgRef::Inline(b"three".to_vec())),
+            &cap,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        source(&kernel, "urn:iki:store:x", &cap).unwrap(),
+        b"three",
+        "the backing name served a stale representation after a sink through the logical name"
+    );
+}
+
+#[test]
+fn a_nested_alias_gives_the_two_names_one_cache_entry() {
+    let kernel = kernel_with_a_nested_alias(Arc::new(Mutex::new("one".to_string())));
+    let cap = Capability::root();
+    assert_eq!(source(&kernel, "urn:store:x", &cap).unwrap(), b"one");
+    assert_eq!(source(&kernel, "urn:iki:store:x", &cap).unwrap(), b"one");
+    assert_eq!(
+        kernel.cache_len(),
+        1,
+        "two names, one resource — two entries here is the bug this arc closes"
+    );
+}
+
+#[test]
+fn an_overlay_that_rebuilds_the_resolution_splits_the_resource_again() {
+    // ★ Honest about what this does not fix, and pinned so the next one is loud.
+    // Reporting moves the canonical into a value overlays already return — harder
+    // to forget than a trait method, not impossible. An overlay that builds a
+    // FRESH `Resolved` drops it, and the two names split back into two resources.
+    // If this test ever fails, forwarding got stronger and the docs saying it can
+    // still be dropped (`Resolved::canonical`, `alias.rs`) need updating with it.
+    let value = Arc::new(Mutex::new("one".to_string()));
+    let kernel = Kernel::new(Arc::new(Rebuilding(Arc::new(Alias::new(
+        migration(),
+        backing_space(Arc::clone(&value)),
+    )))));
+    let cap = Capability::root();
+    assert_eq!(source(&kernel, "urn:store:x", &cap).unwrap(), b"one");
+    assert_eq!(source(&kernel, "urn:iki:store:x", &cap).unwrap(), b"one");
+    assert_eq!(
+        kernel.cache_len(),
+        2,
+        "a rebuilt `Resolved` drops the canonical, so the kernel keys each name \
+         separately — the documented residual hole, not a passing grade"
+    );
+    // …and the visible consequence, spelled out: a sink through one name leaves
+    // the other serving a stale read.
+    block_on(
+        kernel.issue(
+            Request::new(Verb::Sink, iri("urn:iki:store:x"))
+                .with_arg("content", ArgRef::Inline(b"two".to_vec())),
+            &cap,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        source(&kernel, "urn:store:x", &cap).unwrap(),
+        b"one",
+        "the stale read is the point: this is what dropping the report costs"
+    );
+}
+
+#[test]
+fn every_core_overlay_forwards_a_reported_canonical() {
+    // The guard for core's OWN overlays: each one composes over a space that
+    // reports a rewrite, and must hand that report on. A future overlay that
+    // rebuilds instead of forwarding fails here rather than degrading silently.
+    let inner = || -> Arc<dyn Space> {
+        Arc::new(Rewrite::new(
+            backing_space(Arc::new(Mutex::new("one".to_string()))),
+            |target| (target.as_str() == "urn:store:x").then(|| iri("urn:iki:store:x")),
+        ))
+    };
+    let overlays: Vec<(&str, Arc<dyn Space>)> = vec![
+        ("Mount", Arc::new(Mount::new("urn:", inner()))),
+        ("Fallback", Arc::new(Fallback::new(vec![inner()]))),
+        (
+            "Alias (empty table)",
+            Arc::new(Alias::new(Arc::new(AliasTable::new()), inner())),
+        ),
+        ("Rewrite (pass-through rule)", {
+            Arc::new(Rewrite::new(inner(), |_| None))
+        }),
+        ("Decorating (map_endpoint)", Arc::new(Decorating(inner()))),
+    ];
+    for (label, space) in overlays {
+        let request = Request::new(Verb::Source, iri("urn:store:x"));
+        match space.resolve(&request, &Scope::empty()) {
+            Resolution::Hit(hit) => assert_eq!(
+                hit.canonical.as_ref().map(Iri::as_str),
+                Some("urn:iki:store:x"),
+                "{label} dropped the canonical its inner space reported"
+            ),
+            Resolution::Miss => panic!("{label} missed"),
+        }
+    }
+}
+
+#[test]
+fn authority_is_checked_against_the_backing_name_through_a_nested_alias() {
+    // Decision 1, under nesting. Adoption sits AFTER the resolve and BEFORE the
+    // declared-capability floor, so the floor still sees the backing name.
+    let kernel = kernel_with_a_nested_alias(Arc::new(Mutex::new(String::new())));
+    assert_eq!(
+        source(
+            &kernel,
+            "urn:vault:secret",
+            &Capability::scoped(["urn:cap:iki:vault:read"])
+        )
+        .unwrap(),
+        b"the goods"
+    );
+}
+
+#[test]
+fn a_nested_alias_can_never_launder_authority_either() {
+    // The other direction: a grant naming the PRE-alias scope must not open the
+    // backing resource. If adoption had landed after the floor, this would pass
+    // the check and the alias would be an escalation device.
+    let kernel = kernel_with_a_nested_alias(Arc::new(Mutex::new(String::new())));
+    let denied = source(
+        &kernel,
+        "urn:vault:secret",
+        &Capability::scoped(["urn:cap:vault:read"]),
+    )
+    .unwrap_err();
+    let message = denied.to_string();
+    assert!(
+        message.contains("does not grant `urn:cap:iki:vault:read`"),
+        "{message}"
+    );
+    // …and the rewrite is disclosed in the denial, which is the whole reason a
+    // reported hop is carried rather than just the name.
+    assert!(
+        message.contains("urn:vault:secret -> urn:iki:vault:secret"),
+        "a denial on a nested rewrite must still name the hop: {message}"
+    );
+}
+
+#[test]
+fn meta_reports_the_backing_name_through_a_nested_alias() {
+    // Decision 2.
+    let kernel = Kernel::with_meta_renderer(
+        Arc::new(Decorating(Arc::new(Alias::new(
+            migration(),
+            backing_space(Arc::new(Mutex::new(String::new()))),
+        )))),
+        Arc::new(IdRenderer),
+    );
+    let described = block_on(kernel.issue(
+        Request::new(Verb::Meta, iri("urn:fn:toUpper")),
+        &Capability::root(),
+    ))
+    .unwrap();
+    assert_eq!(described.bytes, b"toUpper");
+}
+
+#[test]
+fn the_catalog_lists_the_backing_name_once_through_a_nested_alias() {
+    // Decision 4: enumeration is transparent through both overlays.
+    let kernel = kernel_with_a_nested_alias(Arc::new(Mutex::new(String::new())));
+    let patterns: Vec<String> = kernel
+        .entries()
+        .expect("enumerable")
+        .into_iter()
+        .map(|e| e.pattern)
+        .collect();
+    assert!(patterns.contains(&"urn:iki:fn:toUpper".to_string()));
+    assert!(!patterns.iter().any(|p| p == "urn:fn:toUpper"));
+}
+
+#[test]
+fn a_cycle_under_a_nested_alias_is_refused_never_half_applied() {
+    // Decision 5. A `Space` cannot return an error, so a nested `Alias` refuses at
+    // INVOKE rather than pre-dispatch — later than the kernel's own table, but
+    // still a refusal naming the trail, and never a resolution under whichever
+    // name the walk happened to stop on.
+    let kernel = Kernel::new(Arc::new(Decorating(Arc::new(Alias::new(
+        Arc::new(
+            AliasTable::new()
+                .exact("urn:a", "urn:b")
+                .exact("urn:b", "urn:a"),
+        ),
+        backing_space(Arc::new(Mutex::new(String::new()))),
+    )))));
+    let err = source(&kernel, "urn:a", &Capability::root()).unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("alias cycle"), "{message}");
+    assert!(
+        message.contains("urn:a -> urn:b -> urn:a"),
+        "the trail is the point — the loop must be readable off the message: {message}"
+    );
+    assert_eq!(kernel.cache_len(), 0, "a refusal must not be cached");
+}
+
+#[test]
+fn a_traced_invocation_through_a_nested_alias_carries_the_hop() {
+    // Observability: the hop the resolver reported reads the same on the event as
+    // one the kernel's own table walked, so a tracer cannot tell — and should not
+    // have to — which half of the system did the rewriting.
+    let kernel = kernel_with_a_nested_alias(Arc::new(Mutex::new("one".to_string())));
+    let tracer = Arc::new(Collector::default());
+    block_on(kernel.issue_traced(
+        Request::new(Verb::Source, iri("urn:store:x")),
+        &Capability::root(),
+        Arc::clone(&tracer) as Arc<dyn Tracer>,
+    ))
+    .unwrap();
+    let events = tracer.0.lock().unwrap().clone();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].target, "urn:iki:store:x");
+    assert!(notes_of(&events).contains(&(
+        ALIAS_NOTE.to_string(),
+        "urn:store:x -> urn:iki:store:x".to_string()
+    )));
 }

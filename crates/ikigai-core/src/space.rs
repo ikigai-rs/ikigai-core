@@ -44,12 +44,105 @@ pub enum Resolution {
     Miss,
 }
 
-/// A successful resolution: the endpoint to invoke and its bindings.
+impl Resolution {
+    /// Wrap a hit's endpoint, leaving everything else the inner resolution
+    /// reported intact; a miss passes through.
+    ///
+    /// This is the idiom for the whole interception-overlay family
+    /// (`ikigai-throttle`'s `Retry`, `Timeout`, `CircuitBreaker`, …): they resolve
+    /// through, then decorate the endpoint. Rebuilding a [`Resolved`] by hand
+    /// instead drops [`Resolved::canonical`], and a rewrite composed underneath
+    /// the overlay silently stops being one resource.
+    ///
+    /// ```
+    /// # use ikigai_core::{Request, Resolution, Scope, Space};
+    /// # fn demo(inner: &dyn Space, request: &Request, scope: &Scope) -> Resolution {
+    /// inner.resolve(request, scope).map_endpoint(|endpoint| endpoint)
+    /// # }
+    /// ```
+    pub fn map_endpoint(
+        self,
+        wrap: impl FnOnce(Arc<dyn Endpoint>) -> Arc<dyn Endpoint>,
+    ) -> Resolution {
+        match self {
+            Resolution::Hit(hit) => {
+                let endpoint = wrap(Arc::clone(&hit.endpoint));
+                Resolution::Hit(hit.with_endpoint(endpoint))
+            }
+            Resolution::Miss => Resolution::Miss,
+        }
+    }
+}
+
+/// A successful resolution: the endpoint to invoke, its bindings, and — when the
+/// resolution **rewrote** the target — the name it actually resolved under.
+///
+/// ★ **Build it with [`Resolved::new`], never as a struct literal.** This type
+/// grows fields (`canonical` arrived in 0.1.64), and every literal in every
+/// consumer is a compile break when it does. [`SpaceEntry`] taught this repo the
+/// lesson at 0.1.7 — the `ikigai-web-demo` manifest still carries the epitaph.
 pub struct Resolved {
     /// The resolved endpoint.
     pub endpoint: Arc<dyn Endpoint>,
     /// Variables captured by the matching grammar.
     pub bindings: Bindings,
+    /// The name this resolution actually resolved under, when it differs from the
+    /// request's target — `None` (the overwhelmingly common case) when nothing
+    /// was rewritten.
+    ///
+    /// **Whoever rewrote the name reports it.** A kernel canonicalizes the
+    /// request onto this name before it computes the cache key, fires the
+    /// golden-thread cut, and evaluates the declared-capability floor, so a
+    /// logical name and its backing name are ONE resource — one cache entry, one
+    /// thread — however the rewriting overlay was composed. Before this field the
+    /// only rewrite a kernel could see was one it performed itself from a table it
+    /// held ([`Kernel::with_aliases`](crate::Kernel::with_aliases)); an
+    /// [`Alias`](crate::Alias) composed by hand under another overlay resolved
+    /// correctly and then silently split identity in two.
+    ///
+    /// An overlay that wraps the endpoint must carry this through — see
+    /// [`Resolution::map_endpoint`] and [`Resolved::with_endpoint`], which exist
+    /// so that the ergonomic thing is also the correct thing.
+    pub canonical: Option<Iri>,
+}
+
+impl Resolved {
+    /// A resolution that did not rewrite the target.
+    pub fn new(endpoint: Arc<dyn Endpoint>, bindings: Bindings) -> Self {
+        Resolved {
+            endpoint,
+            bindings,
+            canonical: None,
+        }
+    }
+
+    /// Report that this resolution rewrote the request's target to `canonical`
+    /// (builder). An already-reported canonical is *kept*: the innermost rewrite
+    /// is the one that names the resource actually reached.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{builtins, Bindings, Endpoint, Iri, Resolved};
+    ///
+    /// let endpoint: Arc<dyn Endpoint> = Arc::new(builtins::to_upper());
+    /// let inner = Resolved::new(endpoint, Bindings::default())
+    ///     .with_canonical(Iri::parse("urn:iki:fn:toUpper").unwrap());
+    /// // An outer overlay reporting its own, shallower rewrite does not overwrite it.
+    /// let outer = inner.with_canonical(Iri::parse("urn:mid:fn:toUpper").unwrap());
+    /// assert_eq!(outer.canonical.unwrap().as_str(), "urn:iki:fn:toUpper");
+    /// ```
+    pub fn with_canonical(mut self, canonical: Iri) -> Self {
+        self.canonical.get_or_insert(canonical);
+        self
+    }
+
+    /// Substitute the endpoint, keeping the bindings and the reported canonical
+    /// (builder). The shape a decorating overlay wants: wrapping the endpoint is
+    /// not a new resolution, so it must not lose what the inner one reported.
+    pub fn with_endpoint(mut self, endpoint: Arc<dyn Endpoint>) -> Self {
+        self.endpoint = endpoint;
+        self
+    }
 }
 
 /// One binding in a space, for enumeration: the grammar's pattern and the name
@@ -140,10 +233,7 @@ impl Space for EndpointSpace {
     fn resolve(&self, request: &Request, _scope: &Scope) -> Resolution {
         for (grammar, endpoint) in &self.bindings {
             if let Some(bindings) = grammar.match_iri(&request.target) {
-                return Resolution::Hit(Resolved {
-                    endpoint: Arc::clone(endpoint),
-                    bindings,
-                });
+                return Resolution::Hit(Resolved::new(Arc::clone(endpoint), bindings));
             }
         }
         Resolution::Miss
@@ -234,6 +324,12 @@ type RewriteRule = Box<dyn Fn(&Iri) -> Option<Iri> + Send + Sync>;
 /// Rewrite a request's target IRI before delegating to an inner space. The rule
 /// returns `Some(new_target)` to rewrite, or `None` to pass the request through
 /// unchanged.
+///
+/// A rewrite it performs is **reported** on the [`Resolved`] as its
+/// [`canonical`](Resolved::canonical) name, so a kernel keys the cache and the
+/// golden thread on the backing resource rather than giving the two names an
+/// entry and a thread each. See [`Alias`](crate::Alias) for the table-driven form
+/// with observability, refusals, and a catalog story.
 pub struct Rewrite {
     rule: RewriteRule,
     inner: Arc<dyn Space>,
@@ -257,8 +353,14 @@ impl Space for Rewrite {
         match (self.rule)(&request.target) {
             Some(new_target) => {
                 let mut rewritten = request.clone();
-                rewritten.target = new_target;
-                self.inner.resolve(&rewritten, scope)
+                rewritten.target = new_target.clone();
+                match self.inner.resolve(&rewritten, scope) {
+                    // Whoever rewrote the name reports it. An inner space that
+                    // rewrote further has already named the resource actually
+                    // reached, and `with_canonical` keeps that one.
+                    Resolution::Hit(hit) => Resolution::Hit(hit.with_canonical(new_target)),
+                    Resolution::Miss => Resolution::Miss,
+                }
             }
             None => self.inner.resolve(request, scope),
         }

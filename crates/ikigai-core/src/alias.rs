@@ -27,9 +27,16 @@
 //! Hosts that resolve against a bare `Space` wrap it directly. Hosts running a
 //! [`Kernel`](crate::Kernel) install the table with
 //! [`Kernel::with_aliases`](crate::Kernel::with_aliases), which both wraps the
-//! root **and** teaches the kernel the table — the kernel needs it in its own
-//! hands to make the two names share a cache entry and a golden thread (see the
-//! decision record below).
+//! root **and** teaches the kernel the table — the kernel wants it in its own
+//! hands for the readout at `urn:kernel:aliases`, for refusing a cyclic table
+//! before dispatch, and for attributing a miss to the rule that moved the name.
+//!
+//! It is no longer needed for *identity*. This overlay reports every rewrite it
+//! performs on [`Resolved::canonical`](crate::Resolved::canonical), and the kernel
+//! adopts the reported name before it computes the cache key or fires the
+//! golden-thread cut. So an `Alias` composed by hand under another overlay —
+//! `RateLimit::new(Alias::new(table, space))` — shares one cache entry and one
+//! thread across both names, which it did not before 0.1.64.
 //!
 //! ```
 //! use std::sync::Arc;
@@ -75,12 +82,24 @@
 //! **3. The two names SHARE a cache entry and a golden thread.** They must: a
 //! `Sink` through one name that left the other serving a stale representation is
 //! the invalidation bug that is hardest to see, because both answers look
-//! plausible. This is the reason the kernel — not just the space — has to know
-//! the table: the representation cache keys on [`Request::id`](crate::Request::id)
-//! and the auto-cut on `request.target`, and both are computed before the root
-//! space is ever consulted. Canonicalizing the request at the top of the
-//! resolution path makes identity canonical for the cache key, the auto-cut, the
-//! trace event and the `Invocation` the endpoint sees, all at one point.
+//! plausible. The representation cache keys on [`Request::id`](crate::Request::id)
+//! and the auto-cut on `request.target`, so identity is settled at one point on
+//! the resolution path — for the cache key, the auto-cut, the trace event and the
+//! `Invocation` the endpoint sees alike.
+//!
+//! It is settled by the **resolver reporting what it rewrote**, not by the kernel
+//! knowing the table in advance. This overlay stamps
+//! [`Resolved::canonical`](crate::Resolved::canonical); the kernel adopts it
+//! before the id is computed. The earlier design — canonicalize at the top from a
+//! table the kernel holds — is still there (it is what refuses a cycle *before*
+//! dispatch and what attributes a miss), but it was the *only* mechanism, and it
+//! only ever fired for a table installed through
+//! [`Kernel::with_aliases`](crate::Kernel::with_aliases). Composed by hand under
+//! another overlay, the rewrite happened and the canonicalization did not: two
+//! cache entries and two golden threads over one resource, with
+//! `(no rewrite table installed)` in a readout nobody reads as the only signal.
+//! Reporting closes that, because the report travels with the resolution however
+//! the space was assembled.
 //!
 //! **4. The catalog lists the BACKING name, once.** [`Alias::entries`] is
 //! transparent — it forwards the wrapped space's entries unchanged. Listing both
@@ -231,6 +250,20 @@ pub struct AliasHop {
 }
 
 impl AliasHop {
+    /// A rewrite a `Space` performed and **reported** on its
+    /// [`Resolved::canonical`](crate::Resolved::canonical), rather than one this
+    /// table walked. It carries no rules — nothing in this table did it, so there
+    /// is nothing to attribute a counter to — and exists so the trace note, the
+    /// denial message and the miss path read the same whichever half of the system
+    /// did the rewriting.
+    pub fn reported(logical: Iri, canonical: Iri) -> Self {
+        AliasHop {
+            logical,
+            canonical,
+            rules: Vec::new(),
+        }
+    }
+
     /// The name as the caller wrote it.
     pub fn logical(&self) -> &Iri {
         &self.logical
@@ -616,13 +649,20 @@ impl AliasTable {
 /// A `Space` decorator that rewrites logical names to backing ones before
 /// delegating — the interception-overlay form of [`AliasTable`].
 ///
-/// Hosts running a [`Kernel`](crate::Kernel) should install the table with
-/// [`Kernel::with_aliases`](crate::Kernel::with_aliases) rather than wrapping by
-/// hand: the kernel wraps the root with this type *and* keeps the table, which is
-/// what makes the logical and backing names share a cache entry and a golden
-/// thread (decision 3). Wrapping by hand still rewrites correctly — it just
-/// leaves the two names with separate cache entries, because the cache key is
-/// computed from the request before the space is consulted.
+/// Composing it by hand is fine, including underneath another overlay: the
+/// rewrite is reported on [`Resolved::canonical`](crate::Resolved::canonical) and
+/// the kernel adopts it, so the logical and backing names share a cache entry and
+/// a golden thread either way (decision 3). What
+/// [`Kernel::with_aliases`](crate::Kernel::with_aliases) adds on top is the
+/// operator's half: the live readout at `urn:kernel:aliases`, refusal of a cyclic
+/// or over-long chain *before* dispatch rather than at invoke, and per-rule
+/// attribution of a rewrite that landed on nothing.
+///
+/// One thing only the kernel-held table can do: rewrite a name *into* the reserved
+/// `urn:kernel:` namespace. The kernel dispatches its own builtins ahead of the
+/// root space, so a rewrite performed inside the root space arrives too late — the
+/// backing name is looked for in the space, where no builtin is bound, and misses.
+/// Aliasing one *away* is refused outright, by both routes.
 ///
 /// Resolving an already-canonical target through this space is a no-op: the rules
 /// do not match their own destinations in a well-formed table, so the kernel's
@@ -651,17 +691,30 @@ impl Space for Alias {
             Canonical::Aliased(hop) => {
                 let mut rewritten = request.clone();
                 rewritten.target = hop.canonical().clone();
-                self.inner.resolve(&rewritten, scope)
+                // ★ REPORT THE REWRITE. This is what makes decision 3 hold for an
+                // `Alias` the kernel did not install itself: the canonical rides
+                // back on the `Resolved`, and the kernel adopts it before it
+                // computes the cache key or fires the auto-cut. A space nested
+                // deeper that rewrote further has already named the resource
+                // actually reached, so `with_canonical` keeps that one.
+                match self.inner.resolve(&rewritten, scope) {
+                    Resolution::Hit(hit) => {
+                        Resolution::Hit(hit.with_canonical(hop.canonical().clone()))
+                    }
+                    Resolution::Miss => Resolution::Miss,
+                }
             }
             // A `Space` cannot return an error, and a refusal must not read as a
             // miss (a miss says "nothing is bound there", which is a different
             // and misleading fact). So it resolves to an endpoint that fails on
             // invoke with the trail — the same idiom `RateLimit` uses for an
             // over-budget request. A kernel refuses earlier, before dispatch.
-            Canonical::Refused(refusal) => Resolution::Hit(Resolved {
-                endpoint: refused_endpoint(&refusal),
-                bindings: Bindings::default(),
-            }),
+            // No canonical is reported: a refusal resolved to nothing, and a
+            // half-applied rewrite is exactly what decision 5 forbids.
+            Canonical::Refused(refusal) => Resolution::Hit(Resolved::new(
+                refused_endpoint(&refusal),
+                Bindings::default(),
+            )),
         }
     }
 
