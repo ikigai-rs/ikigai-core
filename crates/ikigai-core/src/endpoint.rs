@@ -174,8 +174,25 @@ pub struct Invocation<'a> {
     /// threaded into every sub-request so concurrent traced resolutions on one
     /// shared kernel stay isolated. `None` off the trace path.
     trace: Option<crate::TraceScope>,
+    /// Everything the endpoint records while it runs, shared by every reborrow of
+    /// this invocation. See [`Recorded`].
+    recorded: Arc<Recorded>,
+}
+
+/// The recording side of an [`Invocation`]: what the endpoint accumulated while it
+/// ran, for the kernel to drain once it returns.
+///
+/// Held behind an `Arc` so that a reborrow ([`Invocation::with_bindings`]) shares
+/// it rather than starting a fresh set. That is the whole difference between a
+/// reborrow and a copy: a sub-request issued through the reborrowed handle is a
+/// dependency of the **same** invocation, so its expiry and its golden threads
+/// reach the kernel whichever handle the endpoint happened to use. A per-reborrow
+/// set would drop them on the floor when the reborrow died — silently, and on the
+/// branch that looks like success, which is the shape this type exists to avoid.
+#[derive(Default)]
+struct Recorded {
     /// Facts the endpoint attached to its own span via
-    /// [`trace_note`](Self::trace_note); drained by the kernel into the
+    /// [`Invocation::trace_note`]; drained by the kernel into the
     /// [`TraceEvent`](crate::TraceEvent) once the invocation completes. Only
     /// collected while tracing (no cost, no growth off the trace path).
     trace_notes: Mutex<Vec<(String, String)>>,
@@ -232,9 +249,7 @@ impl<'a> Invocation<'a> {
             clock: None,
             span: None,
             trace: None,
-            trace_notes: Mutex::new(Vec::new()),
-            deps: Mutex::new(Vec::new()),
-            dep_threads: Mutex::new(BTreeSet::new()),
+            recorded: Arc::new(Recorded::default()),
         }
     }
 
@@ -261,9 +276,74 @@ impl<'a> Invocation<'a> {
             clock: None,
             span: None,
             trace: None,
-            trace_notes: Mutex::new(Vec::new()),
-            deps: Mutex::new(Vec::new()),
-            dep_threads: Mutex::new(BTreeSet::new()),
+            recorded: Arc::new(Recorded::default()),
+        }
+    }
+
+    /// **The same invocation, with different [`bindings`](Self::bindings).** A
+    /// reborrow — every handle to the kernel comes across, and what the sub-context
+    /// records is recorded against this invocation.
+    ///
+    /// ## Why it has to exist in core
+    ///
+    /// `bindings` is a shared reference, so an endpoint that dispatches to more than
+    /// one *target* had no way to say "same invocation, different captures". The only
+    /// public constructor that takes bindings is [`detached`](Self::detached), and
+    /// detached is not a substitute: it drops the issuer, the spawner, the owned
+    /// issuer handle, the clock, the span and the trace scope, severing the endpoint
+    /// from the kernel. So the workaround for a missing reborrow was to keep the
+    /// bindings you already had.
+    ///
+    /// That is exactly what `ikigai-throttle`'s `Failover` did: candidate 2 was
+    /// invoked with **candidate 1's** grammar captures. When the candidates match
+    /// different grammars (`urn:x/{id}` against `urn:x/{name}`), candidate 2 reads
+    /// `None` for its own variable and behaves as it would for the bare target —
+    /// silently, on the branch that looks like success. Benign only because failover
+    /// targets happen to be mirrors in practice.
+    ///
+    /// ## What comes across
+    ///
+    /// Everything: the request, the capability, the issuer, the spawner and owned
+    /// issuer handle used by [`fan_out`](Self::fan_out), an attached clock, the trace
+    /// span and scope. And the *recording* side is **shared, not copied** — a
+    /// sub-request issued through the reborrow is a dependency of this invocation, so
+    /// its expiry and golden threads reach the kernel from either handle. A copy
+    /// would have lost them when the reborrow dropped, which is the same silent shape
+    /// this method exists to close.
+    ///
+    /// The returned invocation borrows `self`, so it cannot outlive the endpoint's
+    /// own context — which is the point: it is a view, not a second life.
+    ///
+    /// ```
+    /// # use ikigai_core::{Bindings, Capability, Invocation, Iri, Request, Verb};
+    /// # let request = Request::new(Verb::Source, Iri::parse("urn:x/7").unwrap());
+    /// # let capability = Capability::root();
+    /// let mut first = Bindings::new();
+    /// first.insert("id", "7");
+    /// let inv = Invocation::detached(&request, &first, &capability);
+    ///
+    /// let mut second = Bindings::new();
+    /// second.insert("name", "seven"); // the NEXT candidate's grammar captured this
+    /// let candidate = inv.with_bindings(&second);
+    ///
+    /// assert_eq!(candidate.bindings.get("name"), Some("seven"));
+    /// assert_eq!(candidate.bindings.get("id"), None); // not candidate 1's captures
+    /// assert_eq!(inv.bindings.get("id"), Some("7")); // and the original is untouched
+    /// ```
+    pub fn with_bindings<'b>(&'b self, bindings: &'b Bindings) -> Invocation<'b> {
+        Invocation {
+            request: self.request,
+            bindings,
+            capability: self.capability,
+            issuer: self.issuer,
+            spawner: self.spawner.clone(),
+            issuer_arc: self.issuer_arc.clone(),
+            clock: self.clock.clone(),
+            span: self.span,
+            trace: self.trace.clone(),
+            // Shared, deliberately: see the doc above. The reborrow records INTO
+            // this invocation, not beside it.
+            recorded: Arc::clone(&self.recorded),
         }
     }
 
@@ -353,7 +433,8 @@ impl<'a> Invocation<'a> {
         if self.trace.is_none() {
             return;
         }
-        self.trace_notes
+        self.recorded
+            .trace_notes
             .lock()
             .expect("trace notes lock")
             .push((key.into(), value.into()));
@@ -362,7 +443,7 @@ impl<'a> Invocation<'a> {
     /// Drain the notes recorded during this invocation (kernel-side, at
     /// trace-record time).
     pub(crate) fn take_trace_notes(&self) -> Vec<(String, String)> {
-        std::mem::take(&mut self.trace_notes.lock().expect("trace notes lock"))
+        std::mem::take(&mut self.recorded.trace_notes.lock().expect("trace notes lock"))
     }
 
     /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s from another kernel into
@@ -405,13 +486,15 @@ impl<'a> Invocation<'a> {
         let representation = issuer
             .issue_scoped(request, self.capability, self.span, self.trace.clone())
             .await?;
-        self.deps
+        self.recorded
+            .deps
             .lock()
             .expect("deps lock")
             .push(representation.expiry);
         // Inherit the sub-resource's golden threads so cutting any of them
         // invalidates this (composite) result too.
-        self.dep_threads
+        self.recorded
+            .dep_threads
             .lock()
             .expect("dep threads lock")
             .extend(representation.threads().iter().cloned());
@@ -504,11 +587,13 @@ impl<'a> Invocation<'a> {
                 .take()
                 .expect("spawned fan-out task completed");
             if let Ok(representation) = &result {
-                self.deps
+                self.recorded
+                    .deps
                     .lock()
                     .expect("deps lock")
                     .push(representation.expiry);
-                self.dep_threads
+                self.recorded
+                    .dep_threads
                     .lock()
                     .expect("dep threads lock")
                     .extend(representation.threads().iter().cloned());
@@ -597,7 +682,7 @@ impl<'a> Invocation<'a> {
     /// `At` deadline among any time-bounded ones, else `Never` (no deps ⇒ `Never`,
     /// imposing no limit).
     pub(crate) fn dependency_expiry(&self) -> Expiry {
-        let deps = self.deps.lock().expect("deps lock");
+        let deps = self.recorded.deps.lock().expect("deps lock");
         deps.iter()
             .copied()
             .fold(Expiry::Never, Expiry::most_restrictive)
@@ -606,7 +691,11 @@ impl<'a> Invocation<'a> {
     /// The union of golden threads of every dependency resolved during this
     /// invocation — the kernel unions these onto the result's own threads.
     pub(crate) fn dependency_threads(&self) -> BTreeSet<Thread> {
-        self.dep_threads.lock().expect("dep threads lock").clone()
+        self.recorded
+            .dep_threads
+            .lock()
+            .expect("dep threads lock")
+            .clone()
     }
 }
 

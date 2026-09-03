@@ -77,10 +77,41 @@ impl Resolution {
 /// A successful resolution: the endpoint to invoke, its bindings, and — when the
 /// resolution **rewrote** the target — the name it actually resolved under.
 ///
-/// ★ **Build it with [`Resolved::new`], never as a struct literal.** This type
-/// grows fields (`canonical` arrived in 0.1.64), and every literal in every
-/// consumer is a compile break when it does. [`SpaceEntry`] taught this repo the
-/// lesson at 0.1.7 — the `ikigai-web-demo` manifest still carries the epitaph.
+/// ## ★ [`Resolved::new`], or a struct literal? Both — the question is whether
+/// this site has a claim to make
+///
+/// **[`Resolved::new`] where it does not.** A site that forwards, wraps, or is
+/// genuinely indifferent to the defaults has nothing to say about a field that
+/// does not exist yet, and should not be edited when one lands. That is the
+/// overwhelmingly common case and it stays the default advice. Better still, an
+/// overlay decorating a resolution it did not make should not build a `Resolved`
+/// at all: [`Resolution::map_endpoint`] and [`Resolved::with_endpoint`] keep
+/// everything the inner resolution reported, including its
+/// [`canonical`](Resolved::canonical).
+///
+/// **The struct literal — field spelled out, reason beside it — where a default
+/// IS a considered semantic claim.** Two live ones, both in `ikigai-cli`:
+/// `ikigai-module` originates the resolution and rewrites nothing, so
+/// `canonical: None` is a statement about the module boundary rather than an
+/// absence of thought; `MountedRemote` *does* rewrite (`urn:edge:foo` →
+/// `urn:foo`) and must still report `None`, because that rewrite crosses out of
+/// this kernel's namespace (see [`canonical`](Resolved::canonical)). At those
+/// sites the compile break on the next added field is the **point**: it forces a
+/// re-review of a claim that may not survive the type learning to say more.
+///
+/// ## ★ The cost of the literal, which is bigger than an edit
+///
+/// [`SpaceEntry`] taught this repo the mechanical half of the lesson at 0.1.7 —
+/// the `ikigai-web-demo` manifest still carries the epitaph. The half nobody had
+/// counted is that **the break crosses the published-crate boundary.** A struct
+/// literal in a *published* consumer means a core bump cannot be adopted anywhere
+/// downstream until that consumer has cut a release carrying the conversion. When
+/// `canonical` landed in 0.1.64, `ikigai-cli` was simultaneously 100% correct and
+/// 100% uncompilable, waiting on an unrelated crate's publish.
+///
+/// So the literal is a standing tax on the whole ecosystem's release ORDER, not
+/// just on the file it appears in. Pay it where a forced re-review is genuinely
+/// wanted; take [`Resolved::new`] everywhere else.
 pub struct Resolved {
     /// The resolved endpoint.
     pub endpoint: Arc<dyn Endpoint>,
@@ -103,6 +134,60 @@ pub struct Resolved {
     /// An overlay that wraps the endpoint must carry this through — see
     /// [`Resolution::map_endpoint`] and [`Resolved::with_endpoint`], which exist
     /// so that the ergonomic thing is also the correct thing.
+    ///
+    /// # ★ Precondition: a reported canonical is a name in THIS kernel's namespace
+    ///
+    /// `canonical` does not mean "a name I rewrote to". It means **the same
+    /// resource under another name that this kernel resolves** — the kernel adopts
+    /// it as the request's identity, so reporting it asserts that anything
+    /// resolving that name *here* reaches this very resource.
+    ///
+    /// A rewrite that crosses out of this kernel therefore reports nothing even
+    /// though it rewrote. A mount stripping its local prefix (`urn:edge:foo` →
+    /// `urn:foo`) has produced a **wire address**, meaningful in the remote; this
+    /// kernel may serve an entirely unrelated local `urn:foo`, and reporting the
+    /// stripped name would fuse two different resources into one cache entry and
+    /// one golden thread. That is precisely the mistake a mechanical sweep makes —
+    /// it sees a rewrite and forwards it — so the rule is stated here, on the
+    /// field, and not only where a mount happens to be written. Sharing identity
+    /// across an origin would need a concept that carries the origin *alongside*
+    /// the name; a bare [`Iri`] cannot express it.
+    ///
+    /// What "adopted as identity" buys, and therefore what a wrong report costs —
+    /// two names, one cache entry:
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     builtins, ArgRef, Capability, EndpointSpace, Exact, Iri, Kernel, Request, Rewrite,
+    ///     Verb,
+    /// };
+    ///
+    /// let backing =
+    ///     EndpointSpace::new().bind(Exact::new("urn:iki:fn:toUpper"), builtins::to_upper());
+    /// // The rewrite reports what it rewrote; this kernel holds no alias table.
+    /// let kernel = Kernel::new(Arc::new(Rewrite::new(Arc::new(backing), |iri: &Iri| {
+    ///     iri.as_str()
+    ///         .strip_prefix("urn:fn:")
+    ///         .and_then(|rest| Iri::parse(format!("urn:iki:fn:{rest}")).ok())
+    /// })));
+    /// let cap = Capability::root();
+    /// let up = |name: &str| {
+    ///     Request::new(Verb::Source, Iri::parse(name).unwrap())
+    ///         .with_arg("in", ArgRef::Inline(b"hi".to_vec()))
+    /// };
+    ///
+    /// let logical = block_on(kernel.issue(up("urn:fn:toUpper"), &cap)).unwrap();
+    /// let backing = block_on(kernel.issue(up("urn:iki:fn:toUpper"), &cap)).unwrap();
+    /// assert_eq!(logical.bytes, b"HI");
+    /// assert_eq!(backing.bytes, b"HI");
+    ///
+    /// // ONE entry: the logical name was cached under the canonical the rewrite
+    /// // reported. Report a name this kernel does not actually resolve to this
+    /// // resource and that single shared entry becomes a collision instead.
+    /// assert_eq!(kernel.cache_len(), 1);
+    /// ```
     pub canonical: Option<Iri>,
 }
 
@@ -190,6 +275,36 @@ pub trait Space: Send + Sync {
     /// means it is enumerable but empty. The default is `None`.
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
         None
+    }
+}
+
+/// A shared space **is** a space, so anything generic over `S: Space` accepts an
+/// already-erased one.
+///
+/// The composition algebra hands back `Arc<dyn Space>` — [`Mount`], [`Fallback`],
+/// [`Rewrite`], [`Alias`](crate::Alias) and `ikigai-throttle`'s `Failover` all
+/// compose from and into it. But the interception-overlay family is written
+/// `impl<S: Space>` (a governor owns its inner space by value), so without this
+/// impl the moment a stack erases you cannot put a governor on top without
+/// hand-writing a delegating newtype. For a family whose whole pitch is "stack
+/// them in front of anything", that was a wall; it stopped the throttle arc's
+/// tests the first time they tried it.
+///
+/// `?Sized` is what makes it cover `Arc<dyn Space>` and not merely
+/// `Arc<Concrete>`. [`Space`] has only `&self` methods, so the delegation is
+/// total — there is nothing an `Arc` cannot forward.
+///
+/// One consequence worth naming so nobody puzzles over it: afterwards both `X`
+/// and `Arc<X>` implement `Space`, so `Arc<Arc<dyn Space>>` compiles and quietly
+/// adds one pointer hop per resolution. Harmless, and no more than that — it is
+/// not a cycle, a double-wrap, or a change in semantics.
+impl<S: Space + ?Sized> Space for Arc<S> {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        (**self).resolve(request, scope)
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        (**self).entries()
     }
 }
 
@@ -404,5 +519,52 @@ mod tests {
     fn rewrite_is_not_enumerable() {
         let inner = Arc::new(EndpointSpace::new().bind(Exact::new("urn:x"), builtins::to_upper()));
         assert!(Rewrite::new(inner, |_iri| None).entries().is_none());
+    }
+
+    /// The interception-overlay shape: a governor OWNS its inner space and is
+    /// generic over it, the way every one in `ikigai-throttle` is written.
+    struct Governor<S: Space>(S);
+
+    impl<S: Space> Space for Governor<S> {
+        fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+            self.0.resolve(request, scope)
+        }
+
+        fn entries(&self) -> Option<Vec<SpaceEntry>> {
+            self.0.entries()
+        }
+    }
+
+    #[test]
+    fn a_governor_stacks_on_an_already_erased_space() {
+        // ★ The wall this closes: the composition algebra hands back
+        // `Arc<dyn Space>`, so without `impl Space for Arc<S>` an overlay written
+        // `impl<S: Space>` could not be put on top of anything composed — it would
+        // need a hand-written delegating newtype per stack.
+        let erased: Arc<dyn Space> =
+            Arc::new(EndpointSpace::new().bind(Exact::new("urn:x"), builtins::to_upper()));
+        let stacked = Governor(Arc::clone(&erased));
+
+        let hit = stacked.resolve(
+            &Request::new(crate::Verb::Source, Iri::parse("urn:x").unwrap()),
+            &Scope::empty(),
+        );
+        assert!(matches!(hit, Resolution::Hit(_)));
+        assert_eq!(
+            stacked.entries().expect("enumerable")[0].pattern,
+            "urn:x",
+            "the blanket impl must forward `entries`, not fall back to the default `None`"
+        );
+
+        // And re-erasing composes: a governor over an erased space is itself a
+        // space, so the next layer up sees no difference.
+        let restacked = Governor(Arc::new(stacked) as Arc<dyn Space>);
+        assert!(matches!(
+            restacked.resolve(
+                &Request::new(crate::Verb::Source, Iri::parse("urn:x").unwrap()),
+                &Scope::empty()
+            ),
+            Resolution::Hit(_)
+        ));
     }
 }
