@@ -618,17 +618,24 @@ impl Kernel {
     /// `file:/logConfig.yaml` for an indirection. See [`alias`](crate::alias) for
     /// the design and its five forced decisions.
     ///
-    /// This does two things, and both are needed:
+    /// This does two things:
     ///
     /// 1. It wraps the root space in an [`Alias`], so anything resolving against
     ///    the kernel's space directly (a host walking `Kernel::entries`, a
     ///    `describe`) sees the same rewrite.
-    /// 2. It keeps the table in the kernel, so the target is canonicalized at the
-    ///    top of the resolution path — **before** the request id that keys the
-    ///    cache, before the capability floor, before the auto-cut that fires on a
-    ///    mutating verb, and before the [`Invocation`] the endpoint receives. That
-    ///    single point is what makes the logical and backing names one resource
-    ///    rather than two that happen to agree.
+    /// 2. It keeps the table in the kernel, which buys the *operator's* half: the
+    ///    live readout at `urn:kernel:aliases`, refusal of a cyclic or over-long
+    ///    chain **before** dispatch instead of at invoke, per-rule attribution of a
+    ///    rewrite that landed on nothing, and the un-migrated-grant hint on a
+    ///    denial.
+    ///
+    /// It is **not** what makes the two names one resource. That is
+    /// [`Resolved::canonical`](crate::Resolved::canonical): the [`Alias`] reports
+    /// each rewrite it performs and the kernel adopts the reported name before the
+    /// request id, the capability floor, the auto-cut and the [`Invocation`]. So an
+    /// `Alias` composed by hand — under a `RateLimit`, say — gets the same single
+    /// cache entry and single golden thread, which before 0.1.64 only this builder
+    /// could give it.
     ///
     /// Installing it twice stacks the wrap and keeps only the newest table; call it
     /// once, with the whole table.
@@ -966,12 +973,12 @@ impl Kernel {
         incoming: Option<Provenance>,
         trace: Option<TraceScope>,
     ) -> Result<Representation> {
-        // ★ LOGICAL REWRITE, FIRST. The target is canonicalized before ANYTHING else
-        // reads it: before the `urn:kernel:*` dispatch, before the request id that
-        // keys the representation cache, before the declared-capability floor, before
-        // the auto-cut that a mutating verb fires, and before the `Invocation` the
-        // endpoint receives. Every one of the five decisions in `alias.rs` falls out
-        // of this one placement:
+        // ★ LOGICAL REWRITE, FIRST. A rewrite the kernel holds the table for is
+        // applied before ANYTHING else reads the target: before the `urn:kernel:*`
+        // dispatch, before the request id that keys the representation cache, before
+        // the declared-capability floor, before the auto-cut that a mutating verb
+        // fires, and before the `Invocation` the endpoint receives. Four of the five
+        // decisions in `alias.rs` bear on this placement:
         //
         //   1. Capability BEFORE/AFTER — after. Authority is evaluated against the
         //      backing resource, the thing that will actually be touched. Checking
@@ -980,12 +987,21 @@ impl Kernel {
         //      own, and the endpoint is reached under its real name.
         //   3. ONE cache entry, ONE golden thread for both names — the id and the
         //      cut are computed from the canonical target below.
-        //   5. A refusal (cycle / over-long chain / malformed rewrite) stops here
-        //      rather than resolving a half-applied name.
+        //   5. A refusal (cycle / over-long chain / malformed rewrite) stops HERE,
+        //      pre-dispatch, rather than resolving a half-applied name. This is the
+        //      only place that can: a `Space` cannot return an error, so an `Alias`
+        //      composed by hand can only refuse at invoke.
         //
         // (Decision 4, what the catalog lists, is `Alias::entries`.)
-        let alias = self.canonicalize(&request.target)?;
-        let request = match &alias {
+        //
+        // ★ But this is not the only rewrite that can happen. A `Space` may rewrite
+        // on its own — an `Alias` or a `Rewrite` nested under some other overlay —
+        // and the kernel cannot know about that in advance. Such a rewrite is
+        // REPORTED back on `Resolved::canonical` and adopted just after the resolve
+        // below, which is the earliest moment it is knowable and still ahead of
+        // every consumer of the target. Decision 3 holds for both.
+        let mut alias = self.canonicalize(&request.target)?;
+        let mut request = match &alias {
             None => request,
             Some(hop) => {
                 let mut rewritten = request;
@@ -993,7 +1009,6 @@ impl Kernel {
                 rewritten
             }
         };
-        let alias = alias.as_ref();
 
         // The kernel-behavior namespace (`urn:kernel:*`) is resolved by the kernel
         // itself — before the root space, which cannot shadow it — exposing the
@@ -1031,7 +1046,6 @@ impl Kernel {
             return Ok(representation);
         }
 
-        let id = request.id();
         let cacheable_verb = request.verb.is_cacheable();
         // Start stamp, shared by the trace event and the always-on constraint window
         // (one clock read); the span only advances while this resolution is traced.
@@ -1042,7 +1056,7 @@ impl Kernel {
         // lookup, so the declared-capability floor below gates cached and computed
         // answers alike (a cached representation must never be served to a caller
         // the endpoint's own declaration would refuse).
-        let resolved = match self.root.resolve(&request, &Scope::empty()) {
+        let mut resolved = match self.root.resolve(&request, &Scope::empty()) {
             Resolution::Hit(resolved) => resolved,
             Resolution::Miss => {
                 // A rewrite that lands on nothing is reported as a rewrite. The error
@@ -1051,7 +1065,7 @@ impl Kernel {
                 // ("why is it saying `urn:iki:`?" *is* the discovery). Beside it: a
                 // trace event marking the miss, and an always-on per-rule counter at
                 // `urn:kernel:aliases` for the operator with no tracer installed.
-                if let Some(hop) = alias {
+                if let Some(hop) = alias.as_ref() {
                     if let Some(table) = self.aliases.as_ref() {
                         table.record_unresolved(hop);
                     }
@@ -1060,6 +1074,37 @@ impl Kernel {
                 return Err(Error::Unresolved(request.target.clone()));
             }
         };
+
+        // ★ ADOPT WHAT THE RESOLUTION REPORTED IT REWROTE — before the request id
+        // below, before the capability floor, before the cache lookup, before the
+        // auto-cut. The kernel's own table (canonicalized at the top) only ever
+        // catches a rewrite the kernel was told about; an `Alias` composed by hand
+        // under another overlay does the rewriting itself, and this is the only
+        // point at which the kernel can learn of it. Without it the logical and
+        // backing names get an id each — two cache entries and two golden threads
+        // over one resource, so a `Sink` through one does not cut the other.
+        //
+        // Ordering, restated because it is the security-relevant half: this sits
+        // AFTER `self.root.resolve` (routing is the only thing that knows) and
+        // BEFORE the declared-capability floor, so authority is still evaluated
+        // against the BACKING name — decision 1. Nothing has been invoked yet.
+        if let Some(canonical) = resolved.canonical.take() {
+            if canonical != request.target {
+                let previous = std::mem::replace(&mut request.target, canonical.clone());
+                // Chain the note onto any hop the kernel's own table already took,
+                // so a two-stage rewrite reads `logical -> final`, not `mid -> final`.
+                let logical = alias
+                    .as_ref()
+                    .map(|hop| hop.logical().clone())
+                    .unwrap_or(previous);
+                alias = Some(AliasHop::reported(logical, canonical));
+            }
+        }
+        let alias = alias.as_ref();
+
+        // Identity is settled: the id keys the representation cache, and it is
+        // derived from the target AFTER every rewrite has been accounted for.
+        let id = request.id();
 
         // The baseline capability floor: **declared = enforced**. Every `requires`
         // the endpoint declares for this verb must be satisfied — on the SAME
@@ -1801,6 +1846,15 @@ impl Kernel {
         // the two disagreeing about one entry, which is the whole failure mode
         // decision 3 exists to close. A refused rewrite resolves to nothing, so it
         // is not cached either.
+        //
+        // Limit, stated because it is invisible otherwise: this sees only rewrites
+        // the kernel's OWN table performs. A canonical reported by a `Space`
+        // (`Resolved::canonical`) is knowable only by resolving, and resolution is
+        // not side-effect-free for the overlay family — a `RateLimit` spends budget
+        // to answer. A read-only probe must not spend it, so a nested rewrite makes
+        // this answer "not cached" under the logical name while the serving path
+        // correctly serves one entry for both. Conservative in the safe direction:
+        // it under-reports a hit, never invents one.
         let id = match self.canonicalize(&request.target) {
             Err(_) => return false,
             Ok(None) => request.id(),

@@ -728,15 +728,15 @@ mod tests {
     impl Space for MountFace {
         fn resolve(&self, request: &Request, _scope: &Scope) -> Resolution {
             // A mount never misses: routing is the prefix's job.
-            Resolution::Hit(crate::space::Resolved {
-                endpoint: Arc::new(Forwarder {
+            Resolution::Hit(crate::space::Resolved::new(
+                Arc::new(Forwarder {
                     guessed: guessed_endpoint_of(&request.target).unwrap_or("remote"),
                     described: mounted_description(
                         remote_endpoint_of(request.target.as_str()).unwrap_or("remote"),
                     ),
                 }),
-                bindings: Bindings::new(),
-            })
+                Bindings::new(),
+            ))
         }
 
         fn entries(&self) -> Option<Vec<SpaceEntry>> {
@@ -778,13 +778,13 @@ mod tests {
         struct Disowned;
         impl Space for Disowned {
             fn resolve(&self, _request: &Request, _scope: &Scope) -> Resolution {
-                Resolution::Hit(crate::space::Resolved {
-                    endpoint: Arc::new(Forwarder {
+                Resolution::Hit(crate::space::Resolved::new(
+                    Arc::new(Forwarder {
                         guessed: "someone-else",
                         described: mounted_description("someone-else"),
                     }),
-                    bindings: Bindings::new(),
-                })
+                    Bindings::new(),
+                ))
             }
 
             fn entries(&self) -> Option<Vec<SpaceEntry>> {
