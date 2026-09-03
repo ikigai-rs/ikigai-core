@@ -16,6 +16,11 @@
 //! [`Space`] to an [`Endpoint`] that produces a [`Representation`]. Spaces
 //! compose via [`Mount`], [`Fallback`], and [`Rewrite`].
 //!
+//! [`alias`] adds **logical rewrite** on that same composition primitive: a stable
+//! logical URI ([`Alias`] over an [`AliasTable`]) resolves to a different backing
+//! resource without the caller knowing — the mechanism that lets a namespace
+//! migration be a transition window instead of a flag day.
+//!
 //! Beside the resolution spine, [`config`] holds the config-home path algebra —
 //! pure path computation, no I/O — so hosts, modules and tools that do not depend
 //! on one another still agree on where configuration lives.
@@ -33,6 +38,7 @@
 //! e.g. [`builtins::to_upper`] builds the `toUpper` endpoint.
 #![forbid(unsafe_code)]
 
+pub mod alias;
 mod arg;
 pub mod builtins;
 mod capability;
@@ -52,6 +58,10 @@ mod select;
 mod space;
 mod verb;
 
+pub use alias::{
+    Alias, AliasHop, AliasParseError, AliasRefusal, AliasRule, AliasTable, Canonical, RuleKind,
+    DEFAULT_MAX_HOPS,
+};
 pub use arg::ArgRef;
 pub use capability::Capability;
 pub use content::{ContentId, ContentIdError};
@@ -66,7 +76,7 @@ pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
-    DENIED_NOTE,
+    ALIAS_MISS_NOTE, ALIAS_NOTE, DENIED_NOTE,
 };
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};

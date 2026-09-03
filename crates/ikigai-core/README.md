@@ -25,6 +25,14 @@ assert_eq!(rep.bytes, b"IKIGAI");
   `RequestId`/`ContentId`, and typed `Representation`s with opt-in caching.
 - **Resolution** — a `Grammar` (`Exact`, RFC 6570 `UriTemplate`) matches a request
   within a `Space` to an `Endpoint`; spaces compose via `Mount` / `Fallback` / `Rewrite`.
+- **Logical rewrite** — an `AliasTable` maps stable logical URIs onto different
+  backing resources (`urn:fn:` → `urn:iki:fn:`, `urn:log:config` →
+  `file:/logConfig.yaml`), installed as the `Alias` overlay via
+  `Kernel::with_aliases`. Both names are ONE resource: one cache entry, one golden
+  thread, one catalog listing (the backing name), and the capability floor is
+  enforced against the backing resource. A namespace migration becomes a transition
+  window instead of a flag day. The live table — with per-rule hop and miss counters
+  — reads out at `urn:kernel:aliases`.
 - **Async kernel** — `Kernel::issue` resolves, invokes, and caches. Async but
   *executor-agnostic* (no runtime dependency), so the same core runs natively, in the
   browser via WebAssembly, or embedded.
