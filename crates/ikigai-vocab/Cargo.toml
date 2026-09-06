@@ -14,7 +14,14 @@ readme = "README.md"
 [dependencies]
 serde_json = "1"
 # path for local/workspace builds; version is what crates.io resolves on publish.
-ikigai-core = { path = "../ikigai-core", version = "0.1" }
+# The version is the TRUE minimum, not a family: the path dep satisfies every call
+# locally, so fmt/clippy/test/CI stay green against a pin that cannot resolve on
+# crates.io, and only `cargo publish --dry-run` ever sees it.
+ikigai-core = { path = "../ikigai-core", version = "0.1.66" } # 0.1.66 = `escape_iri_fragment`,
+# the IRI-position escaping this crate applies to every author-supplied identifier before it
+# is interpolated into an `<...>` IRIREF (endpoint ids, argument names). A hard floor: it is a
+# free function that simply does not exist in 0.1.65, so an older core is E0425 at four call
+# sites rather than a silent behavior change.
 
 [dev-dependencies]
 # Test-only: parse-validate the bundled vocabulary.ttl + the emitted Turtle. Does not
