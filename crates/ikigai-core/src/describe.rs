@@ -103,6 +103,14 @@ impl ArgSpec {
         self.source = InputSource::Binding;
         self
     }
+
+    /// Every string in this spec that an emitter puts in an IRI position, paired with
+    /// the field name to blame. `name` becomes the input node's IRI segment; `class` is
+    /// emitted as a resource (`ik:class <…>`).
+    fn iri_positions(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        std::iter::once(("input name", self.name.as_str()))
+            .chain(self.class.as_deref().map(|c| ("input class", c)))
+    }
 }
 
 /// One verb's contract on an endpoint: the inputs it reads, the outputs it can produce,
@@ -169,6 +177,16 @@ impl ActionSpec {
         self.requires.push(capability.into());
         self
     }
+
+    /// Every string in this spec that an emitter puts in an IRI position, paired with
+    /// the field name to blame. Shared by [`Description::validate`] so the predicate can
+    /// never fall behind what the RDF projection actually emits.
+    fn iri_positions(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        self.inputs
+            .iter()
+            .flat_map(ArgSpec::iri_positions)
+            .chain(self.requires.iter().map(|c| ("requires", c.as_str())))
+    }
 }
 
 /// A structured, RDF-agnostic self-description of an endpoint.
@@ -178,7 +196,20 @@ impl ActionSpec {
 /// description of an endpoint.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Description {
-    /// The endpoint identifier (a `lowerCamelCase` resource identifier).
+    /// The endpoint identifier.
+    ///
+    /// **What is enforced**: nothing at construction — [`Description::new`] takes any
+    /// string. The one hard requirement is that the id must be safe in an RDF `IRIREF`
+    /// ([`is_iri_safe`](crate::is_iri_safe)), because it is projected into IRI positions
+    /// (`urn:ikigai:endpoint:{id}`, and the action and input nodes hung off it). Emitters
+    /// percent-encode rather than trust it, and [`validate`](Self::validate) reports it —
+    /// call that if you would rather fail than be encoded.
+    ///
+    /// **What is convention**: a short noun in `kebab-case` (`camel-case`, `tag-suggest`).
+    /// Not enforced, and not universal — 27 ids in the ecosystem are full IRIs
+    /// (`urn:cms:graph`, `urn:secret`), which nest oddly as
+    /// `<urn:ikigai:endpoint:urn:cms:graph>` and are load-bearing anyway: the MCP
+    /// projection derives tool names from this field, so an id is a published name.
     pub id: String,
     /// A short human title.
     pub title: String,
@@ -358,6 +389,49 @@ impl Description {
             EndpointKind::Endpoint => None,
         }
     }
+
+    /// Check that every identifier this description projects into an RDF IRI position is
+    /// safe to write there — the [`id`](Self::id), each input `name` and `class`, and each
+    /// `requires` scope, across the flat fields and every explicit [`ActionSpec`].
+    ///
+    /// **Opt-in.** [`Description::new`] validates nothing and never will: it has hundreds
+    /// of call sites and a fallible constructor would be a flag day. The RDF projection
+    /// percent-encodes ([`escape_iri_fragment`](crate::escape_iri_fragment)) so a bad name
+    /// can never break the emitted graph; this is for a host that would rather refuse the
+    /// endpoint at bind time than serve it under an encoded name.
+    ///
+    /// ```
+    /// use ikigai_core::{ArgSpec, Description};
+    ///
+    /// assert!(Description::new("tag-suggest").input(ArgSpec::new("book")).validate().is_ok());
+    ///
+    /// // An id that would close the IRI early and inject triples into every Meta response.
+    /// let err = Description::new("evil> ; a <urn:x> . <urn:y").validate().unwrap_err();
+    /// assert!(err.to_string().contains("id"), "{err}");
+    ///
+    /// // Nested fields are checked too — an input name is an IRI segment as well.
+    /// assert!(Description::new("ok").input(ArgSpec::new("a b")).validate().is_err());
+    /// ```
+    pub fn validate(&self) -> crate::Result<()> {
+        let flat = self
+            .inputs
+            .iter()
+            .flat_map(ArgSpec::iri_positions)
+            .chain(self.requires.iter().map(|c| ("requires", c.as_str())));
+        let positions = std::iter::once(("id", self.id.as_str()))
+            .chain(flat)
+            .chain(self.actions.iter().flat_map(ActionSpec::iri_positions));
+        for (field, value) in positions {
+            if !crate::is_iri_safe(value) {
+                return Err(crate::Error::Endpoint(format!(
+                    "endpoint `{}`: {field} `{value}` is not safe in an IRI position \
+                     (an RDF IRIREF cannot contain <>\"{{}}|^`\\, space or a control character)",
+                    self.id
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -512,5 +586,51 @@ mod tests {
             !json.contains("class") && !json.contains("requires"),
             "{json}"
         );
+    }
+
+    #[test]
+    fn validate_reaches_every_field_an_emitter_puts_in_an_iri_position() {
+        // The predicate must cover the NESTED positions too — an explicit ActionSpec's
+        // inputs get their own IRI nodes, and a spec that only checked the flat fields
+        // would pass a description whose Turtle still needed encoding.
+        let base = || {
+            Description::new("cal").action(
+                ActionSpec::new(Verb::Sink)
+                    .requires("urn:cap:cal:write")
+                    .input(
+                        ArgSpec::new("start").class("http://www.w3.org/2001/XMLSchema#dateTime"),
+                    ),
+            )
+        };
+        base().validate().expect("a real endpoint validates");
+
+        let cases: [(&str, Description); 6] = [
+            ("id", Description::new("ca>l")),
+            (
+                "input name",
+                Description::new("cal").input(ArgSpec::new("a b")),
+            ),
+            (
+                "input class",
+                Description::new("cal").input(ArgSpec::new("a").class("urn:x>y")),
+            ),
+            ("requires", Description::new("cal").requires("urn:cap:a b")),
+            (
+                "input name",
+                Description::new("cal")
+                    .action(ActionSpec::new(Verb::Sink).input(ArgSpec::new("a>b"))),
+            ),
+            (
+                "requires",
+                Description::new("cal").action(ActionSpec::new(Verb::Sink).requires("urn:cap:a>b")),
+            ),
+        ];
+        for (field, d) in cases {
+            let err = d.validate().expect_err("must be refused").to_string();
+            assert!(
+                err.contains(field),
+                "expected `{field}` to be blamed: {err}"
+            );
+        }
     }
 }

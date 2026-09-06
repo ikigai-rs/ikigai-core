@@ -73,7 +73,7 @@ pub use endpoint::{
 };
 pub use error::{Error, Result};
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
-pub use iri::{Iri, IriError};
+pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
     ALIAS_MISS_NOTE, ALIAS_NOTE, DENIED_NOTE,
