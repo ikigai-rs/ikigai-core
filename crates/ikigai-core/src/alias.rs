@@ -38,6 +38,17 @@
 //! `RateLimit::new(Alias::new(table, space))` — shares one cache entry and one
 //! thread across both names, which it did not before 0.1.64.
 //!
+//! ★ **`urn:fn:` → `urn:iki:fn:` is the one real migration, and it stays.** Every
+//! other namespace in this crate's examples and tests is fictional and lives under
+//! the IANA-reserved `urn:example:` (RFC 6963), because `grep -r urn:iki:` is how
+//! the ecosystem answers "what has actually moved?" — a fixture naming a namespace
+//! that does not exist makes that grep lie, and a fixture naming the migrated form
+//! of `urn:kernel:` would one day be **ambiguous with production usage** rather
+//! than merely fictional. Teaching the alias with
+//! the thing it was actually built for is worth more than grep purity, so do not
+//! "finish the job" by moving this pair too. `tests/namespaces.rs` enforces the
+//! split.
+//!
 //! ```
 //! use std::sync::Arc;
 //! use ikigai_core::{AliasTable, Iri};
@@ -544,7 +555,7 @@ impl AliasTable {
 
     /// Whether any granted scope mentions a rewritten namespace — the hint that
     /// turns decision 1's silent denial into a sentence. A capability naming
-    /// `urn:cap:fs:read:urn:fs:ws/x` while `urn:fs:` is being migrated is almost
+    /// `urn:cap:fs:read:urn:example:fs:ws/x` while `urn:example:fs:` is being migrated is almost
     /// certainly a grant that was not migrated with the resource.
     ///
     /// Deliberately a *hint*, not a decision: nothing here widens or rewrites
@@ -846,7 +857,7 @@ mod tests {
 
     #[test]
     fn the_kernel_namespace_is_not_aliasable() {
-        let table = AliasTable::new().prefix("urn:kernel:", "urn:iki:kernel:");
+        let table = AliasTable::new().prefix("urn:kernel:", "urn:example:moved:kernel:");
         assert_eq!(
             table.canonicalize(&iri("urn:kernel:cut")),
             Canonical::Direct
@@ -926,14 +937,14 @@ mod tests {
 
     #[test]
     fn stale_scope_hints_name_grants_that_did_not_migrate() {
-        let table = AliasTable::new().prefix("urn:fs:", "urn:iki:fs:");
+        let table = AliasTable::new().prefix("urn:example:fs:", "urn:example:moved:fs:");
         let held = [
-            "urn:cap:fs:read:urn:fs:ws/x".to_string(),
+            "urn:cap:fs:read:urn:example:fs:ws/x".to_string(),
             "urn:cap:kernel:inspect".to_string(),
         ];
         assert_eq!(
             table.scopes_naming_stale_namespaces(held.iter()),
-            ["urn:cap:fs:read:urn:fs:ws/x"]
+            ["urn:cap:fs:read:urn:example:fs:ws/x"]
         );
     }
 }
