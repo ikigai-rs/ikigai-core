@@ -30,8 +30,8 @@ fn migration() -> Arc<AliasTable> {
     Arc::new(
         AliasTable::new()
             .prefix("urn:fn:", "urn:iki:fn:")
-            .prefix("urn:store:", "urn:iki:store:")
-            .prefix("urn:vault:", "urn:iki:vault:"),
+            .prefix("urn:example:store:", "urn:example:moved:store:")
+            .prefix("urn:example:vault:", "urn:example:moved:vault:"),
     )
 }
 
@@ -80,8 +80,11 @@ fn backing_space(cell_value: Arc<Mutex<String>>) -> Arc<dyn Space> {
     Arc::new(
         EndpointSpace::new()
             .bind(Exact::new("urn:iki:fn:toUpper"), builtins::to_upper())
-            .bind(Exact::new("urn:iki:store:x"), cell("cellX", cell_value))
-            .bind(Exact::new("urn:iki:vault:secret"), guarded()),
+            .bind(
+                Exact::new("urn:example:moved:store:x"),
+                cell("cellX", cell_value),
+            )
+            .bind(Exact::new("urn:example:moved:vault:secret"), guarded()),
     )
 }
 
@@ -132,7 +135,7 @@ fn authority_is_checked_against_the_backing_name_and_a_grant_on_it_holds() {
     let kernel = kernel_with_aliases(Arc::new(Mutex::new(String::new())));
     let cap = Capability::scoped(["urn:cap:iki:vault:read"]);
     assert_eq!(
-        source(&kernel, "urn:vault:secret", &cap).unwrap(),
+        source(&kernel, "urn:example:vault:secret", &cap).unwrap(),
         b"the goods"
     );
 }
@@ -144,14 +147,14 @@ fn an_alias_can_never_launder_authority() {
     // backing endpoint declares is refused, whichever name it arrives under.
     let kernel = kernel_with_aliases(Arc::new(Mutex::new(String::new())));
     let cap = Capability::scoped(["urn:cap:vault:read"]); // the PRE-alias spelling
-    let err = source(&kernel, "urn:vault:secret", &cap).unwrap_err();
+    let err = source(&kernel, "urn:example:vault:secret", &cap).unwrap_err();
     assert!(
         matches!(err, ikigai_core::Error::Denied(_)),
         "an un-migrated grant must not pass: {err}"
     );
     // …and identically under the new name, so the alias changes nothing about
     // authority in either direction.
-    assert!(source(&kernel, "urn:iki:vault:secret", &cap).is_err());
+    assert!(source(&kernel, "urn:example:moved:vault:secret", &cap).is_err());
 }
 
 #[test]
@@ -159,13 +162,13 @@ fn a_denial_through_an_alias_says_so_and_points_at_the_un_migrated_grant() {
     // The silent-failure shape this primitive exists to refuse: a capability that
     // fails by simply not holding, with nothing in any log.
     let kernel = kernel_with_aliases(Arc::new(Mutex::new(String::new())));
-    let cap = Capability::scoped(["urn:cap:read:urn:vault:secret"]);
-    let message = source(&kernel, "urn:vault:secret", &cap)
+    let cap = Capability::scoped(["urn:cap:read:urn:example:vault:secret"]);
+    let message = source(&kernel, "urn:example:vault:secret", &cap)
         .unwrap_err()
         .to_string();
     assert!(message.contains("urn:cap:iki:vault:read"), "{message}");
     assert!(
-        message.contains("urn:vault:secret -> urn:iki:vault:secret"),
+        message.contains("urn:example:vault:secret -> urn:example:moved:vault:secret"),
         "the denial must name the hop: {message}"
     );
     assert!(
@@ -179,13 +182,13 @@ fn a_denial_that_did_not_travel_through_an_alias_is_unchanged() {
     // No alias, no extra noise: the message is exactly what it was before.
     let kernel = kernel_with_aliases(Arc::new(Mutex::new(String::new())));
     let cap = Capability::scoped(["urn:cap:nothing"]);
-    let message = source(&kernel, "urn:iki:vault:secret", &cap)
+    let message = source(&kernel, "urn:example:moved:vault:secret", &cap)
         .unwrap_err()
         .to_string();
     assert_eq!(
         message,
         "denied: capability does not grant `urn:cap:iki:vault:read` \
-         (declared by `urn:iki:vault:secret`)"
+         (declared by `urn:example:moved:vault:secret`)"
     );
 }
 
@@ -234,12 +237,15 @@ fn a_sink_through_one_name_invalidates_a_source_through_the_other() {
     let kernel = kernel_with_aliases(Arc::clone(&value));
     let cap = Capability::root();
 
-    assert_eq!(source(&kernel, "urn:store:x", &cap).unwrap(), b"one");
+    assert_eq!(
+        source(&kernel, "urn:example:store:x", &cap).unwrap(),
+        b"one"
+    );
     assert_eq!(kernel.cache_len(), 1);
 
     block_on(
         kernel.issue(
-            Request::new(Verb::Sink, iri("urn:iki:store:x"))
+            Request::new(Verb::Sink, iri("urn:example:moved:store:x"))
                 .with_arg("content", ArgRef::Inline(b"two".to_vec())),
             &cap,
         ),
@@ -247,31 +253,40 @@ fn a_sink_through_one_name_invalidates_a_source_through_the_other() {
     .unwrap();
 
     assert_eq!(
-        source(&kernel, "urn:store:x", &cap).unwrap(),
+        source(&kernel, "urn:example:store:x", &cap).unwrap(),
         b"two",
         "the logical name served a stale representation after a sink through the backing name"
     );
     // …and the reverse direction: write the OLD name, read the NEW one.
     block_on(
         kernel.issue(
-            Request::new(Verb::Sink, iri("urn:store:x"))
+            Request::new(Verb::Sink, iri("urn:example:store:x"))
                 .with_arg("content", ArgRef::Inline(b"three".to_vec())),
             &cap,
         ),
     )
     .unwrap();
-    assert_eq!(source(&kernel, "urn:iki:store:x", &cap).unwrap(), b"three");
+    assert_eq!(
+        source(&kernel, "urn:example:moved:store:x", &cap).unwrap(),
+        b"three"
+    );
 }
 
 #[test]
 fn the_two_names_key_the_same_cache_entry() {
     let kernel = kernel_with_aliases(Arc::new(Mutex::new("one".to_string())));
     let cap = Capability::root();
-    source(&kernel, "urn:store:x", &cap).unwrap();
+    source(&kernel, "urn:example:store:x", &cap).unwrap();
     // The entry is keyed under the BACKING name's request id — the identity a
     // second reader arriving under either name computes.
-    assert!(kernel.is_cached(&Request::new(Verb::Source, iri("urn:iki:store:x")), &cap));
-    assert!(kernel.is_cached(&Request::new(Verb::Source, iri("urn:store:x")), &cap));
+    assert!(kernel.is_cached(
+        &Request::new(Verb::Source, iri("urn:example:moved:store:x")),
+        &cap
+    ));
+    assert!(kernel.is_cached(
+        &Request::new(Verb::Source, iri("urn:example:store:x")),
+        &cap
+    ));
     assert_eq!(kernel.cache_len(), 1);
 }
 
@@ -356,7 +371,7 @@ fn a_traced_invocation_through_an_alias_carries_the_hop() {
     let kernel = kernel_with_aliases(Arc::new(Mutex::new("one".to_string())));
     let tracer = Arc::new(Collector::default());
     block_on(kernel.issue_traced(
-        Request::new(Verb::Source, iri("urn:store:x")),
+        Request::new(Verb::Source, iri("urn:example:store:x")),
         &Capability::root(),
         Arc::clone(&tracer) as Arc<dyn Tracer>,
     ))
@@ -365,10 +380,10 @@ fn a_traced_invocation_through_an_alias_carries_the_hop() {
     assert_eq!(events.len(), 1);
     // The event's target is the canonical name — identity is canonical — and the
     // note is what discloses where it came from.
-    assert_eq!(events[0].target, "urn:iki:store:x");
+    assert_eq!(events[0].target, "urn:example:moved:store:x");
     assert!(notes_of(&events).contains(&(
         ALIAS_NOTE.to_string(),
-        "urn:store:x -> urn:iki:store:x".to_string()
+        "urn:example:store:x -> urn:example:moved:store:x".to_string()
     )));
 }
 
@@ -377,15 +392,14 @@ fn a_denial_through_an_alias_is_traced_as_both_facts() {
     let kernel = kernel_with_aliases(Arc::new(Mutex::new(String::new())));
     let tracer = Arc::new(Collector::default());
     let _ = block_on(kernel.issue_traced(
-        Request::new(Verb::Source, iri("urn:vault:secret")),
+        Request::new(Verb::Source, iri("urn:example:vault:secret")),
         &Capability::scoped(["urn:cap:nothing"]),
         Arc::clone(&tracer) as Arc<dyn Tracer>,
     ));
     let notes = notes_of(&tracer.0.lock().unwrap());
     assert!(notes.iter().any(|(key, _)| key == DENIED_NOTE), "{notes:?}");
-    assert!(notes.iter().any(
-        |(key, value)| key == ALIAS_NOTE && value == "urn:vault:secret -> urn:iki:vault:secret"
-    ));
+    assert!(notes.iter().any(|(key, value)| key == ALIAS_NOTE
+        && value == "urn:example:vault:secret -> urn:example:moved:vault:secret"));
 }
 
 #[test]
@@ -420,7 +434,7 @@ fn the_live_table_is_readable_as_a_resource_with_its_counters() {
     // which rule fired and which rule fired onto nothing.
     let kernel = kernel_with_aliases(Arc::new(Mutex::new("one".to_string())));
     let cap = Capability::root();
-    source(&kernel, "urn:store:x", &cap).unwrap();
+    source(&kernel, "urn:example:store:x", &cap).unwrap();
     let _ = source(&kernel, "urn:fn:missing", &cap);
 
     let readout = String::from_utf8(source(&kernel, "urn:kernel:aliases", &cap).unwrap()).unwrap();
@@ -546,7 +560,10 @@ fn a_sink_through_one_name_cuts_the_other_when_the_alias_is_nested() {
     let kernel = kernel_with_a_nested_alias(Arc::clone(&value));
     let cap = Capability::root();
 
-    assert_eq!(source(&kernel, "urn:store:x", &cap).unwrap(), b"one");
+    assert_eq!(
+        source(&kernel, "urn:example:store:x", &cap).unwrap(),
+        b"one"
+    );
     assert_eq!(
         kernel.cache_len(),
         1,
@@ -555,14 +572,14 @@ fn a_sink_through_one_name_cuts_the_other_when_the_alias_is_nested() {
 
     block_on(
         kernel.issue(
-            Request::new(Verb::Sink, iri("urn:iki:store:x"))
+            Request::new(Verb::Sink, iri("urn:example:moved:store:x"))
                 .with_arg("content", ArgRef::Inline(b"two".to_vec())),
             &cap,
         ),
     )
     .unwrap();
     assert_eq!(
-        source(&kernel, "urn:store:x", &cap).unwrap(),
+        source(&kernel, "urn:example:store:x", &cap).unwrap(),
         b"two",
         "the logical name served a stale representation after a sink through the backing name"
     );
@@ -570,14 +587,14 @@ fn a_sink_through_one_name_cuts_the_other_when_the_alias_is_nested() {
     // …and the reverse direction: write the OLD name, read the NEW one.
     block_on(
         kernel.issue(
-            Request::new(Verb::Sink, iri("urn:store:x"))
+            Request::new(Verb::Sink, iri("urn:example:store:x"))
                 .with_arg("content", ArgRef::Inline(b"three".to_vec())),
             &cap,
         ),
     )
     .unwrap();
     assert_eq!(
-        source(&kernel, "urn:iki:store:x", &cap).unwrap(),
+        source(&kernel, "urn:example:moved:store:x", &cap).unwrap(),
         b"three",
         "the backing name served a stale representation after a sink through the logical name"
     );
@@ -587,8 +604,14 @@ fn a_sink_through_one_name_cuts_the_other_when_the_alias_is_nested() {
 fn a_nested_alias_gives_the_two_names_one_cache_entry() {
     let kernel = kernel_with_a_nested_alias(Arc::new(Mutex::new("one".to_string())));
     let cap = Capability::root();
-    assert_eq!(source(&kernel, "urn:store:x", &cap).unwrap(), b"one");
-    assert_eq!(source(&kernel, "urn:iki:store:x", &cap).unwrap(), b"one");
+    assert_eq!(
+        source(&kernel, "urn:example:store:x", &cap).unwrap(),
+        b"one"
+    );
+    assert_eq!(
+        source(&kernel, "urn:example:moved:store:x", &cap).unwrap(),
+        b"one"
+    );
     assert_eq!(
         kernel.cache_len(),
         1,
@@ -610,8 +633,14 @@ fn an_overlay_that_rebuilds_the_resolution_splits_the_resource_again() {
         backing_space(Arc::clone(&value)),
     )))));
     let cap = Capability::root();
-    assert_eq!(source(&kernel, "urn:store:x", &cap).unwrap(), b"one");
-    assert_eq!(source(&kernel, "urn:iki:store:x", &cap).unwrap(), b"one");
+    assert_eq!(
+        source(&kernel, "urn:example:store:x", &cap).unwrap(),
+        b"one"
+    );
+    assert_eq!(
+        source(&kernel, "urn:example:moved:store:x", &cap).unwrap(),
+        b"one"
+    );
     assert_eq!(
         kernel.cache_len(),
         2,
@@ -622,14 +651,14 @@ fn an_overlay_that_rebuilds_the_resolution_splits_the_resource_again() {
     // the other serving a stale read.
     block_on(
         kernel.issue(
-            Request::new(Verb::Sink, iri("urn:iki:store:x"))
+            Request::new(Verb::Sink, iri("urn:example:moved:store:x"))
                 .with_arg("content", ArgRef::Inline(b"two".to_vec())),
             &cap,
         ),
     )
     .unwrap();
     assert_eq!(
-        source(&kernel, "urn:store:x", &cap).unwrap(),
+        source(&kernel, "urn:example:store:x", &cap).unwrap(),
         b"one",
         "the stale read is the point: this is what dropping the report costs"
     );
@@ -643,7 +672,9 @@ fn every_core_overlay_forwards_a_reported_canonical() {
     let inner = || -> Arc<dyn Space> {
         Arc::new(Rewrite::new(
             backing_space(Arc::new(Mutex::new("one".to_string()))),
-            |target| (target.as_str() == "urn:store:x").then(|| iri("urn:iki:store:x")),
+            |target| {
+                (target.as_str() == "urn:example:store:x").then(|| iri("urn:example:moved:store:x"))
+            },
         ))
     };
     let overlays: Vec<(&str, Arc<dyn Space>)> = vec![
@@ -659,11 +690,11 @@ fn every_core_overlay_forwards_a_reported_canonical() {
         ("Decorating (map_endpoint)", Arc::new(Decorating(inner()))),
     ];
     for (label, space) in overlays {
-        let request = Request::new(Verb::Source, iri("urn:store:x"));
+        let request = Request::new(Verb::Source, iri("urn:example:store:x"));
         match space.resolve(&request, &Scope::empty()) {
             Resolution::Hit(hit) => assert_eq!(
                 hit.canonical.as_ref().map(Iri::as_str),
-                Some("urn:iki:store:x"),
+                Some("urn:example:moved:store:x"),
                 "{label} dropped the canonical its inner space reported"
             ),
             Resolution::Miss => panic!("{label} missed"),
@@ -679,7 +710,7 @@ fn authority_is_checked_against_the_backing_name_through_a_nested_alias() {
     assert_eq!(
         source(
             &kernel,
-            "urn:vault:secret",
+            "urn:example:vault:secret",
             &Capability::scoped(["urn:cap:iki:vault:read"])
         )
         .unwrap(),
@@ -695,7 +726,7 @@ fn a_nested_alias_can_never_launder_authority_either() {
     let kernel = kernel_with_a_nested_alias(Arc::new(Mutex::new(String::new())));
     let denied = source(
         &kernel,
-        "urn:vault:secret",
+        "urn:example:vault:secret",
         &Capability::scoped(["urn:cap:vault:read"]),
     )
     .unwrap_err();
@@ -707,7 +738,7 @@ fn a_nested_alias_can_never_launder_authority_either() {
     // …and the rewrite is disclosed in the denial, which is the whole reason a
     // reported hop is carried rather than just the name.
     assert!(
-        message.contains("urn:vault:secret -> urn:iki:vault:secret"),
+        message.contains("urn:example:vault:secret -> urn:example:moved:vault:secret"),
         "a denial on a nested rewrite must still name the hop: {message}"
     );
 }
@@ -776,16 +807,16 @@ fn a_traced_invocation_through_a_nested_alias_carries_the_hop() {
     let kernel = kernel_with_a_nested_alias(Arc::new(Mutex::new("one".to_string())));
     let tracer = Arc::new(Collector::default());
     block_on(kernel.issue_traced(
-        Request::new(Verb::Source, iri("urn:store:x")),
+        Request::new(Verb::Source, iri("urn:example:store:x")),
         &Capability::root(),
         Arc::clone(&tracer) as Arc<dyn Tracer>,
     ))
     .unwrap();
     let events = tracer.0.lock().unwrap().clone();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].target, "urn:iki:store:x");
+    assert_eq!(events[0].target, "urn:example:moved:store:x");
     assert!(notes_of(&events).contains(&(
         ALIAS_NOTE.to_string(),
-        "urn:store:x -> urn:iki:store:x".to_string()
+        "urn:example:store:x -> urn:example:moved:store:x".to_string()
     )));
 }
