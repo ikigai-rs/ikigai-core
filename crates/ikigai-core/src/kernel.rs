@@ -1625,16 +1625,20 @@ impl Kernel {
                                 m.endpoint.replace('\\', "\\\\").replace('"', "\\\"")
                             )
                         };
+                        // `m.action` embeds the endpoint id, which `Description` never
+                        // validates — percent-encode rather than trust it, or a `>` in an
+                        // id closes the IRI and the rest of the manifold parses as Turtle.
                         body.push_str(&format!(
                             "\n<{}> a ik:ActionMatch ;\n    {named} ;\n    ik:verb \"{:?}\"",
-                            m.action, m.verb
+                            crate::escape_iri_fragment(&m.action),
+                            m.verb
                         ));
                         for scope in &m.requires {
                             let term = if scope.starts_with("urn:")
                                 || scope.starts_with("http://")
                                 || scope.starts_with("https://")
                             {
-                                format!("<{scope}>")
+                                format!("<{}>", crate::escape_iri_fragment(scope))
                             } else {
                                 format!("\"{}\"", scope.replace('\\', "\\\\").replace('"', "\\\""))
                             };
@@ -2145,11 +2149,16 @@ fn validate_against_spec(
     }
     ttl.push_str("<urn:ikigai:validation:report> a sh:ValidationReport ;\n    sh:conforms false");
     for (message, path) in &violations {
+        // Both the focus node and the result path carry an endpoint id (and the path an
+        // argument name) that nothing validated — encode, never interpolate raw.
         ttl.push_str(" ;\n    sh:result [ a sh:ValidationResult ;\n        sh:resultSeverity sh:Violation ;\n        sh:focusNode <");
-        ttl.push_str(action_iri);
+        ttl.push_str(&crate::escape_iri_fragment(action_iri));
         ttl.push('>');
         if let Some(path) = path {
-            ttl.push_str(&format!(" ;\n        sh:resultPath <{path}>"));
+            ttl.push_str(&format!(
+                " ;\n        sh:resultPath <{}>",
+                crate::escape_iri_fragment(path)
+            ));
         }
         ttl.push_str(&format!(
             " ;\n        sh:resultMessage \"{}\" ]",
@@ -2647,6 +2656,75 @@ mod tests {
         let denied = Capability::scoped(["urn:cap:unrelated"]);
         assert!(!manifold(&denied, false).contains("urn:file"));
         assert!(!manifold(&denied, true).contains("urn:file"));
+    }
+
+    #[test]
+    fn a_hostile_endpoint_id_cannot_inject_triples_into_the_kernel_faces() {
+        // Both kernel-authored Turtle faces embed an endpoint id in an IRI position, and
+        // `Description::new` validates nothing — so an id carrying `>` would close the
+        // IRI and the rest of the document would parse as attacker-authored Turtle.
+        // Same hole, two more emitters than the vocabulary projection.
+        let evil = "ev>il";
+        let endpoint = FnEndpoint::new(evil, |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new(evil)
+                .verb(Verb::Source)
+                .requires("urn:cap:x> . <urn:everything")
+                .input(crate::describe::ArgSpec::new("a>b")),
+        );
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:evil"), endpoint),
+        ));
+        let cap = Capability::scoped(["urn:cap:x> . <urn:everything"]);
+
+        // The action manifold …
+        let manifold = String::from_utf8(
+            block_on(
+                kernel.issue(
+                    Request::new(Verb::Source, iri("urn:kernel:actions"))
+                        .with_arg("as", ArgRef::Inline(b"text/turtle".to_vec())),
+                    &cap,
+                ),
+            )
+            .unwrap()
+            .bytes,
+        )
+        .unwrap();
+        assert!(
+            manifold.contains("<urn:ikigai:endpoint:ev%3Eil:action:source> a ik:ActionMatch"),
+            "{manifold}"
+        );
+        assert!(
+            manifold.contains("ik:requires <urn:cap:x%3E%20.%20%3Curn:everything>"),
+            "{manifold}"
+        );
+        assert!(!manifold.contains("<urn:everything>"), "{manifold}");
+
+        // … and the SHACL pre-flight report, whose focus node and result path carry the
+        // id and the argument name.
+        let report = String::from_utf8(
+            block_on(
+                kernel.issue(
+                    Request::new(Verb::Source, iri("urn:kernel:validate"))
+                        .with_arg(
+                            "action",
+                            ArgRef::Inline(b"urn:ikigai:endpoint:ev>il:action:source".to_vec()),
+                        )
+                        .with_arg("args", ArgRef::Inline(b"nope=1".to_vec())),
+                    &cap,
+                ),
+            )
+            .unwrap()
+            .bytes,
+        )
+        .unwrap();
+        assert!(
+            report.contains("sh:focusNode <urn:ikigai:endpoint:ev%3Eil:action:source>"),
+            "{report}"
+        );
+        assert!(!report.contains("<urn:ikigai:endpoint:ev>il"), "{report}");
     }
 
     #[test]

@@ -56,6 +56,32 @@ fn lit(s: &str) -> String {
     format!("\"{}\"", escape_literal(s))
 }
 
+/// Emit an author-supplied value that is *meant* to be an IRI (a declared `class`, a
+/// capability scope) — as a resource when it really is one, else as a literal.
+///
+/// The counterpart to [`lit`], and it exists for the same reason: an emitter must never
+/// trust that the strings it interpolates are shaped the way a doc comment says.
+/// `Description` validates nothing at construction, so a `>` in any of these would close
+/// the IRI early and everything after it would parse as Turtle.
+///
+/// **Two defenses, because escaping alone is not enough.** Percent-encoding
+/// ([`ikigai_core::escape_iri_fragment`]) makes the value a legal Turtle `IRIREF`, but a
+/// legal `IRIREF` is not necessarily a legal IRI: encoding `http://a> . <b` yields
+/// `http://a%3E%20.%20%3Cb`, whose authority has a non-numeric "port", and an RDF parser
+/// rejects the whole document. So the escaped form is parsed, and anything that still
+/// isn't an IRI degrades to a literal — wrong *type* for the predicate, but visible in
+/// the graph and never a parse failure for consumers.
+///
+/// Every `class` and `requires` value in the ecosystem is already a valid IRI, so this
+/// changes no existing output.
+fn iri_term(s: &str) -> String {
+    let escaped = ikigai_core::escape_iri_fragment(s);
+    match ikigai_core::Iri::parse(escaped.as_ref()) {
+        Ok(_) => format!("<{escaped}>"),
+        Err(_) => lit(s),
+    }
+}
+
 fn verb_name(verb: Verb) -> &'static str {
     match verb {
         Verb::Source => "Source",
@@ -77,7 +103,7 @@ fn source_name(source: InputSource) -> &'static str {
 /// as a resource so selection can join on it — else a legacy descriptive label (literal).
 fn cap_term(scope: &str) -> String {
     if scope.starts_with("urn:") || scope.starts_with("http://") || scope.starts_with("https://") {
-        format!("<{scope}>")
+        iri_term(scope)
     } else {
         lit(scope)
     }
@@ -104,7 +130,8 @@ fn input_predicates(input: &ikigai_core::ArgSpec) -> String {
         // The declared class/datatype is an IRI — emit it as a resource, not a literal.
         node.push_str(&format!(
             " ;
-    ik:class <{class}>"
+    ik:class {}",
+            iri_term(class)
         ));
     }
     if let Some(default) = &input.default {
@@ -125,9 +152,21 @@ fn input_predicates(input: &ikigai_core::ArgSpec) -> String {
 }
 
 /// Render a [`Description`] as a Turtle document using the ikigai vocabulary.
+///
+/// Every identifier that lands in an IRI position — the endpoint id, each input name,
+/// each declared class, each capability scope — is percent-encoded on the way out (see
+/// [`ikigai_core::escape_iri_fragment`], and [`iri_term`] for the author-supplied IRIs);
+/// `Description` enforces nothing at construction, so this function must not assume
+/// anything about their shape. The output always parses. Call
+/// [`Description::validate`] if you want the *description* refused instead.
 pub fn to_turtle(description: &Description) -> String {
-    // `id` is a resource identifier (no Turtle-significant characters).
-    let subject = format!("<urn:ikigai:endpoint:{}>", description.id);
+    // The endpoint's node, computed ONCE so the subject and every IRI hung off it
+    // (inputs, actions) cannot disagree about how the id was encoded.
+    let endpoint_iri = format!(
+        "urn:ikigai:endpoint:{}",
+        ikigai_core::escape_iri_fragment(&description.id)
+    );
+    let subject = format!("<{endpoint_iri}>");
 
     // A transreptor is typed as both classes explicitly (`ik:Transreptor ⊏ ik:Endpoint`),
     // so consumers that don't reason over the subclass axiom still see `ik:Endpoint`.
@@ -186,10 +225,12 @@ pub fn to_turtle(description: &Description) -> String {
     // Flat inputs: skolemized under the endpoint (stable IRIs — catalogs SPARQL and
     // diff cleanly; no blank nodes). Actions synthesized from the flat form REFERENCE
     // these same nodes, so the spec body is stated once.
-    let endpoint_iri = format!("urn:ikigai:endpoint:{}", description.id);
     let mut extra_nodes: Vec<String> = Vec::new();
     for input in &description.inputs {
-        let node_iri = format!("{endpoint_iri}:input:{}", input.name);
+        let node_iri = format!(
+            "{endpoint_iri}:input:{}",
+            ikigai_core::escape_iri_fragment(&input.name)
+        );
         predicates.push(format!("ik:input <{node_iri}>"));
         extra_nodes.push(format!("<{node_iri}> {} .", input_predicates(input)));
     }
@@ -215,13 +256,14 @@ pub fn to_turtle(description: &Description) -> String {
         }
         let synthesized = !description.actions.iter().any(|a| a.verb == action.verb);
         for input in &action.inputs {
+            let name = ikigai_core::escape_iri_fragment(&input.name);
             let node_iri = if synthesized {
                 // the flat input node already emitted above — reference it
-                format!("{endpoint_iri}:input:{}", input.name)
+                format!("{endpoint_iri}:input:{name}")
             } else {
-                let iri = format!("{action_iri}:input:{}", input.name);
-                extra_nodes.push(format!("<{iri}> {} .", input_predicates(input)));
-                iri
+                let scoped = format!("{action_iri}:input:{name}");
+                extra_nodes.push(format!("<{scoped}> {} .", input_predicates(input)));
+                scoped
             };
             preds.push(format!("ik:input <{node_iri}>"));
         }
@@ -516,6 +558,132 @@ mod tests {
     fn describe_turtle_is_text_turtle() {
         let rep = describe_turtle(&sample());
         assert_eq!(rep.repr_type.media_type, "text/turtle");
+    }
+
+    /// A description exercising every IRI position at once: the id, an input name, a
+    /// declared class, and a capability scope.
+    fn every_iri_position(id: &str, input: &str, class: &str, cap: &str) -> Description {
+        Description::new(id)
+            .verb(Verb::Source)
+            .input(ArgSpec::new(input).class(class))
+            .requires(cap)
+    }
+
+    #[test]
+    fn escaping_the_iri_positions_changes_no_real_endpoint() {
+        // The claim the guard rail rests on, asserted rather than assumed: for every id
+        // shape actually in the ecosystem — kebab, lowerCamel, and the 27 full-IRI ids —
+        // the emitted Turtle is byte-for-byte what raw interpolation produced.
+        for id in [
+            "camel-case",
+            "toUpper",
+            "urn:cms:graph",
+            "urn:meeting:zoom:schedule",
+            "urn:secret",
+        ] {
+            let ttl = to_turtle(&every_iri_position(
+                id,
+                "path",
+                "http://www.w3.org/2001/XMLSchema#string",
+                "urn:cap:fs:read",
+            ));
+            assert!(
+                ttl.contains(&format!("<urn:ikigai:endpoint:{id}> a ik:Endpoint")),
+                "{ttl}"
+            );
+            assert!(
+                ttl.contains(&format!("<urn:ikigai:endpoint:{id}:input:path>")),
+                "{ttl}"
+            );
+            assert!(
+                ttl.contains(&format!("<urn:ikigai:endpoint:{id}:action:source>")),
+                "{ttl}"
+            );
+            assert!(
+                ttl.contains("ik:class <http://www.w3.org/2001/XMLSchema#string>"),
+                "{ttl}"
+            );
+            assert!(ttl.contains("ik:requires <urn:cap:fs:read>"), "{ttl}");
+            assert!(
+                !ttl.contains('%'),
+                "something was encoded that need not be: {ttl}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hostile_identifier_cannot_inject_triples() {
+        // `Description::new` validates nothing, so this is constructible today. Before the
+        // IRI positions were escaped, the `>` closed the subject IRI and everything after
+        // it parsed as Turtle — arbitrary triples in every Meta response.
+        let ttl = to_turtle(&every_iri_position(
+            "evil> ; a <urn:x> . <urn:y",
+            "a b",
+            "http://ok> . <urn:z> a <urn:w",
+            "urn:cap:x> . <urn:everything",
+        ));
+        // It still parses (the bound encodes; it does not truncate or emit garbage) …
+        let triples: Vec<_> = oxttl::TurtleParser::new()
+            .for_reader(ttl.as_bytes())
+            .map(|t| t.expect("hostile ids must still emit parseable Turtle"))
+            .collect();
+        // … and none of the injected subjects made it into the graph.
+        for t in &triples {
+            let s = t.subject.to_string();
+            assert!(
+                s.starts_with("<urn:ikigai:endpoint:evil%3E"),
+                "injected subject {s}"
+            );
+            let o = t.object.to_string();
+            assert!(
+                !matches!(
+                    o.as_str(),
+                    "<urn:x>" | "<urn:z>" | "<urn:w>" | "<urn:everything>"
+                ),
+                "injected object {o}"
+            );
+        }
+        // A urn: scope survives encoding as a real IRI …
+        assert!(
+            ttl.contains("ik:requires <urn:cap:x%3E%20.%20%3Curn:everything>"),
+            "{ttl}"
+        );
+        // … while the mangled http:// class does not (its authority gains a non-numeric
+        // "port"), so it degrades to a literal rather than breaking the document.
+        assert!(
+            ttl.contains(r#"ik:class "http://ok> . <urn:z> a <urn:w""#),
+            "{ttl}"
+        );
+        // The literal face is unaffected: `ik:id` still carries the id verbatim, because
+        // literal escaping was never the hole.
+        assert!(
+            ttl.contains(r#"ik:id "evil> ; a <urn:x> . <urn:y""#),
+            "{ttl}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_what_the_emitter_has_to_encode() {
+        // The opt-in predicate and the emitter must agree on the same character set: a
+        // description that validates is one whose Turtle needs no encoding at all.
+        let ok = every_iri_position(
+            "tag-suggest",
+            "book",
+            "https://schema.org/Person",
+            "urn:cap:llm",
+        );
+        ok.validate().expect("a real endpoint validates");
+        assert!(!to_turtle(&ok).contains('%'));
+
+        for bad in [
+            every_iri_position("ev>il", "book", "https://schema.org/Person", "urn:cap:llm"),
+            every_iri_position("ok", "bo ok", "https://schema.org/Person", "urn:cap:llm"),
+            every_iri_position("ok", "book", "https://schema.org/Pe rson", "urn:cap:llm"),
+            every_iri_position("ok", "book", "https://schema.org/Person", "urn:cap:l>lm"),
+        ] {
+            bad.validate().expect_err("must be refused");
+            assert!(to_turtle(&bad).contains('%'), "emitter did not encode it");
+        }
     }
 
     /// Parse Turtle and return the triple count, panicking on any syntax error.
