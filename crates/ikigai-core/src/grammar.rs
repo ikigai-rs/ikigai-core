@@ -224,17 +224,17 @@ mod tests {
 
     #[test]
     fn exact_matches_only_itself() {
-        let g = Exact::new("urn:fn:toUpper");
-        assert!(g.match_iri(&iri("urn:fn:toUpper")).is_some());
-        assert!(g.match_iri(&iri("urn:fn:toLower")).is_none());
+        let g = Exact::new("urn:test:to-upper");
+        assert!(g.match_iri(&iri("urn:test:to-upper")).is_some());
+        assert!(g.match_iri(&iri("urn:test:to-lower")).is_none());
     }
 
     #[test]
     fn template_captures_trailing_var() {
-        let t = UriTemplate::parse("urn:fn:echo/{message}").unwrap();
-        let b = t.match_iri(&iri("urn:fn:echo/hello")).unwrap();
+        let t = UriTemplate::parse("urn:test:echo/{message}").unwrap();
+        let b = t.match_iri(&iri("urn:test:echo/hello")).unwrap();
         assert_eq!(b.get("message"), Some("hello"));
-        assert!(t.match_iri(&iri("urn:fn:echo/")).is_none()); // empty capture
+        assert!(t.match_iri(&iri("urn:test:echo/")).is_none()); // empty capture
         assert!(t.match_iri(&iri("urn:other:echo/hi")).is_none());
     }
 
@@ -255,7 +255,10 @@ mod tests {
 
     #[test]
     fn pattern_reflects_the_grammar() {
-        assert_eq!(Exact::new("urn:fn:toUpper").pattern(), "urn:fn:toUpper");
+        assert_eq!(
+            Exact::new("urn:test:to-upper").pattern(),
+            "urn:test:to-upper"
+        );
         assert_eq!(
             UriTemplate::parse("urn:demo:echo/{message}")
                 .unwrap()

@@ -4,7 +4,8 @@
 //!
 //! Per the crate naming conventions, each `snake_case` constructor builds an
 //! endpoint whose `lowerCamelCase` identifier matches its name — e.g.
-//! [`to_upper`] builds the `toUpper` endpoint resolved at `urn:fn:toUpper`.
+//! [`to_upper`] builds the `toUpper` endpoint, which a host binds at a name of
+//! its own choosing (`urn:example:toUpper` in these docs).
 //!
 //! Recursive `$a{<iri>}` transclusion (`compose`) lives in the `ikigai-fn` module
 //! crate, not here — it is a host-facing function, and the kernel only needs the

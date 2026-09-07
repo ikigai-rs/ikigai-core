@@ -116,3 +116,92 @@ fn the_detector_sees_what_it_claims_to() {
         "bare `urn:iki:` prose must not count, and a line may carry several"
     );
 }
+
+// ---------------------------------------------------------------- `urn:fn:`
+
+/// The files allowed to *execute* `urn:fn:` names, and why: they are the worked
+/// example of the alias mechanism itself, where the whole point is that the legacy
+/// name still resolves. Everywhere else in this crate a `urn:fn:` occurrence must
+/// sit in a comment — core has no `ikigai-fn` dependency, so any name it actually
+/// binds, requests or matches under that prefix is a name it does not own.
+const ALIAS_SUBJECT_MATTER: &[&str] = &["alias.rs"];
+
+/// Lines of `text` that put `urn:fn:` in executable position, with line numbers. A
+/// line counts as commentary when it *starts* with `//` (so `//`, `///` and `//!`,
+/// including a `///` doctest line, are all commentary).
+fn executed_urn_fn(text: &str) -> Vec<(usize, String)> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("urn:fn:") && !line.trim_start().starts_with("//"))
+        .map(|(n, line)| (n + 1, line.trim().to_string()))
+        .collect()
+}
+
+/// ikigai-core once carried 125 `urn:fn:` occurrences and no `ikigai-fn` dependency:
+/// 71 of them were fixtures binding core's *own* `builtins` at another module's
+/// name, so a rename in `ikigai-fn` reached into this crate for no reason. They now
+/// live at `urn:test:` (fixtures) and `urn:example:` (illustration), which takes
+/// this crate out of the `urn:fn:` migration permanently — wave two included.
+///
+/// What is left is deliberate: `alias.rs` demonstrates `urn:fn:` → `urn:iki:fn:`,
+/// and a handful of doc comments describe that migration. A comment cannot bind
+/// anything, so the line this test holds is **executable code** — which is exactly
+/// the defect it was written for (`bind(Exact::new("urn:fn:toUpper"), …)`).
+///
+/// ⚠ Known limit, stated rather than hidden: a `/* … */` block comment reads as
+/// code here and would be reported. That is the safe direction — it fails loud.
+#[test]
+fn urn_fn_is_executed_only_where_the_alias_migration_is_the_subject() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    rust_files(&root.join("src"), &mut files);
+    rust_files(&root.join("tests"), &mut files);
+    assert!(!files.is_empty(), "found no sources to scan under {root:?}");
+
+    let mut offenders = Vec::new();
+    for file in &files {
+        let name = file
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        // This file names the prefix in prose and in the detector's own fixtures.
+        if name == "namespaces.rs" || ALIAS_SUBJECT_MATTER.contains(&name.as_str()) {
+            continue;
+        }
+        let text = fs::read_to_string(file).expect("readable source");
+        for (line, source) in executed_urn_fn(&text) {
+            let rel = file.strip_prefix(root).unwrap_or(file);
+            offenders.push(format!("  {}:{line}  {source}", rel.display()));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "ikigai-core does not depend on `ikigai-fn` and must not bind, request or \
+         match a name under its namespace. Fixtures belong at `urn:test:`, \
+         illustrations at `urn:example:` (RFC 6963):\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn the_executable_position_detector_sees_what_it_claims_to() {
+    // Prove both directions on synthetic text: comments about the migration are
+    // fine at any indentation, a binding is not.
+    let source = [
+        "//! `urn:fn:toUpper` -> `urn:iki:fn:toUpper` is the one real migration.",
+        "    /// let table = AliasTable::new().prefix(\"urn:fn:\", \"urn:iki:fn:\");",
+        "        // a plain indented comment about urn:fn:",
+        "        .bind(Exact::new(\"urn:fn:toUpper\"), builtins::to_upper())",
+    ]
+    .join("\n");
+    assert_eq!(
+        executed_urn_fn(&source),
+        vec![(
+            4,
+            ".bind(Exact::new(\"urn:fn:toUpper\"), builtins::to_upper())".to_string()
+        )],
+        "only the binding is in executable position"
+    );
+}

@@ -2340,11 +2340,12 @@ mod tests {
 
     #[test]
     fn meta_is_routed_through_the_renderer() {
-        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let space =
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper());
         let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
         let cap = Capability::root();
-        let rep =
-            block_on(kernel.issue(Request::new(Verb::Meta, iri("urn:fn:toUpper")), &cap)).unwrap();
+        let rep = block_on(kernel.issue(Request::new(Verb::Meta, iri("urn:test:to-upper")), &cap))
+            .unwrap();
         assert_eq!(rep.bytes, b"toUpper");
     }
 
@@ -2389,7 +2390,7 @@ mod tests {
 
     fn meta_kernel() -> Kernel {
         let space = EndpointSpace::new()
-            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:test:to-upper"), builtins::to_upper())
             .bind(Exact::new("urn:rdf:transrept"), stub_rdf_transrept());
         Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleishRenderer))
     }
@@ -2481,7 +2482,7 @@ mod tests {
 
     #[test]
     fn meta_serves_canonical_turtle_directly() {
-        let rep = meta_as(&meta_kernel(), "urn:fn:toUpper", "text/turtle");
+        let rep = meta_as(&meta_kernel(), "urn:test:to-upper", "text/turtle");
         assert_eq!(rep.repr_type.media_type, "text/turtle");
         assert!(String::from_utf8(rep.bytes)
             .unwrap()
@@ -2492,7 +2493,7 @@ mod tests {
     fn meta_transrepts_to_a_non_canonical_type_via_selection() {
         // as=application/rdf+xml: the renderer can't emit it, so the kernel renders canonical
         // Turtle and runs the selected turtle→rdf+xml transreptor over it.
-        let rep = meta_as(&meta_kernel(), "urn:fn:toUpper", "application/rdf+xml");
+        let rep = meta_as(&meta_kernel(), "urn:test:to-upper", "application/rdf+xml");
         assert_eq!(rep.repr_type.media_type, "application/rdf+xml");
         let body = String::from_utf8(rep.bytes).unwrap();
         assert!(body.starts_with("RDFXML("), "transreptor ran: {body}");
@@ -2505,7 +2506,7 @@ mod tests {
     #[test]
     fn meta_falls_back_to_turtle_when_no_transreptor_reaches_the_type() {
         // as=application/pdf: nothing converts turtle→pdf, so fall back to canonical Turtle.
-        let rep = meta_as(&meta_kernel(), "urn:fn:toUpper", "application/pdf");
+        let rep = meta_as(&meta_kernel(), "urn:test:to-upper", "application/pdf");
         assert_eq!(rep.repr_type.media_type, "text/turtle");
         assert!(String::from_utf8(rep.bytes)
             .unwrap()
@@ -2514,11 +2515,13 @@ mod tests {
 
     #[test]
     fn meta_without_a_renderer_errors() {
-        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let space =
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper());
         let kernel = Kernel::new(Arc::new(space));
         let cap = Capability::root();
         assert!(
-            block_on(kernel.issue(Request::new(Verb::Meta, iri("urn:fn:toUpper")), &cap)).is_err()
+            block_on(kernel.issue(Request::new(Verb::Meta, iri("urn:test:to-upper")), &cap))
+                .is_err()
         );
     }
 
@@ -2528,8 +2531,8 @@ mod tests {
         // space and renders each entry's `describe()` via the Meta renderer, so a
         // SPARQL query / transreption can run over "the endpoints" as a resource.
         let space = EndpointSpace::new()
-            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
-            .bind(Exact::new("urn:fn:echo"), builtins::echo());
+            .bind(Exact::new("urn:test:to-upper"), builtins::to_upper())
+            .bind(Exact::new("urn:test:echo"), builtins::echo());
         let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
         let cap = Capability::root();
         let rep =
@@ -2799,7 +2802,7 @@ mod tests {
         );
         let space = EndpointSpace::new()
             // untyped required inputs → never an inferred action
-            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:test:to-upper"), builtins::to_upper())
             .bind(Exact::new("urn:demo:greet"), greet);
         let kernel = Kernel::new(Arc::new(space));
         let cap = Capability::root();
@@ -2824,7 +2827,7 @@ mod tests {
         let body = String::from_utf8(rep.bytes).unwrap();
         assert!(body.contains("urn:demo:greet"), "{body}");
         assert!(
-            body.contains("urn:fn:toUpper"),
+            body.contains("urn:test:to-upper"),
             "no type filter applied: {body}"
         );
     }
@@ -3090,11 +3093,12 @@ mod tests {
         // A cacheable endpoint (toUpper opts into caching via builtins) issued with
         // an *uncacheable* upstream provenance must itself become uncacheable —
         // cacheability is no greater than the piped input's.
-        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let space =
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper());
         let kernel = Kernel::new(Arc::new(space));
         let cap = Capability::root();
         let req = || {
-            Request::new(Verb::Source, iri("urn:fn:toUpper"))
+            Request::new(Verb::Source, iri("urn:test:to-upper"))
                 .with_arg("in", ArgRef::Inline(b"hi".to_vec()))
         };
 
@@ -3108,7 +3112,7 @@ mod tests {
         );
 
         // Uncacheable upstream (Always) → result becomes uncacheable → not cached.
-        let other = Request::new(Verb::Source, iri("urn:fn:toUpper"))
+        let other = Request::new(Verb::Source, iri("urn:test:to-upper"))
             .with_arg("in", ArgRef::Inline(b"yo".to_vec()));
         let volatile_up = Provenance::new(Expiry::Always, BTreeSet::new());
         let rep = block_on(kernel.issue_with_incoming(other, &cap, volatile_up)).unwrap();
@@ -3128,11 +3132,12 @@ mod tests {
     fn incoming_threads_are_inherited_so_cutting_the_source_invalidates() {
         // The upstream's golden threads propagate, so cutting one invalidates the
         // transformed result — the pipe is a dependency edge.
-        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let space =
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper());
         let kernel = Kernel::new(Arc::new(space));
         let cap = Capability::root();
         let req = || {
-            Request::new(Verb::Source, iri("urn:fn:toUpper"))
+            Request::new(Verb::Source, iri("urn:test:to-upper"))
                 .with_arg("in", ArgRef::Inline(b"hi".to_vec()))
         };
         let mut threads = BTreeSet::new();
@@ -3151,7 +3156,8 @@ mod tests {
     fn live_kernel_introspection_is_never_cached() {
         // The introspection builtins return `Always` (live) — they must not be
         // cached, even though the catalog (also `urn:kernel:*`) is.
-        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let space =
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper());
         let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
         let cap = Capability::root();
         for op in [
@@ -3171,7 +3177,8 @@ mod tests {
 
     #[test]
     fn catalog_requires_the_inspect_capability() {
-        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let space =
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper());
         let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
         let unprivileged = Capability::scoped(["urn:cap:nothing".to_string()]);
         assert!(block_on(kernel.issue(
@@ -3183,11 +3190,12 @@ mod tests {
 
     #[test]
     fn resolves_invokes_and_caches() {
-        let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+        let space =
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper());
         let kernel = Kernel::new(Arc::new(space));
         let cap = Capability::root();
         let req = || {
-            Request::new(Verb::Source, iri("urn:fn:toUpper"))
+            Request::new(Verb::Source, iri("urn:test:to-upper"))
                 .with_arg("in", ArgRef::Inline(b"hi".to_vec()))
         };
         let a = block_on(kernel.issue(req(), &cap)).unwrap();
@@ -3205,10 +3213,10 @@ mod tests {
             Ok(Representation::new(ReprType::new("text/plain"), b"x".to_vec()).cacheable())
         });
         let kernel = Kernel::new(Arc::new(
-            EndpointSpace::new().bind(Exact::new("urn:fn:count"), counter),
+            EndpointSpace::new().bind(Exact::new("urn:test:count"), counter),
         ));
         let cap = Capability::root();
-        let req = || Request::new(Verb::Source, iri("urn:fn:count"));
+        let req = || Request::new(Verb::Source, iri("urn:test:count"));
         block_on(kernel.issue(req(), &cap)).unwrap();
         block_on(kernel.issue(req(), &cap)).unwrap();
         assert_eq!(
@@ -3226,10 +3234,10 @@ mod tests {
             Ok(Representation::new(ReprType::new("text/plain"), b"x".to_vec()).cacheable())
         });
         let kernel = Kernel::new(Arc::new(
-            EndpointSpace::new().bind(Exact::new("urn:fn:count"), counter),
+            EndpointSpace::new().bind(Exact::new("urn:test:count"), counter),
         ));
         let cap = Capability::root();
-        let req = || Request::new(Verb::Source, iri("urn:fn:count"));
+        let req = || Request::new(Verb::Source, iri("urn:test:count"));
 
         // Not cached before the first issue; probing does not resolve it.
         assert!(!kernel.is_cached(&req(), &Capability::root()));
@@ -3242,7 +3250,7 @@ mod tests {
         assert!(kernel.is_cached(&req(), &Capability::root()));
 
         // A different request (different argument identity) is still a miss.
-        let other = Request::new(Verb::Source, iri("urn:fn:count"))
+        let other = Request::new(Verb::Source, iri("urn:test:count"))
             .with_arg("in", ArgRef::Inline(b"z".to_vec()));
         assert!(!kernel.is_cached(&other, &Capability::root()));
     }
@@ -3259,10 +3267,10 @@ mod tests {
             ))
         });
         let kernel = Kernel::new(Arc::new(
-            EndpointSpace::new().bind(Exact::new("urn:fn:vol"), volatile),
+            EndpointSpace::new().bind(Exact::new("urn:test:vol"), volatile),
         ));
         let cap = Capability::root();
-        let req = || Request::new(Verb::Source, iri("urn:fn:vol"));
+        let req = || Request::new(Verb::Source, iri("urn:test:vol"));
         block_on(kernel.issue(req(), &cap)).unwrap();
         block_on(kernel.issue(req(), &cap)).unwrap();
         assert_eq!(
@@ -3276,7 +3284,7 @@ mod tests {
     fn unresolved_target_errors() {
         let kernel = Kernel::new(Arc::new(EndpointSpace::new()));
         let cap = Capability::root();
-        let err = block_on(kernel.issue(Request::new(Verb::Source, iri("urn:fn:nope")), &cap))
+        let err = block_on(kernel.issue(Request::new(Verb::Source, iri("urn:test:nope")), &cap))
             .unwrap_err();
         assert!(matches!(err, Error::Unresolved(_)));
     }
@@ -3307,11 +3315,11 @@ mod tests {
         });
         let space = EndpointSpace::new()
             .bind(Exact::new("urn:data:greeting"), greeting)
-            .bind(Exact::new("urn:fn:upcaseOf"), UpcaseOf);
+            .bind(Exact::new("urn:test:upcase-of"), UpcaseOf);
         let kernel = Kernel::new(Arc::new(space));
         let cap = Capability::root();
         let req = || {
-            Request::new(Verb::Source, iri("urn:fn:upcaseOf"))
+            Request::new(Verb::Source, iri("urn:test:upcase-of"))
                 .with_arg("src", ArgRef::Reference(iri("urn:data:greeting")))
         };
         let a = block_on(kernel.issue(req(), &cap)).unwrap();
@@ -3335,11 +3343,11 @@ mod tests {
         });
         let space = EndpointSpace::new()
             .bind(Exact::new("urn:data:clock"), clock)
-            .bind(Exact::new("urn:fn:upcaseOf"), UpcaseOf);
+            .bind(Exact::new("urn:test:upcase-of"), UpcaseOf);
         let kernel = Kernel::new(Arc::new(space));
         let cap = Capability::root();
         let req = || {
-            Request::new(Verb::Source, iri("urn:fn:upcaseOf"))
+            Request::new(Verb::Source, iri("urn:test:upcase-of"))
                 .with_arg("src", ArgRef::Reference(iri("urn:data:clock")))
         };
         block_on(kernel.issue(req(), &cap)).unwrap();
@@ -3416,11 +3424,11 @@ mod tests {
         });
         let space = EndpointSpace::new()
             .bind(Exact::new("urn:data:leaf"), leaf)
-            .bind(Exact::new("urn:fn:upcaseOf"), UpcaseOf);
+            .bind(Exact::new("urn:test:upcase-of"), UpcaseOf);
         let kernel = Kernel::new(Arc::new(space));
         let cap = Capability::root();
         let req = || {
-            Request::new(Verb::Source, iri("urn:fn:upcaseOf"))
+            Request::new(Verb::Source, iri("urn:test:upcase-of"))
                 .with_arg("src", ArgRef::Reference(iri("urn:data:leaf")))
         };
         block_on(kernel.issue(req(), &cap)).unwrap();
@@ -3937,12 +3945,12 @@ mod tests {
                     Exact::new("urn:t:leaf"),
                     timed_endpoint("leaf", 100, &LEAF_CALLS),
                 )
-                .bind(Exact::new("urn:fn:upcaseOf"), UpcaseOf),
+                .bind(Exact::new("urn:test:upcase-of"), UpcaseOf),
         ))
         .with_clock(Arc::new(clock.clone()));
         let cap = Capability::root();
         let req = || {
-            Request::new(Verb::Source, iri("urn:fn:upcaseOf"))
+            Request::new(Verb::Source, iri("urn:test:upcase-of"))
                 .with_arg("src", ArgRef::Reference(iri("urn:t:leaf")))
         };
 
@@ -4598,7 +4606,7 @@ mod tests {
                 .scope_sync(|issuer| {
                     let a = issuer.source(&Iri::parse("urn:data:a").unwrap())?;
                     let upper = issuer.issue(
-                        Request::new(Verb::Source, Iri::parse("urn:fn:toUpper").unwrap())
+                        Request::new(Verb::Source, Iri::parse("urn:test:to-upper").unwrap())
                             .with_arg("in", ArgRef::Inline(a.bytes.clone())),
                     )?;
                     Ok(format!("{}!", String::from_utf8_lossy(&upper.bytes)))
@@ -4625,7 +4633,7 @@ mod tests {
                     ))
                 }),
             )
-            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:test:to-upper"), builtins::to_upper())
             .bind(Exact::new("urn:demo:composite"), SyncComposite);
         Kernel::new(Arc::new(space))
     }
@@ -4733,7 +4741,7 @@ mod tests {
                                         .issue(
                                             Request::new(
                                                 Verb::Source,
-                                                Iri::parse("urn:fn:toUpper").unwrap(),
+                                                Iri::parse("urn:test:to-upper").unwrap(),
                                             )
                                             .with_arg("in", ArgRef::Inline(b"hi".to_vec())),
                                         )
@@ -4758,7 +4766,7 @@ mod tests {
             }
         }
         let space = EndpointSpace::new()
-            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:test:to-upper"), builtins::to_upper())
             .bind(Exact::new("urn:demo:fanning"), Fanning);
         let kernel = Kernel::new(Arc::new(space));
         let rep = block_on(kernel.issue(
@@ -4787,7 +4795,7 @@ mod tests {
             }
         }
         let space = EndpointSpace::new()
-            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:test:to-upper"), builtins::to_upper())
             .bind(Exact::new("urn:demo:panic"), Panicking);
         let kernel = Kernel::new(Arc::new(space));
         let err = block_on(kernel.issue(
@@ -4799,7 +4807,7 @@ mod tests {
         // The kernel still answers.
         let ok = block_on(
             kernel.issue(
-                Request::new(Verb::Source, iri("urn:fn:toUpper"))
+                Request::new(Verb::Source, iri("urn:test:to-upper"))
                     .with_arg("in", ArgRef::Inline(b"alive".to_vec())),
                 &Capability::root(),
             ),

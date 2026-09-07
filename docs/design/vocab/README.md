@@ -57,12 +57,13 @@ a prefix.
 ## Imports: loose locally, tight across a trust boundary
 
 An import declaration is what **mints the capability** the module's `issue` is
-scoped to — so it must be least-privilege. A bare prefix wildcard (`urn:fn:*`) is
-rejected: **unbounded** (importing things that don't exist yet), **mutable**
-(what answers an IRI can change), **non-reproducible** (depends on who published
-what, when), and **over-broad** (a wildcard import is a wildcard capability).
+scoped to — so it must be least-privilege. A bare prefix wildcard
+(`urn:example:*`) is rejected: **unbounded** (importing things that don't exist
+yet), **mutable** (what answers an IRI can change), **non-reproducible**
+(depends on who published what, when), and **over-broad** (a wildcard import is
+a wildcard capability).
 
-- **Loose** — a bare IRI (`"urn:fn:toUpper"`): resolve whatever currently
+- **Loose** — a bare IRI (`"urn:example:toUpper"`): resolve whatever currently
   answers. Fine *within your own trust boundary*.
 - **Tight** — an object that pins and/or scopes:
   - `version` (range) or `content` (`blake3:…`, exact + tamper-evident) — *pinning*;
