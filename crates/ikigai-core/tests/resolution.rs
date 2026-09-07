@@ -28,10 +28,13 @@ fn run(space: &dyn Space, req: &Request) -> Option<Vec<u8>> {
 
 fn functions() -> EndpointSpace {
     EndpointSpace::new()
-        .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
-        .bind(Exact::new("urn:fn:reverseList"), builtins::reverse_list())
+        .bind(Exact::new("urn:test:to-upper"), builtins::to_upper())
         .bind(
-            UriTemplate::parse("urn:fn:echo/{message}").unwrap(),
+            Exact::new("urn:test:reverse-list"),
+            builtins::reverse_list(),
+        )
+        .bind(
+            UriTemplate::parse("urn:test:echo/{message}").unwrap(),
             builtins::echo(),
         )
 }
@@ -39,7 +42,7 @@ fn functions() -> EndpointSpace {
 #[test]
 fn resolves_and_invokes_closure_endpoint() {
     let space = functions();
-    let req = Request::new(Verb::Source, iri("urn:fn:toUpper"))
+    let req = Request::new(Verb::Source, iri("urn:test:to-upper"))
         .with_arg("in", ArgRef::Inline(b"hello".to_vec()));
     assert_eq!(run(&space, &req).as_deref(), Some(b"HELLO".as_slice()));
 }
@@ -47,7 +50,7 @@ fn resolves_and_invokes_closure_endpoint() {
 #[test]
 fn reverse_list_reverses_items() {
     let space = functions();
-    let req = Request::new(Verb::Source, iri("urn:fn:reverseList"))
+    let req = Request::new(Verb::Source, iri("urn:test:reverse-list"))
         .with_arg("in", ArgRef::Inline(b"a\nb\nc".to_vec()));
     assert_eq!(run(&space, &req).as_deref(), Some(b"c\nb\na".as_slice()));
 }
@@ -55,23 +58,23 @@ fn reverse_list_reverses_items() {
 #[test]
 fn grammar_bindings_flow_to_endpoint() {
     let space = functions();
-    let req = Request::new(Verb::Source, iri("urn:fn:echo/world"));
+    let req = Request::new(Verb::Source, iri("urn:test:echo/world"));
     assert_eq!(run(&space, &req).as_deref(), Some(b"world".as_slice()));
 }
 
 #[test]
 fn unresolved_target_misses() {
     let space = functions();
-    let req = Request::new(Verb::Source, iri("urn:fn:nope"));
+    let req = Request::new(Verb::Source, iri("urn:test:nope"));
     assert!(run(&space, &req).is_none());
 }
 
 #[test]
 fn mount_gates_by_prefix() {
-    let mounted = Mount::new("urn:fn:", Arc::new(functions()));
-    let hit = Request::new(Verb::Source, iri("urn:fn:toUpper"))
+    let mounted = Mount::new("urn:test:", Arc::new(functions()));
+    let hit = Request::new(Verb::Source, iri("urn:test:to-upper"))
         .with_arg("in", ArgRef::Inline(b"x".to_vec()));
-    let off = Request::new(Verb::Source, iri("urn:other:toUpper"))
+    let off = Request::new(Verb::Source, iri("urn:other:to-upper"))
         .with_arg("in", ArgRef::Inline(b"x".to_vec()));
     assert_eq!(run(&mounted, &hit).as_deref(), Some(b"X".as_slice()));
     assert!(run(&mounted, &off).is_none());
@@ -82,7 +85,7 @@ fn fallback_tries_in_order() {
     let empty: Arc<dyn Space> = Arc::new(EndpointSpace::new());
     let real: Arc<dyn Space> = Arc::new(functions());
     let chain = Fallback::new(vec![empty, real]);
-    let req = Request::new(Verb::Source, iri("urn:fn:toUpper"))
+    let req = Request::new(Verb::Source, iri("urn:test:to-upper"))
         .with_arg("in", ArgRef::Inline(b"hi".to_vec()));
     assert_eq!(run(&chain, &req).as_deref(), Some(b"HI".as_slice()));
 }
@@ -90,7 +93,7 @@ fn fallback_tries_in_order() {
 #[test]
 fn rewrite_remaps_target_before_resolution() {
     let rewritten = Rewrite::new(Arc::new(functions()), |iri| {
-        (iri.as_str() == "urn:alias:up").then(|| Iri::parse("urn:fn:toUpper").unwrap())
+        (iri.as_str() == "urn:alias:up").then(|| Iri::parse("urn:test:to-upper").unwrap())
     });
     let req = Request::new(Verb::Source, iri("urn:alias:up"))
         .with_arg("in", ArgRef::Inline(b"hey".to_vec()));

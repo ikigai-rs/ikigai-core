@@ -1000,11 +1000,11 @@ mod tests {
         });
         let space = EndpointSpace::new()
             .bind(Exact::new("urn:data:leaf"), leaf)
-            .bind(Exact::new("urn:fn:upcaseOf"), upcase_of);
+            .bind(Exact::new("urn:test:upcase-of"), upcase_of);
         let kernel = Kernel::new(Arc::new(space));
         let cap = Capability::root();
         let req = || {
-            Request::new(Verb::Source, iri("urn:fn:upcaseOf"))
+            Request::new(Verb::Source, iri("urn:test:upcase-of"))
                 .with_arg("src", ArgRef::Reference(iri("urn:data:leaf")))
         };
 

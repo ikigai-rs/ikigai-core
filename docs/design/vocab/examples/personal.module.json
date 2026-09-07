@@ -27,7 +27,7 @@
   ],
 
   "imports": [
-    { "resource": "urn:fn:redact", "content": "blake3:9af2c1d4e5b6a7c8", "signer": "did:key:z6MkpExampleTrustedSigner" },
-    { "prefix": "urn:fn:date:", "signer": "did:key:z6MkpExampleTrustedSigner", "shape": "urn:shape:fn" }
+    { "resource": "urn:example:redact", "content": "blake3:9af2c1d4e5b6a7c8", "signer": "did:key:z6MkpExampleTrustedSigner" },
+    { "prefix": "urn:example:date:", "signer": "did:key:z6MkpExampleTrustedSigner", "shape": "urn:shape:fn" }
   ]
 }

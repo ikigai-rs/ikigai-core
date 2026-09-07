@@ -9,10 +9,10 @@ use ikigai_core::{builtins, ArgRef, Capability, EndpointSpace, Exact, Iri, Kerne
 
 # async fn demo() -> ikigai_core::Result<()> {
 let space = EndpointSpace::new()
-    .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+    .bind(Exact::new("urn:example:toUpper"), builtins::to_upper());
 let kernel = Kernel::new(std::sync::Arc::new(space));
 
-let req = Request::new(Verb::Source, Iri::parse("urn:fn:toUpper")?)
+let req = Request::new(Verb::Source, Iri::parse("urn:example:toUpper")?)
     .with_arg("in", ArgRef::Inline(b"ikigai".to_vec()));
 let rep = kernel.issue(req, &Capability::root()).await?;
 assert_eq!(rep.bytes, b"IKIGAI");

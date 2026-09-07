@@ -29,9 +29,9 @@
           ik:capability "freebusy" ] ;
 
     ik:imports
-        [ ik:resource <urn:fn:redact> ;
+        [ ik:resource <urn:example:redact> ;
           ik:content  "blake3:9af2c1d4e5b6a7c8" ;
           ik:signer   <did:key:z6MkpExampleTrustedSigner> ] ,
-        [ ik:prefix "urn:fn:date:" ;
+        [ ik:prefix "urn:example:date:" ;
           ik:signer <did:key:z6MkpExampleTrustedSigner> ;
           ik:shape  <urn:shape:fn> ] .

@@ -241,7 +241,7 @@ pub struct SpaceEntry {
     /// Where this binding came from, for a **federated** catalog: `None` for this
     /// kernel's own spaces; `Some(label)` for a binding surfaced from a mounted
     /// remote (its mount alias or connection name). So an overlap reads
-    /// "`urn:fn:compose` — local / via `beefybox`" instead of an anonymous
+    /// "`urn:example:compose` — local / via `beefybox`" instead of an anonymous
     /// concatenation, and a listing can show *where* each resource resolves.
     pub origin: Option<String>,
 }
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn endpoint_space_enumerates_its_bindings() {
         let space = EndpointSpace::new()
-            .bind(Exact::new("urn:fn:toUpper"), builtins::to_upper())
+            .bind(Exact::new("urn:test:to-upper"), builtins::to_upper())
             .bind(
                 UriTemplate::parse("urn:demo:echo/{message}").unwrap(),
                 builtins::echo(),
@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(
             entries,
             vec![
-                SpaceEntry::new("urn:fn:toUpper", "toUpper"),
+                SpaceEntry::new("urn:test:to-upper", "toUpper"),
                 SpaceEntry::new("urn:demo:echo/{message}", "echo"),
             ]
         );

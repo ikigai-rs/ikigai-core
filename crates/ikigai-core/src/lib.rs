@@ -30,7 +30,7 @@
 //! Two namespaces, two conventions:
 //!
 //! - **Resource identifiers** — IRIs and endpoint names, e.g. `toUpper` in
-//!   `urn:fn:toUpper` — use RDF-idiomatic casing: `lowerCamelCase` for
+//!   `urn:example:toUpper` — use RDF-idiomatic casing: `lowerCamelCase` for
 //!   properties and operations, `PascalCase` for classes.
 //! - **Rust identifiers** use `snake_case` and `PascalCase` per Rust convention.
 //!
