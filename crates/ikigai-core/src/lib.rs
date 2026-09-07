@@ -27,15 +27,32 @@
 //!
 //! # Naming conventions
 //!
-//! Two namespaces, two conventions:
+//! Three namespaces, three conventions — and the first two are easy to conflate,
+//! which is how this section came to contradict [`Description::id`] for a while:
 //!
-//! - **Resource identifiers** — IRIs and endpoint names, e.g. `toUpper` in
-//!   `urn:example:toUpper` — use RDF-idiomatic casing: `lowerCamelCase` for
-//!   properties and operations, `PascalCase` for classes.
+//! - **Resource names** — a bound IRI's own segment and the matching
+//!   [`Description::id`] (`tag-suggest`, `kernel-catalog`) — are a short **noun in
+//!   `kebab-case`**. A noun because a resource is a thing you resolve, not a
+//!   procedure you call; `kebab-case` because these are published names — the MCP
+//!   projection derives an agent's tool names from the id — and they read across
+//!   IRIs, shells and tool lists without casing surprises. [`Description::id`]
+//!   records what is *enforced* about one (nothing but IRI-safety) as against what
+//!   is convention.
+//! - **RDF vocabulary terms** — the classes and properties an emitted graph uses,
+//!   e.g. `ik:Endpoint`, `ik:requires` — keep RDF-idiomatic casing: `PascalCase`
+//!   for classes, `lowerCamelCase` for properties. That convention belongs to the
+//!   vocabulary, not to resource naming, and applying it to endpoint names is the
+//!   mistake this crate made.
 //! - **Rust identifiers** use `snake_case` and `PascalCase` per Rust convention.
 //!
-//! A `snake_case` constructor therefore maps to a `lowerCamelCase` identifier —
-//! e.g. [`builtins::to_upper`] builds the `toUpper` endpoint.
+//! A constructor's `snake_case` name and its resource name therefore agree up to
+//! the separator: the kernel's own operations describe themselves as `kernel-cut`,
+//! `kernel-catalog`, `kernel-actions`. The exceptions are visible and known:
+//! [`builtins`] still
+//! carries the `lowerCamelCase` ids `toUpper`, `reverseList` and `echo` from before
+//! the convention settled, and those are live MCP tool names — renaming them moves
+//! an agent's tool list, so they ride one coordinated ecosystem-wide wave rather
+//! than leaking out of an unrelated change.
 #![forbid(unsafe_code)]
 
 pub mod alias;
@@ -51,6 +68,7 @@ mod grammar;
 pub(crate) mod hashing;
 mod iri;
 mod kernel;
+mod kernel_ops;
 mod meta;
 mod repr;
 mod request;

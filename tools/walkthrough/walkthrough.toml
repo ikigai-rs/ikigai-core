@@ -25,7 +25,7 @@ anchor = "#![forbid(unsafe_code)]"
 bullets = [
   "The crate doc is the map of the kernel: identity (M0), resolution (M1), the async kernel + cache (M3).",
   "`#![forbid(unsafe_code)]` — a crate-wide, compile-time ban on unsafe.",
-  "Two naming worlds, documented here: resource identifiers are `lowerCamelCase` (RDF-idiomatic); Rust identifiers stay `snake_case` / `PascalCase`.",
+  "Three naming worlds, documented here: resource names are short nouns in `kebab-case`; RDF vocabulary terms keep RDF casing (`PascalCase` classes, `lowerCamelCase` properties); Rust identifiers stay `snake_case` / `PascalCase`.",
 ]
 [[file.note]]
 anchor = "pub use space::{"
@@ -280,7 +280,7 @@ bullets = [
 [[file.note]]
 anchor = "pub fn to_upper()"
 bullets = [
-  "Per the naming convention, the `snake_case` constructor builds the `lowerCamelCase` endpoint: `to_upper()` is the `toUpper` resource.",
+  "`to_upper()` builds the `toUpper` resource — a `lowerCamelCase` name from before the convention settled on `kebab-case` nouns. These three are live MCP tool names, so they wait for one coordinated rename rather than drifting one crate at a time.",
   "Each now carries a full `Description` (verbs, the `in` argument, output type), so `describe` and the contract-driven REPL routing have something to read.",
 ]
 

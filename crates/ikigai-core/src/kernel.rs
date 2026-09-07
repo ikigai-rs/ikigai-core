@@ -47,7 +47,7 @@ use crate::meta::MetaRenderer;
 use crate::repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 use crate::request::{Request, RequestId};
 use crate::select::{ActionMatch, TransreptionStep};
-use crate::space::{Resolution, Scope, Space, SpaceEntry};
+use crate::space::{Fallback, Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
 
 /// The kernel's source of "now". Injected (rather than read from the system
@@ -467,7 +467,7 @@ impl Kernel {
     pub fn select_action(&self, present: &[&str]) -> Vec<ActionMatch> {
         let expanded = self.expand_present(present);
         let refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
-        crate::select::select_action(self.root.as_ref(), &refs)
+        crate::select::select_action(&self.described(), &refs)
     }
 
     /// The action-level selection funnel over this kernel's bindings (see
@@ -480,7 +480,7 @@ impl Kernel {
             present: &refs,
             ..*query
         };
-        crate::select::select_actions(self.root.as_ref(), &expanded_query)
+        crate::select::select_actions(&self.described(), &expanded_query)
     }
 
     /// The typed self-description of the endpoint bound at `iri`, or `None` if the
@@ -491,7 +491,7 @@ impl Kernel {
     /// list the allowed actions, then `describe` each endpoint for its schema.
     pub fn describe(&self, iri: &Iri) -> Option<Description> {
         match self
-            .root
+            .described()
             .resolve(&Request::new(Verb::Meta, iri.clone()), &Scope::empty())
         {
             Resolution::Hit(resolved) => Some(resolved.endpoint.describe()),
@@ -504,8 +504,9 @@ impl Kernel {
     /// template-bound entries too (via [`crate::select::describe_entry`]'s probe), so
     /// `urn:kernel:validate` can pre-flight a template action's catalog IRI.
     fn description_for_id(&self, id: &str) -> Result<Option<Description>> {
-        for entry in self.root.entries().unwrap_or_default() {
-            if let Some(described) = crate::select::describe_entry(self.root.as_ref(), &entry) {
+        let space = self.described();
+        for entry in space.entries().unwrap_or_default() {
+            if let Some(described) = crate::select::describe_entry(&space, &entry) {
                 if described.description.id == id {
                     return Ok(Some(described.description));
                 }
@@ -523,13 +524,13 @@ impl Kernel {
         if let Ok(iri) = Iri::parse(pattern) {
             return self.describe(&iri);
         }
-        let entry = self
-            .root
+        let space = self.described();
+        let entry = space
             .entries()
             .unwrap_or_default()
             .into_iter()
             .find(|e| e.pattern == pattern)?;
-        crate::select::describe_entry(self.root.as_ref(), &entry).map(|d| d.description)
+        crate::select::describe_entry(&space, &entry).map(|d| d.description)
     }
 
     /// Expand each present type to itself + its superclasses (`rdfs:subClassOf*`); an
@@ -1364,6 +1365,28 @@ impl Kernel {
                 "capability does not grant `{scope}`"
             )))
         };
+        // ★ DECLARED = ENFORCED, made mechanical rather than intentional. Each kernel
+        // operation's [`Description`](crate::Description) states the scopes its verb
+        // requires (`crate::kernel_ops`), and those declarations are what the catalog
+        // publishes and what `urn:kernel:actions` filters the manifold by. Gating on
+        // the declaration HERE, before dispatch, makes over-offering impossible: a
+        // scope this namespace advertises is a scope this namespace demands, and the
+        // manifold cannot drift into a lie by a description being edited alone.
+        //
+        // It does not replace the per-arm `require_cap` calls below — those stay as
+        // each operation's local, readable statement of its own authority, and as the
+        // fail-safe if the table and the arm ever disagree. A second capability check
+        // is cheap; the arms are what a reviewer reads. What it removes is the
+        // possibility of the DECLARATION being the looser of the two. The converse
+        // (an arm enforcing a scope nobody declared, so the manifold over-offers) is
+        // not statically preventable and is pinned by
+        // `kernel_ops_declare_exactly_what_they_enforce`.
+        //
+        // `Meta` declares nothing by construction (`action_specs` drops it), so
+        // describing an operation stays ungated exactly as it always has been.
+        for scope in crate::kernel_ops::required_scopes(op, request.verb) {
+            require_cap(&scope)?;
+        }
         match (op, request.verb) {
             // Cut a golden thread. The thread is the sunk content — so
             // `sink urn:kernel:cut <thread>` works — or an explicit `thread` arg.
@@ -1513,14 +1536,20 @@ impl Kernel {
                 let mut body = String::new();
                 let mut rendered_ids = BTreeSet::new();
                 let mut templates = Vec::new();
-                for entry in self.root.entries().unwrap_or_default() {
+                // The kernel's own operations come first (see [`Self::described`]),
+                // so the catalog opens with the resources that make the rest of it
+                // legible. Note the division the design already draws: the catalog
+                // says what EXISTS — every kernel operation, for a caller with the
+                // inspect authority this arm demanded — while `urn:kernel:actions`
+                // says what you MAY DO and filters by capability.
+                let space = self.described();
+                for entry in space.entries().unwrap_or_default() {
                     let Ok(iri) = Iri::parse(&entry.pattern) else {
                         templates.push(entry);
                         continue;
                     };
-                    if let Resolution::Hit(resolved) = self
-                        .root
-                        .resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
+                    if let Resolution::Hit(resolved) =
+                        space.resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
                     {
                         let description = resolved.endpoint.describe();
                         rendered_ids.insert(description.id.clone());
@@ -1533,8 +1562,7 @@ impl Kernel {
                     }
                 }
                 for entry in templates {
-                    let Some(described) = crate::select::describe_entry(self.root.as_ref(), &entry)
-                    else {
+                    let Some(described) = crate::select::describe_entry(&space, &entry) else {
                         continue;
                     };
                     if !rendered_ids.insert(described.description.id.clone()) {
@@ -1558,24 +1586,6 @@ impl Kernel {
             // entities, what can I do with them?" (see [`crate::select_action`]). One endpoint
             // IRI per line, so it pipes into a `..` map. Cacheable like the catalog (a pure
             // function of the binding set + `types`).
-            // `describe urn:kernel:actions` — the selector's self-description, so the
-            // engine routes `types=` (it only names *declared* inputs) and the resource is
-            // introspectable like any bound endpoint. Rendered on this sync path in its
-            // canonical forms (JSON for the engine, Turtle for `describe`); the async
-            // transrept-to-other-types route the normal Meta path uses isn't available here,
-            // so any other requested type falls back to canonical Turtle.
-            ("actions", Verb::Meta) => {
-                let renderer = self
-                    .meta
-                    .as_ref()
-                    .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
-                let description = actions_description();
-                let target = meta_target(request);
-                let repr = renderer
-                    .render(&description, &target)
-                    .or_else(|_| renderer.render(&description, &ReprType::new("text/turtle")))?;
-                Ok(repr.cacheable())
-            }
             ("actions", Verb::Source) => {
                 // NO inspect gate, deliberately: unlike the catalog (which discloses the
                 // whole kernel), the manifold is SELF-LIMITING — it only ever contains
@@ -1676,18 +1686,6 @@ impl Kernel {
                 )
                 .cacheable())
             }
-            ("validate", Verb::Meta) => {
-                let renderer = self
-                    .meta
-                    .as_ref()
-                    .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
-                let description = validate_description();
-                let target = meta_target(request);
-                let repr = renderer
-                    .render(&description, &target)
-                    .or_else(|_| renderer.render(&description, &ReprType::new("text/turtle")))?;
-                Ok(repr.cacheable())
-            }
             // Validated invoke, stage four of the selection funnel: check a PROPOSED
             // invocation against the action's declared contract BEFORE firing it —
             // required inputs present, one_of respected, XSD scalars plausible, no
@@ -1770,6 +1768,32 @@ impl Kernel {
                     report.into_bytes(),
                 )
                 .cacheable())
+            }
+            // `describe urn:kernel:<op>` — the operation's own self-description, so every
+            // kernel operation is introspectable exactly like a bound endpoint (and the
+            // engine routes its named arguments, which it does only for *declared* inputs).
+            // Rendered on this sync path in its canonical forms (JSON for the engine,
+            // Turtle for `describe`); the async transrept-to-other-types route the normal
+            // Meta path uses isn't available here, so any other requested type falls back
+            // to canonical Turtle.
+            //
+            // Ungated, and not by omission: `Description::action_specs` excludes `Meta`
+            // (it is universal, never a selectable action), so no kernel operation can
+            // declare a scope for it — which is what the pre-gate above enforces against.
+            // Reading a contract discloses nothing the crate documentation does not; the
+            // authority to *invoke* is checked on the verb arms below.
+            (op, Verb::Meta) => {
+                let description = crate::kernel_ops::description(op)
+                    .ok_or_else(|| Error::Unresolved(request.target.clone()))?;
+                let renderer = self
+                    .meta
+                    .as_ref()
+                    .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
+                let target = meta_target(request);
+                let repr = renderer
+                    .render(&description, &target)
+                    .or_else(|_| renderer.render(&description, &ReprType::new("text/turtle")))?;
+                Ok(repr.cacheable())
             }
             _ => Err(Error::Unresolved(request.target.clone())),
         }
@@ -1879,10 +1903,40 @@ impl Kernel {
             .is_some_and(|entry| self.entry_is_valid(entry))
     }
 
-    /// Enumerate the root space's bindings, if it supports enumeration. `None`
-    /// when the root space is not enumerable.
+    /// Enumerate this kernel's bindings, if the root space supports enumeration:
+    /// the kernel's own `urn:kernel:*` operations first, then the root space's.
+    /// `None` when the root space is not enumerable — the kernel operations alone
+    /// are not an answer to "what is bound here?", and reporting `Some` for a
+    /// non-enumerable root would turn "cannot say" into "nothing else".
+    ///
+    /// The kernel operations are listed here (and described through the same
+    /// composed space the catalog walks) because they are resolved *intrinsically* —
+    /// intercepted ahead of the root space, which therefore never binds them. Before
+    /// this, `list` returned every endpoint in the system except the ones that make
+    /// the rest of it legible.
     pub fn entries(&self) -> Option<Vec<SpaceEntry>> {
-        self.root.entries()
+        self.root.entries().map(|bound| {
+            let mut entries = crate::kernel_ops::KernelOps.entries().unwrap_or_default();
+            entries.extend(bound);
+            entries
+        })
+    }
+
+    /// The space every `entries → Meta → describe` walk runs over: the kernel's own
+    /// operations composed in FRONT of the root space, mirroring the intercept order
+    /// on the issue path (where the root cannot shadow `urn:kernel:*` either).
+    ///
+    /// **Description only.** Resolution proper still goes straight to the root space
+    /// after the `urn:kernel:` intercept, so nothing here can change what a request
+    /// resolves to; the endpoints this space hands back refuse invocation. What it
+    /// changes is what the kernel can SAY about itself — the catalog, the action
+    /// manifold, describe-by-id and `urn:kernel:validate` all consume this walk, so
+    /// they inherit the kernel from one place instead of nine.
+    fn described(&self) -> Fallback {
+        Fallback::new(vec![
+            Arc::new(crate::kernel_ops::KernelOps),
+            Arc::clone(&self.root),
+        ])
     }
 }
 
@@ -1952,7 +2006,7 @@ fn alias_notes(alias: Option<&AliasHop>) -> Vec<(String, String)> {
 }
 
 /// The reserved kernel-behavior namespace prefix.
-const KERNEL_NS: &str = "urn:kernel:";
+pub(crate) const KERNEL_NS: &str = "urn:kernel:";
 
 /// Parse a `verb=` argument (case-insensitive verb name).
 fn parse_verb(name: &str) -> Result<Verb> {
@@ -1966,84 +2020,6 @@ fn parse_verb(name: &str) -> Result<Verb> {
             "unknown verb \"{other}\" (source, sink, exists, delete, meta)"
         ))),
     }
-}
-
-/// Self-description of the `urn:kernel:actions` selector. Declares the `types` input so the
-/// engine routes `types=` (it only names *declared* inputs) and `describe urn:kernel:actions`
-/// works — surfacing typed action-selection like any bound endpoint.
-fn actions_description() -> Description {
-    use crate::describe::ArgSpec;
-    Description::new("kernel-actions")
-        .title("Action selection")
-        .summary(
-            "Given the RDF classes of the entities you have, list the endpoints whose required \
-             typed inputs are all satisfied — \"what can I do with these?\". One endpoint IRI \
-             per line; pipe into a `..` map to act on each.",
-        )
-        .verb(Verb::Source)
-        .verb(Verb::Meta)
-        .input(
-            ArgSpec::new("types")
-                .summary("present RDF class IRIs, comma- or space-separated")
-                .optional(),
-        )
-        .input(
-            ArgSpec::new("verb")
-                .summary("only actions answering this verb")
-                .one_of(["source", "sink", "exists", "delete"])
-                .optional(),
-        )
-        .input(
-            ArgSpec::new("want")
-                .summary("only actions that can produce this media type")
-                .optional(),
-        )
-        .input(
-            ArgSpec::new("as")
-                .summary("response face")
-                .one_of(["text/plain", "text/turtle"])
-                .default_value("text/plain"),
-        )
-        .output("text/plain;charset=utf-8")
-}
-
-/// The self-description of `urn:kernel:validate`.
-fn validate_description() -> Description {
-    use crate::describe::ArgSpec;
-    Description::new("validate")
-        .title("Validate a proposed invocation")
-        .summary(
-            "Stage four of the selection funnel: check a proposed invocation against the \
-             action's declared contract BEFORE firing it — required inputs present, one_of \
-             respected, XSD scalars plausible, no unknown arguments, and the ambient \
-             capability satisfying the action's requires. The answer is a SHACL validation \
-             report: violations are data, and sh:resultPath joins each one back to the \
-             catalog's input node.",
-        )
-        .verb(Verb::Source)
-        .verb(Verb::Meta)
-        .input(
-            ArgSpec::new("action")
-                .summary("the catalog action IRI (urn:ikigai:endpoint:<id>:action:<verb>)")
-                .optional(),
-        )
-        .input(
-            ArgSpec::new("endpoint")
-                .summary("alternative: the bound endpoint IRI, with verb=")
-                .optional(),
-        )
-        .input(
-            ArgSpec::new("verb")
-                .summary("the verb, when addressing by endpoint=")
-                .one_of(["source", "sink", "exists", "delete"])
-                .optional(),
-        )
-        .input(
-            ArgSpec::new("args")
-                .summary("the proposed arguments: key=value pairs joined with & (or newlines)")
-                .optional(),
-        )
-        .output("text/turtle")
 }
 
 /// Check `proposed` (key=value pairs joined by `&`/newlines) against `spec`,
@@ -3086,6 +3062,224 @@ mod tests {
             String::from_utf8(meta_as(&kernel, "urn:kernel:actions", "application/json").bytes)
                 .unwrap();
         assert!(fallback.contains("kernel-actions"), "fell back: {fallback}");
+    }
+
+    /// Issue `urn:kernel:actions` under `capability` and return the `urn:kernel:*`
+    /// lines of the plain manifold face — the caller's kernel-scoped tool list.
+    fn kernel_manifold(kernel: &Kernel, capability: &Capability) -> Vec<String> {
+        let request = Request::new(Verb::Source, iri("urn:kernel:actions"));
+        let rep = block_on(kernel.issue(request, capability)).unwrap();
+        String::from_utf8(rep.bytes)
+            .unwrap()
+            .lines()
+            .filter(|l| l.starts_with(KERNEL_NS))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_manifold_offers_exactly_the_kernel_ops_a_capability_admits() {
+        // ★ THE PROPERTY, and the one a future refactor breaks silently: an agent's
+        // tool list IS the manifold under its capability, so the kernel's own
+        // operations must appear there — and appear *filtered*. `list` mentioning
+        // the kernel is the easy half; this is the half with teeth.
+        let kernel = meta_kernel();
+        const INSPECT_ONLY: [&str; 6] = [
+            "urn:kernel:aliases",
+            "urn:kernel:cache",
+            "urn:kernel:catalog",
+            "urn:kernel:constraint",
+            "urn:kernel:scheduler",
+            "urn:kernel:threads",
+        ];
+        // Ungated by design: "what can I do?" must be answerable by any capability
+        // about itself, and the pre-flight that checks a proposal is not itself
+        // authority (see the `actions` arm).
+        const UNGATED: [&str; 2] = ["urn:kernel:actions", "urn:kernel:validate"];
+
+        let root = kernel_manifold(&kernel, &Capability::root());
+        for op in INSPECT_ONLY.iter().chain(UNGATED.iter()) {
+            assert!(root.contains(&op.to_string()), "root manifold lacks {op}");
+        }
+        assert!(
+            root.contains(&"urn:kernel:cut".to_string()),
+            "root manifold lacks urn:kernel:cut"
+        );
+
+        let inspect = kernel_manifold(&kernel, &Capability::scoped(["urn:cap:kernel:inspect"]));
+        for op in INSPECT_ONLY.iter().chain(UNGATED.iter()) {
+            assert!(
+                inspect.contains(&op.to_string()),
+                "inspect manifold lacks {op}"
+            );
+        }
+        assert!(
+            !inspect.contains(&"urn:kernel:cut".to_string()),
+            "inspect authority must not offer thread-cutting: {inspect:?}"
+        );
+
+        let cut = kernel_manifold(&kernel, &Capability::scoped(["urn:cap:kernel:cut"]));
+        assert!(cut.contains(&"urn:kernel:cut".to_string()), "{cut:?}");
+        for op in INSPECT_ONLY {
+            assert!(
+                !cut.contains(&op.to_string()),
+                "cut authority must not offer {op}: {cut:?}"
+            );
+        }
+
+        // No kernel authority at all: only the two self-limiting resources.
+        let none = kernel_manifold(&kernel, &Capability::scoped(Vec::<String>::new()));
+        assert_eq!(none, UNGATED.map(str::to_string).to_vec(), "{none:?}");
+    }
+
+    #[test]
+    fn kernel_ops_declare_exactly_what_they_enforce() {
+        // Declared = enforced, in both directions, over every operation and verb.
+        // The pre-gate in `issue_kernel` makes declared ⊆ enforced structurally; what
+        // no type can catch is the converse — an arm demanding a scope its
+        // description never mentions, which makes the manifold over-offer and an
+        // agent's tool call fail at invoke after selection said it would not.
+        let kernel = meta_kernel();
+        for op in crate::kernel_ops::OPS {
+            let description = crate::kernel_ops::description(op).expect("listed op");
+            for spec in description.action_specs() {
+                let target = format!("{KERNEL_NS}{op}");
+                let fire = |scopes: Vec<String>| {
+                    let request = Request::new(spec.verb, iri(&target));
+                    block_on(kernel.issue(request, &Capability::scoped(scopes)))
+                };
+                // Withholding any ONE declared scope must deny.
+                for withheld in &spec.requires {
+                    let held: Vec<String> = spec
+                        .requires
+                        .iter()
+                        .filter(|s| *s != withheld)
+                        .cloned()
+                        .collect();
+                    let error = fire(held).expect_err("must deny without the declared scope");
+                    assert!(
+                        matches!(&error, Error::Denied(m) if m.contains(withheld)),
+                        "{target} ({:?}) declares `{withheld}` but did not refuse for it: {error:?}",
+                        spec.verb
+                    );
+                }
+                // Holding EXACTLY the declared scopes must not deny. A missing
+                // argument or an absent renderer is fine — a denial is not.
+                let outcome = fire(spec.requires.clone());
+                if let Err(Error::Denied(message)) = &outcome {
+                    panic!(
+                        "{target} ({:?}) enforces authority beyond its declaration \
+                         (declared {:?}): {message}",
+                        spec.verb, spec.requires
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_kernel_operation_describes_itself() {
+        // The generic Meta arm: `describe urn:kernel:<op>` renders that operation's own
+        // contract, for every operation — not just the two that used to have one. And
+        // it stays ungated: `Meta` is universal, so no operation can declare a scope
+        // for it, and reading a contract discloses nothing the crate docs do not.
+        let kernel = meta_kernel();
+        for op in crate::kernel_ops::OPS {
+            let id = crate::kernel_ops::description(op).expect("listed op").id;
+            let target = format!("{KERNEL_NS}{op}");
+            let request = Request::new(Verb::Meta, iri(&target));
+            let rep = block_on(kernel.issue(request, &Capability::scoped(Vec::<String>::new())))
+                .unwrap_or_else(|e| panic!("describe {target}: {e:?}"));
+            let turtle = String::from_utf8(rep.bytes).unwrap();
+            assert!(turtle.contains(&id), "describe {target} rendered: {turtle}");
+        }
+        // A name inside the namespace that names no operation is still unresolved —
+        // the generic arm describes what exists, it does not invent.
+        let request = Request::new(Verb::Meta, iri("urn:kernel:nonesuch"));
+        assert!(matches!(
+            block_on(kernel.issue(request, &Capability::root())),
+            Err(Error::Unresolved(_))
+        ));
+    }
+
+    #[test]
+    fn the_catalog_and_the_listing_both_carry_the_kernel() {
+        // The catalog says what EXISTS — every kernel operation, for a caller who has
+        // already proven inspect authority (capability filtering belongs in the
+        // manifold, not here).
+        let kernel = meta_kernel();
+        let rep = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:kernel:catalog")),
+            &Capability::root(),
+        ))
+        .unwrap();
+        let turtle = String::from_utf8(rep.bytes).unwrap();
+        for op in crate::kernel_ops::OPS {
+            let id = crate::kernel_ops::description(op).expect("listed op").id;
+            assert!(
+                turtle.contains(&format!("\"{id}\"")),
+                "catalog omits `{id}`: {turtle}"
+            );
+        }
+        assert!(turtle.contains("\"toUpper\""), "catalog lost the space");
+
+        // …and so does enumeration, which is what `list` reads.
+        let entries = kernel.entries().expect("enumerable root");
+        for op in crate::kernel_ops::OPS {
+            let pattern = format!("{KERNEL_NS}{op}");
+            assert!(
+                entries.iter().any(|e| e.pattern == pattern),
+                "entries omit `{pattern}`"
+            );
+        }
+        assert!(entries.iter().any(|e| e.pattern == "urn:test:to-upper"));
+    }
+
+    #[test]
+    fn a_non_enumerable_root_still_reports_that_it_cannot_say() {
+        // The kernel operations alone are not an answer to "what is bound here?".
+        // Reporting `Some` over a root that cannot enumerate would turn "cannot say"
+        // into "nothing else is bound", which is a different and false claim.
+        struct Opaque;
+        impl Space for Opaque {
+            fn resolve(&self, _request: &Request, _scope: &Scope) -> Resolution {
+                Resolution::Miss
+            }
+        }
+        assert!(Kernel::new(Arc::new(Opaque)).entries().is_none());
+    }
+
+    #[test]
+    fn validate_can_preflight_a_kernel_action() {
+        // `description_for_id` reaches the kernel now, so stage four of the selection
+        // funnel covers the kernel's own actions: an agent that found `urn:kernel:cut`
+        // in its manifold can pre-flight the call it is about to make.
+        let kernel = meta_kernel();
+        let report = |args: &str, capability: &Capability| {
+            let request = Request::new(Verb::Source, iri("urn:kernel:validate"))
+                .with_arg(
+                    "action",
+                    ArgRef::Inline(b"urn:ikigai:endpoint:kernel-cut:action:sink".to_vec()),
+                )
+                .with_arg("args", ArgRef::Inline(args.as_bytes().to_vec()));
+            String::from_utf8(block_on(kernel.issue(request, capability)).unwrap().bytes).unwrap()
+        };
+        let cutter = Capability::scoped(["urn:cap:kernel:cut"]);
+        assert!(
+            report("thread=urn:x", &cutter).contains("sh:conforms true"),
+            "a well-formed cut under cut authority should conform"
+        );
+        // The contract is real: an argument outside it is a violation…
+        assert!(report("thred=urn:x", &cutter).contains("unknown argument"));
+        // …and so is proposing it without the authority the description declares.
+        let report = report(
+            "thread=urn:x",
+            &Capability::scoped(["urn:cap:kernel:inspect"]),
+        );
+        assert!(
+            report.contains("urn:cap:kernel:cut"),
+            "pre-flight must report the missing capability: {report}"
+        );
     }
 
     #[test]

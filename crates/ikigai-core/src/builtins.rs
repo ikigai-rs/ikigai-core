@@ -2,10 +2,12 @@
 //! cacheable kind. They double as the M1 demonstration of resolution and the
 //! pure-cache test: the same call with the same value has the same identity.
 //!
-//! Per the crate naming conventions, each `snake_case` constructor builds an
-//! endpoint whose `lowerCamelCase` identifier matches its name — e.g.
-//! [`to_upper`] builds the `toUpper` endpoint, which a host binds at a name of
-//! its own choosing (`urn:example:toUpper` in these docs).
+//! Each `snake_case` constructor builds an endpoint whose identifier matches its
+//! name — e.g. [`to_upper`] builds the `toUpper` endpoint, which a host binds at a
+//! name of its own choosing (`urn:example:toUpper` in these docs). These three ids
+//! predate the naming convention the crate now states (short nouns in `kebab-case`,
+//! see the [crate docs](crate)); they are live MCP tool names, so they wait for one
+//! coordinated ecosystem-wide rename rather than drifting here alone.
 //!
 //! Recursive `$a{<iri>}` transclusion (`compose`) lives in the `ikigai-fn` module
 //! crate, not here — it is a host-facing function, and the kernel only needs the
