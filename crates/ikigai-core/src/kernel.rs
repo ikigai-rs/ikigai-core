@@ -471,7 +471,7 @@ impl Kernel {
     }
 
     /// The action-level selection funnel over this kernel's bindings (see
-    /// [`crate::select::select_actions`]): capability-scoped, verb- and output-aware,
+    /// `select::select_actions`, crate-private): capability-scoped, verb- and output-aware,
     /// with the present types expanded through the `rdfs:subClassOf` closure first.
     pub fn select_actions(&self, query: &crate::select::ActionQuery<'_>) -> Vec<ActionMatch> {
         let expanded = self.expand_present(query.present);

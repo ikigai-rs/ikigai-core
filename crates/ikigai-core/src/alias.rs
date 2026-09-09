@@ -545,7 +545,7 @@ impl AliasTable {
     }
 
     /// Record that a rewritten target resolved to nothing. Called by the kernel on
-    /// [`Error::Unresolved`](crate::Error::Unresolved) so the miss is attributed to
+    /// [`crate::Error::Unresolved`] so the miss is attributed to
     /// the rule that moved the name.
     pub fn record_unresolved(&self, hop: &AliasHop) {
         for &index in &hop.rules {
