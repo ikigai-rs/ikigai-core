@@ -155,7 +155,7 @@ fn input_predicates(input: &ikigai_core::ArgSpec) -> String {
 ///
 /// Every identifier that lands in an IRI position — the endpoint id, each input name,
 /// each declared class, each capability scope — is percent-encoded on the way out (see
-/// [`ikigai_core::escape_iri_fragment`], and [`iri_term`] for the author-supplied IRIs);
+/// [`ikigai_core::escape_iri_fragment`], and the private `iri_term` for the author-supplied IRIs);
 /// `Description` enforces nothing at construction, so this function must not assume
 /// anything about their shape. The output always parses. Call
 /// [`Description::validate`] if you want the *description* refused instead.
