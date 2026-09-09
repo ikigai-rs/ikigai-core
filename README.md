@@ -5,6 +5,10 @@ resolve it through composable address spaces, with content-addressed caching so 
 result is computed once and reused. Most requests are satisfied by deterministic
 resolution; a language model is one optional, last-resort resolver — not the default.
 
+**New here? Start with [The ikigai Book](https://ikigai-rs.github.io/ikigai-tutorial/)** —
+the tutorial: resolution, your first endpoint, self-description, modules, and a kernel
+behind a socket. Every code block in it is compiled against the published crates.
+
 This repository is the core, dependency-light layer — no network transports, and it
 compiles to WebAssembly. The CLI and its transports live in
 [`ikigai-cli`](https://github.com/ikigai-rs/ikigai-cli).
