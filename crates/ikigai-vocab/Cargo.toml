@@ -24,6 +24,8 @@ ikigai-core = { path = "../ikigai-core", version = "0.1.66" } # 0.1.66 = `escape
 # sites rather than a silent behavior change.
 
 [dev-dependencies]
-# Test-only: parse-validate the bundled vocabulary.ttl + the emitted Turtle. Does not
-# enter the published library's dependency graph (the crate stays dependency-free).
+# Test-only: parse-validate the bundled vocabulary.ttl / shapes.ttl / the emitted Turtle,
+# and walk the plan fixtures as triples. Neither enters the published library's
+# dependency graph (the crate stays dependency-free).
 oxttl = "0.2"
+oxrdf.workspace = true
