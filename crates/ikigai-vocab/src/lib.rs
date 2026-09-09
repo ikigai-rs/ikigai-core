@@ -19,9 +19,22 @@ pub const NS: &str = "https://ikigai-rs.dev/ns#";
 
 /// The ikigai vocabulary itself, as a Turtle ontology — hand-maintained in
 /// `src/vocabulary.ttl` and bundled at compile time. Defines the `ns#` classes
-/// (`ik:Endpoint`, `ik:Transreptor ⊏ ik:Endpoint`, …) and properties. Served by
-/// [`space`] at `urn:ikigai:vocab`, and eventually at the external `ns#` URL.
+/// (`ik:Endpoint`, `ik:Transreptor ⊏ ik:Endpoint`, the process classes `ik:Process` /
+/// `ik:Step` / `ik:Argument` / `ik:Fork`, …) and properties. Served by [`space`] at
+/// `urn:ikigai:vocab`, and eventually at the external `ns#` URL. Its `owl:versionInfo`
+/// is this crate's version (a test enforces it), so a deployed copy can be dated.
 pub const VOCABULARY: &str = include_str!("vocabulary.ttl");
+
+/// SHACL shapes for the process vocabulary — what a plan must look like before any
+/// step runs: one verb from the five per step, one target, one result, an argument by
+/// value or by reference but not both, every edge and `@name` reference inside the plan,
+/// each name bound once. Hand-maintained in `src/shapes.ttl`, bundled at compile time,
+/// parsed for syntax by a test. **Data only**: this crate has no SHACL engine and must
+/// not gain one; `ikigai-shacl` runs them. What they cannot say (full acyclicity — a
+/// reference goes through a name, a hop a property path cannot take; catalog binding;
+/// ArgSpec fit; transreption routes; capability) is stated in the file's header and
+/// belongs to the plan validator.
+pub const SHAPES: &str = include_str!("shapes.ttl");
 
 /// A JSON-LD `@context` for the whole vocabulary — every `ns#` term mapped to its
 /// short name, with datatype/`@id` coercions (integers, booleans, and IRI-valued
@@ -35,6 +48,73 @@ pub const CONTEXT: &str = include_str!("context.jsonld");
 
 /// The conventional IRI the vocabulary is bound to by [`space`].
 pub const VOCAB_IRI: &str = "urn:ikigai:vocab";
+
+/// The plan IRI scheme — the one place it is coded, so the engine that emits a plan, the
+/// validator that reads one, and the fixtures that pin the shape agree on every IRI.
+///
+/// A plan and everything in it is skolemized under `urn:plan:{plan-id}` (no blank nodes:
+/// the graph diffs, signs, and answers SPARQL). `{plan-id}` is the program's name when the
+/// plan is stored — `urn:program:{name}` is then the resolvable face that RUNS it, and
+/// `urn:plan:{name}` the graph that DESCRIBES it — and the plan's content address when it
+/// is anonymous. Every author-supplied segment passes through
+/// [`ikigai_core::escape_iri_fragment`], so a hostile name cannot close the IRI early.
+///
+/// ```
+/// use ikigai_vocab::plan;
+///
+/// assert_eq!(plan::process_iri("linkcheck"), "urn:plan:linkcheck");
+/// assert_eq!(plan::step_iri("linkcheck", 2), "urn:plan:linkcheck:step:2");
+/// assert_eq!(plan::var_iri("linkcheck", "checks"), "urn:plan:linkcheck:var:checks");
+/// assert_eq!(plan::fork_iri("linkcheck", 1), "urn:plan:linkcheck:fork:1");
+/// assert_eq!(plan::input_iri("linkcheck", "ttl"), "urn:plan:linkcheck:input:ttl");
+/// assert_eq!(
+///     plan::argument_iri("linkcheck", 4, "content"),
+///     "urn:plan:linkcheck:step:4:arg:content"
+/// );
+/// // A content-addressed (anonymous) plan keeps its colons; a hostile name does not
+/// // escape the IRI.
+/// assert_eq!(plan::step_iri("sha256:9f2c", 1), "urn:plan:sha256:9f2c:step:1");
+/// assert_eq!(plan::var_iri("p", "x> . <urn:y"), "urn:plan:p:var:x%3E%20.%20%3Curn:y");
+/// ```
+pub mod plan {
+    use ikigai_core::escape_iri_fragment;
+
+    /// The IRI of the plan itself: `urn:plan:{plan-id}`.
+    pub fn process_iri(plan_id: &str) -> String {
+        format!("urn:plan:{}", escape_iri_fragment(plan_id))
+    }
+
+    /// One step, by its 1-based position in the text face: `urn:plan:{plan-id}:step:{n}`.
+    pub fn step_iri(plan_id: &str, n: usize) -> String {
+        format!("{}:step:{n}", process_iri(plan_id))
+    }
+
+    /// A bound name — a step's `ik:binds` or a parameter's `ik:inputName` — which is what
+    /// an `ik:ref` cites: `urn:plan:{plan-id}:var:{name}`.
+    pub fn var_iri(plan_id: &str, name: &str) -> String {
+        format!("{}:var:{}", process_iri(plan_id), escape_iri_fragment(name))
+    }
+
+    /// One fork: `urn:plan:{plan-id}:fork:{n}`.
+    pub fn fork_iri(plan_id: &str, n: usize) -> String {
+        format!("{}:fork:{n}", process_iri(plan_id))
+    }
+
+    /// A declared parameter's ArgSpec node: `urn:plan:{plan-id}:input:{name}` — the same
+    /// `:input:{name}` suffix an endpoint's inputs carry under `urn:ikigai:endpoint:{id}`.
+    pub fn input_iri(plan_id: &str, name: &str) -> String {
+        format!(
+            "{}:input:{}",
+            process_iri(plan_id),
+            escape_iri_fragment(name)
+        )
+    }
+
+    /// One named argument of a step: `urn:plan:{plan-id}:step:{n}:arg:{name}`.
+    pub fn argument_iri(plan_id: &str, n: usize, name: &str) -> String {
+        format!("{}:arg:{}", step_iri(plan_id, n), escape_iri_fragment(name))
+    }
+}
 
 /// Escape a string for use inside a Turtle double-quoted literal.
 fn escape_literal(s: &str) -> String {
@@ -754,6 +834,14 @@ mod tests {
         // IRI-valued property coerced to @id (so a string value is an IRI ref)
         assert_eq!(ctx["cors"]["@type"], "@id");
         assert_eq!(ctx["shape"]["@type"], "@id");
+        // … including the ones that used to be special-cased in the generator, now
+        // carried by a declared rdfs:range: a range change is a context change.
+        for iri_valued in ["requires", "input", "endpoint", "class", "resolves", "ref"] {
+            assert_eq!(ctx[iri_valued]["@type"], "@id", "{iri_valued}");
+        }
+        // a literal-valued term stays plain
+        assert_eq!(ctx["value"], "ik:value");
+        assert_eq!(ctx["binds"], "ik:binds");
         // plain string term
         assert_eq!(ctx["match"], "ik:match");
         // whole-vocab, not just routes — an unrelated term is present
@@ -789,6 +877,107 @@ mod tests {
             "context.jsonld is out of sync with vocabulary.ttl — regenerate it: \
              `python3 crates/ikigai-vocab/context.gen.py`"
         );
+    }
+
+    // The name-set test above cannot see a changed COERCION (a term that moved from a
+    // string to an @id when its rdfs:range was declared). `--check` regenerates to a
+    // string and compares bytes, so this is the test that keeps a range edit honest.
+    #[test]
+    fn context_generator_sees_no_drift() {
+        let out = std::process::Command::new("python3")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/context.gen.py"))
+            .arg("--check")
+            .output()
+            .expect("python3 runs the generator");
+        assert!(
+            out.status.success(),
+            "context.jsonld is stale — regenerate it: `python3 crates/ikigai-vocab/context.gen.py`\n\
+             stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // The deployed /ns is a copy of VOCABULARY; owl:versionInfo is how one deploy is told
+    // apart from the last. It is the crate version, and the release bump must move it.
+    #[test]
+    fn ontology_version_is_the_crate_version() {
+        let declared = VOCABULARY
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("owl:versionInfo \""))
+            .and_then(|rest| rest.split('"').next())
+            .expect("the ontology header declares owl:versionInfo");
+        assert_eq!(
+            declared,
+            env!("CARGO_PKG_VERSION"),
+            "vocabulary.ttl's owl:versionInfo must be bumped with the crate version"
+        );
+    }
+
+    // The endpoint-contract properties are emitted on ik:Action and input nodes too; a
+    // `rdfs:domain ik:Endpoint` on them made every action an endpoint under RDFS
+    // entailment. Keep them domain-free.
+    #[test]
+    fn shared_contract_properties_declare_no_domain() {
+        for term in ["summary", "verb", "output", "input", "requires", "order"] {
+            let block = VOCABULARY
+                .split("\n\n")
+                .find(|b| {
+                    b.trim_start()
+                        .starts_with(&format!("ik:{term} a rdf:Property"))
+                })
+                .unwrap_or_else(|| panic!("ik:{term} is declared"));
+            assert!(
+                !block.contains("rdfs:domain"),
+                "ik:{term} is shared across node kinds and must not declare a domain:\n{block}"
+            );
+        }
+    }
+
+    // Every term carries a label and a comment (the /ns page and the catalog UI read
+    // them); ik:missingOptional once shipped without a label.
+    #[test]
+    fn every_term_has_a_label_and_a_comment() {
+        for block in VOCABULARY.split("\n\n") {
+            let head = block.trim_start();
+            if !(head.starts_with("ik:")
+                && (head.contains(" a rdf:Property") || head.contains(" a rdfs:Class")))
+            {
+                continue;
+            }
+            let name = head.split_whitespace().next().unwrap();
+            assert!(block.contains("rdfs:label"), "{name} has no rdfs:label");
+            assert!(block.contains("rdfs:comment"), "{name} has no rdfs:comment");
+        }
+    }
+
+    #[test]
+    fn bundled_shapes_are_valid_turtle_over_declared_terms() {
+        assert!(parse_count(SHAPES) > 0, "shapes.ttl parses");
+        // Every ik: term a shape constrains (sh:path / sh:targetClass / sh:class) is a
+        // declared vocabulary term — a shape over a term that does not exist would
+        // silently constrain nothing.
+        let declared: std::collections::BTreeSet<&str> = VOCABULARY
+            .lines()
+            .filter_map(|l| {
+                let rest = l.trim_start().strip_prefix("ik:")?;
+                let (name, tail) = rest.split_once(' ')?;
+                (tail.starts_with("a rdf:Property") || tail.starts_with("a rdfs:Class"))
+                    .then_some(name)
+            })
+            .collect();
+        for line in SHAPES.lines() {
+            let line = line.trim();
+            for key in ["sh:path ik:", "sh:targetClass ik:", "sh:class ik:"] {
+                if let Some(rest) = line.strip_prefix(key) {
+                    let term = rest.trim_end_matches([' ', ';', '.']);
+                    assert!(
+                        declared.contains(term),
+                        "shapes.ttl constrains undeclared ik:{term}"
+                    );
+                }
+            }
+        }
     }
 
     // The generator must fail loudly when vocabulary.ttl declares a term twice —

@@ -5,15 +5,19 @@
     "AccessibilityConfig": "ik:AccessibilityConfig",
     "Action": "ik:Action",
     "ActionMatch": "ik:ActionMatch",
+    "Argument": "ik:Argument",
     "Binding": "ik:Binding",
     "CorsPolicy": "ik:CorsPolicy",
     "Directory": "ik:Directory",
     "Endpoint": "ik:Endpoint",
     "Explanation": "ik:Explanation",
     "File": "ik:File",
+    "Fork": "ik:Fork",
     "LlmBackend": "ik:LlmBackend",
+    "Process": "ik:Process",
     "Route": "ik:Route",
     "RouteRequest": "ik:RouteRequest",
+    "Step": "ik:Step",
     "Symlink": "ik:Symlink",
     "Transreptor": "ik:Transreptor",
     "about": {
@@ -41,10 +45,15 @@
       "@id": "ik:appLayer",
       "@type": "@id"
     },
+    "argument": {
+      "@id": "ik:argument",
+      "@type": "@id"
+    },
     "bind": {
       "@id": "ik:bind",
       "@type": "@id"
     },
+    "binds": "ik:binds",
     "byteSize": {
       "@id": "ik:byteSize",
       "@type": "xsd:integer"
@@ -100,13 +109,25 @@
     },
     "explanation": "ik:explanation",
     "fileName": "ik:fileName",
+    "forkOf": {
+      "@id": "ik:forkOf",
+      "@type": "@id"
+    },
     "from": "ik:from",
     "id": "ik:id",
-    "input": "ik:input",
+    "input": {
+      "@id": "ik:input",
+      "@type": "@id"
+    },
     "inputName": "ik:inputName",
+    "join": "ik:join",
     "jsonMode": {
       "@id": "ik:jsonMode",
       "@type": "xsd:boolean"
+    },
+    "mapOver": {
+      "@id": "ik:mapOver",
+      "@type": "@id"
     },
     "match": "ik:match",
     "missingOptional": {
@@ -127,6 +148,10 @@
     "output": "ik:output",
     "params": "ik:params",
     "path": "ik:path",
+    "pipeFrom": {
+      "@id": "ik:pipeFrom",
+      "@type": "@id"
+    },
     "promptKind": "ik:promptKind",
     "reanchored": {
       "@id": "ik:reanchored",
@@ -136,12 +161,27 @@
       "@id": "ik:reduceMotion",
       "@type": "xsd:boolean"
     },
+    "ref": {
+      "@id": "ik:ref",
+      "@type": "@id"
+    },
     "repo": "ik:repo",
     "required": {
       "@id": "ik:required",
       "@type": "xsd:boolean"
     },
-    "requires": "ik:requires",
+    "requires": {
+      "@id": "ik:requires",
+      "@type": "@id"
+    },
+    "resolves": {
+      "@id": "ik:resolves",
+      "@type": "@id"
+    },
+    "result": {
+      "@id": "ik:result",
+      "@type": "@id"
+    },
     "routesTo": {
       "@id": "ik:routesTo",
       "@type": "@id"
@@ -155,6 +195,10 @@
       "@type": "@id"
     },
     "source": "ik:source",
+    "step": {
+      "@id": "ik:step",
+      "@type": "@id"
+    },
     "summary": "ik:summary",
     "target": "ik:target",
     "template": "ik:template",
@@ -175,6 +219,11 @@
       "@id": "ik:underlineLinks",
       "@type": "xsd:boolean"
     },
+    "upstream": {
+      "@id": "ik:upstream",
+      "@type": "@id"
+    },
+    "value": "ik:value",
     "var": "ik:var",
     "vendor": "ik:vendor",
     "verb": "ik:verb",

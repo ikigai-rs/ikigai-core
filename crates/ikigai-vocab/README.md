@@ -36,6 +36,36 @@ When you change `vocabulary.ttl`, regenerate it with
 `python3 crates/ikigai-vocab/context.gen.py`. A test
 (`context_covers_every_vocabulary_term`) fails if the context drifts from the terms.
 
+## Plans: a pipeline as a graph
+
+The vocabulary also carries the **process terms** — `ik:Process`, `ik:Step`,
+`ik:Argument`, `ik:Fork` and their edges (`ik:pipeFrom`, `ik:mapOver`, `ik:forkOf` +
+`ik:order`, `ik:binds` / `ik:ref`) — so a plan, a DAG of requests with
+single-assignment names, is a resource in the same graph as the endpoints it calls:
+stored, diffed, signed, transrepted, and **validated before any step runs**. A plan
+declares its parameters as the same ArgSpec nodes an endpoint does, so a stored plan
+describes itself, the manifold offers it, and a plan can call a plan. It is
+deliberately not Turing complete — no conditional, no loop, no "now"; a conditional in
+a plan is a missing resource, and the environment comes from the kernel.
+
+The text face is the REPL grammar plus names; the graph is that text, skolemized under
+`urn:plan:{id}` (`ikigai_vocab::plan` is the scheme, coded once):
+
+```text
+urls   = source urn:cms:bookmarks root=@root as=text/uri-list
+checks = @urls .. urn:http:reachable ttl=@ttl
+count  = @checks | urn:text:wc count=lines
+stored = sink urn:cms:linkstatus content=@checks checked=@count
+@stored | ( source urn:cms:linkstatus as=text/html ; source urn:cms:linkstatus as=text/turtle )
+```
+
+`SHAPES` (`src/shapes.ttl`) is the SHACL contract: one verb from the five per step, one
+target, one result, an argument by value or by reference but not both, every edge and
+`@name` inside the plan, each name bound once. The shapes are data here — this crate has
+no SHACL engine — and `ikigai-shacl` runs them. `tests/fixtures/plan-linkcheck*.ttl` is
+the CMS link-check pass written as a plan, with three variants that are three kinds of
+edit (a stricter policy, repair instead of removal, a narrower scope) and no new Rust.
+
 ## License
 
 Licensed under either of [MIT](../../LICENSE-MIT) or

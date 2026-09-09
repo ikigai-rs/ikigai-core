@@ -328,3 +328,9 @@ anchor = "fn source_name"
 bullets = [
   "The one place the `InputSource` enum becomes RDF vocabulary — the seam between the neutral core model and its projection.",
 ]
+[[file.note]]
+anchor = "pub mod plan {"
+bullets = [
+  "The plan IRI scheme (`urn:plan:{id}:step:{n}`, `:var:{name}`, `:fork:{n}`) coded once, so the engine that emits a plan and the validator that reads one cannot disagree; every author-supplied segment is escaped on the way in.",
+  "`SHAPES` beside it is the SHACL contract for `ik:Process` / `ik:Step` / `ik:Argument` / `ik:Fork` — data here, run by `ikigai-shacl`; the fixtures under `tests/fixtures` are the CMS link check written as a plan.",
+]

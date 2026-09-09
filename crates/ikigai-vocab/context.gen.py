@@ -3,10 +3,15 @@
 
 The JSON-LD @context is a projection of the vocabulary: every ns# term mapped to
 its short name, with datatype / @id coercions inferred from each property's
-declared rdfs:range. Run this whenever vocabulary.ttl changes — a test
-(`context_covers_every_vocabulary_term`) fails if the two drift apart.
+declared rdfs:range — and ONLY from the range: an IRI-valued property declares
+`rdfs:range rdfs:Resource` (or an ik: class) in the vocabulary rather than being
+special-cased here. Run this whenever vocabulary.ttl changes — two tests fail if
+the two drift apart (`context_covers_every_vocabulary_term` compares the term
+names, `context_generator_sees_no_drift` runs `--check`, which also catches a
+changed coercion).
 
-    python3 crates/ikigai-vocab/context.gen.py
+    python3 crates/ikigai-vocab/context.gen.py          # rewrite context.jsonld
+    python3 crates/ikigai-vocab/context.gen.py --check  # exit 1 if it would change
 
 Fails (exit 1) if vocabulary.ttl declares the same term twice — a later
 declaration would otherwise silently overwrite the earlier one's mapping.
@@ -21,9 +26,6 @@ import sys
 SRC = pathlib.Path(__file__).resolve().parent / "src"
 NS = "https://ikigai-rs.dev/ns#"
 XSD = "http://www.w3.org/2001/XMLSchema#"
-# Properties whose value is an IRI but whose range is left undeclared (or a plain
-# string in the vocab) — coerce them to @id so a string value is read as a reference.
-IRI_PROPS = {"endpoint", "class"}
 
 
 def coercion(name: str, rng: str | None):
@@ -35,8 +37,9 @@ def coercion(name: str, rng: str | None):
         return {"@id": f"ik:{name}", "@type": "xsd:decimal"}
     if rng == "xsd:dateTime":
         return {"@id": f"ik:{name}", "@type": "xsd:dateTime"}
-    if rng == "rdfs:Resource" or (rng and rng.startswith("ik:")) or name in IRI_PROPS:
+    if rng == "rdfs:Resource" or (rng and rng.startswith("ik:")):
         return {"@id": f"ik:{name}", "@type": "@id"}
+    # xsd:string, rdfs:Literal, or undeclared: a plain term (no coercion).
     return f"ik:{name}"
 
 
@@ -74,12 +77,28 @@ def build_context(ttl: str) -> dict:
     return {"@context": ctx}
 
 
-def main() -> None:
+def render(ttl: str) -> str:
+    return json.dumps(build_context(ttl), indent=2, ensure_ascii=False) + "\n"
+
+
+def main(argv: list[str]) -> None:
     ttl = (SRC / "vocabulary.ttl").read_text()
-    out = json.dumps(build_context(ttl), indent=2, ensure_ascii=False) + "\n"
-    (SRC / "context.jsonld").write_text(out)
+    out = render(ttl)
+    target = SRC / "context.jsonld"
+    if argv[1:] == ["--check"]:
+        current = target.read_text() if target.exists() else ""
+        if current != out:
+            sys.exit(
+                "context.gen.py --check: src/context.jsonld is stale — regenerate it: "
+                "python3 crates/ikigai-vocab/context.gen.py"
+            )
+        print("context.jsonld is up to date")
+        return
+    if argv[1:]:
+        sys.exit(f"context.gen.py: unknown arguments {argv[1:]} (only --check is accepted)")
+    target.write_text(out)
     print(f"wrote context.jsonld ({out.count(chr(10))} lines)")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv)
