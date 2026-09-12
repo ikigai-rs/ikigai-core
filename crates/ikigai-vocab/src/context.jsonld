@@ -15,6 +15,7 @@
     "Fork": "ik:Fork",
     "LlmBackend": "ik:LlmBackend",
     "Process": "ik:Process",
+    "Review": "ik:Review",
     "Route": "ik:Route",
     "RouteRequest": "ik:RouteRequest",
     "Step": "ik:Step",
@@ -48,6 +49,10 @@
     "argument": {
       "@id": "ik:argument",
       "@type": "@id"
+    },
+    "batchAt": {
+      "@id": "ik:batchAt",
+      "@type": "xsd:positiveInteger"
     },
     "bind": {
       "@id": "ik:bind",
@@ -145,8 +150,13 @@
       "@id": "ik:orphaned",
       "@type": "xsd:boolean"
     },
+    "orphanedItems": {
+      "@id": "ik:orphanedItems",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "output": "ik:output",
     "params": "ik:params",
+    "passcode": "ik:passcode",
     "path": "ik:path",
     "pipeFrom": {
       "@id": "ik:pipeFrom",
@@ -182,6 +192,10 @@
       "@id": "ik:result",
       "@type": "@id"
     },
+    "reviewedBytes": {
+      "@id": "ik:reviewedBytes",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "routesTo": {
       "@id": "ik:routesTo",
       "@type": "@id"
@@ -212,6 +226,10 @@
     "tools": {
       "@id": "ik:tools",
       "@type": "xsd:boolean"
+    },
+    "totalBytes": {
+      "@id": "ik:totalBytes",
+      "@type": "xsd:nonNegativeInteger"
     },
     "transreptsFrom": "ik:transreptsFrom",
     "transreptsTo": "ik:transreptsTo",

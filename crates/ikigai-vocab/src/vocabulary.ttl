@@ -46,7 +46,7 @@
 <https://ikigai-rs.dev/ns#> a owl:Ontology ;
     rdfs:label "ikigai endpoint vocabulary" ;
     rdfs:comment "Self-description vocabulary for ikigai resource-oriented endpoints, and the process vocabulary that makes a plan (a DAG of requests) a resource in the same graph." ;
-    owl:versionInfo "0.1.68" .
+    owl:versionInfo "0.1.69" .
 
 #
 # Classes
@@ -191,6 +191,11 @@ ik:allDay a rdf:Property ;
     rdfs:label "allDay" ;
     rdfs:comment "Whether an event is all-day (date-valued rather than timed)." .
 
+ik:passcode a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "passcode" ;
+    rdfs:comment "The conference passcode a participant TYPES to join — the human-readable code, distinct from the join URL that already carries a form of it. No well-known term holds it: RFC 7986's CONFERENCE is a URI-valued property, so an iCalendar generator can only bury the code inside the URI and never state it as a field, and a Zoom join URL's pwd= is an encrypted token rather than the code. A string, never a number: leading zeros are significant and providers issue alphanumeric codes. No domain — the subject is an ical:Vevent, an external class, and this vocabulary declares only its own (see ik:annotates)." .
+
 # ---- LLM backends (the urn:llm trait graph) -----------------------------------
 
 ik:LlmBackend a rdfs:Class ;
@@ -200,7 +205,7 @@ ik:LlmBackend a rdfs:Class ;
 ik:model a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "model" ;
-    rdfs:comment "A model identity. On an ik:LlmBackend: the backend's configured default model id, e.g. \"llama3.2:3b\". On an ik:Explanation: the model that derived it — the resolved identity also folded into its ik:versionTag. The domain is deliberately open; the property crosses both graphs." .
+    rdfs:comment "A model identity. On an ik:LlmBackend: the backend's configured default model id, e.g. \"llama3.2:3b\". On an ik:Explanation or an ik:Review: the model that derived it — the resolved identity also folded into its ik:versionTag. The domain is deliberately open; the property crosses all three graphs." .
 
 ik:context a rdf:Property ;
     rdfs:domain ik:LlmBackend ;
@@ -243,6 +248,12 @@ ik:params a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "params" ;
     rdfs:comment "Display-only parameter count, e.g. \"3B\", \"70B\"." .
+
+ik:batchAt a rdf:Property ;
+    rdfs:domain ik:LlmBackend ;
+    rdfs:range xsd:positiveInteger ;
+    rdfs:label "batchAt" ;
+    rdfs:comment "The backend's LOAD SHAPE: the number of concurrent in-flight requests at or above which it is the throughput winner — a continuous-batching server declares the width at which batching starts paying, a serializing backend declares nothing. A routing trait, and the axis on which local backends most differ; no caller can express it by naming a model, so a fan-out asks for it (needs=batchAt<=W). Declared-only and deliberately without a default: no OpenAI-compatible endpoint advertises whether it batches (/v1/models has no field for it, /api/show never mentions it), so there is nothing to discover and nothing to correct a wrong guess with — an operator states a measurement, per provider. Absent means UNKNOWN, and unknown satisfies no batchAt<= requirement: a backend that never claimed to batch must not be handed a fan-out on the strength of its silence. Positive because a declared 0 is a configuration error, not \"batches from nothing\"." .
 
 ik:routesTo a rdf:Property ;
     rdfs:range rdfs:Resource ;
@@ -398,7 +409,7 @@ ik:fileName a rdf:Property ;
 ik:path a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "path" ;
-    rdfs:comment "The root-relative path of a browse node, as decoded text (\"src/lib.rs\") — the IRI carries its percent-encoded form. Absent on a root directory (the root is path-less). Also stamped on archive entries (ik:Explanation, oa:Annotation) so they stay queryable by path after the content moves on." .
+    rdfs:comment "The root-relative path of a browse node, as decoded text (\"src/lib.rs\") — the IRI carries its percent-encoded form. Absent on a root directory (the root is path-less). Also stamped on archive entries (ik:Explanation, ik:Review, oa:Annotation) so they stay queryable by path after the content moves on." .
 
 ik:repo a rdf:Property ;
     rdfs:range xsd:string ;
@@ -429,13 +440,12 @@ ik:about a rdf:Property ;
 ik:contentHash a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "contentHash" ;
-    rdfs:comment "The content version an entry was derived against — sha256:<hex> of a file's bytes, or the merkle construction over a directory's entries. Half of an explanation's archive key; on an annotation, the drift detector (a differing current hash triggers re-anchoring)." .
+    rdfs:comment "The content version an entry was derived against — sha256:<hex> of a file's bytes, or the merkle construction over a directory's entries. Half of an explanation's or a review's archive key; on an annotation, the drift detector (a differing current hash triggers re-anchoring)." .
 
 ik:versionTag a rdf:Property ;
-    rdfs:domain ik:Explanation ;
     rdfs:range xsd:string ;
     rdfs:label "versionTag" ;
-    rdfs:comment "The derivation-identity half of the archive key: {prompt-version}@{model-label}, e.g. \"code-v1@qwen3-coder:30b\" (canned binary stubs involve no model, so no @). A prompt edit or model swap re-keys the archive; old tags stay addressable via version=." .
+    rdfs:comment "The derivation-identity half of the archive key: {prompt-version}@{model-label}, e.g. \"code-v1@qwen3-coder:30b\" (canned binary stubs involve no model, so no @). A prompt edit or model swap re-keys the archive; old tags stay addressable via version=. No domain: the review archive keys its ik:Review entries the same way, and `rdfs:domain ik:Explanation` made every one of them an ik:Explanation under RDFS entailment." .
 
 ik:promptKind a rdf:Property ;
     rdfs:domain ik:Explanation ;
@@ -450,10 +460,9 @@ ik:explanation a rdf:Property ;
     rdfs:comment "The explanation text itself — plain prose. Its presence is what makes an archive entry complete; a subject without it is a miss." .
 
 ik:derivedAt a rdf:Property ;
-    rdfs:domain ik:Explanation ;
     rdfs:range xsd:dateTime ;
     rdfs:label "derivedAt" ;
-    rdfs:comment "When the explanation was derived (UTC). Orders the explain-versions listing, newest first." .
+    rdfs:comment "When an archived derivation ran (UTC). Orders the explain-versions listing, newest first. No domain: stamped on ik:Review entries too, and `rdfs:domain ik:Explanation` typed every one of them an ik:Explanation." .
 
 # ---- annotation drift (what the oa: model lacks) -----------------------------
 # Browse annotations are W3C Web Annotations (oa:) under the house skolemization
@@ -475,6 +484,33 @@ ik:orphaned a rdf:Property ;
     rdfs:range xsd:boolean ;
     rdfs:label "orphaned" ;
     rdfs:comment "The annotation's quote is gone from its target's current content (or the target itself is gone or binary): it still renders, flagged, against its recorded positions — never silently dropped — and is re-searched on later reads, since content may come back." .
+
+# ---- review passes (urn:repo:*:review, urn:repo:pr:*:review) -----------------
+# An LLM review pass over a file or a pull-request diff, archived like the
+# explanation archive above and sharing its keys (ik:contentHash + ik:versionTag)
+# and its stamps (ik:repo, ik:path, ik:model, ik:derivedAt). What a pass adds is
+# its findings — oa:Annotation nodes it prov:generated against the resource it
+# prov:used — and the honesty numbers below.
+
+ik:Review a rdfs:Class ;
+    rdfs:label "Review" ;
+    rdfs:comment "One archived LLM review pass over a browse resource or a pull-request diff, keyed like ik:Explanation by (path, content hash, version tag) under a stable urn:ikigai:browse:review:… IRI. Its findings are the oa:Annotation nodes it prov:generated; the resource it read is its prov:used. Like the explanation archive it is a record rather than a cache: a re-review adds an entry and never replaces one, so a pass stays citable after the content moves on." .
+
+ik:orphanedItems a rdf:Property ;
+    rdfs:domain ik:Review ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "orphanedItems" ;
+    rdfs:comment "How many of a pass's findings could not be anchored: the model quoted something that is not in the reviewed content character-for-character, so the finding was DROPPED rather than minted against a guessed position. The pass's honesty number — zero is the healthy case and a large one says the model is paraphrasing its source. Counted at mint time, which is what distinguishes it from ik:orphaned: that flags one annotation whose quote went missing LATER, as the content drifted under it." .
+
+ik:reviewedBytes a rdf:Property ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "reviewedBytes" ;
+    rdfs:comment "How many bytes of the input a derivation actually fed the model — less than ik:totalBytes when the prompt budget truncated it. Recorded so a pass over a large input cannot silently read as a pass over the whole of it; absent on entries archived before the pair existed, which is not the same as zero. No domain: a truncated prompt is a fact about any LLM-derived entry rather than a review in particular — the explanation archive truncates through the same code and would record the same pair, and a domain here would type its entries ik:Review." .
+
+ik:totalBytes a rdf:Property ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "totalBytes" ;
+    rdfs:comment "The full size in bytes of the input a derivation was asked about — the denominator to ik:reviewedBytes, and equal to it when nothing was truncated. Distinct from ik:byteSize, which is a file's size on disk: an input may be a diff or a rendered section that no file holds. No domain, for the reason stated on ik:reviewedBytes." .
 
 ik:AccessibilityConfig a rdfs:Class ;
     rdfs:label "AccessibilityConfig" ;
