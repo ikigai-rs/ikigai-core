@@ -29,17 +29,21 @@ XSD = "http://www.w3.org/2001/XMLSchema#"
 
 
 def coercion(name: str, rng: str | None):
-    if rng == "xsd:integer":
-        return {"@id": f"ik:{name}", "@type": "xsd:integer"}
-    if rng == "xsd:boolean":
-        return {"@id": f"ik:{name}", "@type": "xsd:boolean"}
-    if rng == "xsd:decimal":
-        return {"@id": f"ik:{name}", "@type": "xsd:decimal"}
-    if rng == "xsd:dateTime":
-        return {"@id": f"ik:{name}", "@type": "xsd:dateTime"}
+    """One property's JSON-LD term entry, from its declared rdfs:range and nothing else.
+
+    An IRI-valued range (rdfs:Resource, or an ik: class) coerces to @id. Every other
+    xsd datatype coerces to ITSELF rather than being enumerated here, so a range this
+    file has never seen (xsd:nonNegativeInteger, xsd:positiveInteger, xsd:anyURI …)
+    is carried the day the vocabulary declares it — the point of driving the context
+    off the range is that the vocabulary, not the generator, decides.
+
+    xsd:string, rdfs:Literal and an undeclared range stay plain terms: a JSON string
+    is already what they mean, and a coercion would only add noise.
+    """
     if rng == "rdfs:Resource" or (rng and rng.startswith("ik:")):
         return {"@id": f"ik:{name}", "@type": "@id"}
-    # xsd:string, rdfs:Literal, or undeclared: a plain term (no coercion).
+    if rng and rng.startswith("xsd:") and rng != "xsd:string":
+        return {"@id": f"ik:{name}", "@type": rng}
     return f"ik:{name}"
 
 

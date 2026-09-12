@@ -951,6 +951,110 @@ mod tests {
         }
     }
 
+    /// The six terms the conformance wave found: every `ik:` name a shipped module
+    /// SERVES in its Turtle face that this vocabulary did not define. Each was pinned
+    /// as an exact finding in its own module's conformance test, so this list is the
+    /// other half of three pins in three repos — `ikigai-llm`'s
+    /// `batch_at_is_the_one_term_the_vocabulary_lacks`, `ikigai-meeting`'s `conforms`,
+    /// and `ikigai-browse`'s `the_review_graph_uses_four_terms_the_vocabulary_owes_it`
+    /// (whose `browse-review` opt-out exists ONLY because of the four).
+    ///
+    /// Those pins go red on the first CI run that resolves the version carrying these,
+    /// by design: red there means the term arrived. Asserted here so the day someone
+    /// deletes one from `vocabulary.ttl`, this crate says which face it breaks rather
+    /// than three other repos discovering it separately.
+    #[test]
+    fn the_terms_three_modules_serve_are_defined() {
+        // Asserted the way `ikigai_conformance::rdf::is_defined` asks it — over PARSED
+        // subjects under the namespace, not a substring of the file. A term declared in
+        // syntax the parser does not accept as a subject reads as present to `contains`
+        // and as missing to every module's VOCABULARY check.
+        let subjects: std::collections::BTreeSet<String> = oxttl::TurtleParser::new()
+            .for_reader(VOCABULARY.as_bytes())
+            .map(|t| t.expect("valid turtle").subject.to_string())
+            .collect();
+        for (term, served_by) in [
+            (
+                "batchAt",
+                "ikigai-llm, on an ik:LlmBackend in urn:llm:models",
+            ),
+            (
+                "passcode",
+                "ikigai-meeting, on the ical:Vevent of urn:meeting:zoom:*",
+            ),
+            ("Review", "ikigai-browse, the review pass's archive entry"),
+            (
+                "orphanedItems",
+                "ikigai-browse, unanchorable findings of a pass",
+            ),
+            (
+                "reviewedBytes",
+                "ikigai-browse, prompt-truncation accounting",
+            ),
+            ("totalBytes", "ikigai-browse, prompt-truncation accounting"),
+        ] {
+            assert!(
+                subjects.contains(&format!("<{NS}{term}>")),
+                "ik:{term} is served today by {served_by} — without it that face \
+                 emits an undefined term again"
+            );
+        }
+    }
+
+    /// The archive keys and stamps are shared by `ik:Explanation` and `ik:Review`, and
+    /// a `rdfs:domain ik:Explanation` on them typed every review entry an explanation
+    /// under RDFS entailment — the V-1 mistake (`rdfs:domain ik:Endpoint` on the four
+    /// contract properties) repeated one archive over. The review face has emitted
+    /// `ik:versionTag` and `ik:derivedAt` on `ik:Review` nodes since it shipped; the
+    /// domains came off when `ik:Review` was declared. Keep them off.
+    #[test]
+    fn archive_properties_shared_with_review_declare_no_domain() {
+        for term in [
+            "versionTag",
+            "derivedAt",
+            "contentHash",
+            "model",
+            "path",
+            "repo",
+        ] {
+            let block = VOCABULARY
+                .split("\n\n")
+                .find(|b| {
+                    b.trim_start()
+                        .starts_with(&format!("ik:{term} a rdf:Property"))
+                })
+                .unwrap_or_else(|| panic!("ik:{term} is declared"));
+            // A DECLARATION line, not a mention: these comments say in prose which
+            // domain came off, and a substring match on the whole block would read
+            // that explanation as the axiom it warns about.
+            assert!(
+                !block
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("rdfs:domain")),
+                "ik:{term} is stamped on ik:Explanation AND ik:Review entries, so a \
+                 domain types one as the other:\n{block}"
+            );
+        }
+    }
+
+    /// The coercion is a function of the declared range, so a range the generator has
+    /// never seen must still be carried — `xsd:nonNegativeInteger` and
+    /// `xsd:positiveInteger` arrived with the review and LLM terms and neither was
+    /// enumerated in `context.gen.py`. (`ikigai-browse` emits its counts with the
+    /// `^^xsd:nonNegativeInteger` tag already, so the two faces agree term-for-term.)
+    #[test]
+    fn a_range_the_generator_never_enumerated_still_coerces() {
+        let ctx: serde_json::Value = serde_json::from_str(CONTEXT).unwrap();
+        let ctx = &ctx["@context"];
+        assert_eq!(ctx["batchAt"]["@type"], "xsd:positiveInteger");
+        for counted in ["orphanedItems", "reviewedBytes", "totalBytes"] {
+            assert_eq!(ctx[counted]["@type"], "xsd:nonNegativeInteger", "{counted}");
+        }
+        // xsd:string stays a plain term, and a class is still just its ik: name.
+        assert_eq!(ctx["passcode"], "ik:passcode");
+        assert_eq!(ctx["Review"], "ik:Review");
+    }
+
     #[test]
     fn bundled_shapes_are_valid_turtle_over_declared_terms() {
         assert!(parse_count(SHAPES) > 0, "shapes.ttl parses");
