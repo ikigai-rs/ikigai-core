@@ -18,14 +18,19 @@ compiles to WebAssembly. The CLI and its transports live in
 |-------|------|
 | `ikigai-core`  | identity, representations, resolution, caching, capabilities |
 | `ikigai-vocab` | self-description vocabulary |
-| `ikigai-store` | the persistent RDF store — **unfinished**, and `publish = false` until it is (an in-memory placeholder stands in) |
 
-Capability-gated file/store behaviour now lives in its own module crate,
-[`ikigai-fs`](https://github.com/ikigai-rs/ikigai-fs) (published; native `std::fs`
-+ browser `localStorage`), linked by hosts like the other module crates. SHACL
-validation likewise left this workspace for
-[`ikigai-shacl`](https://github.com/ikigai-rs/ikigai-shacl) (the placeholder crate
-was removed in #52); the table above listed it long after it was gone.
+That is the whole workspace: the kernel and the vocabulary it describes itself with.
+Every module crate that once lived here has moved to its own repo — capability-gated
+file behaviour to [`ikigai-fs`](https://github.com/ikigai-rs/ikigai-fs) (published;
+native `std::fs` + browser `localStorage`), SHACL validation to
+[`ikigai-shacl`](https://github.com/ikigai-rs/ikigai-shacl) (#52), and the persistent
+RDF store to [`ikigai-store`](https://github.com/ikigai-rs/ikigai-store) (2026-09-13,
+history carried across), which is unfinished and `publish = false` until it is the
+durable store it is named for.
+
+⚠ This table is a claim about the workspace that nothing checks — `ikigai-shacl` sat in
+it for roughly two months after #52 removed the crate. Diff it against `crates/*` when
+you touch either.
 
 ## Status
 Pre-alpha scaffold. APIs are not yet defined.

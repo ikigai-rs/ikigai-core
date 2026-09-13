@@ -312,30 +312,6 @@ bullets = [
   "The generation map is keyed by thread NAME, and a name can derive from caller input — the same exhaustion vector as the entry map with a different key. Forgetting is safe exactly when nothing pins the thread: a generation is only ever compared against an entry's pin.",
 ]
 
-# --------------------------------------------------------------- ikigai-store
-[[file]]
-path = "crates/ikigai-store/src/lib.rs"
-title = "ikigai-store / lib.rs"
-subtitle = "The persistent RDF store — UNFINISHED; this file is the placeholder standing in for it"
-[[file.note]]
-anchor = "pub struct SparqlEndpoint"
-bullets = [
-  "★ Read the crate docs first: `ikigai-store` is meant to own DURABLE RDF — a dataset opened from a path that survives a restart. That backend is not built. This struct is the June 2026 M2 scaffold standing in for it, and it is `publish = false` until it is the thing it is named for.",
-  "Wraps an in-memory Oxigraph store (shared via `Arc`). Synchronous — in-memory evaluation needs no async runtime.",
-  "In-memory today: Oxigraph with `default-features = false` (no RocksDB), plus `js` on wasm. The durable backend costs a native compile, not the wasm face — Oxigraph target-gates `oxrocksdb-sys` off wasm entirely.",
-]
-[[file.note]]
-anchor = "fn evaluate(&self, query: &str)"
-bullets = [
-  "The query result type drives the representation: SELECT/ASK → `application/sparql-results+json`; CONSTRUCT/DESCRIBE → `application/n-triples`.",
-]
-[[file.note]]
-anchor = "impl Endpoint for SparqlEndpoint"
-bullets = [
-  "Only `Source` serves data — `Meta` is routed by the kernel through the transform layer, so the endpoint never hand-rolls its own description rendering.",
-  "`describe()` declares the `query` argument and both output types — machine-readable, and projected to RDF by the same Meta path.",
-]
-
 # --------------------------------------------------------------- ikigai-vocab
 [[file]]
 path = "crates/ikigai-vocab/src/lib.rs"
