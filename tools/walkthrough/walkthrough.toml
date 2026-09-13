@@ -284,6 +284,34 @@ bullets = [
   "Each now carries a full `Description` (verbs, the `in` argument, output type), so `describe` and the contract-driven REPL routing have something to read.",
 ]
 
+# ---------------------------------------------------------------- ikigai-core
+[[file]]
+path = "crates/ikigai-core/src/cache.rs"
+title = "ikigai-core / cache.rs"
+subtitle = "The representation cache: validity, bound, policy"
+[[file.note]]
+anchor = "pub struct CacheKey"
+bullets = [
+  "The key is the request id AND a fingerprint of the authority that computed it. A cache hit is served before the endpoint runs, so a key without the capability half would let one authority read another's cached result, skipping the check entirely.",
+]
+[[file.note]]
+anchor = "pub trait CachePolicy"
+bullets = [
+  "Admission and eviction are pluggable; validity is not. A policy is consulted on the way in and on the way out, never on the way back — so no policy, however written, can make the kernel serve a representation whose golden thread was cut.",
+  "`capacity()` is a real default (4096 entries / 64 MiB), not `unbounded`: the process that most needs a ceiling is the edge, and it is the one nobody remembers to configure.",
+]
+[[file.note]]
+anchor = "pub struct CutSnapshot"
+bullets = [
+  "Taken before a request invokes anything. Pinning an entry's threads to the generations read AFTER the invocation returns files a representation built from pre-cut state as valid against the very cut that should have invalidated it — silently, and until some later cut.",
+  "The check is per-thread, not global: only a cut to a thread this result depends on declines the store, so a busy host writing elsewhere does not stop expensive results from ever being cached.",
+]
+[[file.note]]
+anchor = "fn sweep_generations"
+bullets = [
+  "The generation map is keyed by thread NAME, and a name can derive from caller input — the same exhaustion vector as the entry map with a different key. Forgetting is safe exactly when nothing pins the thread: a generation is only ever compared against an entry's pin.",
+]
+
 # --------------------------------------------------------------- ikigai-store
 [[file]]
 path = "crates/ikigai-store/src/lib.rs"

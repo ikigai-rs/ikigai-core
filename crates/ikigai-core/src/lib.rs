@@ -21,6 +21,10 @@
 //! resource without the caller knowing — the mechanism that lets a namespace
 //! migration be a transition window instead of a flag day.
 //!
+//! [`cache`] holds what the kernel keeps: the representation cache with its
+//! golden-thread validity, its bound, and the [`CachePolicy`] a host installs to
+//! decide what is worth keeping.
+//!
 //! Beside the resolution spine, [`config`] holds the config-home path algebra —
 //! pure path computation, no I/O — so hosts, modules and tools that do not depend
 //! on one another still agree on where configuration lives.
@@ -58,6 +62,7 @@
 pub mod alias;
 mod arg;
 pub mod builtins;
+pub mod cache;
 mod capability;
 pub mod config;
 mod content;
@@ -81,6 +86,10 @@ pub use alias::{
     DEFAULT_MAX_HOPS,
 };
 pub use arg::ArgRef;
+pub use cache::{
+    CacheBound, CacheEntry, CacheKey, CachePolicy, CostAware, CutSnapshot, EntryFacts, Fifo, Lru,
+    ReprCache,
+};
 pub use capability::Capability;
 pub use content::{ContentId, ContentIdError};
 pub use describe::{ActionSpec, ArgSpec, Description, EndpointKind, InputSource, Transreption};
