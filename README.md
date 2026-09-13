@@ -18,12 +18,14 @@ compiles to WebAssembly. The CLI and its transports live in
 |-------|------|
 | `ikigai-core`  | identity, representations, resolution, caching, capabilities |
 | `ikigai-vocab` | self-description vocabulary |
-| `ikigai-store` | RDF/SPARQL endpoint (Oxigraph-backed) |
-| `ikigai-shacl` | SHACL validation endpoint |
+| `ikigai-store` | the persistent RDF store — **unfinished**, and `publish = false` until it is (an in-memory placeholder stands in) |
 
 Capability-gated file/store behaviour now lives in its own module crate,
 [`ikigai-fs`](https://github.com/ikigai-rs/ikigai-fs) (published; native `std::fs`
-+ browser `localStorage`), linked by hosts like the other module crates.
++ browser `localStorage`), linked by hosts like the other module crates. SHACL
+validation likewise left this workspace for
+[`ikigai-shacl`](https://github.com/ikigai-rs/ikigai-shacl) (the placeholder crate
+was removed in #52); the table above listed it long after it was gone.
 
 ## Status
 Pre-alpha scaffold. APIs are not yet defined.
