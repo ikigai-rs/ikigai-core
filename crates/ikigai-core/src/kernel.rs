@@ -19,6 +19,16 @@
 //! `At` entry is recomputed. A kernel with no clock simply never caches `At`
 //! results, staying fully time-independent (and so deterministic for replay).
 //!
+//! What the cache *keeps* is a separate question from what is *valid*, and it lives
+//! in [`cache`](crate::cache): a bounded store under a pluggable
+//! [`CachePolicy`](crate::CachePolicy) (LRU at 4096 entries / 64 MiB by default,
+//! replaceable via [`with_cache_policy`](Kernel::with_cache_policy)). A policy
+//! decides admission and eviction only — it is never consulted on the serving path,
+//! so nothing it does can make the kernel hand back a cut or expired representation.
+//! That module also carries the **cut sequence** that closes the lost-cut race: a
+//! result computed before a cut it should have seen is declined rather than filed
+//! against the post-cut generation.
+//!
 //! The kernel also reserves the **`urn:kernel:*`** namespace for its own
 //! operations as capability-gated resources, resolved intrinsically before the
 //! root space: `sink urn:kernel:cut <thread>` cuts a thread (so an endpoint or a
@@ -38,6 +48,7 @@ use async_trait::async_trait;
 
 use crate::alias::{Alias, AliasHop, AliasTable, Canonical};
 use crate::arg::ArgRef;
+use crate::cache::{CacheKey, CachePolicy, ReprCache};
 use crate::capability::Capability;
 use crate::describe::Description;
 use crate::endpoint::{Invocation, Issuer, Spawner};
@@ -45,7 +56,7 @@ use crate::error::{Error, Result};
 use crate::iri::Iri;
 use crate::meta::MetaRenderer;
 use crate::repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
-use crate::request::{Request, RequestId};
+use crate::request::Request;
 use crate::select::{ActionMatch, TransreptionStep};
 use crate::space::{Fallback, Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
@@ -291,17 +302,18 @@ fn thread_label() -> String {
 /// caches cacheable representations by their content-addressed request id.
 pub struct Kernel {
     root: Arc<dyn Space>,
-    /// Cacheable representations, keyed by `(request id, capability fingerprint)`. The
-    /// capability is part of the key so a cached entry is only ever served back to the
-    /// same authority that computed it — a different (e.g. narrower) capability misses
-    /// and must pass the endpoint's own check. Without this, a cache hit is served
-    /// *before* the endpoint runs (see [`issue_inner`](Self::issue_inner)), which would
-    /// skip the capability check and let one authority read another's cached result.
-    cache: Mutex<HashMap<(RequestId, u64), CacheEntry>>,
-    /// Current generation of each golden thread (absent ⇒ generation 0).
-    /// [`Kernel::cut`] bumps a thread's generation, invalidating every cache entry
-    /// pinned to an earlier one.
-    generations: Mutex<HashMap<Thread, u64>>,
+    /// Cacheable representations and the golden-thread generations that keep them
+    /// valid — see [`cache`](crate::cache) for the bound, the pluggable policy, and
+    /// the cut-sequence check that closes the lost-cut race.
+    ///
+    /// Entries are keyed by `(request id, capability fingerprint)`. The capability is
+    /// part of the key so a cached entry is only ever served back to the same
+    /// authority that computed it — a different (e.g. narrower) capability misses and
+    /// must pass the endpoint's own check. Without this, a cache hit is served
+    /// *before* the endpoint runs (see [`issue_inner`](Self::issue_inner)), which
+    /// would skip the capability check and let one authority read another's cached
+    /// result.
+    cache: ReprCache,
     meta: Option<Arc<dyn MetaRenderer>>,
     /// Source of "now" for time-based [`Expiry::At`] deadlines. Absent ⇒ the
     /// kernel cannot evaluate a deadline, so it declines to cache `At` results
@@ -357,25 +369,12 @@ struct ResolutionSample {
     cache_hit: bool,
 }
 
-/// A cached representation plus the golden-thread edges that keep it valid: each
-/// `(thread, generation)` records the generation that thread held when the entry
-/// was stored. The entry is valid only while every thread is still at that
-/// generation — cut any of them and it's stale.
-struct CacheEntry {
-    /// The IRI of the request that produced this entry — kept so `urn:kernel:cache`
-    /// can name what's cached (the cache is otherwise keyed by a content hash).
-    target: String,
-    representation: Representation,
-    edges: Vec<(Thread, u64)>,
-}
-
 impl Kernel {
     /// A kernel over the given root space.
     pub fn new(root: Arc<dyn Space>) -> Self {
         Kernel {
             root,
-            cache: Mutex::new(HashMap::new()),
-            generations: Mutex::new(HashMap::new()),
+            cache: ReprCache::default(),
             meta: None,
             clock: None,
             spawner: None,
@@ -394,8 +393,7 @@ impl Kernel {
     pub fn with_meta_renderer(root: Arc<dyn Space>, renderer: Arc<dyn MetaRenderer>) -> Self {
         Kernel {
             root,
-            cache: Mutex::new(HashMap::new()),
-            generations: Mutex::new(HashMap::new()),
+            cache: ReprCache::default(),
             meta: Some(renderer),
             clock: None,
             spawner: None,
@@ -613,6 +611,35 @@ impl Kernel {
         self
     }
 
+    /// Install the cache's admission and eviction [`CachePolicy`] (builder) —
+    /// configured at execution time, beside the clock and the meta renderer, because
+    /// the right trade is the host's to make: an edge process facing strangers, a
+    /// batch job that wants everything it computed, and a browser tab want different
+    /// ceilings.
+    ///
+    /// A policy decides what is *worth keeping*, never what is *correct to serve*:
+    /// golden threads and expiry are evaluated on the serving path, where no policy
+    /// is consulted. Absent ⇒ [`Lru`](crate::Lru) at its
+    /// [default bound](crate::CacheBound::default) (4096 entries, 64 MiB), which is a
+    /// change from the unbounded behaviour before 0.1.70 — a long-lived process now
+    /// evicts instead of growing.
+    ///
+    /// Call it before the kernel is used: it replaces the cache, so anything already
+    /// stored is dropped.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use ikigai_core::{CacheBound, Kernel, Lru, Space};
+    /// # fn example(root: Arc<dyn Space>) {
+    /// let kernel = Kernel::new(root)
+    ///     .with_cache_policy(Arc::new(Lru::with_bound(CacheBound::new(256, 8 << 20))));
+    /// # let _ = kernel; }
+    /// ```
+    pub fn with_cache_policy(mut self, policy: Arc<dyn CachePolicy>) -> Self {
+        self.cache = ReprCache::new(policy);
+        self
+    }
+
     /// Install a logical-rewrite table (builder): stable logical names resolve to
     /// different backing resources, invisibly to the caller. `urn:fn:toUpper` →
     /// `urn:iki:fn:toUpper` for a namespace migration; `urn:log:config` →
@@ -716,17 +743,25 @@ impl Kernel {
         self.clock.as_ref().map(|clock| clock.now())
     }
 
+    /// Milliseconds elapsed since `started`, per the injected clock — the honest
+    /// proxy for what a result cost to produce, and the only cost signal a
+    /// [`CachePolicy`] gets. `None` without a clock (or without a start stamp): an
+    /// unmeasured cost must not read as a zero cost.
+    fn elapsed_since(&self, started: Option<Time>) -> Option<u64> {
+        match (started, self.clock.as_ref()) {
+            (Some(start), Some(clock)) => {
+                Some(clock.now().as_millis().saturating_sub(start.as_millis()))
+            }
+            _ => None,
+        }
+    }
+
     /// Record one resolution into the rolling constraint window (always-on, bounded
     /// to [`CONSTRAINT_WINDOW`]). `started` is the pre-resolution stamp; the elapsed
     /// compute time is `now − started` (only when the kernel has a clock). A cache
     /// hit is logged but its elapsed is left out of the constraint total.
     fn record_resolution(&self, request: &Request, started: Option<Time>, cache_hit: bool) {
-        let elapsed_ms = match (started, self.clock.as_ref()) {
-            (Some(start), Some(clock)) => {
-                Some(clock.now().as_millis().saturating_sub(start.as_millis()))
-            }
-            _ => None,
-        };
+        let elapsed_ms = self.elapsed_since(started);
         let mut window = self.constraint.lock().expect("constraint lock");
         if window.len() >= CONSTRAINT_WINDOW {
             window.pop_front();
@@ -974,6 +1009,15 @@ impl Kernel {
         incoming: Option<Provenance>,
         trace: Option<TraceScope>,
     ) -> Result<Representation> {
+        // ★ THE CUT SNAPSHOT, BEFORE ANYTHING ELSE. Everything this request is
+        // about to observe is state as of *now*; a cut that lands after this point
+        // invalidates whatever comes back, and `ReprCache::store` declines the entry
+        // rather than pinning it to a generation the result never saw. Taken here
+        // rather than beside the invocation because resolution reads state too, and
+        // an over-early snapshot only ever costs a decline (never caching is safe;
+        // caching a stale answer is not). See `cache.rs` for the race it closes.
+        let taken = self.cache.snapshot();
+
         // ★ LOGICAL REWRITE, FIRST. A rewrite the kernel holds the table for is
         // applied before ANYTHING else reads the target: before the `urn:kernel:*`
         // dispatch, before the request id that keys the representation cache, before
@@ -1018,11 +1062,11 @@ impl Kernel {
         // participates in the cache, so a re-resolution serves `[cached]`; the live
         // introspection builtins return `Always` and are simply never stored.
         if let Some(op) = request.target.as_str().strip_prefix(KERNEL_NS) {
-            let id = request.id();
-            let cap_key = capability_key(capability);
+            let key = CacheKey::new(request.id(), capability_key(capability));
             let cacheable_verb = request.verb.is_cacheable();
+            let started = self.now_stamp();
             if cacheable_verb {
-                if let Some(cached) = self.valid_cached(&id, cap_key) {
+                if let Some(cached) = self.cache.get(&key, started) {
                     return Ok(cached);
                 }
             }
@@ -1034,14 +1078,12 @@ impl Kernel {
                     Expiry::At(_) => self.clock.is_some(),
                 };
             if storable {
-                let edges = self.edges_for(representation.threads());
-                self.cache.lock().expect("cache lock").insert(
-                    (id, cap_key),
-                    CacheEntry {
-                        target: request.target.as_str().to_string(),
-                        representation: representation.clone(),
-                        edges,
-                    },
+                self.cache.store(
+                    key,
+                    request.target.as_str().to_string(),
+                    representation.clone(),
+                    taken,
+                    self.elapsed_since(started),
                 );
             }
             return Ok(representation);
@@ -1130,9 +1172,12 @@ impl Kernel {
         // Representation-cache lookup (idempotent verbs only): serve a cached entry
         // whose golden-thread edges are all still current. A cut entry is evicted
         // here and recomputed below. The guard is dropped before any await.
-        let cap_key = capability_key(capability);
+        let key = CacheKey::new(id, capability_key(capability));
         if cacheable_verb {
-            if let Some(cached) = self.valid_cached(&id, cap_key) {
+            // Freshness is evaluated as of `started` — the instant this resolution
+            // began, one clock reading shared with the trace event and the
+            // constraint window rather than a fresh read per lookup.
+            if let Some(cached) = self.cache.get(&key, started) {
                 self.trace_record(
                     &trace,
                     &request,
@@ -1254,66 +1299,17 @@ impl Kernel {
                 Expiry::At(_) => self.clock.is_some(),
             };
         if storable {
-            let edges = self.edges_for(representation.threads());
-            self.cache.lock().expect("cache lock").insert(
-                (id, cap_key),
-                CacheEntry {
-                    target: request.target.as_str().to_string(),
-                    representation: representation.clone(),
-                    edges,
-                },
+            // The store may still decline: `taken` predates the invocation, so a cut
+            // that landed while it ran means this representation is already stale.
+            self.cache.store(
+                key,
+                request.target.as_str().to_string(),
+                representation.clone(),
+                taken,
+                self.elapsed_since(started),
             );
         }
         Ok(representation)
-    }
-
-    /// Whether a cache entry is valid *right now*: its golden-thread edges are all
-    /// still at their pinned generation (nothing it depends on has been cut) AND,
-    /// if it carries a time deadline, that deadline is still in the future per the
-    /// injected clock. (`At` is only ever stored when a clock is present, so a
-    /// missing clock here conservatively treats a deadline as expired.) The single
-    /// source of truth shared by the serving path ([`valid_cached`](Self::valid_cached),
-    /// which evicts on staleness) and the read-only probe ([`is_cached`](Self::is_cached)),
-    /// so the two can never disagree.
-    fn entry_is_valid(&self, entry: &CacheEntry) -> bool {
-        let gens = self.generations.lock().expect("generations lock");
-        let edges_current = entry
-            .edges
-            .iter()
-            .all(|(thread, gen)| generation_of(&gens, thread) == *gen);
-        let unexpired = match entry.representation.expiry {
-            Expiry::At(deadline) => self.clock.as_ref().is_some_and(|c| c.now() < deadline),
-            _ => true,
-        };
-        edges_current && unexpired
-    }
-
-    /// A cached representation for `id` that is still [valid](Self::entry_is_valid).
-    /// A stale entry (a thread cut, or its deadline passed) is evicted and `None`
-    /// returned, so the caller recomputes.
-    fn valid_cached(&self, id: &RequestId, cap_key: u64) -> Option<Representation> {
-        let mut cache = self.cache.lock().expect("cache lock");
-        let key = (*id, cap_key);
-        let outcome = cache
-            .get(&key)
-            .map(|entry| (self.entry_is_valid(entry), entry.representation.clone()));
-        match outcome {
-            None => None,
-            Some((true, representation)) => Some(representation),
-            Some((false, _)) => {
-                cache.remove(&key);
-                None
-            }
-        }
-    }
-
-    /// Pin each thread to its current generation, forming an entry's validity edges.
-    fn edges_for(&self, threads: &BTreeSet<Thread>) -> Vec<(Thread, u64)> {
-        let gens = self.generations.lock().expect("generations lock");
-        threads
-            .iter()
-            .map(|thread| (thread.clone(), generation_of(&gens, thread)))
-            .collect()
     }
 
     /// Cut a golden thread: invalidate every cached representation that depends on
@@ -1321,9 +1317,11 @@ impl Kernel {
     /// thread's generation; dependent entries are evicted lazily on next lookup.
     /// A `Sink` that mutates a resource cuts the thread named after it; an external
     /// watcher cuts it on change.
+    ///
+    /// The cut is also *sequenced*, so a request already in flight cannot file a
+    /// result that predates it (see [`cache`](crate::cache)).
     pub fn cut(&self, thread: impl Into<Thread>) {
-        let mut gens = self.generations.lock().expect("generations lock");
-        *gens.entry(thread.into()).or_insert(0) += 1;
+        self.cache.cut(thread.into());
     }
 
     /// Resolve a `urn:kernel:*` request — a kernel operation exposed as a
@@ -1403,22 +1401,16 @@ impl Kernel {
             // threads it depends on (cut any of them and this entry recomputes).
             ("cache", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
-                let mut rows: Vec<(String, String, usize, usize)> = {
-                    let cache = self.cache.lock().expect("cache lock");
-                    cache
-                        .values()
-                        .map(|e| {
-                            (
-                                e.target.clone(),
-                                e.representation.repr_type.media_type.clone(),
-                                e.representation.bytes.len(),
-                                e.edges.len(),
-                            )
-                        })
-                        .collect()
-                };
+                let mut rows = self.cache.rows();
                 rows.sort();
-                let mut body = format!("cache\n  entries  {}\n", rows.len());
+                let bound = self.cache.bound();
+                let mut body = format!(
+                    "cache\n  entries  {} / {}\n  size     {} / {}\n",
+                    rows.len(),
+                    bound.max_entries,
+                    human_size(self.cache.bytes()),
+                    human_size(bound.max_bytes),
+                );
                 let width = rows
                     .iter()
                     .map(|r| r.0.chars().count())
@@ -1441,15 +1433,14 @@ impl Kernel {
             // Inspect the golden threads that have been cut, and how many times.
             ("threads", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
-                let gens = self.generations.lock().expect("generations lock");
+                let mut rows = self.cache.generation_rows();
                 let mut body = String::from("threads (cut generations)\n");
-                if gens.is_empty() {
+                if rows.is_empty() {
                     body.push_str("  (none cut)\n");
                 } else {
-                    let mut rows: Vec<_> = gens.iter().collect();
-                    rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                    rows.sort();
                     for (thread, generation) in rows {
-                        body.push_str(&format!("  {}  gen {generation}\n", thread.as_str()));
+                        body.push_str(&format!("  {thread}  gen {generation}\n"));
                     }
                 }
                 Ok(kernel_text(body))
@@ -1857,7 +1848,7 @@ impl Kernel {
 
     /// The number of representations currently cached (diagnostics/tests).
     pub fn cache_len(&self) -> usize {
-        self.cache.lock().expect("cache lock").len()
+        self.cache.len()
     }
 
     /// Whether issuing `request` right now would be served from the cache — a
@@ -1897,10 +1888,10 @@ impl Kernel {
         // serve. Keyed by capability too, so the probe answers "cached *for this
         // authority*" — consistent with what issuing under it would actually serve.
         // Does not evict — eviction happens on the serving path.
-        let cache = self.cache.lock().expect("cache lock");
-        cache
-            .get(&(id, capability_key(capability)))
-            .is_some_and(|entry| self.entry_is_valid(entry))
+        self.cache.probe(
+            &CacheKey::new(id, capability_key(capability)),
+            self.now_stamp(),
+        )
     }
 
     /// Enumerate this kernel's bindings, if the root space supports enumeration:
@@ -1938,11 +1929,6 @@ impl Kernel {
             Arc::clone(&self.root),
         ])
     }
-}
-
-/// The current generation of `thread` (absent ⇒ 0).
-fn generation_of(generations: &HashMap<Thread, u64>, thread: &Thread) -> u64 {
-    generations.get(thread).copied().unwrap_or(0)
 }
 
 /// A stable fingerprint of a capability's authority, used to namespace cache entries.
@@ -3343,6 +3329,182 @@ mod tests {
         assert!(
             !kernel.is_cached(&req(), &cap),
             "cutting the inherited thread invalidates it"
+        );
+    }
+
+    /// ★ THE LOST-CUT RACE. A cut that lands *while an invocation is in flight* must
+    /// not be consumed by the very entry it should have invalidated. The endpoint
+    /// observed state before the cut, so what it returns is already stale; pinning
+    /// the entry's edges to the generation read AFTER the invocation returns files
+    /// that stale representation as fresh, and it stays fresh until some later cut.
+    ///
+    /// This has to be a race, not a sequence — a cut between two synchronous calls
+    /// reproduces nothing. The endpoint blocks on a channel the test controls, the
+    /// cut lands inside that window, and only then is the invocation released.
+    #[test]
+    fn a_cut_during_an_in_flight_invocation_is_not_consumed_by_the_entry_it_invalidates() {
+        use std::sync::mpsc;
+
+        struct Blocking {
+            entered: mpsc::SyncSender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+            calls: Arc<AtomicU32>,
+        }
+
+        #[async_trait]
+        impl Endpoint for Blocking {
+            async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                // Announce that the endpoint is inside the invocation, then hold it
+                // open. Everything this result is built from is state as of THIS
+                // moment — before the cut the test is about to make.
+                self.entered.send(()).expect("test receiver alive");
+                self.release
+                    .lock()
+                    .expect("release lock")
+                    .recv()
+                    .expect("released");
+                Ok(Representation::new(
+                    ReprType::new("text/plain"),
+                    b"observed-before-the-cut".to_vec(),
+                )
+                .cacheable()
+                .depends_on("urn:data:state"))
+            }
+            fn name(&self) -> &str {
+                "blocking"
+            }
+        }
+
+        let (entered_tx, entered_rx) = mpsc::sync_channel(4);
+        let (release_tx, release_rx) = mpsc::channel();
+        let calls = Arc::new(AtomicU32::new(0));
+        let space = EndpointSpace::new().bind(
+            Exact::new("urn:test:slow"),
+            Blocking {
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+                calls: Arc::clone(&calls),
+            },
+        );
+        let kernel = Kernel::new(Arc::new(space));
+        let req = || Request::new(Verb::Source, iri("urn:test:slow"));
+
+        std::thread::scope(|scope| {
+            let kernel = &kernel;
+            let reader = scope.spawn(move || {
+                block_on(kernel.issue(req(), &Capability::root())).expect("read succeeds")
+            });
+            // The endpoint is demonstrably inside the invocation…
+            entered_rx.recv().expect("endpoint entered");
+            // …the thread its result will depend on is cut, mid-flight…
+            kernel.cut("urn:data:state");
+            // …and only now does it return the representation built from pre-cut state.
+            release_tx.send(()).expect("release the invocation");
+            reader.join().expect("invocation completed");
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one invocation so far");
+        assert_eq!(
+            kernel.cache_len(),
+            0,
+            "a representation built before a cut must not be stored as valid after it"
+        );
+        assert!(
+            !kernel.is_cached(&req(), &Capability::root()),
+            "the stale representation must not be served back"
+        );
+
+        // …and the next read recomputes rather than serving the stale answer.
+        release_tx.send(()).expect("release the second invocation");
+        block_on(kernel.issue(req(), &Capability::root())).expect("read succeeds");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "the next read recomputes");
+    }
+
+    /// The policy is the host's to choose, at execution time — the builder sits
+    /// beside `with_clock` and `with_meta_renderer` because it is the same kind of
+    /// decision: one the kernel cannot make for every deployment.
+    #[test]
+    fn an_installed_cache_policy_bounds_what_the_kernel_keeps() {
+        use crate::cache::{CacheBound, Fifo};
+
+        let space =
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper());
+        let kernel = Kernel::new(Arc::new(space))
+            .with_cache_policy(Arc::new(Fifo::with_bound(CacheBound::new(2, 1 << 20))));
+        let cap = Capability::root();
+        let read = |word: &str| {
+            Request::new(Verb::Source, iri("urn:test:to-upper"))
+                .with_arg("in", ArgRef::Inline(word.as_bytes().to_vec()))
+        };
+        for word in ["a", "b", "c", "d"] {
+            block_on(kernel.issue(read(word), &cap)).unwrap();
+        }
+        assert_eq!(kernel.cache_len(), 2, "the installed bound is enforced");
+        assert!(
+            !kernel.is_cached(&read("a"), &cap),
+            "FIFO evicted the oldest"
+        );
+        assert!(kernel.is_cached(&read("d"), &cap), "the newest survives");
+    }
+
+    /// A policy decides admission and eviction, never validity: an entry whose
+    /// golden thread has been cut is not served, whatever a policy would like.
+    #[test]
+    fn no_policy_can_make_a_cut_entry_serve() {
+        use crate::cache::{CacheBound, CachePolicy, EntryFacts};
+
+        struct KeepEverythingForever;
+        impl CachePolicy for KeepEverythingForever {
+            fn capacity(&self) -> CacheBound {
+                CacheBound::new(usize::MAX, usize::MAX)
+            }
+            fn admit(&self, _candidate: &EntryFacts<'_>) -> bool {
+                true
+            }
+            fn victim(&self, _resident: &[EntryFacts<'_>]) -> Option<usize> {
+                None
+            }
+        }
+
+        let space =
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper());
+        let kernel =
+            Kernel::new(Arc::new(space)).with_cache_policy(Arc::new(KeepEverythingForever));
+        let cap = Capability::root();
+        let req = || {
+            Request::new(Verb::Source, iri("urn:test:to-upper"))
+                .with_arg("in", ArgRef::Inline(b"hi".to_vec()))
+        };
+        let mut threads = BTreeSet::new();
+        threads.insert(Thread::new("urn:data:source"));
+        block_on(kernel.issue_with_incoming(req(), &cap, Provenance::new(Expiry::Never, threads)))
+            .unwrap();
+        assert!(kernel.is_cached(&req(), &cap));
+        kernel.cut("urn:data:source");
+        assert!(
+            !kernel.is_cached(&req(), &cap),
+            "validity is not the policy's to decide"
+        );
+    }
+
+    /// The bound is part of the operator readout — the default is a number someone
+    /// can see and argue with, not an implicit "unbounded".
+    #[test]
+    fn the_cache_readout_names_the_bound_in_force() {
+        let space =
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper());
+        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
+        let request = Request::new(Verb::Source, iri("urn:kernel:cache"));
+        let body = block_on(kernel.issue(request, &Capability::root())).unwrap();
+        let body = String::from_utf8(body.bytes).unwrap();
+        assert!(
+            body.contains("entries  0 / 4096"),
+            "the default entry bound is reported: {body}"
+        );
+        assert!(
+            body.contains("64.0 MB"),
+            "the default byte budget is reported: {body}"
         );
     }
 

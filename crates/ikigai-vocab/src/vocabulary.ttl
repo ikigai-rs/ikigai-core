@@ -46,7 +46,7 @@
 <https://ikigai-rs.dev/ns#> a owl:Ontology ;
     rdfs:label "ikigai endpoint vocabulary" ;
     rdfs:comment "Self-description vocabulary for ikigai resource-oriented endpoints, and the process vocabulary that makes a plan (a DAG of requests) a resource in the same graph." ;
-    owl:versionInfo "0.1.69" .
+    owl:versionInfo "0.1.70" .
 
 #
 # Classes
