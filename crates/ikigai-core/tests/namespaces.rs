@@ -1,7 +1,7 @@
 //! **`grep -r urn:iki:` is a progress meter, and this test keeps it honest.**
 //!
 //! The ecosystem is migrating its `urn:` namespaces under a single `urn:iki:`
-//! root, one at a time. Exactly one has actually moved — `urn:fn:`, published as
+//! root, one at a time. Exactly one has actually MOVED — `urn:fn:`, published as
 //! `ikigai-fn` 0.2.0 — so "what has moved?" is answerable by grep. It stops being
 //! answerable the moment a *fixture* names a namespace that does not exist:
 //! answering the question then means opening every hit to find out whether it is a
@@ -18,13 +18,28 @@
 //! rather than described — and note what is checked is the *namespace set*, not
 //! prose: when a second namespace genuinely migrates, this list grows by one line,
 //! which is the correct signal rather than friction.
+//!
+//! ★ One distinction the list must not blur, added 2026-09-13 with `urn:iki:store:`.
+//! A namespace can be real under this root two ways: it MIGRATED from an older name
+//! (`urn:fn:` did), or it was BORN here and never had an older name (`ikigai-store`
+//! 0.2.0 was — a brand-new namespace is the only kind whose migration is free, so a
+//! new module should start under the root rather than migrate into it later). Both
+//! are legitimate mentions and both belong in the list below; only the first is
+//! evidence of migration PROGRESS. Counting the list would therefore over-report, so
+//! the list is named for what it authorizes rather than for how a name got there.
 
 use std::fs;
 use std::path::Path;
 
 /// The `urn:iki:` sub-namespaces this crate is allowed to mention. Add to this ONLY
-/// when the namespace has actually been published under its new name.
-const MIGRATED: &[&str] = &["fn"];
+/// when the namespace has actually been published under that name. Say which kind
+/// each one is — see the module doc on migrated-versus-born.
+const REAL: &[&str] = &[
+    // MIGRATED from `urn:fn:` — published as `ikigai-fn` 0.2.0.
+    "fn",
+    // BORN here — `ikigai-store` 0.2.0 (2026-09-13) never had an older namespace.
+    "store",
+];
 
 /// Every `urn:iki:<name>` occurrence in `text`, with its line number.
 fn iki_namespaces(text: &str) -> Vec<(usize, String)> {
@@ -79,7 +94,7 @@ fn urn_iki_appears_only_for_namespaces_that_actually_migrated() {
         }
         let text = fs::read_to_string(file).expect("readable source");
         for (line, name) in iki_namespaces(&text) {
-            if !MIGRATED.contains(&name.as_str()) {
+            if !REAL.contains(&name.as_str()) {
                 let rel = file.strip_prefix(root).unwrap_or(file);
                 offenders.push(format!("  {}:{line}  urn:iki:{name}", rel.display()));
             }
@@ -89,7 +104,7 @@ fn urn_iki_appears_only_for_namespaces_that_actually_migrated() {
     assert!(
         offenders.is_empty(),
         "`urn:iki:` names a namespace that has not migrated — fictional namespaces \
-         belong under `urn:example:` (RFC 6963), or add the name to MIGRATED once it \
+         belong under `urn:example:` (RFC 6963), or add the name to REAL once it \
          is really published:\n{}",
         offenders.join("\n")
     );

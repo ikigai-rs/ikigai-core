@@ -24,9 +24,9 @@ Every module crate that once lived here has moved to its own repo — capability
 file behaviour to [`ikigai-fs`](https://github.com/ikigai-rs/ikigai-fs) (published;
 native `std::fs` + browser `localStorage`), SHACL validation to
 [`ikigai-shacl`](https://github.com/ikigai-rs/ikigai-shacl) (#52), and the persistent
-RDF store to [`ikigai-store`](https://github.com/ikigai-rs/ikigai-store) (2026-09-13,
-history carried across), which is unfinished and `publish = false` until it is the
-durable store it is named for.
+RDF store to [`ikigai-store`](https://github.com/ikigai-rs/ikigai-store) (#111,
+2026-09-13, history carried across), which now has its durable RocksDB-backed backend
+and is published on its own cadence.
 
 ⚠ This table is a claim about the workspace that nothing checks — `ikigai-shacl` sat in
 it for roughly two months after #52 removed the crate. Diff it against `crates/*` when
