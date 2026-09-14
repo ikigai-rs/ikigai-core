@@ -963,6 +963,14 @@ impl Kernel {
     /// concurrency-safe form of [`set_tracer`](Self::set_tracer) + issue: a wire
     /// server tracing one connection's call must use this, or concurrent tenants'
     /// events interleave into whichever collector was installed last.
+    ///
+    /// ★ **It is EXCLUSIVE of the globally-installed tracer**, not additive: this
+    /// resolution records into `tracer` and into nothing else, so a host that calls
+    /// [`set_tracer`](Self::set_tracer) *and* routes some resolutions through here
+    /// will not see those resolutions in the global collector. That is deliberate —
+    /// the alternative is a double-write, and a per-connection trace wants exactly one
+    /// destination — but it is a behavioural contract you would otherwise only find by
+    /// reading `issue_inner`, which is not where a host author looks.
     pub async fn issue_traced(
         &self,
         request: Request,
@@ -4464,6 +4472,166 @@ mod tests {
         // a later caller without the declared cap is denied, not served.
         let err = block_on(kernel.issue(req(), &narrow)).unwrap_err();
         assert!(matches!(err, Error::Denied(_)));
+    }
+
+    // ---- attenuation on a sub-request ------------------------------------
+
+    /// An endpoint that dereferences a caller-named IRI, either verbatim or under a
+    /// narrowed authority — the two halves of the shape `issue_attenuated` exists for.
+    struct Deref {
+        /// Scopes to narrow to, or `None` to pass the caller's capability through.
+        narrow_to: Option<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl Endpoint for Deref {
+        async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+            // The target the CALLER named — exactly the value a module must not
+            // dereference with every scope its caller happens to hold.
+            let target = iri(inv.inline_str("src")?);
+            let inner = match &self.narrow_to {
+                Some(scopes) => inv.source_attenuated(&target, scopes.clone()).await?,
+                None => inv.source(&target).await?,
+            };
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                inner.bytes,
+            ))
+        }
+        fn name(&self) -> &str {
+            "deref"
+        }
+    }
+
+    /// A space with a secret behind `urn:cap:secret:read`, bound under two derefs:
+    /// one that forwards the caller's authority, one that narrows to fs-read only.
+    fn deref_kernel() -> Kernel {
+        let secret = FnEndpoint::new("secret", |_inv| {
+            Ok(
+                Representation::new(ReprType::new("text/plain"), b"s3cr3t".to_vec())
+                    .cacheable()
+                    .depends_on("urn:data:secret"),
+            )
+        })
+        .with_description(
+            Description::new("secret")
+                .verb(Verb::Source)
+                .requires("urn:cap:secret:read"),
+        );
+        Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:data:secret"), secret)
+                .bind(Exact::new("urn:demo:deref"), Deref { narrow_to: None })
+                .bind(
+                    Exact::new("urn:demo:deref-narrowed"),
+                    Deref {
+                        narrow_to: Some(vec!["urn:cap:fs:read".to_string()]),
+                    },
+                ),
+        ))
+    }
+
+    fn deref_request(via: &str) -> Request {
+        Request::new(Verb::Source, iri(via))
+            .with_arg("src", ArgRef::Inline(b"urn:data:secret".to_vec()))
+    }
+
+    #[test]
+    fn an_attenuated_sub_request_drops_authority_the_caller_still_holds() {
+        let kernel = deref_kernel();
+        // The caller holds secret-read. Through the forwarding deref it reaches the
+        // secret — today's only behaviour, and the hazard: the module dereferenced a
+        // target it did not choose with every scope its caller had.
+        let caller = Capability::scoped(["urn:cap:secret:read", "urn:cap:fs:read"]);
+        let reached = block_on(kernel.issue(deref_request("urn:demo:deref"), &caller)).unwrap();
+        assert_eq!(reached.bytes, b"s3cr3t");
+
+        // The SAME caller, through the deref that narrows first: denied.
+        let err =
+            block_on(kernel.issue(deref_request("urn:demo:deref-narrowed"), &caller)).unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn attenuating_a_sub_request_cannot_widen_past_the_caller() {
+        // The module asks for a scope its caller does not hold. Attenuation is an
+        // intersection, so it gets nothing — a narrowing call can never mint authority.
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:data:secret"),
+                    FnEndpoint::new("secret", |_inv| {
+                        Ok(Representation::new(
+                            ReprType::new("text/plain"),
+                            b"s3cr3t".to_vec(),
+                        ))
+                    })
+                    .with_description(
+                        Description::new("secret")
+                            .verb(Verb::Source)
+                            .requires("urn:cap:secret:read"),
+                    ),
+                )
+                .bind(
+                    Exact::new("urn:demo:grabby"),
+                    Deref {
+                        // "Give me secret-read" — from a caller that has none.
+                        narrow_to: Some(vec!["urn:cap:secret:read".to_string()]),
+                    },
+                ),
+        ));
+        let caller = Capability::scoped(["urn:cap:fs:read"]);
+        let err = block_on(kernel.issue(deref_request("urn:demo:grabby"), &caller)).unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got {err:?}");
+
+        // And with a caller that DOES hold it, the same narrowing call succeeds —
+        // proving the refusal above was the intersection, not a broken code path.
+        let holder = Capability::scoped(["urn:cap:secret:read"]);
+        let reached = block_on(kernel.issue(deref_request("urn:demo:grabby"), &holder)).unwrap();
+        assert_eq!(reached.bytes, b"s3cr3t");
+    }
+
+    #[test]
+    fn an_attenuated_sub_request_is_still_recorded_as_a_dependency() {
+        // The narrowed path must record expiry and golden threads exactly like
+        // `issue` — it is the same sub-request, under less authority. A silent loss
+        // here would show up only as a composite that never invalidates.
+        let caller = Capability::scoped(["urn:cap:secret:read", "urn:cap:fs:read"]);
+        let narrowing = Deref {
+            narrow_to: Some(vec![
+                "urn:cap:secret:read".to_string(),
+                "urn:cap:fs:read".to_string(),
+            ]),
+        };
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:data:secret"),
+                    FnEndpoint::new("secret", |_inv| {
+                        Ok(
+                            Representation::new(ReprType::new("text/plain"), b"s3cr3t".to_vec())
+                                .cacheable()
+                                .depends_on("urn:data:secret"),
+                        )
+                    })
+                    .with_description(
+                        Description::new("secret")
+                            .verb(Verb::Source)
+                            .requires("urn:cap:secret:read"),
+                    ),
+                )
+                .bind(Exact::new("urn:demo:deref-narrowed"), narrowing),
+        ));
+        let composite =
+            block_on(kernel.issue(deref_request("urn:demo:deref-narrowed"), &caller)).unwrap();
+        assert!(
+            composite
+                .threads()
+                .iter()
+                .any(|t| t.as_str() == "urn:data:secret"),
+            "the sub-resource's golden thread must propagate through the narrowed \
+             path too; got {:?}",
+            composite.threads()
+        );
     }
 
     #[test]

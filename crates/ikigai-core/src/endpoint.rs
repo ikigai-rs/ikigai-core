@@ -479,12 +479,85 @@ impl<'a> Invocation<'a> {
 
     /// Issue a sub-request through the kernel, recording it as a dependency of
     /// this invocation's result so expiry propagates. Errors if detached.
+    ///
+    /// The sub-request runs under **this invocation's own capability**, unchanged.
+    /// To narrow it first — the shape a module wants when it is about to resolve a
+    /// caller-supplied IRI — use
+    /// [`issue_attenuated`](Self::issue_attenuated).
     pub async fn issue(&self, request: Request) -> Result<Representation> {
+        self.issue_under(request, self.capability).await
+    }
+
+    /// Issue a sub-request under a **strictly weaker** authority: this invocation's
+    /// capability [`attenuate`](crate::Capability::attenuate)d to `scopes`.
+    ///
+    /// `Root` narrows to exactly `scopes`; a scoped capability narrows to the
+    /// intersection. There is no widening counterpart and there must never be one —
+    /// see the note on `issue_under` in this file for why that is load-bearing — so
+    /// the worst outcome of calling this is a refusal further down.
+    ///
+    /// ## What it is for
+    ///
+    /// A module that dereferences a **caller-supplied** IRI is resolving a target it
+    /// did not choose, with every scope its caller happens to hold. Dropping the ones
+    /// the module does not need turns "the caller named `urn:secret:prod-db` and my
+    /// caller can read secrets" from an exfiltration into a `Denied`. The narrowing is
+    /// voluntary: the module still holds `self.capability` and can still call
+    /// [`issue`](Self::issue), so this defends the module's *downstream*, not the
+    /// module itself. That is the only thing an in-process, self-applied restriction
+    /// can honestly claim.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use futures::executor::block_on;
+    /// # use ikigai_core::{
+    /// #     builtins, ArgRef, Capability, EndpointSpace, Exact, Iri, Kernel, Request, Verb,
+    /// # };
+    /// # let space = EndpointSpace::new().bind(Exact::new("urn:fn:toUpper"), builtins::to_upper());
+    /// # let kernel = Kernel::new(Arc::new(space));
+    /// // Held by the caller, but not something this module's sub-requests need.
+    /// let caller = Capability::root().attenuate(["urn:cap:secret:read", "urn:cap:fs:read"]);
+    /// let narrowed = caller.attenuate(["urn:cap:fs:read"]);
+    /// assert!(!narrowed.allows("urn:cap:secret:read"));
+    /// // …and asking for it back does not bring it back.
+    /// assert!(!narrowed
+    ///     .attenuate(["urn:cap:secret:read"])
+    ///     .allows("urn:cap:secret:read"));
+    /// ```
+    pub async fn issue_attenuated<I, S>(
+        &self,
+        request: Request,
+        scopes: I,
+    ) -> Result<Representation>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let attenuated = self.capability.attenuate(scopes);
+        self.issue_under(request, &attenuated).await
+    }
+
+    /// The one place a sub-request's authority is chosen.
+    ///
+    /// ★ **This is private, and that is a security property, not an oversight.**
+    /// [`Capability::root`](crate::Capability::root) and
+    /// [`Capability::scoped`](crate::Capability::scoped) are both public — any code in
+    /// the process can *construct* a capability value of any strength. What makes
+    /// in-process non-escalation structural is that an endpoint has no way to hand one
+    /// to an issuer: `Invocation` owns the only reachable path to the kernel and never
+    /// offers to take a capability. A public `issue_under` would hand every endpoint
+    /// root authority in one line. Any future authority-carrying form must therefore
+    /// take the authority **from the kernel**, never from its caller.
+    async fn issue_under(
+        &self,
+        request: Request,
+        capability: &Capability,
+    ) -> Result<Representation> {
         let issuer = self
             .issuer
             .ok_or_else(|| Error::Endpoint("sub-requests require a kernel context".to_string()))?;
         let representation = issuer
-            .issue_scoped(request, self.capability, self.span, self.trace.clone())
+            .issue_scoped(request, capability, self.span, self.trace.clone())
             .await?;
         self.recorded
             .deps
@@ -505,6 +578,22 @@ impl<'a> Invocation<'a> {
     /// it as a dependency.
     pub async fn source(&self, target: &Iri) -> Result<Representation> {
         self.issue(Request::new(Verb::Source, target.clone())).await
+    }
+
+    /// `SOURCE` another resource under a **strictly weaker** authority — this
+    /// invocation's capability narrowed to `scopes` — recording it as a dependency.
+    ///
+    /// The [`issue_attenuated`](Self::issue_attenuated) form of
+    /// [`source`](Self::source), and the shape that case usually wants: a module
+    /// dereferencing an IRI its caller named should be reaching for read authority
+    /// over one family and nothing else.
+    pub async fn source_attenuated<I, S>(&self, target: &Iri, scopes: I) -> Result<Representation>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.issue_attenuated(Request::new(Verb::Source, target.clone()), scopes)
+            .await
     }
 
     /// Plan a transreptor chain converting media type `from` → `to` over the kernel's
