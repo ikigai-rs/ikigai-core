@@ -23,14 +23,15 @@ That is the whole workspace: the kernel and the vocabulary it describes itself w
 Every module crate that once lived here has moved to its own repo — capability-gated
 file behaviour to [`ikigai-fs`](https://github.com/ikigai-rs/ikigai-fs) (published;
 native `std::fs` + browser `localStorage`), SHACL validation to
-[`ikigai-shacl`](https://github.com/ikigai-rs/ikigai-shacl) (#52), and the persistent
-RDF store to [`ikigai-store`](https://github.com/ikigai-rs/ikigai-store) (#111,
-2026-09-13, history carried across), which now has its durable RocksDB-backed backend
-and is published on its own cadence.
+[`ikigai-shacl`](https://github.com/ikigai-rs/ikigai-shacl), and the persistent RDF
+store to [`ikigai-store`](https://github.com/ikigai-rs/ikigai-store) (since 2026-09-13,
+with its history carried across), which now has its durable RocksDB-backed backend and
+is published on its own cadence. Each is a separate dependency you add when you want
+it; none of them is pulled in by depending on the kernel.
 
 ⚠ This table is a claim about the workspace that nothing checks — `ikigai-shacl` sat in
-it for roughly two months after #52 removed the crate. Diff it against `crates/*` when
-you touch either.
+it for roughly two months after that crate had already moved out. Diff it against
+`crates/*` when you touch either.
 
 ## Status
 Pre-alpha scaffold. APIs are not yet defined.
