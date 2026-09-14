@@ -34,7 +34,22 @@ it for roughly two months after that crate had already moved out. Diff it agains
 `crates/*` when you touch either.
 
 ## Status
-Pre-alpha scaffold. APIs are not yet defined.
+
+Pre-1.0 and in active use. 0.1.70 is on crates.io, 37 repositories in the ecosystem build
+against it, and the kernel's shape — resources, the five verbs, representations, transreptors,
+golden threads, capabilities — has been stable for months.
+
+What that does **not** promise is a frozen API. Under Cargo's 0.x rules the second number is
+the breaking one, so this line moves when a type does, and it has moved 64 times. Recent
+examples of the kind of change to expect: a public struct gaining a field (which broke a
+published consumer once — the reason `Resolved` is now built rather than constructed), and
+async endpoints gaining a flat authoring form. Pin an exact minimum and read the release notes
+rather than tracking `0.1`.
+
+Where the edges still are, so nobody discovers them by surprise: a module cannot issue a
+sub-request under authority it holds rather than its caller's, capability scopes match by
+prefix but not infix, and the cache is bounded by policy rather than by an accounting of
+memory. Each is written up in the repository's design notes.
 
 ## License
 Licensed under either of MIT or Apache-2.0 at your option. See `LICENSE-MIT`,
