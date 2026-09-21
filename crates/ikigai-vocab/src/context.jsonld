@@ -12,6 +12,7 @@
     "Endpoint": "ik:Endpoint",
     "Explanation": "ik:Explanation",
     "File": "ik:File",
+    "Finding": "ik:Finding",
     "Fork": "ik:Fork",
     "LlmBackend": "ik:LlmBackend",
     "Process": "ik:Process",
@@ -104,6 +105,10 @@
       "@id": "ik:derivedAt",
       "@type": "xsd:dateTime"
     },
+    "droppedItems": {
+      "@id": "ik:droppedItems",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "endpoint": {
       "@id": "ik:endpoint",
       "@type": "@id"
@@ -114,6 +119,10 @@
     },
     "explanation": "ik:explanation",
     "fileName": "ik:fileName",
+    "findingCount": {
+      "@id": "ik:findingCount",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "forkOf": {
       "@id": "ik:forkOf",
       "@type": "@id"
@@ -153,6 +162,10 @@
     "orphanedItems": {
       "@id": "ik:orphanedItems",
       "@type": "xsd:nonNegativeInteger"
+    },
+    "outcome": {
+      "@id": "ik:outcome",
+      "@type": "@id"
     },
     "output": "ik:output",
     "params": "ik:params",
@@ -200,6 +213,10 @@
       "@id": "ik:routesTo",
       "@type": "@id"
     },
+    "severity": {
+      "@id": "ik:severity",
+      "@type": "@id"
+    },
     "shape": {
       "@id": "ik:shape",
       "@type": "@id"
@@ -214,6 +231,10 @@
       "@type": "@id"
     },
     "summary": "ik:summary",
+    "suppressedItems": {
+      "@id": "ik:suppressedItems",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "target": "ik:target",
     "template": "ik:template",
     "textScale": {

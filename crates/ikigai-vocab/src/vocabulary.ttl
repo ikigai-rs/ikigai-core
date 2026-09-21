@@ -46,7 +46,7 @@
 <https://ikigai-rs.dev/ns#> a owl:Ontology ;
     rdfs:label "ikigai endpoint vocabulary" ;
     rdfs:comment "Self-description vocabulary for ikigai resource-oriented endpoints, and the process vocabulary that makes a plan (a DAG of requests) a resource in the same graph." ;
-    owl:versionInfo "0.1.70" .
+    owl:versionInfo "0.1.71" .
 
 #
 # Classes
@@ -502,6 +502,21 @@ ik:orphanedItems a rdf:Property ;
     rdfs:label "orphanedItems" ;
     rdfs:comment "How many of a pass's findings could not be anchored: the model quoted something that is not in the reviewed content character-for-character, so the finding was DROPPED rather than minted against a guessed position. The pass's honesty number — zero is the healthy case and a large one says the model is paraphrasing its source. Counted at mint time, which is what distinguishes it from ik:orphaned: that flags one annotation whose quote went missing LATER, as the content drifted under it." .
 
+ik:findingCount a rdf:Property ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "findingCount" ;
+    rdfs:comment "How many findings a COMPLETED pass produced — an assertion that the pass ran and reached this number, which is the whole point: zero MEANS reviewed and clean. Counting prov:generated cannot say that, because a pass that found nothing and a pass that produced nothing look identical (no links either way), so absence of a triple ends up doing the work of a claim nobody made. Any calibration query over a corpus of passes has to tell a clean file from a failed one before it can say anything about either. No domain: \"I checked and found n\" is a claim any checker makes — a SHACL validation summary, a conformance run, a gate — and rdfs:domain ik:Review would type every one of them an LLM review pass over a browse resource. Cf. ik:orphanedItems, which does declare a domain because it names a mechanism (quote anchoring) that only such a pass has." .
+
+ik:droppedItems a rdf:Property ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "droppedItems" ;
+    rdfs:comment "How many candidate findings a pass discarded to hold its own volume budget. A limit a prompt merely asks for is not a limit (measured at ~5 suggestions against a request for 3), and enforcing it after parsing destroys the discarded text at the instant it is generated unless the count survives — so this term is the precondition for enforcing one at all, exactly as ik:orphanedItems is what lets an unanchorable finding be dropped rather than guessed at. It is also the only evidence a prompt revision can be judged by: whether the bound binds, and how hard. Distinct from ik:suppressedItems on purpose. No domain, for the reason stated on ik:findingCount." .
+
+ik:suppressedItems a rdf:Property ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "suppressedItems" ;
+    rdfs:comment "How many candidate findings a pass withheld because the claim had already been judged and set aside — a human's earlier decline, a recorded waiver, a conformance opt-out. Suppression is how declines accumulate into knowledge rather than being re-litigated: a decline that matches only an identical id is per-instance, so any unrelated edit resurfaces a known false positive under a new id and spends the human gate again. ⚠ Withholding without recording is the failure ik:orphanedItems already avoids one step earlier, and a filter nobody can count is a filter nobody can audit. Deliberately NOT merged with ik:droppedItems: \"the model was verbose\" and \"we already answered this\" are different facts with opposite remedies, they co-occur in one pass, and one number covering both is useful for neither. No domain, for the reason stated on ik:findingCount." .
+
 ik:reviewedBytes a rdf:Property ;
     rdfs:range xsd:nonNegativeInteger ;
     rdfs:label "reviewedBytes" ;
@@ -511,6 +526,40 @@ ik:totalBytes a rdf:Property ;
     rdfs:range xsd:nonNegativeInteger ;
     rdfs:label "totalBytes" ;
     rdfs:comment "The full size in bytes of the input a derivation was asked about — the denominator to ik:reviewedBytes, and equal to it when nothing was truncated. Distinct from ik:byteSize, which is a file's size on disk: an input may be a diff or a rendered section that no file holds. No domain, for the reason stated on ik:reviewedBytes." .
+
+# ---- review findings (urn:iki:finding:*) -------------------------------------
+# The PENDING QUEUE an ik:Review writes into, and the human act that empties it.
+# A finding is deliberately NOT an oa:Annotation: a pass mints claims, and
+# publishing one is a separate act that is always a person's. The two families
+# therefore have to stay tellable apart in the graph, by construction.
+#
+# ⚠ Which is why these three terms are ours rather than the W3C's. oa:bodyValue
+# and oa:motivatedBy both carry `rdfs:domain oa:Annotation`, so writing either
+# onto a finding types it INTO the annotation family under any reasoner —
+# silently undoing the one separation the design exists to create, with no code
+# path that would ever show it. Borrowing a term borrows its domain.
+#
+# ★ The same reasoning runs the other way for what is declared below: read every
+# `No domain` here as an argued position, not an omission. A domain is an
+# assertion about every subject that ever carries the predicate, including
+# subjects that do not exist yet — and this neighbourhood has already paid for
+# that once (ik:versionTag and ik:derivedAt were `rdfs:domain ik:Explanation`
+# until 0.1.69, which typed every review-archive entry an explanation as well).
+
+ik:Finding a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Finding" ;
+    rdfs:comment "One PENDING review finding: a machine's anchored claim about a resource, minted by an ik:Review pass and awaiting a human decision. It is not an annotation and never becomes one — publishing mints a SEPARATE oa:Annotation and links it back with prov:wasDerivedFrom, so the machine's claim and the note a human vouched for stay one hop apart and both survive. Declining is a record too rather than a deletion: the finding remains, with the reason if one was given, which is what lets declines accumulate into knowledge instead of churn. A subclass of prov:Entity — the thing a pass prov:generated and a decision prov:used — stated here so a face can type the node once and a PROV-aware reader still sees the entity." .
+
+ik:severity a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "severity" ;
+    rdfs:comment "How urgent an assessment result is, as an IRI naming one severity (urn:iki:severity:critical … urn:iki:severity:praise). TRIAGE and never permission: it orders what to look at first and gates nothing. ⚠ NO DOMAIN, and here that is forced rather than merely cautious — three different node classes carry it today, one hop apart: the ik:Finding, where it is the model's PROPOSAL and is never rewritten; the prov:Activity decision node, where it is the human's FINAL rating; and the oa:Annotation a publication mints, which copies that rating in. Any domain would type two of those three as the third and collapse the very distinction that makes \"is this reviewer calibrated?\" a query rather than an impression. Replaces the sh:resultSeverity a module had to borrow — legal, since SHACL admits severities beyond its own three, but it says \"SHACL validation result\" to every reader who knows SHACL, and a review finding is not one. The value set is deliberately NOT enumerated here: it is a closed list in the code that serves it, checked there against the prompt and the menu it also feeds, and a second copy in a vocabulary that can only change through a publish is a copy that will disagree." .
+
+ik:outcome a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "outcome" ;
+    rdfs:comment "How a completed act came out, as an IRI from a closed set the act's own family defines — for the decision on a review finding, urn:iki:finding:outcome:published or urn:iki:finding:outcome:declined. The value's IRI space says which family the outcome belongs to, so the property does not have to. Replaces a dcterms:type carrying an IRI, which is legal and says only \"the nature of the resource\", leaving a reader to infer that this particular type is a verdict. No domain, for two reasons that agree: the subject today is a prov:Activity, an external class, and this vocabulary declares only its own (the ik:annotates and ik:passcode precedent); and concluding is what acts do generally, so a domain would be an assertion about acts that have not been designed yet." .
 
 ik:AccessibilityConfig a rdfs:Class ;
     rdfs:label "AccessibilityConfig" ;
