@@ -1037,6 +1037,103 @@ mod tests {
         }
     }
 
+    /// The finding family: the six terms a review pass and the pending queue it
+    /// writes into need in order to stop borrowing. Asserted here the same way and
+    /// for the same reason as [`the_terms_three_modules_serve_are_defined`] — over
+    /// PARSED subjects, so a term declared in syntax the parser rejects reads as
+    /// missing here rather than as present to `contains`.
+    ///
+    /// Each replaces a borrowed term or an absence:
+    /// `ik:Finding` a bare `prov:Entity`, `ik:severity` a `sh:resultSeverity`,
+    /// `ik:outcome` a `dcterms:type`, and the three counts nothing at all — a fate
+    /// no triple recorded.
+    #[test]
+    fn the_finding_family_is_defined() {
+        let subjects: std::collections::BTreeSet<String> = oxttl::TurtleParser::new()
+            .for_reader(VOCABULARY.as_bytes())
+            .map(|t| t.expect("valid turtle").subject.to_string())
+            .collect();
+        for (term, replaces) in [
+            ("Finding", "a pending finding typed only `a prov:Entity`"),
+            ("severity", "the borrowed sh:resultSeverity"),
+            ("outcome", "a dcterms:type carrying an outcome IRI"),
+            (
+                "findingCount",
+                "a clean pass being an ABSENCE of prov:generated",
+            ),
+            (
+                "droppedItems",
+                "a suggestion over budget, discarded uncounted",
+            ),
+            (
+                "suppressedItems",
+                "a claim withheld as already declined, uncounted",
+            ),
+        ] {
+            assert!(
+                subjects.contains(&format!("<{NS}{term}>")),
+                "ik:{term} exists to replace {replaces} — removing it sends that face \
+                 back to borrowing a term whose domain types it into another family"
+            );
+        }
+    }
+
+    /// ⚠ The finding family's domains, pinned OFF — the axiom this neighbourhood has
+    /// already paid for twice.
+    ///
+    /// `ik:severity` is the sharpest: three node classes carry it one hop apart — the
+    /// `ik:Finding` (the model's proposal), the `prov:Activity` decision node (the
+    /// human's final rating), and the `oa:Annotation` a publication mints. A domain
+    /// would type two of those as the third and destroy the only signal that can
+    /// answer whether a reviewer is calibrated. `ik:outcome`'s subject is an external
+    /// class (`prov:Activity`), and this vocabulary declares only its own. The three
+    /// counts state "I checked and found n", which any checker claims.
+    ///
+    /// ★ `ik:orphanedItems` is NOT in this list and keeps its `rdfs:domain ik:Review`
+    /// deliberately: it names a mechanism — a quote that did not anchor
+    /// character-for-character — that only an anchored-quote LLM pass has. That is
+    /// the line between the two halves of this family, and it is the whole test.
+    #[test]
+    fn the_finding_family_declares_no_domain() {
+        for (term, kind, why) in [
+            (
+                "severity",
+                "rdf:Property",
+                "a finding, a decision activity and an annotation all carry it",
+            ),
+            (
+                "outcome",
+                "rdf:Property",
+                "its subject is a prov:Activity, an external class",
+            ),
+            (
+                "findingCount",
+                "rdf:Property",
+                "any checker can say it found nothing",
+            ),
+            ("droppedItems", "rdf:Property", "ditto, one fate over"),
+            ("suppressedItems", "rdf:Property", "ditto, one fate over"),
+            (
+                "Finding",
+                "rdfs:Class",
+                "a class carries no domain; here to keep the family in one list",
+            ),
+        ] {
+            let block = VOCABULARY
+                .split("\n\n")
+                .find(|b| b.trim_start().starts_with(&format!("ik:{term} a {kind}")))
+                .unwrap_or_else(|| panic!("ik:{term} is declared"));
+            // A DECLARATION line, not a mention: the comments argue in prose about
+            // domains, and a substring match would read the argument as the axiom.
+            assert!(
+                !block
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("rdfs:domain")),
+                "ik:{term} must declare no domain — {why}:\n{block}"
+            );
+        }
+    }
+
     /// The coercion is a function of the declared range, so a range the generator has
     /// never seen must still be carried — `xsd:nonNegativeInteger` and
     /// `xsd:positiveInteger` arrived with the review and LLM terms and neither was
@@ -1047,12 +1144,27 @@ mod tests {
         let ctx: serde_json::Value = serde_json::from_str(CONTEXT).unwrap();
         let ctx = &ctx["@context"];
         assert_eq!(ctx["batchAt"]["@type"], "xsd:positiveInteger");
-        for counted in ["orphanedItems", "reviewedBytes", "totalBytes"] {
+        for counted in [
+            "orphanedItems",
+            "reviewedBytes",
+            "totalBytes",
+            "findingCount",
+            "droppedItems",
+            "suppressedItems",
+        ] {
             assert_eq!(ctx[counted]["@type"], "xsd:nonNegativeInteger", "{counted}");
+        }
+        // An IRI-valued property declares `rdfs:range rdfs:Resource` and gets `@id`
+        // from that alone. Both of these name a value from a closed set that lives
+        // in the serving code, so a range slipped to xsd:string would quietly turn
+        // every severity and every outcome into a JSON string in the same edit.
+        for iri_valued in ["severity", "outcome"] {
+            assert_eq!(ctx[iri_valued]["@type"], "@id", "{iri_valued}");
         }
         // xsd:string stays a plain term, and a class is still just its ik: name.
         assert_eq!(ctx["passcode"], "ik:passcode");
         assert_eq!(ctx["Review"], "ik:Review");
+        assert_eq!(ctx["Finding"], "ik:Finding");
     }
 
     #[test]
