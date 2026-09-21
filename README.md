@@ -35,8 +35,8 @@ it for roughly two months after that crate had already moved out. Diff it agains
 
 ## Status
 
-Pre-1.0 and in active use. 0.1.70 is on crates.io, 37 repositories in the ecosystem build
-against it, and the kernel's shape — resources, the five verbs, representations, transreptors,
+Pre-1.0 and in active use. 0.1.70 is on crates.io, 51 published crates depend on it, and
+the kernel's shape — resources, the five verbs, representations, transreptors,
 golden threads, capabilities — has been stable for months.
 
 What that does **not** promise is a frozen API. Under Cargo's 0.x rules the second number is
