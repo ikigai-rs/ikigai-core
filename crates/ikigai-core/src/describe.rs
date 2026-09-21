@@ -121,8 +121,20 @@ impl ArgSpec {
 ///
 /// Most endpoints never construct one: a single-verb endpoint's flat
 /// [`Description`] fields ARE its action spec, and [`Description::action_specs`]
-/// synthesizes the per-verb view. Declare explicit `ActionSpec`s only when verbs
-/// genuinely differ.
+/// synthesizes the per-verb view. That flat form is the common case and is permanent
+/// sugar, not a deprecated one.
+///
+/// Declare explicit `ActionSpec`s when a verb's contract genuinely differs from the flat
+/// one: different capability scopes (a calendar's `Sink` demands write authority its
+/// `Source` does not), different arguments, or a different summary. If every verb reads the
+/// same inputs under the same authority, the flat fields already say so.
+///
+/// ⚠ The two forms are **exclusive per verb, not additive**. [`Description::action_specs`]
+/// takes an explicit spec whole for the verbs that have one, so its `inputs`, `outputs` and
+/// `requires` REPLACE the flat fields for that verb rather than adding to them: an explicit
+/// spec whose `requires` is empty declares that the verb needs no authority, and the flat
+/// `requires` sitting beside it is dead for that verb. Restate on each explicit spec
+/// whatever it still needs — and state no more, since the kernel enforces what is declared.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionSpec {
     /// The verb this contract applies to.
