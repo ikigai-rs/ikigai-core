@@ -46,6 +46,12 @@ published consumer once — the reason `Resolved` is now built rather than const
 async endpoints gaining a flat authoring form. Pin an exact minimum and read the release notes
 rather than tracking `0.1`.
 
+Breaking here is not only about types. The version also moves when what an unchanged call
+*does* changes: 0.1.49 made the kernel enforce the capabilities an endpoint declares, before
+dispatch and before the cache, so a caller that had been relying on a declared-but-unchecked
+scope compiled exactly as before and started being refused at runtime. A change like that
+cannot be caught by `cargo build`, which is the other reason to read the release notes.
+
 Where the edges still are, so nobody discovers them by surprise: a module cannot issue a
 sub-request under authority it holds rather than its caller's, capability scopes match by
 prefix but not infix, and the cache is bounded by policy rather than by an accounting of
