@@ -20,6 +20,12 @@ pub(crate) fn feed_str(h: &mut Hasher, s: &str) {
 }
 
 /// Feed a single discriminant byte.
+///
+/// No length prefix, and none is needed: the module's prefix-free property is
+/// about VARIABLE-length fields, and a fixed-width one cannot make two field
+/// sequences ambiguous. Prefixing it would be harmless but would imply the
+/// invariant is about every field, which is the reading that invites someone to
+/// drop a prefix somewhere it matters.
 #[inline]
 pub(crate) fn feed_u8(h: &mut Hasher, v: u8) {
     h.update(&[v]);
