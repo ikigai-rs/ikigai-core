@@ -1034,6 +1034,47 @@ impl Kernel {
     /// The cache is partitioned by the chain's [fingerprint](Scope::fingerprint),
     /// which is computed over the corridors' **names** — see [`Scope`] on what a
     /// name claims, and why an unnamed corridor never shares.
+    ///
+    /// One name, two contexts, two resources — and two cache entries:
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     Capability, EndpointSpace, Exact, FnEndpoint, Iri, Kernel, ReprType, Representation,
+    ///     Request, Scope, Verb,
+    /// };
+    ///
+    /// // The root binds `urn:doc:title`…
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(
+    ///     Exact::new("urn:doc:title"),
+    ///     FnEndpoint::new("title", |_| {
+    ///         Ok(Representation::new(ReprType::new("text/plain"), b"resource oriented computing".to_vec())
+    ///             .cacheable())
+    ///     }),
+    /// )));
+    /// // …and so does a corridor the host injects for one request: the SAME name.
+    /// let at_six = Arc::new(EndpointSpace::new().bind(
+    ///     Exact::new("urn:doc:title"),
+    ///     FnEndpoint::new("title-at-six", |_| {
+    ///         Ok(Representation::new(ReprType::new("text/plain"), b"as it stood at 18:00".to_vec())
+    ///             .cacheable())
+    ///     }),
+    /// ));
+    /// let root = Capability::root();
+    /// let title = || Request::new(Verb::Source, Iri::parse("urn:doc:title").unwrap());
+    /// let six_pm = Scope::empty().with_named(Iri::parse("urn:ctx:six-pm").unwrap(), at_six);
+    ///
+    /// // The corridor is consulted ahead of the root, so it shadows the root's door.
+    /// let here = block_on(kernel.issue(title(), &root)).unwrap();
+    /// let there = block_on(kernel.issue_in(title(), &root, six_pm)).unwrap();
+    /// assert_eq!(here.bytes, b"resource oriented computing");
+    /// assert_eq!(there.bytes, b"as it stood at 18:00");
+    ///
+    /// // Two entries, because the chain is part of the key: neither answer can be
+    /// // served to the other context.
+    /// assert_eq!(kernel.cache_len(), 2);
+    /// ```
     pub async fn issue_in(
         &self,
         request: Request,

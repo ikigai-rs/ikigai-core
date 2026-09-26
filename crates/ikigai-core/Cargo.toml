@@ -10,6 +10,12 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
+# The formalism gate resolves every pin in `docs/formalism/README.md` against this
+# repository's tree, and `docs/` lives above this crate, so a packaged crate cannot
+# carry the document the test reads. Excluded rather than taught to skip: a skip on an
+# absent document is the silent pass the gate exists to refuse, and its audience is
+# this repository and its CI, not a downstream running the crate's own tests.
+exclude = ["tests/formalism_pins.rs"]
 
 [dependencies]
 # Dyn-compatible async traits; runtime-free (boxes the returned future), so the
