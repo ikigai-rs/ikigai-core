@@ -227,6 +227,30 @@ pub const ALIAS_NOTE: &str = "alias";
 /// rewrite is the part they cannot see.
 pub const ALIAS_MISS_NOTE: &str = "alias-unresolved";
 
+/// The [`TraceEvent::notes`] key under which the kernel reports the **resolution
+/// chain** a request was resolved in, when it is not the empty one — paired with
+/// the chain as [`Scope`] renders it, innermost first, ending in `root` or
+/// `severed`: e.g. `("scope", "urn:ctx:doc:7 severed")`. Public so an observer
+/// can match the key without re-spelling the literal.
+///
+/// Every event of such a resolution carries it: the computed invocation, the
+/// cache hit, the denial, and the miss. A request resolved in the empty chain
+/// carries no note, so its events are byte-identical to before scopes existed.
+/// This note is a reserved key rather than a field because adding a field to
+/// [`TraceEvent`] changes its postcard layout, and a host shipping events over
+/// the wire would have to bump its protocol version.
+pub const SCOPE_NOTE: &str = "scope";
+
+/// The [`TraceEvent::notes`] key marking that a request resolved to **nothing
+/// inside a non-empty chain** — paired with the target that had no binding there.
+/// Appears only beside [`SCOPE_NOTE`]. It exists because a miss inside a
+/// confinement is deliberately indistinguishable from "no such resource" to the
+/// caller (an [`Unresolved`](crate::Error::Unresolved), never a
+/// [`Denied`](crate::Error::Denied)) — so the trace is the only place the fact
+/// "this name IS bound, just not in here" can show. Ordinary misses in the empty
+/// chain record no event, unchanged.
+pub const SCOPE_MISS_NOTE: &str = "scope-unresolved";
+
 /// Receives a [`TraceEvent`] per invocation while installed. The kernel records
 /// only when one is set ([`Kernel::set_tracer`]) — off the hot path otherwise — so
 /// the `trace` command can capture one real resolution and render it. The host
@@ -306,13 +330,17 @@ pub struct Kernel {
     /// valid — see [`cache`](crate::cache) for the bound, the pluggable policy, and
     /// the cut-sequence check that closes the lost-cut race.
     ///
-    /// Entries are keyed by `(request id, capability fingerprint)`. The capability is
-    /// part of the key so a cached entry is only ever served back to the same
-    /// authority that computed it — a different (e.g. narrower) capability misses and
-    /// must pass the endpoint's own check. Without this, a cache hit is served
-    /// *before* the endpoint runs (see [`issue_inner`](Self::issue_inner)), which
-    /// would skip the capability check and let one authority read another's cached
-    /// result.
+    /// Entries are keyed by `(request id, capability fingerprint, scope
+    /// fingerprint)`. The capability is part of the key so a cached entry is only
+    /// ever served back to the same authority that computed it — a different (e.g.
+    /// narrower) capability misses and must pass the endpoint's own check. Without
+    /// this, a cache hit is served *before* the endpoint runs (see
+    /// [`issue_inner`](Self::issue_inner)), which would skip the capability check
+    /// and let one authority read another's cached result. The scope is part of it
+    /// so an answer computed in one resolution chain (a confinement, an injected
+    /// corridor) is never served to a request in another — the same name can
+    /// resolve to a different endpoint there. The empty chain fingerprints to `0`,
+    /// so plain [`issue`](Self::issue) keys exactly as it always has.
     cache: ReprCache,
     meta: Option<Arc<dyn MetaRenderer>>,
     /// Source of "now" for time-based [`Expiry::At`] deadlines. Absent ⇒ the
@@ -801,12 +829,17 @@ impl Kernel {
         parent: Option<u64>,
         started: Option<Time>,
         cache_hit: bool,
-        notes: Vec<(String, String)>,
+        mut notes: Vec<(String, String)>,
+        scope: &Scope,
     ) {
-        let Some(scope) = trace else {
+        let Some(recording) = trace else {
             return;
         };
-        scope.record(TraceEvent {
+        // The chain is disclosed on every event of a non-empty-chain resolution;
+        // rendered here, inside the tracing gate, so an untraced issue never pays
+        // for the string.
+        notes.extend(scope_notes(scope));
+        recording.record(TraceEvent {
             target: request.target.as_str().to_string(),
             thread: thread_label(),
             started,
@@ -846,8 +879,9 @@ impl Kernel {
         capability: &Capability,
         span: Option<u64>,
         parent: Option<u64>,
-        scope: &str,
+        lacking: &str,
         alias: Option<&AliasHop>,
+        scope: &Scope,
     ) {
         let Some(trace_scope) = trace else {
             return;
@@ -857,8 +891,9 @@ impl Kernel {
         // (decision 1), so a grant that still names the pre-alias scope fails by
         // simply not holding. Carrying the hop on the denial event is what stops
         // that from being invisible.
-        let mut notes = vec![(DENIED_NOTE.to_string(), scope.to_string())];
+        let mut notes = vec![(DENIED_NOTE.to_string(), lacking.to_string())];
         notes.extend(alias_notes(alias));
+        notes.extend(scope_notes(scope));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
             thread: thread_label(),
@@ -875,9 +910,13 @@ impl Kernel {
         });
     }
 
-    /// Record a resolution that MISSED after a rewrite: the alias fired, and nothing
-    /// was bound at the name it produced. Nothing ran, so — like a denial — no
-    /// observer inside an endpoint can ever report it.
+    /// Record a resolution that MISSED where the miss is not the whole story: after
+    /// a rewrite (the alias fired, and nothing was bound at the name it produced),
+    /// or inside a non-empty chain (the name may well be bound in the root, and the
+    /// chain is why it was not reached). Nothing ran, so — like a denial — no
+    /// observer inside an endpoint can ever report it. A plain miss in the empty
+    /// chain records nothing, unchanged.
+    #[allow(clippy::too_many_arguments)]
     fn trace_miss(
         &self,
         trace: &Option<TraceScope>,
@@ -885,16 +924,29 @@ impl Kernel {
         capability: &Capability,
         span: Option<u64>,
         parent: Option<u64>,
-        alias: &AliasHop,
+        alias: Option<&AliasHop>,
+        scope: &Scope,
     ) {
         let Some(trace_scope) = trace else {
             return;
         };
-        let mut notes = alias_notes(Some(alias));
-        notes.push((
-            ALIAS_MISS_NOTE.to_string(),
-            request.target.as_str().to_string(),
-        ));
+        if alias.is_none() && scope.is_empty() {
+            return;
+        }
+        let mut notes = alias_notes(alias);
+        if alias.is_some() {
+            notes.push((
+                ALIAS_MISS_NOTE.to_string(),
+                request.target.as_str().to_string(),
+            ));
+        }
+        notes.extend(scope_notes(scope));
+        if !scope.is_empty() {
+            notes.push((
+                SCOPE_MISS_NOTE.to_string(),
+                request.target.as_str().to_string(),
+            ));
+        }
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
             thread: thread_label(),
@@ -952,7 +1004,44 @@ impl Kernel {
         // Top-level entry: no parent span (this is a trace root if one is recording
         // via the globally-installed tracer).
         let trace = self.global_scope();
-        self.issue_inner(request, capability, None, None, trace)
+        self.issue_inner(request, capability, None, None, trace, Scope::empty())
+            .await
+    }
+
+    /// Issue a request in a **resolution chain** other than the plain root: the
+    /// corridors `scope` injects are consulted ahead of the root — shadowing it
+    /// for this request and for every sub-request it gives rise to — and, if the
+    /// scope is [severed](Scope::sever), the root is not consulted at all. With
+    /// [`Scope::empty`] this is [`issue`](Self::issue).
+    ///
+    /// # ★ This is authority, and it is the host's
+    ///
+    /// A corridor placed ahead of the root can stand in for any door — bind
+    /// `urn:personal:contacts` in one and every sub-request of this resolution
+    /// that asks for contacts gets the corridor's answer. So the widening face of
+    /// the chain lives here, on the kernel, reachable only by whoever holds it: the
+    /// same trust line as [`Capability::root`], and the same reason
+    /// `Invocation::issue_under` is private (`docs/design/sub-request-authority.md`
+    /// — an authority-carrying sub-request takes its authority from the kernel,
+    /// never from its caller). From inside an endpoint the only chain-changing
+    /// operation is [`Invocation::confine`], which is strictly narrowing.
+    ///
+    /// Two things the chain does not touch: `urn:kernel:*` is intercepted ahead of
+    /// it, so no corridor can shadow a kernel operation and a severed chain still
+    /// reaches them, capability-gated as ever; and the declared-capability floor
+    /// runs unchanged against whichever endpoint the chain resolved to.
+    ///
+    /// The cache is partitioned by the chain's [fingerprint](Scope::fingerprint),
+    /// which is computed over the corridors' **names** — see [`Scope`] on what a
+    /// name claims, and why an unnamed corridor never shares.
+    pub async fn issue_in(
+        &self,
+        request: Request,
+        capability: &Capability,
+        scope: Scope,
+    ) -> Result<Representation> {
+        let trace = self.global_scope();
+        self.issue_inner(request, capability, None, None, trace, scope)
             .await
     }
 
@@ -983,6 +1072,7 @@ impl Kernel {
             None,
             None,
             Some(TraceScope::new(tracer)),
+            Scope::empty(),
         )
         .await
     }
@@ -1000,15 +1090,25 @@ impl Kernel {
         incoming: Provenance,
     ) -> Result<Representation> {
         let trace = self.global_scope();
-        self.issue_inner(request, capability, None, Some(incoming), trace)
-            .await
+        self.issue_inner(
+            request,
+            capability,
+            None,
+            Some(incoming),
+            trace,
+            Scope::empty(),
+        )
+        .await
     }
 
     /// The resolution path, carrying the `parent` span of the invocation that issued
-    /// this request (`None` at the top level) and any upstream pipe [`Provenance`].
-    /// [`Issuer::issue_with_parent`] threads the span through re-entrant sub-requests
-    /// so a recorded run links each node to its parent; the public
-    /// [`issue`](Self::issue) is the parentless, no-upstream entry point.
+    /// this request (`None` at the top level), any upstream pipe [`Provenance`], and
+    /// the resolution chain (`scope`) to resolve in.
+    /// [`Issuer::issue_in_scope`] threads the span and the chain through re-entrant
+    /// sub-requests so a recorded run links each node to its parent and a
+    /// confinement holds below the endpoint that entered it; the public
+    /// [`issue`](Self::issue) is the parentless, no-upstream, empty-chain entry
+    /// point.
     async fn issue_inner(
         &self,
         request: Request,
@@ -1016,6 +1116,7 @@ impl Kernel {
         parent: Option<u64>,
         incoming: Option<Provenance>,
         trace: Option<TraceScope>,
+        scope: Scope,
     ) -> Result<Representation> {
         // ★ THE CUT SNAPSHOT, BEFORE ANYTHING ELSE. Everything this request is
         // about to observe is state as of *now*; a cut that lands after this point
@@ -1069,6 +1170,13 @@ impl Kernel {
         // capability-gated resources. A *cacheable* builtin (the catalog) still
         // participates in the cache, so a re-resolution serves `[cached]`; the live
         // introspection builtins return `Always` and are simply never stored.
+        //
+        // ★ And before the resolution CHAIN, for the same reason: an injected
+        // corridor cannot shadow a kernel operation either, and a severed chain
+        // still reaches them. So the answer does not depend on the scope and the
+        // key carries none (scope fingerprint 0): a confined endpoint reading the
+        // catalog sees the same catalog as everyone else — a list of NAMES it may
+        // not be able to resolve, which is names and not content.
         if let Some(op) = request.target.as_str().strip_prefix(KERNEL_NS) {
             let key = CacheKey::new(request.id(), capability_key(capability));
             let cacheable_verb = request.verb.is_cacheable();
@@ -1106,8 +1214,13 @@ impl Kernel {
         // Resolution is synchronous, pure routing — and it runs BEFORE the cache
         // lookup, so the declared-capability floor below gates cached and computed
         // answers alike (a cached representation must never be served to a caller
-        // the endpoint's own declaration would refuse).
-        let mut resolved = match self.root.resolve(&request, &Scope::empty()) {
+        // the endpoint's own declaration would refuse). It runs in the request's
+        // CHAIN: injected corridors innermost first, then the root — unless the
+        // chain is severed, in which case a name the corridors do not bind is a
+        // miss, exactly as if nothing were bound. That "exactly" is the point of
+        // confinement: the caller cannot tell a name outside the chain from a name
+        // that does not exist, so there is no decision here to misconfigure.
+        let mut resolved = match scope.resolve_in(&request, self.root.as_ref()) {
             Resolution::Hit(resolved) => resolved,
             Resolution::Miss => {
                 // A rewrite that lands on nothing is reported as a rewrite. The error
@@ -1116,12 +1229,23 @@ impl Kernel {
                 // ("why is it saying `urn:iki:`?" *is* the discovery). Beside it: a
                 // trace event marking the miss, and an always-on per-rule counter at
                 // `urn:kernel:aliases` for the operator with no tracer installed.
+                // A miss inside a non-empty chain is traced for the same reason —
+                // the error is indistinguishable from "unbound" by design, so the
+                // trace is the only place it can show.
                 if let Some(hop) = alias.as_ref() {
                     if let Some(table) = self.aliases.as_ref() {
                         table.record_unresolved(hop);
                     }
-                    self.trace_miss(&trace, &request, capability, span, parent, hop);
                 }
+                self.trace_miss(
+                    &trace,
+                    &request,
+                    capability,
+                    span,
+                    parent,
+                    alias.as_ref(),
+                    &scope,
+                );
                 return Err(Error::Unresolved(request.target.clone()));
             }
         };
@@ -1169,18 +1293,30 @@ impl Kernel {
         // A denial is REPORTED before it is returned: enforcement happens before
         // dispatch, so the endpoint is never entered and no observer inside it can
         // ever see the refusal. This is the only point that holds it.
-        if let Some(scope) = unsatisfied_scope(&resolved.endpoint.describe(), &request, capability)
+        // The floor runs against the endpoint the CHAIN resolved to, whichever
+        // corridor answered — a corridor that shadows a root door is checked on its
+        // own declaration, not the root's.
+        if let Some(lacking) =
+            unsatisfied_scope(&resolved.endpoint.describe(), &request, capability)
         {
-            self.trace_denial(&trace, &request, capability, span, parent, &scope, alias);
+            self.trace_denial(
+                &trace, &request, capability, span, parent, &lacking, alias, &scope,
+            );
             return Err(Error::Denied(
-                self.denial_message(&scope, &request, capability, alias),
+                self.denial_message(&lacking, &request, capability, alias),
             ));
         }
 
         // Representation-cache lookup (idempotent verbs only): serve a cached entry
         // whose golden-thread edges are all still current. A cut entry is evicted
         // here and recomputed below. The guard is dropped before any await.
-        let key = CacheKey::new(id, capability_key(capability));
+        //
+        // Keyed by the chain too: the same request in another chain may have
+        // resolved to another endpoint, and a representation is shared across that
+        // boundary only when the corridors consulted are the same on both sides.
+        // The whole chain's fingerprint guarantees that (over-partitioned, sound);
+        // the empty chain's is 0, so this key is unchanged for plain `issue`.
+        let key = CacheKey::new(id, capability_key(capability)).in_scope(scope.fingerprint());
         if cacheable_verb {
             // Freshness is evaluated as of `started` — the instant this resolution
             // began, one clock reading shared with the trace event and the
@@ -1195,6 +1331,7 @@ impl Kernel {
                     started,
                     true,
                     alias_notes(alias),
+                    &scope,
                 );
                 self.record_resolution(&request, started, true);
                 return Ok(cached);
@@ -1237,11 +1374,16 @@ impl Kernel {
                     let issuer: Arc<dyn Issuer> = kernel;
                     issuer
                 });
+            // …and the chain this request resolved in, so every sub-request the
+            // endpoint issues resolves in the same one. This is what makes a
+            // corridor hold "for the request and everything below it", and what
+            // keeps a confinement closed under the endpoint it was applied to.
             let invocation =
                 Invocation::with_issuer(&request, &resolved.bindings, capability, self)
                     .with_concurrency(self.spawner.clone(), issuer_arc)
                     .with_span(span)
-                    .with_trace(trace.clone());
+                    .with_trace(trace.clone())
+                    .with_scope(scope.clone());
             let representation = resolved.endpoint.invoke(&invocation).await?;
             // Effective expiry propagates from the dependencies: the result is no
             // fresher than its most volatile part. The endpoint's own expiry is met
@@ -1285,6 +1427,7 @@ impl Kernel {
             started,
             false,
             trace_notes,
+            &scope,
         );
         self.record_resolution(&request, started, false);
 
@@ -1366,7 +1509,18 @@ impl Kernel {
             // Spans are allocated lazily here: this arm short-circuits before the
             // resolution path's span, so a denial is the only thing that needs one.
             let span = trace.as_ref().map(TraceScope::next_span);
-            self.trace_denial(trace, request, capability, span, parent, scope, None);
+            // A kernel operation is resolved ahead of the chain, so its denial is
+            // reported in the empty one — whatever chain the caller ran in.
+            self.trace_denial(
+                trace,
+                request,
+                capability,
+                span,
+                parent,
+                scope,
+                None,
+                &Scope::empty(),
+            );
             Err(Error::Denied(format!(
                 "capability does not grant `{scope}`"
             )))
@@ -1999,6 +2153,15 @@ fn alias_notes(alias: Option<&AliasHop>) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// The trace note disclosing the resolution chain: empty for the empty chain, so
+/// a plain `issue`'s events are byte-identical to before scopes existed.
+fn scope_notes(scope: &Scope) -> Vec<(String, String)> {
+    if scope.is_empty() {
+        return Vec::new();
+    }
+    vec![(SCOPE_NOTE.to_string(), scope.to_string())]
+}
+
 /// The reserved kernel-behavior namespace prefix.
 pub(crate) const KERNEL_NS: &str = "urn:kernel:";
 
@@ -2195,7 +2358,7 @@ impl Issuer for Kernel {
         // preserving pre-scope behavior. A sub-resource resolves on its own
         // merits — no pipe upstream here.
         let trace = self.global_scope();
-        self.issue_inner(request, capability, parent, None, trace)
+        self.issue_inner(request, capability, parent, None, trace, Scope::empty())
             .await
     }
 
@@ -2210,7 +2373,25 @@ impl Issuer for Kernel {
         // resolution's trace scope through, so the recorded events link
         // parent → child (across the fan-out spawn) inside the RIGHT trace —
         // concurrent traced resolutions never bleed into each other's collectors.
-        self.issue_inner(request, capability, parent, None, trace)
+        // (Compatibility path — no chain threaded; `issue_in_scope` is the full
+        // seam and the one `Invocation` calls.)
+        self.issue_inner(request, capability, parent, None, trace, Scope::empty())
+            .await
+    }
+
+    async fn issue_in_scope(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<TraceScope>,
+        scope: Scope,
+    ) -> Result<Representation> {
+        // The full re-entrant seam: span, trace scope AND resolution chain, so a
+        // sub-request resolves in the chain its issuer ran in — a confinement holds
+        // below the endpoint that entered it, an injected corridor is visible all
+        // the way down.
+        self.issue_inner(request, capability, parent, None, trace, scope)
             .await
     }
 

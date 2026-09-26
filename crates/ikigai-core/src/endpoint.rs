@@ -14,6 +14,7 @@ use crate::iri::Iri;
 use crate::repr::{Expiry, Representation, Thread, Time};
 use crate::request::Request;
 use crate::select::{ActionMatch, TransreptionStep};
+use crate::space::{Scope, Space};
 use crate::verb::Verb;
 
 /// Lets an endpoint issue sub-requests back through the kernel. Implemented by
@@ -54,6 +55,41 @@ pub trait Issuer: Send + Sync {
     ) -> Result<Representation> {
         let _ = trace;
         self.issue_with_parent(request, capability, parent).await
+    }
+
+    /// Like [`issue_scoped`](Issuer::issue_scoped), additionally carrying the
+    /// **resolution chain** ([`Scope`]) the sub-request must resolve in — the
+    /// corridors injected ahead of the root, and whether the root is in the chain
+    /// at all. The kernel overrides it to resolve in exactly that chain; that is
+    /// what makes a confined endpoint's sub-requests confined and an injected
+    /// corridor visible to every sub-request of the request it was injected for.
+    ///
+    /// **The default honours the empty chain and refuses every other.** An empty
+    /// scope delegates to `issue_scoped`, so every issuer written before this
+    /// method existed behaves exactly as it did. A non-empty scope is refused with
+    /// [`Error::Endpoint`] rather than dropped: an issuer that cannot carry the
+    /// chain (a detached one, a module host bridge, anything that forwards over a
+    /// wire that has no field for it) would otherwise resolve the sub-request in
+    /// the plain root chain — inside a confinement that looked like it held, under
+    /// a corridor the host believed was in force — on the branch that reads like
+    /// success. Refusing names the hole. Override it to carry the chain.
+    async fn issue_in_scope(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<crate::TraceScope>,
+        scope: Scope,
+    ) -> Result<Representation> {
+        if !scope.is_empty() {
+            return Err(Error::Endpoint(format!(
+                "sub-request for {} carries a resolution scope ({scope}) this issuer \
+                 cannot honour — it implements only the plain `issue` seam — so it was \
+                 refused rather than resolved outside the scope",
+                request.target
+            )));
+        }
+        self.issue_scoped(request, capability, parent, trace).await
     }
 
     /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s produced by *another*
@@ -174,6 +210,10 @@ pub struct Invocation<'a> {
     /// threaded into every sub-request so concurrent traced resolutions on one
     /// shared kernel stay isolated. `None` off the trace path.
     trace: Option<crate::TraceScope>,
+    /// The resolution chain this invocation's request was resolved in, inherited
+    /// by every sub-request it issues. Set by the kernel; the only change an
+    /// endpoint can make to it is [`confine`](Invocation::confine), which narrows.
+    scope: Scope,
     /// Everything the endpoint records while it runs, shared by every reborrow of
     /// this invocation. See [`Recorded`].
     recorded: Arc<Recorded>,
@@ -249,6 +289,7 @@ impl<'a> Invocation<'a> {
             clock: None,
             span: None,
             trace: None,
+            scope: Scope::empty(),
             recorded: Arc::new(Recorded::default()),
         }
     }
@@ -276,6 +317,7 @@ impl<'a> Invocation<'a> {
             clock: None,
             span: None,
             trace: None,
+            scope: Scope::empty(),
             recorded: Arc::new(Recorded::default()),
         }
     }
@@ -341,10 +383,75 @@ impl<'a> Invocation<'a> {
             clock: self.clock.clone(),
             span: self.span,
             trace: self.trace.clone(),
+            scope: self.scope.clone(),
             // Shared, deliberately: see the doc above. The reborrow records INTO
             // this invocation, not beside it.
             recorded: Arc::clone(&self.recorded),
         }
+    }
+
+    /// **The same invocation, confined to `space`.** A reborrow like
+    /// [`with_bindings`](Self::with_bindings) — every handle to the kernel comes
+    /// across and the recording side is shared — whose sub-requests resolve in the
+    /// chain [`Scope::confined`] describes: everything the host injected, then
+    /// `space` where the root used to be, and **no root**. A sub-request for
+    /// anything the chain does not bind is [`Error::Unresolved`], never
+    /// [`Error::Denied`], and the root endpoint it would have reached is never
+    /// entered. This is the trapdoor: the paper's point is that a denial is a
+    /// decision that can be misconfigured, while an unresolvable identifier has
+    /// nowhere to go.
+    ///
+    /// `name` is the corridor's identity for the cache — see [`Scope`] on what
+    /// naming claims — so two confinements naming the same `name` share cached
+    /// answers and must therefore bind the same doors.
+    ///
+    /// ## Why this is the only chain-changing operation an endpoint gets
+    ///
+    /// It narrows, structurally. Relative to the chain this invocation runs in,
+    /// the confined chain resolves nothing differently except what the **root**
+    /// would have answered: `space` sits behind every injected corridor, so it
+    /// cannot shadow one, and the root's doors are exactly what confinement
+    /// exists to remove. The worst outcome of calling it is an `Unresolved`. The
+    /// widening counterpart — injecting a corridor ahead of the root, with the
+    /// root still present — is [`Kernel::issue_in`](crate::Kernel::issue_in),
+    /// reachable only by whoever holds the kernel, for the same reason a
+    /// sub-request's *authority* is taken from the kernel and never from its
+    /// caller (see `issue_under` in this file): a corridor placed innermost can
+    /// stand in for any door, for every sub-request below it.
+    ///
+    /// [`Confine`](crate::Confine) is this, as an endpoint decorator.
+    pub fn confine<'b>(&'b self, name: Iri, space: Arc<dyn Space>) -> Invocation<'b> {
+        Invocation {
+            request: self.request,
+            bindings: self.bindings,
+            capability: self.capability,
+            issuer: self.issuer,
+            spawner: self.spawner.clone(),
+            issuer_arc: self.issuer_arc.clone(),
+            clock: self.clock.clone(),
+            span: self.span,
+            trace: self.trace.clone(),
+            scope: self.scope.clone().confined(name, space),
+            recorded: Arc::clone(&self.recorded),
+        }
+    }
+
+    /// The resolution chain this invocation runs in — what its sub-requests
+    /// resolve against. Empty (nothing injected, root present) for every plain
+    /// [`Kernel::issue`](crate::Kernel::issue); [`severed`](Scope::is_severed)
+    /// inside a [`confine`](Self::confine).
+    pub fn scope(&self) -> &Scope {
+        &self.scope
+    }
+
+    /// Attach the resolution chain the request was resolved in (set by the
+    /// kernel), so sub-requests resolve in the same chain. Crate-private on
+    /// purpose: a public setter would let an endpoint hand a widening chain to its
+    /// own sub-requests, which is the one thing [`confine`](Self::confine) is
+    /// shaped to make impossible.
+    pub(crate) fn with_scope(mut self, scope: Scope) -> Self {
+        self.scope = scope;
+        self
     }
 
     /// Attach an explicit source of "now", so [`now`](Self::now) answers without an
@@ -557,7 +664,13 @@ impl<'a> Invocation<'a> {
             .issuer
             .ok_or_else(|| Error::Endpoint("sub-requests require a kernel context".to_string()))?;
         let representation = issuer
-            .issue_scoped(request, capability, self.span, self.trace.clone())
+            .issue_in_scope(
+                request,
+                capability,
+                self.span,
+                self.trace.clone(),
+                self.scope.clone(),
+            )
             .await?;
         self.recorded
             .deps
@@ -657,9 +770,13 @@ impl<'a> Invocation<'a> {
                 // without bleeding into a concurrently-traced neighbor.
                 let parent = self.span;
                 let trace = self.trace.clone();
+                // …and the resolution chain: a spawned sub-request is still a
+                // sub-request of this invocation, so a confinement it runs in
+                // holds across the spawn.
+                let scope = self.scope.clone();
                 spawner.spawn(Box::pin(async move {
                     let result = issuer
-                        .issue_scoped(request, &capability, parent, trace)
+                        .issue_in_scope(request, &capability, parent, trace, scope)
                         .await;
                     *slot.lock().expect("fan-out slot") = Some(result);
                 }))

@@ -60,27 +60,49 @@ use crate::request::RequestId;
 /// missed caching under an implausible burst, never correctness.
 pub const CUT_LOG: usize = 4096;
 
-/// A cached representation's key: the content-addressed request **and** the
-/// fingerprint of the authority that computed it.
+/// A cached representation's key: the content-addressed request, the
+/// fingerprint of the authority that computed it, **and** the fingerprint of the
+/// resolution chain it was computed in.
 ///
 /// The capability half is not decoration. A cache hit is served *before* the
 /// endpoint runs, so an entry keyed only by request id would let one authority read
 /// another's cached result, skipping the capability check entirely.
+///
+/// The scope half is the same argument for the chain: a request resolved inside a
+/// confined chain, or with a corridor injected ahead of the root, can resolve one
+/// name to a *different endpoint* than the same request in the plain chain. A cached
+/// representation may be shared across that boundary only when the corridors
+/// consulted are the same on both sides; with the whole chain in the key that holds
+/// by construction, over-partitioned rather than unsound. The empty chain's
+/// fingerprint is `0`, so [`new`](Self::new) — which does not take one — is the empty
+/// chain's key, and every key built before scopes existed is unchanged.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct CacheKey {
     /// The content-addressed identity of the request that produced the entry.
     pub request: RequestId,
     /// A stable fingerprint of the capability the request was issued under.
     pub capability: u64,
+    /// A stable fingerprint of the resolution chain the request was resolved in
+    /// ([`Scope::fingerprint`](crate::Scope::fingerprint)); `0` for the empty chain.
+    #[serde(default)]
+    pub scope: u64,
 }
 
 impl CacheKey {
-    /// A key over a request id and a capability fingerprint.
+    /// A key over a request id and a capability fingerprint, in the empty
+    /// resolution chain (scope fingerprint `0`).
     pub fn new(request: RequestId, capability: u64) -> Self {
         CacheKey {
             request,
             capability,
+            scope: 0,
         }
+    }
+
+    /// The same key in the resolution chain `scope` fingerprints (builder).
+    pub fn in_scope(mut self, scope: u64) -> Self {
+        self.scope = scope;
+        self
     }
 }
 
