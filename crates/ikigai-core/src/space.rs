@@ -7,32 +7,293 @@ use crate::grammar::{Bindings, Grammar};
 use crate::iri::Iri;
 use crate::request::Request;
 
-/// The set of address spaces visible to a request during resolution.
+/// The resolution chain a request is resolved in: the corridors a host injected
+/// ahead of the kernel's root space, and whether the root is in the chain at all.
 ///
-/// In M1 it is a (possibly empty) stack of additional spaces injected into a
-/// request's context; richer scope semantics (dynamic injection, pass-by-value)
-/// arrive with the kernel. The resolution signature carries it from the start so
-/// those mechanisms slot in without changing call sites.
+/// A kernel resolves a request against
+/// `⟨injected corridors (innermost first), root⟩`. Every sub-request an endpoint
+/// issues inherits the chain, so what is true of the request is true of
+/// everything it gives rise to. Two faces of that one mechanism:
+///
+/// - **Injection** — [`with_named`](Self::with_named) puts a space ahead of the
+///   root, where it can **shadow** a root door for this request and all of its
+///   sub-requests. This is how a host composes per-request context (a temporal
+///   corridor pinning `urn:time:now`, say) without rebuilding its space tree.
+///   Reachable only through [`Kernel::issue_in`](crate::Kernel::issue_in), i.e.
+///   only by whoever holds the kernel: an injected corridor placed innermost can
+///   stand in for anything, so injecting is authority.
+/// - **Severing** — [`confined`](Self::confined) cuts the root off. Inside a
+///   severed chain a resource outside it is
+///   [`Unresolved`](crate::Error::Unresolved), never
+///   [`Denied`](crate::Error::Denied): a denial is a decision that can be
+///   misconfigured, an unresolvable identifier has nowhere to go. This is the
+///   only face an endpoint can reach ([`Invocation::confine`](crate::Invocation::confine),
+///   [`Confine`](crate::Confine)), and it is strictly narrowing.
+///
+/// [`empty`](Self::empty) — nothing injected, root present — is what every
+/// [`Kernel::issue`](crate::Kernel::issue) resolves in, and it is the status quo:
+/// its [`fingerprint`](Self::fingerprint) is `0`, so today's cache entries and
+/// today's cache keys are untouched.
+///
+/// The kernel reserves `urn:kernel:*` ahead of the chain: no corridor can shadow
+/// a kernel operation, and a severed chain still reaches them (capability-gated,
+/// as always).
+///
+/// # A corridor's name is a claim
+///
+/// The representation cache keys on this chain's fingerprint, and the fingerprint
+/// is computed over the corridors' **names**, not their contents or their
+/// addresses. So `with_named(n, s)` asserts: *any corridor named `n` holds the
+/// same doors as `s`.* Same name ⇒ same doors ⇒ same resource — exactly the
+/// contract [`Resolved::canonical`] makes for a rewritten name. Name two
+/// different corridors alike and one request is served the other's cached answer;
+/// the flip side is what makes naming worth it: a corridor rebuilt per request
+/// under the same name shares one cache entry across every request that names it.
+/// (An [anonymous](Self::with) corridor shares with nothing but its own clones.)
+///
+/// ```
+/// use std::sync::Arc;
+/// use futures::executor::block_on;
+/// use ikigai_core::{
+///     Capability, EndpointSpace, Exact, FnEndpoint, Iri, Kernel, ReprType, Representation,
+///     Request, Scope, Verb,
+/// };
+///
+/// let pinned = || {
+///     Arc::new(EndpointSpace::new().bind(
+///         Exact::new("urn:time:now"),
+///         FnEndpoint::new("pinned", |_| {
+///             Ok(Representation::new(ReprType::new("text/plain"), b"18:00Z".to_vec()).cacheable())
+///         }),
+///     ))
+/// };
+/// let kernel = Kernel::new(Arc::new(EndpointSpace::new()));
+/// let cap = Capability::root();
+/// let now = || Request::new(Verb::Source, Iri::parse("urn:time:now").unwrap());
+/// let name = || Iri::parse("urn:ctx:time:2026-09-25T18:00Z").unwrap();
+///
+/// // Two requests, two freshly built corridors, ONE name: one cache entry.
+/// block_on(kernel.issue_in(now(), &cap, Scope::empty().with_named(name(), pinned()))).unwrap();
+/// block_on(kernel.issue_in(now(), &cap, Scope::empty().with_named(name(), pinned()))).unwrap();
+/// assert_eq!(kernel.cache_len(), 1);
+///
+/// // A different name is a different chain, so a different entry — and the
+/// // empty chain never sees either: `urn:time:now` is not bound in the root.
+/// let other = Iri::parse("urn:ctx:time:2026-09-26T09:00Z").unwrap();
+/// block_on(kernel.issue_in(now(), &cap, Scope::empty().with_named(other, pinned()))).unwrap();
+/// assert_eq!(kernel.cache_len(), 2);
+/// assert!(block_on(kernel.issue(now(), &cap)).is_err());
+/// ```
 #[derive(Clone, Default)]
 pub struct Scope {
-    injected: Vec<Arc<dyn Space>>,
+    /// `None` IS the empty chain. The chain lives behind an `Arc` so that the
+    /// scope every `issue` carries, clones into its invocation and hands to each
+    /// sub-request is one word: the empty chain costs a null check, a non-empty
+    /// one a refcount bump. Building a chain is cold; carrying it is the hot path.
+    chain: Option<Arc<Chain>>,
 }
 
+/// A non-empty chain: what was injected, under what identity, and whether the
+/// root is still on the end of it.
+#[derive(Clone)]
+struct Chain {
+    /// The injected corridors, **outermost first** (the most recently injected is
+    /// last, and is consulted first). Parallel to `identities`.
+    injected: Vec<Arc<dyn Space>>,
+    /// Each injected corridor's identity, in `injected`'s order.
+    identities: Vec<CorridorIdentity>,
+    /// `true` when the root has been cut off the chain.
+    severed: bool,
+    /// The chain's fingerprint, computed once when the chain is built so reading
+    /// it costs nothing on the issue path.
+    fingerprint: u64,
+}
+
+/// What a corridor is fingerprinted by: the name its injector claimed for it, or
+/// — with no name — a process-unique number, so it shares a cache entry with its
+/// own clones and nothing else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CorridorIdentity {
+    Named(Iri),
+    Anonymous(u64),
+}
+
+/// Source of anonymous corridor identities. A counter rather than the `Arc`'s
+/// address because an address is reused once the corridor is dropped, while a
+/// cache entry keyed on it lives on — a later, unrelated corridor at the same
+/// address would be served the first one's answers.
+static ANONYMOUS_CORRIDORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 impl Scope {
-    /// An empty scope.
+    /// The empty chain: nothing injected, root present. Its fingerprint is `0`.
     pub fn empty() -> Self {
         Scope::default()
     }
 
-    /// Inject a space into the scope (innermost last).
-    pub fn with(mut self, space: Arc<dyn Space>) -> Self {
-        self.injected.push(space);
-        self
+    /// Inject an **anonymous** corridor ahead of everything already injected
+    /// (innermost). Prefer [`with_named`](Self::with_named): an anonymous corridor
+    /// is fingerprinted by a fresh process-unique identity, so a request resolved
+    /// through it shares a cache entry only with requests carrying a *clone* of
+    /// this very scope — a corridor rebuilt per request never shares with the
+    /// last one. Sound, and useless for the case injection exists for.
+    pub fn with(self, space: Arc<dyn Space>) -> Self {
+        let id = ANONYMOUS_CORRIDORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.edit(|chain| {
+            chain.injected.push(space);
+            chain.identities.push(CorridorIdentity::Anonymous(id));
+        })
     }
 
-    /// The injected spaces, innermost last.
+    /// Inject a **named** corridor ahead of everything already injected
+    /// (innermost). The name is the corridor's identity for the cache — see the
+    /// type-level note on what naming claims.
+    pub fn with_named(self, name: Iri, space: Arc<dyn Space>) -> Self {
+        self.edit(|chain| {
+            chain.injected.push(space);
+            chain.identities.push(CorridorIdentity::Named(name));
+        })
+    }
+
+    /// Cut the root off the chain: a request resolved in the result reaches only
+    /// the injected corridors, and anything else is
+    /// [`Unresolved`](crate::Error::Unresolved). Idempotent.
+    pub fn sever(self) -> Self {
+        self.edit(|chain| chain.severed = true)
+    }
+
+    /// The chain an endpoint runs in once confined to `space`: everything already
+    /// injected, then `space` **behind** it — where the root used to be — and no
+    /// root. The one chain-changing operation an endpoint can reach
+    /// ([`Invocation::confine`](crate::Invocation::confine)), and its placement
+    /// is the whole authority argument: a confining endpoint can only ever put a
+    /// space where the root was and cut the root off. It cannot get ahead of a
+    /// corridor the host injected, so it can never shadow one; and the root's
+    /// doors are exactly what confinement exists to remove. Relative to the chain
+    /// it started in, nothing resolves differently except what the root would
+    /// have answered.
+    pub fn confined(self, name: Iri, space: Arc<dyn Space>) -> Self {
+        self.edit(|chain| {
+            chain.injected.insert(0, space);
+            chain.identities.insert(0, CorridorIdentity::Named(name));
+            chain.severed = true;
+        })
+    }
+
+    /// Apply a builder step: unshare (or start) the chain, edit it, refingerprint.
+    fn edit(self, step: impl FnOnce(&mut Chain)) -> Self {
+        let mut chain = match self.chain {
+            None => Chain {
+                injected: Vec::new(),
+                identities: Vec::new(),
+                severed: false,
+                fingerprint: 0,
+            },
+            Some(shared) => Arc::try_unwrap(shared).unwrap_or_else(|shared| (*shared).clone()),
+        };
+        step(&mut chain);
+        chain.refingerprint();
+        Scope {
+            chain: Some(Arc::new(chain)),
+        }
+    }
+
+    /// The injected corridors, outermost first (the most recently injected is
+    /// last, and is consulted first).
     pub fn spaces(&self) -> &[Arc<dyn Space>] {
-        &self.injected
+        self.chain.as_ref().map_or(&[], |chain| &chain.injected)
+    }
+
+    /// Whether the root has been cut off the chain.
+    pub fn is_severed(&self) -> bool {
+        self.chain.as_ref().is_some_and(|chain| chain.severed)
+    }
+
+    /// Whether this is the empty chain — nothing injected, root present — the
+    /// one every plain [`Kernel::issue`](crate::Kernel::issue) resolves in.
+    pub fn is_empty(&self) -> bool {
+        match self.chain.as_ref() {
+            None => true,
+            Some(chain) => chain.is_empty(),
+        }
+    }
+
+    /// The chain's fingerprint: the dimension the representation cache keys on
+    /// beside the request id and the capability. `0` for the empty chain, so a
+    /// [`CacheKey`](crate::CacheKey) built without a scope is the empty chain's
+    /// key. Otherwise BLAKE3 over whether the root is present and each corridor's
+    /// identity in chain order — the **whole** chain, not the corridors actually
+    /// consulted, which is sound and over-partitioned (two chains differing only
+    /// in a corridor neither request touched do not share).
+    pub fn fingerprint(&self) -> u64 {
+        self.chain.as_ref().map_or(0, |chain| chain.fingerprint)
+    }
+
+    /// Resolve `request` against the chain: each injected corridor innermost
+    /// first, then the root unless severed.
+    pub(crate) fn resolve_in(&self, request: &Request, root: &dyn Space) -> Resolution {
+        let Some(chain) = self.chain.as_ref() else {
+            return root.resolve(request, self);
+        };
+        for space in chain.injected.iter().rev() {
+            if let Resolution::Hit(resolved) = space.resolve(request, self) {
+                return Resolution::Hit(resolved);
+            }
+        }
+        if chain.severed {
+            Resolution::Miss
+        } else {
+            root.resolve(request, self)
+        }
+    }
+}
+
+impl Chain {
+    fn is_empty(&self) -> bool {
+        self.injected.is_empty() && !self.severed
+    }
+
+    fn refingerprint(&mut self) {
+        if self.is_empty() {
+            self.fingerprint = 0;
+            return;
+        }
+        let mut hasher = blake3::Hasher::new();
+        crate::hashing::feed_u8(&mut hasher, if self.severed { 2 } else { 1 });
+        for identity in &self.identities {
+            match identity {
+                CorridorIdentity::Named(name) => {
+                    crate::hashing::feed_u8(&mut hasher, 1);
+                    crate::hashing::feed_str(&mut hasher, name.as_str());
+                }
+                CorridorIdentity::Anonymous(id) => {
+                    crate::hashing::feed_u8(&mut hasher, 2);
+                    hasher.update(&id.to_le_bytes());
+                }
+            }
+        }
+        let digest = hasher.finalize();
+        self.fingerprint = u64::from_le_bytes(digest.as_bytes()[..8].try_into().expect("8 bytes"));
+    }
+}
+
+/// The chain as text, innermost first, ending in `root` or `severed`: e.g.
+/// `urn:ctx:doc:7 root`, or `urn:ctx:doc:7 severed`. An anonymous corridor
+/// renders as `_:<n>` — a blank node, which is what a space without a name is.
+/// This is what the kernel puts on a trace event under
+/// [`SCOPE_NOTE`](crate::SCOPE_NOTE); the two terminal tokens carry no colon, so
+/// they can never be confused with a corridor's IRI.
+impl std::fmt::Display for Scope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Some(chain) = self.chain.as_ref() else {
+            return f.write_str("root");
+        };
+        for identity in chain.identities.iter().rev() {
+            match identity {
+                CorridorIdentity::Named(name) => write!(f, "{} ", name.as_str())?,
+                CorridorIdentity::Anonymous(id) => write!(f, "_:{id} ")?,
+            }
+        }
+        f.write_str(if chain.severed { "severed" } else { "root" })
     }
 }
 

@@ -16,6 +16,11 @@
 //! [`Space`] to an [`Endpoint`] that produces a [`Representation`]. Spaces
 //! compose via [`Mount`], [`Fallback`], and [`Rewrite`].
 //!
+//! [`Scope`] is the resolution **chain** a request is resolved in — corridors a
+//! host injects ahead of the root ([`Kernel::issue_in`]), or a chain with the
+//! root cut off ([`Confine`], [`Invocation::confine`]) inside which anything
+//! unbound is unresolvable rather than denied.
+//!
 //! [`alias`] adds **logical rewrite** on that same composition primitive: a stable
 //! logical URI ([`Alias`] over an [`AliasTable`]) resolves to a different backing
 //! resource without the caller knowing — the mechanism that lets a namespace
@@ -65,6 +70,7 @@ pub mod builtins;
 pub mod cache;
 mod capability;
 pub mod config;
+mod confine;
 mod content;
 mod describe;
 mod endpoint;
@@ -91,6 +97,7 @@ pub use cache::{
     ReprCache,
 };
 pub use capability::Capability;
+pub use confine::Confine;
 pub use content::{ContentId, ContentIdError};
 pub use describe::{ActionSpec, ArgSpec, Description, EndpointKind, InputSource, Transreption};
 #[cfg(not(target_family = "wasm"))]
@@ -103,7 +110,7 @@ pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
-    ALIAS_MISS_NOTE, ALIAS_NOTE, DENIED_NOTE,
+    ALIAS_MISS_NOTE, ALIAS_NOTE, DENIED_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE,
 };
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
