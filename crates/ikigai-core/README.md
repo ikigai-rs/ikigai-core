@@ -38,6 +38,7 @@ assert_eq!(rep.bytes, b"IKIGAI");
   browser via WebAssembly, or embedded.
 - **Capabilities & self-description** — an unforgeable capability handle, and a `Meta`
   verb routed to a pluggable `MetaRenderer` (one resource, many representations).
+- **Formal companion** — [`docs/formalism/README.md`](https://github.com/ikigai-rs/ikigai-core/blob/main/docs/formalism/README.md) maps the kernel onto Peter Rodgers' *Peter's Hotel* formalism, every theorem pinned to the test that holds its precondition.
 
 ## Lineage
 
