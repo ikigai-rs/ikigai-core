@@ -128,6 +128,22 @@ authority-carrying sub-request takes its authority from the kernel, never from i
 caller.* `Invocation::with_scope` is `pub(crate)` for the same reason `issue_under` is
 private.
 
+The consequence that ordering carries, stated rather than left to be re-derived: **a
+host-injected corridor can shadow S's own doors inside a confinement.** An endpoint confined
+to `S` that sources a name both `S` and a corridor the host injected bind gets the corridor's
+answer, never `S`'s — the host's per-request context outranks the endpoint's confinement
+exactly as it outranks the root. The paper's Definition 10 places `S` innermost and would
+answer from `S`; the swap is deliberate (an endpoint must not get ahead of a host corridor)
+and is argued as a deviation in `docs/formalism/README.md` §1.3.
+
+And `Confine` is bound at one door — it is **not transparent**. The paper's trapdoor is a
+transparent overlay that admits from outside everything `S` serves, which is how its worked
+example (§12.3) finds the model client reachable from the application corridor and prescribes
+wrapping the trapdoor in a mapper that exposes one identifier (§9.3). `Confine` is that
+already-wrapped form: bound under the inner endpoint's own name and description, with `S`
+never exposed outward, so that leak cannot arise here — nothing outside the confinement can
+resolve a door of `S` at all, only the one identifier the decorator is bound at.
+
 Nested confinement follows: an endpoint confined to `S1` that confines again with `S2`
 runs in `⟨host corridors…, S1, S2⟩`, severed — `S2` adds doors `S1` lacks and shadows
 nothing. Test: `an_endpoint_can_only_narrow_its_chain`, which also pins that an endpoint

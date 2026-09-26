@@ -9,7 +9,10 @@ an extension and the deviations that were deliberate, each argued.
 **Status:** written 2026-09-25 against ikigai-core **0.1.72** (`2504ad5`, published). Outline:
 ledger [#522](http://localhost:1060/l/default/item/522). The explainer in a different register
 is [#523](http://localhost:1060/l/default/item/523); the book review is
-[#521](http://localhost:1060/l/default/item/521).
+[#521](http://localhost:1060/l/default/item/521). Revised 2026-09-26
+([#525](http://localhost:1060/l/default/item/525)): the gate left the packaged crate (§11), four
+doctests landed (the visibility halves of R2.2 and R7.5 as `compile_fail`, `Kernel::issue_in`,
+`Invocation::confine`), and §7 cross-links the two sentences `resolution-scope.md` owed.
 **Companions in this repository:** `docs/design/resolution-scope.md` (the chain),
 `docs/design/sub-request-authority.md` (attenuation, and why delegation is not built),
 `docs/design/cache-ejection.md` (what the cache key does not identify),
@@ -36,8 +39,10 @@ UNPINNED — what a test would assert, in one sentence
 - `pin:` names a `#[test]` function (a unit test by its module path, an integration test by its
   file), and the file it lives in. The gate fails if the function is missing or is not a test,
   or if the file does not contain it.
-- `doctest:` names a public item whose `///` block carries a fenced example, which `cargo test`
-  compiles and runs. The only comment the compiler reads.
+- `doctest:` names an item whose `///` block carries a fenced example, which `cargo test`
+  compiles and runs — or, for a `compile_fail` fence, compiles and requires to fail, which is
+  how a visibility fact (an item that is *not* public) gets a pin. The only comment the
+  compiler reads.
 - `UNPINNED` is **a finding, not a formatting choice**: the sentence after the dash says what a
   test would assert. The register in §9 collects every one of them; that list is the set of
   things this crate cannot yet vouch for.
@@ -56,11 +61,12 @@ calls it a *space*. ikigai's trait is `Space`. Below, *corridor* is the paper's 
 built over, and the *static tree* is that space's composition of `Mount`, `Fallback`, `Rewrite`
 and `Alias` combinators. The paper's Σ* is written I.
 
-**Conditional where the code is conditional.** Two of the theorems below have a precondition
-the kernel does not yet discharge for every endpoint (R4.4, R2.2's structural half). They are
-stated with the precondition explicit and the precondition pinned to the test that supplies it
-by hand. That is the whole value of the document: it says exactly where ikigai is weaker than
-its own story.
+**Conditional where the code is conditional.** One theorem below has a precondition the
+kernel does not yet discharge for every endpoint (R4.4). It is stated with the precondition
+explicit and the precondition pinned to the test that supplies it by hand. That is the whole
+value of the document: it says exactly where ikigai is weaker than its own story. (R2.2's
+structural half was the second such theorem until 2026-09-26; a `compile_fail` doctest now
+holds it.)
 
 ---
 
@@ -76,13 +82,13 @@ tracks it.
 | Identifier, I = Σ* | §1.2 | `Iri` — a validated **absolute IRI**. The identifier space is the RFC 3987 subset of Σ*, not all of it; the empty string ε is not an identifier. | deviation, §1.5 | pin: `iri::tests::accepts_absolute_iris` (crates/ikigai-core/src/iri.rs); pin: `iri::tests::rejects_relative_or_malformed` (crates/ikigai-core/src/iri.rs) |
 | Door (φ, F, Ω) | Def. 1 | a `(Grammar, Endpoint)` binding in an `EndpointSpace`: φ is `Grammar::match_iri`, which also returns the capture (the paper's "division into captured parts"); F is the set it accepts; Ω is `Endpoint::invoke`. Shipped grammars: `Exact` (a singleton family) and `UriTemplate` (RFC 6570 level 1, non-empty captures, adjacent variables refused at construction — so the capture function is a function of the identifier, as Thm. 4(a)(ii) and B.2 require). Regularity is a property of the shipped grammars, not of the trait: any decidable `Grammar` may be bound. | realised | pin: `grammar::tests::exact_matches_only_itself` (crates/ikigai-core/src/grammar.rs); pin: `grammar::tests::template_captures_trailing_var` (crates/ikigai-core/src/grammar.rs); pin: `grammar::tests::expand_is_inverse_of_match` (crates/ikigai-core/src/grammar.rs); pin: `grammar::tests::rejects_ambiguous_and_malformed` (crates/ikigai-core/src/grammar.rs) |
 | Corridor, first-match; effective families (Def. 3, Prop. 1) | §2.2 | `EndpointSpace::resolve`: bindings in declaration order, the first grammar that matches wins. The partition of Prop. 1 is what `entries()` enumerates, in the same order. A shadowed binding is invisible to selection rather than misattributed. | realised | pin: `space::tests::endpoint_space_enumerates_its_bindings` (crates/ikigai-core/src/space.rs); pin: `resolution::grammar_bindings_flow_to_endpoint` (crates/ikigai-core/tests/resolution.rs); pin: `resolution::unresolved_target_misses` (crates/ikigai-core/tests/resolution.rs); pin: `select::tests::a_shadowed_probe_is_discarded_not_misattributed` (crates/ikigai-core/src/select.rs) |
-| Context chain Γ, innermost first | §3 | Two things, and the difference is §1.1. **Per request:** `Scope` — ⟨injected corridors innermost first, root⟩, carried on the `Invocation` into every sub-request. **Static:** the root's tree, of which `Fallback` is the ordered first-hit member list. | realised, deviation §1.1 | pin: `scope::an_injected_corridor_shadows_a_root_door_for_the_request_and_for_its_sub_requests` (crates/ikigai-core/tests/scope.rs); pin: `resolution::fallback_tries_in_order` (crates/ikigai-core/tests/resolution.rs); pin: `space::tests::fallback_concatenates_enumerable_members_in_order` (crates/ikigai-core/src/space.rs) |
+| Context chain Γ, innermost first | §3 | Two things, and the difference is §1.1. **Per request:** `Scope` — ⟨injected corridors innermost first, root⟩, carried on the `Invocation` into every sub-request. **Static:** the root's tree, of which `Fallback` is the ordered first-hit member list. | realised, deviation §1.1 | pin: `scope::an_injected_corridor_shadows_a_root_door_for_the_request_and_for_its_sub_requests` (crates/ikigai-core/tests/scope.rs); pin: `resolution::fallback_tries_in_order` (crates/ikigai-core/tests/resolution.rs); pin: `space::tests::fallback_concatenates_enumerable_members_in_order` (crates/ikigai-core/src/space.rs); doctest: `Kernel::issue_in` |
 | Import (union) | Def. 4 | `Mount` — an import guarded by a prefix: the inner space's families, restricted to identifiers under the prefix, added to what resolution reaches at the mount's position. No rewrite; the inner patterns are already full identifiers. | realised | pin: `resolution::mount_gates_by_prefix` (crates/ikigai-core/tests/resolution.rs) |
 | Mapper (preimage) | Def. 6 | `Rewrite` (a closure τ) and `Alias` (a table of exact and prefix rules, with counters). Both resolve τ(i) **once** in the enclosed space and **report** the rewrite on `Resolved::canonical`, which the kernel adopts before the cache key, the capability floor and the write-cut. **No outward fallback with τ(i)** — §1.2 and §5. | realised, deviation §1.2 | pin: `resolution::rewrite_remaps_target_before_resolution` (crates/ikigai-core/tests/resolution.rs); doctest: `Resolved::canonical`; pin: `alias::an_alias_can_never_launder_authority` (crates/ikigai-core/tests/alias.rs); pin: `alias::every_core_overlay_forwards_a_reported_canonical` (crates/ikigai-core/tests/alias.rs) |
 | Transparent overlay | Def. 5 | the interception family: `Resolution::map_endpoint` decorates the endpoint of an inner resolution and forwards `entries()`, so the overlay's family is exactly the union of what it encloses — the paper's transparent family, by enumeration. Every governor in `ikigai-throttle` is this shape; core's own overlays forward a reported canonical through it. | realised | doctest: `Resolution::map_endpoint`; pin: `space::tests::a_governor_stacks_on_an_already_erased_space` (crates/ikigai-core/src/space.rs) |
 | Opaque overlay | Def. 5 | `MountedRemote` in `ikigai-cli`: declares the remote's published patterns as its own family and hides the rest. Outside this crate. | realised elsewhere | UNPINNED — lives in ikigai-cli (`MountedRemote`), which a test in this crate cannot reach |
 | Limiter (difference) | Def. 7 | **Absent.** `Resolution` is `Hit \| Miss`; a miss always falls through, so no space can carve a family out of a chain. Subtraction exists only by construction site (a smaller root per process). Ledger [#511](http://localhost:1060/l/default/item/511). | absent | UNPINNED — a test would bind `Fallback([Limit("urn:personal:"), S])` with S binding `urn:personal:x`, and assert `Unresolved` for it and its absence from `urn:kernel:actions` |
-| Trapdoor (severs the chain) | Def. 10 | `Confine` (endpoint-side) and `Invocation::confine`: the inner endpoint's sub-requests resolve in ⟨host corridors…, S⟩ with no root; a root-bound name is `Unresolved`, never `Denied`, and the root endpoint is never entered. Two deviations from Def. 10, argued in §1.3. | realised, deviation §1.3 | doctest: `Confine`; pin: `scope::a_confined_sub_request_for_a_root_bound_iri_is_unresolved_and_the_root_endpoint_is_never_entered` (crates/ikigai-core/tests/scope.rs); pin: `scope::an_endpoint_can_only_narrow_its_chain` (crates/ikigai-core/tests/scope.rs); pin: `scope::fan_out_from_a_confined_endpoint_stays_confined` (crates/ikigai-core/tests/scope.rs); pin: `scope::confine_describes_and_names_as_its_inner_endpoint` (crates/ikigai-core/tests/scope.rs) |
+| Trapdoor (severs the chain) | Def. 10 | `Confine` (endpoint-side) and `Invocation::confine`: the inner endpoint's sub-requests resolve in ⟨host corridors…, S⟩ with no root; a root-bound name is `Unresolved`, never `Denied`, and the root endpoint is never entered. Two deviations from Def. 10, argued in §1.3. | realised, deviation §1.3 | doctest: `Confine`; doctest: `Invocation::confine`; pin: `scope::a_confined_sub_request_for_a_root_bound_iri_is_unresolved_and_the_root_endpoint_is_never_entered` (crates/ikigai-core/tests/scope.rs); pin: `scope::an_endpoint_can_only_narrow_its_chain` (crates/ikigai-core/tests/scope.rs); pin: `scope::fan_out_from_a_confined_endpoint_stays_confined` (crates/ikigai-core/tests/scope.rs); pin: `scope::confine_describes_and_names_as_its_inner_endpoint` (crates/ikigai-core/tests/scope.rs) |
 | Gatekeeper | §9.5 | Not a construct. The kernel's **capability floor** is a gatekeeper on every door at once: the scopes a description `requires` for the verb are checked before dispatch and before the cache, and a refusal is recorded on the trace before it is returned. Who is asking is established at the transport (per-identity grants, `ikigai-cli`), outside this crate. This is the paper's *interception*: a decision, not structure (§9.6). | realised as the floor | pin: `kernel::tests::declared_requires_is_kernel_enforced_before_dispatch` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_denied_bound_endpoint_reports_the_refusal` (crates/ikigai-core/src/kernel.rs) |
 | Projection across a boundary (restricted union) | §9.6 | Two halves. The **authority** half is in core: a carried capability is clamped to the ceiling the channel authenticated (`Capability::clamp`). The **surface** half — only declared doors are visible to the far side — is the served kernel's choice of root per process (`ikigai-embedded`), outside this crate. | realised, half here | pin: `capability::tests::clamp_bounds_a_carried_capability_to_the_ceiling` (crates/ikigai-core/src/capability.rs); UNPINNED — the served surface is chosen in ikigai-embedded, which a test in this crate cannot reach |
 | Value corridors | §3 | **Not modelled.** Values travel on the `Request` as `ArgRef`s (inline bytes, a content address, or a by-reference IRI) and are part of the request's identity; they are never doors and can shadow nothing. A by-reference argument naming something outside the chain is `Unresolved` inside it — the trapdoor working. §1.4. | deviation §1.4 | pin: `request::tests::distinct_inputs_have_distinct_identity` (crates/ikigai-core/src/request.rs); UNPINNED — a test would confine an endpoint, hand it `ArgRef::Reference` to a root-bound IRI, and assert `Unresolved` on dereference |
@@ -237,15 +243,17 @@ cₖ ∈ {cₖ₋₁, cₖ₋₁ ⊓ s} for a set s the issuing endpoint named.
 `SyncIssuer` bridge (served by the invocation that minted it). All route through the private
 `issue_under(request, capability)`, and **no public path takes a capability**: `Capability::root`
 and `Capability::scoped` are public, so any code can *construct* a strong capability, but an
-endpoint has no way to hand one to an issuer. Across a wire the receiver clamps a carried
-capability to the session's ceiling (R2.1), so the chain descends across peers too.
+endpoint has no way to hand one to an issuer — pinned as a `compile_fail` doctest on
+`Invocation` that calls `issue_under` from outside the crate and is refused with E0624 (*method
+`issue_under` is private*). Across a wire the receiver clamps a carried capability to the
+session's ceiling (R2.1), so the chain descends across peers too.
 
     pin: `kernel::tests::an_attenuated_sub_request_drops_authority_the_caller_still_holds` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::attenuating_a_sub_request_cannot_widen_past_the_caller` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::a_sync_scope_cannot_widen_authority` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::an_attenuated_sub_request_is_still_recorded_as_a_dependency` (crates/ikigai-core/src/kernel.rs)
     doctest: `Invocation::issue_attenuated`
-    UNPINNED — the structural half ("no public path takes a capability") is a visibility fact; a `compile_fail` doctest on `Invocation` calling `issue_under` would hold it, and none exists
+    doctest: `Invocation`
 
 The wire half (a QUIC server resolving under `session.clamp(&carried)`) is in `ikigai-cli`:
 the clamp is pinned above, the site that applies it is outside this crate. IPC deliberately
@@ -607,6 +615,8 @@ root-bound name `Unresolved` for everything below it.
     pin: `scope::an_injected_corridor_shadows_a_root_door_for_the_request_and_for_its_sub_requests` (crates/ikigai-core/tests/scope.rs)
     pin: `scope::a_confined_sub_request_for_a_root_bound_iri_is_unresolved_and_the_root_endpoint_is_never_entered` (crates/ikigai-core/tests/scope.rs)
     pin: `scope::fan_out_from_a_confined_endpoint_stays_confined` (crates/ikigai-core/tests/scope.rs)
+    doctest: `Kernel::issue_in`
+    doctest: `Invocation::confine`
 
 **R7.2 (the fingerprint: names, order, severed-ness; whole chain).** `Scope::fingerprint` is
 BLAKE3 over whether the root is present and each corridor's identity in chain order — a name
@@ -646,11 +656,22 @@ stand in for any door for every sub-request of that resolution, so injection wit
 present is reachable only by whoever holds the `Kernel` (`Kernel::issue_in`) — the trust line
 of `Capability::root()`. From inside an endpoint the only chain-changing operation is
 `Invocation::confine`, whose placement (§1.3) makes it strictly narrowing; `Invocation::with_scope`
-is crate-private for the reason `issue_under` is (R2.2). Nested confinement adds doors in the
-root's old position and shadows nothing.
+is crate-private for the reason `issue_under` is (R2.2), and pinned the same way — a
+`compile_fail` doctest on it, refused with E0624 from outside the crate. Nested confinement
+adds doors in the root's old position and shadows nothing.
+
+Two consequences of that placement are stated where the decision is
+(`docs/design/resolution-scope.md`, decision 3), and cited here rather than copied:
+- because S sits behind the host's corridors, **a host-injected corridor can shadow S's own
+  doors inside a confinement** — the price of the §1.3 deviation from Def. 10, stated there;
+- because `Confine` is bound at one door and is not transparent, **the paper's §12.3 leak (a
+  door of S reachable from outside through a transparent trapdoor) cannot arise** — it is the
+  trapdoor already wrapped in §9.3's mapper that exposes one identifier.
 
     pin: `scope::an_endpoint_can_only_narrow_its_chain` (crates/ikigai-core/tests/scope.rs)
-    UNPINNED — the visibility half: a `compile_fail` doctest calling `Invocation::with_scope` from outside the crate would hold it, and none exists
+    doctest: `Invocation::with_scope`
+    doctest: `Invocation::confine`
+    doctest: `Kernel::issue_in`
 
 **R7.6 (the chain is legible).** Every traced event of a non-empty-chain resolution carries the
 chain, innermost first, ending in `root` or `severed`; a miss inside a non-empty chain is
@@ -759,8 +780,6 @@ item that would discharge it where one exists. The gate counts these; it does no
 - R3.2 — two facts in the key are claims: a corridor's name (same name ⇒ same doors) and a
   reported canonical (a name in this kernel's namespace). Both pinned as declarations
   (doctests), neither observable by the kernel.
-- R2.2 and R7.5 — the structural halves ("no public path takes a capability", "no endpoint can
-  set its own chain") are visibility facts with no `compile_fail` doctest.
 - R7.2 — the fingerprint covers the whole chain, not the corridors consulted.
 - R5.1 — hypotheses (i) foreign `Space`s call only what they enclose and (ii) the `Arc` graph
   is acyclic are review, not tests.
@@ -808,11 +827,16 @@ bound, lossless flag and topology are in; re-measure, do not inherit.
 
 ## 11. Version note
 
-This document and its gate change nothing the crate publishes: no source under `src/`, no
-public item, no behaviour, no vocabulary. The gate is a dev-only integration test that reads
-this file from the repository. A patch bump would move ~31 lockstep consumers for nothing; the
-crate README's one-line link rides whatever bump comes next. **No bump.** One consequence,
-named: the test file is packaged with the crate (Cargo includes `tests/`), and run from an
-unpacked `.crate` it fails, because the document is not there. That is the same class as a test
-that reads the repository, and it is preferable to a gate that silently passes on an absent
-document.
+This document and its gate change nothing the crate publishes: no source under `src/` beyond
+doc comments, no public item, no behaviour, no vocabulary. The gate is a dev-only integration
+test that reads this file from the repository, and **it is excluded from the packaged crate**
+(`exclude = ["tests/formalism_pins.rs"]` in `crates/ikigai-core/Cargo.toml`, since 2026-09-26,
+[#525](http://localhost:1060/l/default/item/525)). The reason: `docs/` lives above the crate
+directory and is not packaged, so from an unpacked `.crate` the test could only fail on a
+missing document or skip on one — and a skip-with-a-message is the silent pass the gate was
+built to refuse. Its audience is this repository and its CI, which run from the tree the
+document lives in; a downstream running the crate's own tests is not the document's audience.
+Verified with `cargo package -p ikigai-core --list`, which packages nothing and no longer lists
+the file; the gate still runs under `cargo test` here. A patch bump would move ~31 lockstep
+consumers for nothing; the crate README's one-line link, the `exclude` line and the four
+doctests ride whatever bump comes next. **No bump.**

@@ -184,6 +184,36 @@ pub trait Spawner: Send + Sync {
 /// authorizing capability — and, when the kernel is driving, the ability to
 /// issue sub-requests via [`Invocation::source`] / [`Invocation::issue`].
 /// Endpoints take no ambient authority.
+///
+/// ## No public path takes a capability
+///
+/// [`Capability::root`](crate::Capability::root) and
+/// [`Capability::scoped`](crate::Capability::scoped) are public, so any code in the
+/// process can *construct* a capability of any strength. What makes in-process
+/// non-escalation structural is that an endpoint has no way to hand one to an
+/// issuer: every sub-request form on this type — [`issue`](Self::issue) and
+/// [`source`](Self::source) (this invocation's capability, verbatim),
+/// [`issue_attenuated`](Self::issue_attenuated) and
+/// [`source_attenuated`](Self::source_attenuated) (a meet, strictly weaker),
+/// [`fan_out`](Self::fan_out) (a clone per spawned request) — routes through a
+/// **private** `issue_under(request, capability)`, and nothing public takes a
+/// capability. That privacy is the visibility half of `docs/formalism/README.md`
+/// R2.2, and this block pins it: it fails to compile with E0624, *method
+/// `issue_under` is private*, and for no other reason.
+///
+/// ```compile_fail,E0624
+/// use ikigai_core::{Bindings, Capability, Invocation, Iri, Request, Verb};
+///
+/// let request = Request::new(Verb::Source, Iri::parse("urn:x").unwrap());
+/// let bindings = Bindings::new();
+/// let weak = Capability::scoped(["urn:cap:read"]);
+/// let inv = Invocation::detached(&request, &bindings, &weak);
+///
+/// // An endpoint holding a weak capability can construct a strong one…
+/// let strong = Capability::root();
+/// // …and has no way to issue under it. `issue_under` is private.
+/// let _ = inv.issue_under(Request::new(Verb::Source, Iri::parse("urn:y").unwrap()), &strong);
+/// ```
 pub struct Invocation<'a> {
     /// The request being served.
     pub request: &'a Request,
@@ -405,6 +435,64 @@ impl<'a> Invocation<'a> {
     /// naming claims — so two confinements naming the same `name` share cached
     /// answers and must therefore bind the same doors.
     ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicU32, Ordering};
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     AsyncFnEndpoint, Capability, EndpointSpace, Error, Exact, FnEndpoint, Iri, Kernel,
+    ///     ReprType, Representation, Request, Verb,
+    /// };
+    ///
+    /// // A root with a secret in it, counting how often it is entered.
+    /// let reached = Arc::new(AtomicU32::new(0));
+    /// let secret = {
+    ///     let reached = Arc::clone(&reached);
+    ///     FnEndpoint::new("secret", move |_| {
+    ///         reached.fetch_add(1, Ordering::SeqCst);
+    ///         Ok(Representation::new(ReprType::new("text/plain"), b"s3cr3t".to_vec()))
+    ///     })
+    /// };
+    /// // An endpoint that confines ITSELF to a corridor holding one document, then
+    /// // reads through the confined handle.
+    /// let extractor = AsyncFnEndpoint::new("extract", |inv| {
+    ///     Box::pin(async move {
+    ///         let document = Arc::new(EndpointSpace::new().bind(
+    ///             Exact::new("urn:doc:1"),
+    ///             FnEndpoint::new("doc", |_| {
+    ///                 Ok(Representation::new(ReprType::new("text/plain"), b"the document".to_vec()))
+    ///             }),
+    ///         ));
+    ///         assert!(inv.scope().is_empty()); // the plain root, before
+    ///         let confined = inv.confine(Iri::parse("urn:ctx:doc:1").unwrap(), document);
+    ///         assert!(confined.scope().is_severed()); // no root, after…
+    ///         assert!(inv.scope().is_empty()); // …and the original handle is untouched
+    ///
+    ///         // What the corridor binds resolves…
+    ///         let doc = confined.source(&Iri::parse("urn:doc:1").unwrap()).await?;
+    ///         assert_eq!(doc.bytes, b"the document");
+    ///         // …and a root-bound name is unresolvable: not denied, nowhere to go.
+    ///         let err = confined.source(&Iri::parse("urn:data:secret").unwrap()).await.unwrap_err();
+    ///         assert!(matches!(err, Error::Unresolved(ref t) if t.as_str() == "urn:data:secret"));
+    ///         Ok(doc)
+    ///     })
+    /// });
+    /// let kernel = Kernel::new(Arc::new(
+    ///     EndpointSpace::new()
+    ///         .bind(Exact::new("urn:data:secret"), secret)
+    ///         .bind(Exact::new("urn:extract"), extractor),
+    /// ));
+    ///
+    /// let out = block_on(kernel.issue(
+    ///     Request::new(Verb::Source, Iri::parse("urn:extract").unwrap()),
+    ///     &Capability::root(),
+    /// ))
+    /// .unwrap();
+    /// assert_eq!(out.bytes, b"the document");
+    /// // Even under ROOT authority, the secret endpoint was never entered.
+    /// assert_eq!(reached.load(Ordering::SeqCst), 0);
+    /// ```
+    ///
     /// ## Why this is the only chain-changing operation an endpoint gets
     ///
     /// It narrows, structurally. Relative to the chain this invocation runs in,
@@ -449,6 +537,23 @@ impl<'a> Invocation<'a> {
     /// purpose: a public setter would let an endpoint hand a widening chain to its
     /// own sub-requests, which is the one thing [`confine`](Self::confine) is
     /// shaped to make impossible.
+    ///
+    /// That is the visibility half of `docs/formalism/README.md` R7.5 ("no endpoint
+    /// can set its own chain"), and this block pins it: from outside the crate it
+    /// fails to compile with E0624, *method `with_scope` is private*, and for no
+    /// other reason.
+    ///
+    /// ```compile_fail,E0624
+    /// use ikigai_core::{Bindings, Capability, Invocation, Iri, Request, Scope, Verb};
+    ///
+    /// let request = Request::new(Verb::Source, Iri::parse("urn:x").unwrap());
+    /// let bindings = Bindings::new();
+    /// let cap = Capability::root();
+    /// let inv = Invocation::detached(&request, &bindings, &cap);
+    ///
+    /// // An endpoint cannot hand its sub-requests a chain of its own choosing.
+    /// let _ = inv.with_scope(Scope::empty());
+    /// ```
     pub(crate) fn with_scope(mut self, scope: Scope) -> Self {
         self.scope = scope;
         self
