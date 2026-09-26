@@ -6,7 +6,8 @@ Issuer::issue_in_scope, CacheKey::scope, SCOPE_NOTE, SCOPE_MISS_NOTE}`.
 **Companions:** `docs/design/sub-request-authority.md` (the authority argument this reuses
 verbatim), `docs/design/cache-ejection.md` §2 (a fingerprint is not an identity),
 `docs/design/spaces-as-named-graphs.md` (where corridor identity goes next, ledger
-[#515](http://localhost:1060/l/default/item/515)).
+[#515](http://localhost:1060/l/default/item/515)), `docs/formalism/README.md` (the formal
+companion to the paper: this chain as the paper's Γ, every claim pinned to a test).
 **Normative reference:** Peter Rodgers, *Peter's Hotel: A Set-Theoretic Formalism* v5.18 —
 §3 (context chains, value corridors), §9.1 (the trapdoor, Def. 10), §9.3 (confinement,
 Prop. 4), §9.4 and §5.1 (cache sharing across a boundary).
