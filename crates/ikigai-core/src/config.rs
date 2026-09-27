@@ -35,7 +35,7 @@
 //! `XDG_CONFIG_HOME` and `HOME` are the ONLY environment variables this module reads, and no
 //! new one belongs here: config home plus flags is the rule, and an environment variable is
 //! the banned third channel. The overrides that predate that rule — `IKIGAI_FILES`,
-//! `IKIGAI_SECRETS`, `IKIGAI_CALENDAR_CONFIG` — stay in the consumers that honour them, so
+//! `IKIGAI_SECRETS`, `IKIGAI_CALENDAR_CONFIG` — stay in the consumers that honor them, so
 //! that retiring them stays one visible decision per consumer rather than a channel core
 //! quietly reopens for everybody.
 
@@ -97,7 +97,7 @@ pub fn config_home_from(xdg: Option<OsString>, home: Option<OsString>) -> Option
 ///    inherits none of a login shell's environment, so an `XDG_DATA_HOME` exported from a
 ///    shell profile would split exactly that pair, on exactly this machine.
 /// 2. **Sockets are not data.** XDG puts sockets in `$XDG_RUNTIME_DIR`, not
-///    `$XDG_DATA_HOME`. Honouring `XDG_DATA_HOME` here would not make this directory
+///    `$XDG_DATA_HOME`. Honoring `XDG_DATA_HOME` here would not make this directory
 ///    XDG-conformant; it would make it half-conformant and owe a second rule for the rest.
 /// 3. **Live consumers name it literally.** `health-watch.sh` reads `~/.ikigai/health/`,
 ///    launchd plists name `~/.ikigai/host.sock` and `~/.ikigai/quic-drain`, and machines

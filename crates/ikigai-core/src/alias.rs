@@ -20,7 +20,7 @@
 //!
 //! [`Alias`] is a `Space` decorator in the **interception-overlay family** — the
 //! same shape as `ikigai-throttle`'s `RateLimit`/`Timeout`: wrap a space, add a
-//! cross-cutting behaviour to every resolution flowing through it, leave the
+//! cross-cutting behavior to every resolution flowing through it, leave the
 //! wrapped space unaware. It is deliberately *not* a second composition
 //! mechanism.
 //!
@@ -253,7 +253,7 @@ impl AliasRule {
 }
 
 /// A completed rewrite: the name the caller used, the name it resolves to, and
-/// the rules it travelled through.
+/// the rules it traveled through.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AliasHop {
     logical: Iri,

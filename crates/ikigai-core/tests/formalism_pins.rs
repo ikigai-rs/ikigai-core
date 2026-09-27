@@ -1,4 +1,4 @@
-//! The gate on `docs/formalism/README.md` — "The ikigai realisation", the formal
+//! The gate on `docs/formalism/README.md` — "The ikigai realization", the formal
 //! companion to Peter's Hotel. A paper has no gate; this document does: every
 //! definition, theorem and deviation in it carries a **pin** naming the test or
 //! doctest that holds its precondition, and this test resolves every pin against

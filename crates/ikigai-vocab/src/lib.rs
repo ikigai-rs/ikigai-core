@@ -1116,7 +1116,7 @@ mod tests {
         }
     }
 
-    /// ⚠ The finding family's domains, pinned OFF — the axiom this neighbourhood has
+    /// ⚠ The finding family's domains, pinned OFF — the axiom this neighborhood has
     /// already paid for twice.
     ///
     /// `ik:severity` is the sharpest: three node classes carry it one hop apart — the

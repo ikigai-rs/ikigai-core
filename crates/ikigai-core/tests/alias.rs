@@ -522,7 +522,7 @@ impl Space for Rebuilding {
     }
 }
 
-/// An endpoint decorator that changes nothing — the overlay's behaviour is not
+/// An endpoint decorator that changes nothing — the overlay's behavior is not
 /// what is under test, only whether the resolution survives being wrapped.
 struct PassThrough(Arc<dyn Endpoint>);
 

@@ -112,7 +112,7 @@ impl CacheKey {
 /// cut any of them and it is stale.
 ///
 /// `Serialize`/`Deserialize` are derived because everything inside already is, and
-/// keeping the door open for an ejected cache costs nothing here. **Serialising one
+/// keeping the door open for an ejected cache costs nothing here. **Serializing one
 /// of these is not the hard part of ejection, and this derive is not permission to
 /// import one** — `generation` is a per-process counter and means nothing in another
 /// instance. See `docs/design/cache-ejection.md`.
@@ -972,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn a_deadline_is_honoured_and_a_clockless_kernel_assumes_the_worst() {
+    fn a_deadline_is_honored_and_a_clockless_kernel_assumes_the_worst() {
         let cache = ReprCache::default();
         let repr = Representation::new(ReprType::new("text/plain"), b"x".to_vec())
             .cacheable_until(Time::from_millis(100));

@@ -1,5 +1,5 @@
 //! **The limiter, end to end** — the paper's Definition 7 and §9.6's *difference*,
-//! realised as a hit on a kernel-known endpoint (`docs/formalism/README.md` §1,
+//! realized as a hit on a kernel-known endpoint (`docs/formalism/README.md` §1,
 //! "Limiter (difference)"). One test per claim: a limited name is `Unresolved`,
 //! byte-identical to an unbound one, and offered by no manifold; an alias INTO
 //! the family is limited under the canonical and one OUT of it resolves; a

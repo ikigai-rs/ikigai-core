@@ -72,7 +72,7 @@ host sets it gets `None` and quietly loads the shared layer only — the operato
 That is the precise failure the config-home push-down was written against: a wrong
 answer that reads like a right one. But it is *worse* here in the way that matters for
 debugging. XDG drift is deterministic — one machine, one wrong directory, reproducible
-forever. An initialisation-order bug is intermittent: it depends on where in `main` the
+forever. An initialization-order bug is intermittent: it depends on where in `main` the
 set happens relative to space construction, on whether a mount is built lazily, and on
 whether the host is itself a library (`ikigai-embedded` is). It reproduces on one
 machine and not the next. Trading a deterministic wrong answer for a nondeterministic
@@ -122,7 +122,7 @@ drift to point at.
 ## What we do instead: the shape of the knob
 
 Four consumers should agree on one shape, so that when a second a11y-aware library
-appears it is recognisably the same knob rather than a new dialect. `ikigai-browse`'s
+appears it is recognizably the same knob rather than a new dialect. `ikigai-browse`'s
 `Mount::app` is the reference implementation; the rules below are what it already does,
 written down.
 

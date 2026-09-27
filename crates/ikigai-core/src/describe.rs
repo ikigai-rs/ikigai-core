@@ -258,7 +258,7 @@ pub struct Description {
 /// (`ik:Endpoint`, `ik:Transreptor`, …) and lets the kernel select endpoints by role.
 ///
 /// The default, [`Endpoint`](EndpointKind::Endpoint), is a plain endpoint (today's
-/// behaviour). [`Transreptor`](EndpointKind::Transreptor) marks an endpoint that converts a
+/// behavior). [`Transreptor`](EndpointKind::Transreptor) marks an endpoint that converts a
 /// representation between media types and carries the `from`/`to` types it handles, so a host
 /// can find "a transreptor from A to B." More kinds may follow.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]

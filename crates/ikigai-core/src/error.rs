@@ -37,7 +37,7 @@ pub enum Error {
     /// The request is well-formed, authorized and names something that exists — and
     /// the **current state** of the resource refuses it: a move to a square already
     /// taken, a move after the game is over, a transition the resource is not in a
-    /// position to make, a write whose precondition does not hold. The HTTP analogue is
+    /// position to make, a write whose precondition does not hold. The HTTP analog is
     /// **409 Conflict** ("conflicts with the current state of the target resource").
     /// **Permanent** (see [`is_transient`](Error::is_transient)): re-issuing the same
     /// request against the same state gets the same answer; what changes the answer is

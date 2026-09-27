@@ -64,7 +64,7 @@ pub trait Issuer: Send + Sync {
     /// what makes a confined endpoint's sub-requests confined and an injected
     /// corridor visible to every sub-request of the request it was injected for.
     ///
-    /// **The default honours the empty chain and refuses every other.** An empty
+    /// **The default honors the empty chain and refuses every other.** An empty
     /// scope delegates to `issue_scoped`, so every issuer written before this
     /// method existed behaves exactly as it did. A non-empty scope is refused with
     /// [`Error::Endpoint`] rather than dropped: an issuer that cannot carry the
@@ -84,7 +84,7 @@ pub trait Issuer: Send + Sync {
         if !scope.is_empty() {
             return Err(Error::Endpoint(format!(
                 "sub-request for {} carries a resolution scope ({scope}) this issuer \
-                 cannot honour — it implements only the plain `issue` seam — so it was \
+                 cannot honor — it implements only the plain `issue` seam — so it was \
                  refused rather than resolved outside the scope",
                 request.target
             )));
@@ -166,7 +166,7 @@ pub trait Issuer: Send + Sync {
     /// ([`Kernel::select_transreptor_in`](crate::Kernel::select_transreptor_in));
     /// [`Invocation::select_transreptor`] reads it with the invocation's own chain.
     ///
-    /// **The default honours the empty chain and offers nothing in every other.**
+    /// **The default honors the empty chain and offers nothing in every other.**
     /// An empty scope delegates to `select_transreptor`, so an issuer written before
     /// this method existed behaves exactly as it did; a non-empty scope gets `None`
     /// rather than the root's plan — an issuer that cannot select in the chain must
@@ -190,7 +190,7 @@ pub trait Issuer: Send + Sync {
     /// ([`Kernel::select_action_in`](crate::Kernel::select_action_in));
     /// [`Invocation::select_action`] reads it with the invocation's own chain.
     ///
-    /// **The default honours the empty chain and offers nothing in every other**,
+    /// **The default honors the empty chain and offers nothing in every other**,
     /// for the reason [`select_transreptor_in`](Issuer::select_transreptor_in)
     /// gives: an offer the chain cannot resolve is the over-offer the manifold
     /// exists to prevent. Override it to select in the chain.
@@ -207,7 +207,7 @@ pub trait Issuer: Send + Sync {
     /// ([`Kernel::select_transreptor_in_with`](crate::Kernel::select_transreptor_in_with));
     /// [`Invocation::select_transreptor_with`] reads it with the invocation's own chain.
     ///
-    /// **The default honours the lossless policy and offers nothing under any other.**
+    /// **The default honors the lossless policy and offers nothing under any other.**
     /// A lossless-only policy is exactly `select_transreptor_in`, so an issuer written
     /// before this method existed answers as it did; a policy that admits lossy edges
     /// gets `None`, because an issuer that cannot see the declarations cannot vouch
@@ -455,7 +455,7 @@ impl<'a> Invocation<'a> {
     /// That has already cost a session a failing test that looked like a golden-thread
     /// bug: the endpoint was reading the right layers, the test was resolving an IRI
     /// with an `{app}` segment in it, and the binding was never there to be read.
-    /// If the behaviour under test depends on a captured variable, state it:
+    /// If the behavior under test depends on a captured variable, state it:
     ///
     /// ```
     /// # use ikigai_core::{Bindings, Capability, Invocation, Iri, Request, Verb};
@@ -1066,7 +1066,7 @@ impl<'a> Invocation<'a> {
     /// `compose` expanding several `$a{}` markers) never holds a thread while its
     /// children run, and a child can run on the thread the parent released. Without a
     /// spawner it falls back to sequential [`issue`](Self::issue) — the kernel's
-    /// default single-threaded behaviour. Either way each result's expiry and golden
+    /// default single-threaded behavior. Either way each result's expiry and golden
     /// threads are recorded as dependencies of this invocation, exactly like `issue`
     /// — the failed branches included, by the same rules — and every branch runs
     /// one nesting level deeper than this invocation.
@@ -1591,7 +1591,7 @@ mod tests {
 
     #[test]
     fn a_detached_async_endpoint_cannot_issue() {
-        // Mirror of the detached FnEndpoint behaviour: no kernel context means
+        // Mirror of the detached FnEndpoint behavior: no kernel context means
         // sub-requests fail cleanly, not silently.
         let needs_kernel = AsyncFnEndpoint::new("needsKernel", |inv| {
             Box::pin(async move { inv.source(&iri("urn:data:leaf")).await })
@@ -1664,7 +1664,7 @@ mod tests {
     }
 
     #[test]
-    fn the_width_default_changes_no_spawn_behaviour() {
+    fn the_width_default_changes_no_spawn_behavior() {
         // Additive by construction: `width` is a read. Whatever it answers — 1, 8, or
         // unknown — the task still runs exactly as it did before the accessor existed.
         static RAN: AtomicU32 = AtomicU32::new(0);

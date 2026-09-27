@@ -1399,7 +1399,7 @@ impl Space for Limit {
     }
 }
 
-/// ⊥ — the distinguished endpoint a [`Limit`] resolves to. The kernel recognises
+/// ⊥ — the distinguished endpoint a [`Limit`] resolves to. The kernel recognizes
 /// it by [`Endpoint::is_limiter`] and never invokes it. Should something else
 /// invoke it — a harness that matches [`Resolution`] and calls `invoke` on a hit
 /// without asking — it answers as the kernel would: the target is unresolved.

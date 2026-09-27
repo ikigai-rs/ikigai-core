@@ -183,9 +183,9 @@ The paper carries a request's values as transient corridors so they can be resol
 identifier, and notes that value corridors accumulate down the chain so a trapdoor exposes
 all of them unless filtered. ikigai's values already travel **on the `Request`** as
 `ArgRef`s, and a confined sub-request carries its own request's args and nothing of its
-parent's — there is no accumulation to filter. Modelling value corridors would add a second
+parent's — there is no accumulation to filter. Modeling value corridors would add a second
 way to say what the request already says, and a second thing the trapdoor has to strip.
-Not modelled; if a by-reference argument (`ArgRef::Reference`) names something outside the
+Not modeled; if a by-reference argument (`ArgRef::Reference`) names something outside the
 chain, dereferencing it inside is `Unresolved`, which is the trapdoor working.
 
 ### 7. The wire drops the scope — a named hole, in two places
