@@ -583,8 +583,11 @@ canonical name the kernel reports for `Unresolved`, the requested name for `NotF
 carries no IRI of its own; for `Denied` and every other error, `Always`. Consequently a composite
 that catches the failure and returns a cacheable fallback is stored with an edge on the missing
 name (so a `Sink` that creates it, or a watcher that sees it appear, cuts the fallback), and a
-composite built on a denial — or on a timeout, an outage, a depth refusal — is not stored at
-all. `fan_out` applies the same rule per branch. The rule is conservative in the direction that
+composite built on a denial — or on a timeout, an outage, a depth refusal, a conflict — is not
+stored at all. `Conflict` (the state refuses a well-formed, authorized request) is the one of
+these a thread looks right for, since a change of state is what clears it; it does not get one,
+because the state that refused is whatever the endpoint consulted, not the name that was
+requested, and a thread on the requested name is one no write would cut. `fan_out` applies the same rule per branch. The rule is conservative in the direction that
 is never wrong: a grant change has no thread, and the kernel cannot name what would make an
 `Endpoint` error go away, so it declines to cache rather than guess. The residue, stated: under
 an alias a `NotFound` records the *logical* name while the write-cut fires on the canonical one
@@ -595,6 +598,8 @@ variant.
     pin: `kernel::tests::a_composite_over_a_not_found_name_recomputes_when_a_sink_creates_it` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::a_composite_built_on_a_denial_is_not_cached` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::a_composite_built_on_any_other_failure_is_not_cached` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_composite_built_on_a_conflict_is_not_cached` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_conflict_is_never_stored_and_a_change_of_state_clears_it` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::fan_out_records_failed_branches_by_the_same_rules` (crates/ikigai-core/src/kernel.rs)
 
 *Corollary (the least cacheable dependency, again).* R4.5 is the corollary of R4.3 applied to
@@ -1446,3 +1451,14 @@ this file from the repository, **excluded from the packaged crate**
 (`exclude = ["tests/formalism_pins.rs"]`, [#525](http://localhost:1060/l/default/item/525)),
 because `docs/` lives above the crate directory and a skip-with-a-message is the silent pass the
 gate was built to refuse.
+
+**0.1.80** carries `Error::Conflict` ([#575](http://localhost:1060/l/default/item/575)): a
+typed refusal for a request that is well-formed, authorized and names something that exists,
+which the current state of the resource refuses — the 409 of the taxonomy. Found by the
+tutorial's tic-tac-toe, whose move endpoint had to refuse a taken square as `InvalidArgument`
+under an invented argument name. Additive (`Error` is `#[non_exhaustive]`), permanent
+(`is_transient` false — only a change of state clears it), message-only like `NotFound`, and
+under R4.5 it is `Always`, argued there. Nothing in the kernel's behaviour changes: no kernel
+path raises it; it exists for endpoints. Until the wire gains a tag for it, a remote caller sees
+it as `Endpoint` carrying the displayed text — the same degradation `DepthExceeded` has today.
+`vocabulary.ttl` names no error kinds, so only its `owl:versionInfo` moves.
