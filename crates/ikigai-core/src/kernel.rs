@@ -1380,7 +1380,7 @@ impl Kernel {
         // simply not holding. Carrying the hop on the denial event is what stops
         // that from being invisible.
         let mut notes = vec![(DENIED_NOTE.to_string(), lacking.to_string())];
-        notes.extend(provenance_notes(alias, answered));
+        notes.extend(provenance_notes(trace, alias, answered));
         notes.extend(scope_notes(scope));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
@@ -1512,7 +1512,7 @@ impl Kernel {
             LIMITED_NOTE.to_string(),
             request.target.as_str().to_string(),
         )];
-        notes.extend(provenance_notes(alias, answered));
+        notes.extend(provenance_notes(trace, alias, answered));
         notes.extend(scope_notes(scope));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
@@ -1939,9 +1939,10 @@ impl Kernel {
         }
         let alias = alias.as_ref();
         // Who answered, for the trace: the innermost named space on the path, or
-        // the named corridor the hit came from. Read once; it never changes below.
-        let answered = resolved.answered_by.clone();
-        let answered = answered.as_ref();
+        // the named corridor the hit came from. Borrowed, not cloned — a named
+        // leaf already paid one `Iri` clone to report it, and a cache hit through
+        // it must not pay a second (measured 2026-09-27, formalism §10).
+        let answered = resolved.answered_by.as_ref();
 
         // ★ THE LIMITER. A hit on ⊥ (`Endpoint::is_limiter`) is the paper's
         // Definition 7: the identifier is admitted by a door whose endpoint is the
@@ -2018,7 +2019,7 @@ impl Kernel {
                     parent,
                     started,
                     true,
-                    provenance_notes(alias, answered),
+                    provenance_notes(&trace, alias, answered),
                     &scope,
                 );
                 self.record_resolution(&request, started, true);
@@ -2142,7 +2143,7 @@ impl Kernel {
             trace_notes = invocation.take_trace_notes();
             // The rewrite and the answering space are provenance of the invocation,
             // so they lead the endpoint's own notes rather than being appended after.
-            let mut notes = provenance_notes(alias, answered);
+            let mut notes = provenance_notes(&trace, alias, answered);
             notes.append(&mut trace_notes);
             trace_notes = notes;
             representation.with_expiry(effective).with_threads(threads)
@@ -2150,7 +2151,7 @@ impl Kernel {
         if request.verb == Verb::Meta {
             // The Meta arm takes no invocation, so it never reached the note-merging
             // above; the rewrite and the answerer still have to show on the event.
-            trace_notes = provenance_notes(alias, answered);
+            trace_notes = provenance_notes(&trace, alias, answered);
         }
         // Computed (not served from cache) — record after the invocation completes.
         self.trace_record(
@@ -3024,8 +3025,19 @@ fn alias_notes(alias: Option<&AliasHop>) -> Vec<(String, String)> {
 
 /// The trace notes disclosing a resolution's provenance: the rewrite, if any, then
 /// the space that answered, if it is named. Empty for an un-aliased hit through
-/// anonymous spaces, so such an event is byte-identical to before.
-fn provenance_notes(alias: Option<&AliasHop>, answered: Option<&Iri>) -> Vec<(String, String)> {
+/// anonymous spaces, so such an event is byte-identical to before — and empty
+/// whenever nothing is tracing, so a hit through a named space never builds
+/// strings nobody records (the answerer's note is the one provenance fact a
+/// plain, un-aliased read can carry, so unlike the alias hop it sits on the hot
+/// path of every named space).
+fn provenance_notes(
+    trace: &Option<TraceScope>,
+    alias: Option<&AliasHop>,
+    answered: Option<&Iri>,
+) -> Vec<(String, String)> {
+    if trace.is_none() {
+        return Vec::new();
+    }
     let mut notes = alias_notes(alias);
     notes.extend(answered.map(|space| (ANSWERED_NOTE.to_string(), space.as_str().to_string())));
     notes
