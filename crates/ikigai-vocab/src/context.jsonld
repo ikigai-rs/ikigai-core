@@ -139,6 +139,10 @@
       "@id": "ik:jsonMode",
       "@type": "xsd:boolean"
     },
+    "lossless": {
+      "@id": "ik:lossless",
+      "@type": "xsd:boolean"
+    },
     "mapOver": {
       "@id": "ik:mapOver",
       "@type": "@id"

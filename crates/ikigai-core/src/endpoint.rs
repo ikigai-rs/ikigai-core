@@ -13,7 +13,7 @@ use crate::grammar::Bindings;
 use crate::iri::Iri;
 use crate::repr::{Expiry, Representation, Thread, Time};
 use crate::request::Request;
-use crate::select::{ActionMatch, TransreptionStep};
+use crate::select::{ActionMatch, TransreptionPolicy, TransreptionStep};
 use crate::space::{Scope, Space};
 use crate::verb::Verb;
 
@@ -199,6 +199,31 @@ pub trait Issuer: Send + Sync {
             return Vec::new();
         }
         self.select_action(present)
+    }
+
+    /// [`select_transreptor_in`](Issuer::select_transreptor_in) under an explicit
+    /// [`TransreptionPolicy`] — the seam a caller consents to a lossy edge through.
+    /// The kernel overrides it
+    /// ([`Kernel::select_transreptor_in_with`](crate::Kernel::select_transreptor_in_with));
+    /// [`Invocation::select_transreptor_with`] reads it with the invocation's own chain.
+    ///
+    /// **The default honours the lossless policy and offers nothing under any other.**
+    /// A lossless-only policy is exactly `select_transreptor_in`, so an issuer written
+    /// before this method existed answers as it did; a policy that admits lossy edges
+    /// gets `None`, because an issuer that cannot see the declarations cannot vouch
+    /// that a plan it offers is the one the caller consented to — fail closed, as
+    /// `select_transreptor_in` does for a chain it cannot select in.
+    fn select_transreptor_in_with(
+        &self,
+        from: &str,
+        to: &str,
+        scope: &Scope,
+        policy: &TransreptionPolicy,
+    ) -> Option<Vec<TransreptionStep>> {
+        if policy.allows_lossy() {
+            return None;
+        }
+        self.select_transreptor_in(from, to, scope)
     }
 }
 
@@ -998,6 +1023,20 @@ impl<'a> Invocation<'a> {
     /// corridor shadows is the one named — exactly what the step would resolve to.
     pub fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
         self.issuer?.select_transreptor_in(from, to, &self.scope)
+    }
+
+    /// [`select_transreptor`](Self::select_transreptor) under an explicit
+    /// [`TransreptionPolicy`] — how an endpoint that has its caller's consent (an
+    /// `lossy=allow` argument of its own, say) plans through a declared projection.
+    /// The plan reports each lossy step; the endpoint decides what to tell its caller.
+    pub fn select_transreptor_with(
+        &self,
+        from: &str,
+        to: &str,
+        policy: &TransreptionPolicy,
+    ) -> Option<Vec<TransreptionStep>> {
+        self.issuer?
+            .select_transreptor_in_with(from, to, &self.scope, policy)
     }
 
     /// Find endpoints whose required inputs are satisfiable by the RDF classes in `present`

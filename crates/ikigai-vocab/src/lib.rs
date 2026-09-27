@@ -301,6 +301,10 @@ pub fn to_turtle(description: &Description) -> String {
             let to = t.to.iter().map(|m| lit(m)).collect::<Vec<_>>().join(", ");
             predicates.push(format!("ik:transreptsTo {to}"));
         }
+        // Always emitted, `true` included: the graph states the declaration rather than
+        // implying it by absence, so `?t ik:lossless false` finds every projection and a
+        // consumer never has to know the default.
+        predicates.push(format!("ik:lossless {}", t.lossless));
     }
     // Flat inputs: skolemized under the endpoint (stable IRIs — catalogs SPARQL and
     // diff cleanly; no blank nodes). Actions synthesized from the flat form REFERENCE
@@ -420,8 +424,9 @@ pub fn to_text(description: &Description) -> String {
         s.push_str(&format!("outputs: {}\n", description.outputs.join(", ")));
     }
     if let Some(t) = description.transreption() {
+        let lossy = if t.lossless { "" } else { " (lossy)" };
         s.push_str(&format!(
-            "transrepts: {} → {}\n",
+            "transrepts: {} → {}{lossy}\n",
             t.from.join(", "),
             t.to.join(", ")
         ));
@@ -794,13 +799,46 @@ mod tests {
             ttl.contains("ik:transreptsTo \"text/turtle\", \"text/html\""),
             "{ttl}"
         );
+        // The declaration is stated, not implied: a transreptor that says nothing
+        // claims the definition, and the graph says so.
+        assert!(ttl.contains("ik:lossless true"), "{ttl}");
         assert!(parse_count(&ttl) > 0, "emitted transreptor turtle parses");
-        // A plain endpoint stays just ik:Endpoint.
+        // A plain endpoint stays just ik:Endpoint, and carries no ik:lossless.
         let plain = to_turtle(&sample());
         assert!(
             plain.contains("a ik:Endpoint") && !plain.contains("ik:Transreptor"),
             "{plain}"
         );
+        assert!(!plain.contains("ik:lossless"), "{plain}");
+    }
+
+    #[test]
+    fn renders_a_projection_as_a_lossy_transreptor() {
+        // A projection is still an ik:Transreptor — the class is the shape of the
+        // edge, and selection still walks it under consent — with `ik:lossless false`.
+        let d = Description::new("summarize")
+            .verb(Verb::Source)
+            .transreptor(["text/turtle"], ["text/x-summary"])
+            .lossy();
+        let ttl = to_turtle(&d);
+        assert!(ttl.contains("a ik:Endpoint, ik:Transreptor"), "{ttl}");
+        assert!(ttl.contains("ik:lossless false"), "{ttl}");
+        assert!(parse_count(&ttl) > 0, "emitted projection turtle parses");
+        // Every face carries it: the text face marks the edge, the JSON face is the
+        // contract a client engine reads, and it round-trips.
+        assert!(
+            to_text(&d).contains("→ text/x-summary (lossy)"),
+            "{}",
+            to_text(&d)
+        );
+        let repr = TurtleRenderer
+            .render(&d, &ReprType::new("application/json"))
+            .unwrap();
+        let json = String::from_utf8(repr.bytes.clone()).unwrap();
+        assert!(json.contains("\"lossless\":false"), "{json}");
+        let back: Description = serde_json::from_slice(&repr.bytes).unwrap();
+        assert!(!back.transreption().unwrap().is_lossless());
+        assert!(!to_text(&Description::new("rdf").transreptor(["a/b"], ["c/d"])).contains("lossy"));
     }
 
     #[test]
