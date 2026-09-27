@@ -9,7 +9,10 @@
 //! combinator as IRIs with ordered layers, answers the chain it is asked in, and is
 //! keyed by it; and the paper's §12.5 check — is the personal family reachable
 //! without passing the limiter? — is a walk over that graph, NO with the limiter
-//! and YES without it.
+//! and YES without it. The walk answers for a FRAGMENT and says so (ledger #552):
+//! an alias's visible rules are expanded, so a rule into the family behind the wall
+//! is reported as the leak it is; a closure rewrite behind the wall, an opaque
+//! space, and a template the prefix test cannot place are "unknown", never "no".
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -656,8 +659,11 @@ fn the_topology_renders_the_chain_and_every_core_combinator_as_iris_with_ordered
     .is_ok());
 }
 
-/// The answer a reachability walk gives through a graph that may say "I cannot
-/// see in here" (`ik:OpaqueSpace`).
+/// The answer the gatekeeper check gives. Three-valued, because the graph can hold
+/// things the check does not evaluate — R7.3's fragment: an `ik:OpaqueSpace`, a
+/// closure `ik:Rewrite` behind a wall over the family, a template door whose `{`
+/// falls inside the family's length, a template family on a limiter that touches
+/// it. `Unknown` is the check saying so rather than answering.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Reach {
     Reachable,
@@ -665,65 +671,220 @@ enum Reach {
     Unknown,
 }
 
+/// Where a pattern's literal head — the text before the first `{` — stands relative
+/// to the family. The check does not evaluate templates; it places them by their
+/// head, which is sound in two of the three cases: a head inside the family means
+/// every expansion is (`urn:personal:doc/{id}`); a head that diverges from it means
+/// no expansion can start with it (`urn:file:{path}`); a head the family extends
+/// (`urn:{ns}:inbox` against `urn:personal:`) may or may not, and that is the case
+/// the check does not answer.
+#[derive(Debug, PartialEq, Eq)]
+enum Head {
+    Inside,
+    Outside,
+    Astride,
+}
+
+fn head(text: &str, family: &str) -> Head {
+    let (lit, template) = match text.find('{') {
+        Some(at) => (&text[..at], true),
+        None => (text, false),
+    };
+    if lit.starts_with(family) {
+        Head::Inside
+    } else if template && family.starts_with(lit) {
+        Head::Astride
+    } else {
+        Head::Outside
+    }
+}
+
+/// Two prefixes share names: one extends the other.
+fn touches(a: &str, b: &str) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
 /// **Theorem 4(b) as a walk** — the formal document's §1.1: ikigai's tree contributes
 /// no pushes, so gatekeeper completeness over it is a path query, not a pushdown
-/// analysis. Is any door of `family` reachable from `node` without a limiter over
-/// the family standing ahead of it in some ordered list on the path?
+/// analysis. The walk follows the order the kernel consults the tree, because that
+/// order IS the rule: `Fallback` returns the first hit and a hit on ⊥ is a hit, so a
+/// plain limiter met earlier in pre-order — on a path that admits the name — ends
+/// resolution for every later door under its family, whichever list that door sits
+/// in. `walls` accumulates those families as the walk meets them, narrowed to the
+/// mount the limiter sits under (`gate`: a limiter stops only what its mount admits,
+/// and one under a mount that admits none of the family is dead). A limiter met
+/// inside a mapper (`Rewrite`, `Alias`) walls only the mapper's own subtree: the
+/// closure or the table may rename the family away before it, so exporting it would
+/// wall doors it never stops. `maybe` is set by a template family the check cannot
+/// place, after which a door found is at best "unknown".
 ///
-/// The SPARQL form of the same walk is in `docs/formalism/README.md` (R7.3).
-fn reach(g: &Graph, node: &str, family: &str) -> Reach {
-    let p = |name: &str| format!("{IK}{name}");
-    match g.kind(node).as_str() {
-        "Chain" | "Fallback" => {
-            let mut unknown = false;
-            for layer in g.layers(node) {
-                if g.kind(&layer) == "Limit"
-                    && g.strs(&layer, &p("family"))
-                        .iter()
-                        .any(|limited| family.starts_with(limited.as_str()))
-                {
-                    // The hole covers the whole family: nothing after it is reached.
-                    return Reach::Unreachable;
+/// The SPARQL form of the same question — two queries — is in
+/// `docs/formalism/README.md` (R7.3), with the two places it is coarser than this walk.
+#[derive(Default)]
+struct Walk {
+    walls: Vec<String>,
+    maybe: bool,
+    reachable: bool,
+    unknown: bool,
+}
+
+impl Walk {
+    fn walk(&mut self, g: &Graph, node: &str, family: &str, gate: &str) {
+        let p = |name: &str| format!("{IK}{name}");
+        match g.kind(node).as_str() {
+            "Chain" | "Fallback" => {
+                for layer in g.layers(node) {
+                    if g.kind(&layer) == "Limit" {
+                        for limited in g.strs(&layer, &p("family")) {
+                            match limited.find('{') {
+                                // A plain family is a prefix (`Limit::new`): a wall over
+                                // everything under it that the mount above admits.
+                                None if limited.starts_with(gate) => self.walls.push(limited),
+                                None if gate.starts_with(&limited) => {
+                                    self.walls.push(gate.to_string())
+                                }
+                                None => {} // dead: the mount above admits none of it
+                                // A template family (`Limit::matching`) is not evaluated:
+                                // one whose head touches the family may wall part of it.
+                                Some(at) if touches(&limited[..at], family) => {
+                                    self.maybe = true;
+                                }
+                                Some(_) => {}
+                            }
+                        }
+                    } else {
+                        self.walk(g, &layer, family, gate);
+                    }
                 }
-                match reach(g, &layer, family) {
-                    Reach::Reachable => return Reach::Reachable,
-                    Reach::Unknown => unknown = true,
-                    Reach::Unreachable => {}
+            }
+            "Mount" => {
+                let prefix = g.strs(node, &p("prefix")).remove(0);
+                // The mount admits nothing of the family, or nothing the mount above
+                // it admits: nothing below it is reached.
+                if !touches(&prefix, family) || !touches(&prefix, gate) {
+                    return;
+                }
+                let gate = if prefix.starts_with(gate) {
+                    prefix
+                } else {
+                    gate.to_string()
+                };
+                self.walk(g, &g.space(node), family, &gate);
+            }
+            "EndpointSpace" => {
+                for door in g.strs(node, &p("pattern")) {
+                    let lit = door.split('{').next().unwrap_or(&door);
+                    if !touches(lit, gate) {
+                        continue; // the mount above never admits a name of this door
+                    }
+                    match head(&door, family) {
+                        Head::Inside if !self.walls.iter().any(|w| door.starts_with(w)) => {
+                            if self.maybe {
+                                self.unknown = true;
+                            } else {
+                                self.reachable = true;
+                            }
+                        }
+                        Head::Astride if !self.walls.iter().any(|w| family.starts_with(w)) => {
+                            self.unknown = true;
+                        }
+                        _ => {}
+                    }
                 }
             }
-            if unknown {
-                Reach::Unknown
-            } else {
-                Reach::Unreachable
+            // τ is a closure. Behind a wall that touches the family it may map an
+            // admitted name into the family — the §12.5 leak, invisible here — so the
+            // walk cannot answer. Above every such wall it is walked through: τ can
+            // only choose among the doors the enclosed space has.
+            "Rewrite" => {
+                if self.walls.iter().any(|w| touches(w, family)) {
+                    self.unknown = true;
+                } else {
+                    self.scoped(g, &g.space(node), family, gate);
+                }
             }
-        }
-        "Mount" => {
-            let prefix = g.strs(node, &p("prefix")).remove(0);
-            if family.starts_with(&prefix) || prefix.starts_with(family) {
-                reach(g, &g.space(node), family)
-            } else {
-                Reach::Unreachable
+            // A table is visible, so it is EXPANDED. A rule whose canonical is
+            // prefix-related to the family maps into it; the family's names as the
+            // table admits them are `logical ++ family[|canonical|..]`; if no wall
+            // ahead is a prefix of those, and the mount above admits them, the
+            // canonical is followed inside the enclosed space with the walls the
+            // logical name passed left behind. Then the enclosed space is walked as
+            // it is, for the names the table passes through unchanged.
+            "Alias" => {
+                let inner = g.space(node);
+                for rule in g.objects(node, &p("rewrites")) {
+                    let rule = match rule {
+                        Term::NamedNode(n) => n.as_str().to_string(),
+                        other => panic!("{node} rewrites a non-IRI: {other}"),
+                    };
+                    let logical = g.strs(&rule, &p("logical")).remove(0);
+                    let canonical = g.strs(&rule, &p("canonical")).remove(0);
+                    let (sub, under) = if canonical.starts_with(family) {
+                        (canonical.clone(), logical)
+                    } else if family.starts_with(&canonical) {
+                        (
+                            family.to_string(),
+                            format!("{logical}{}", &family[canonical.len()..]),
+                        )
+                    } else {
+                        continue; // the rule maps nothing into the family
+                    };
+                    if !touches(&under, gate) || self.walls.iter().any(|w| under.starts_with(w)) {
+                        continue; // the admitted names never reach the alias
+                    }
+                    let mut followed = Walk {
+                        maybe: self.maybe,
+                        ..Walk::default()
+                    };
+                    followed.walk(g, &inner, &sub, "");
+                    self.reachable |= followed.reachable;
+                    self.unknown |= followed.unknown;
+                }
+                self.scoped(g, &inner, family, gate);
             }
+            // A limiter reached on its own admits nothing; an opaque space is exactly
+            // that — it may hold a door, or be a mapper, and the walk cannot see.
+            "Limit" => {}
+            "OpaqueSpace" => self.unknown = true,
+            "Confine" => self.walk(g, &g.space(node), family, gate),
+            other => panic!("unknown node kind {other}"),
         }
-        "EndpointSpace" => {
-            if g.strs(node, &p("pattern"))
-                .iter()
-                .any(|pattern| pattern.starts_with(family))
-            {
-                Reach::Reachable
-            } else {
-                Reach::Unreachable
-            }
-        }
-        // A limiter reached on its own admits nothing; a rewrite, alias or
-        // confinement is walked through (a rewrite INTO the family is the alias's
-        // rules' business, and this walk over-reports rather than under-reports);
-        // an opaque space is exactly that.
-        "Limit" => Reach::Unreachable,
-        "Rewrite" | "Alias" | "Confine" => reach(g, &g.space(node), family),
-        "OpaqueSpace" => Reach::Unknown,
-        other => panic!("unknown node kind {other}"),
     }
+
+    /// Walk `node` with this walk's walls, keeping any it meets inside to itself.
+    fn scoped(&mut self, g: &Graph, node: &str, family: &str, gate: &str) {
+        let mut inner = Walk {
+            walls: self.walls.clone(),
+            maybe: self.maybe,
+            ..Walk::default()
+        };
+        inner.walk(g, node, family, gate);
+        self.reachable |= inner.reachable;
+        self.unknown |= inner.unknown;
+    }
+}
+
+/// The first question: is any door of `family` reachable from `node` without a
+/// limiter over it standing ahead of it?
+fn reach(g: &Graph, node: &str, family: &str) -> Reach {
+    let mut walk = Walk::default();
+    walk.walk(g, node, family, "");
+    if walk.reachable {
+        Reach::Reachable
+    } else if walk.unknown {
+        Reach::Unknown
+    } else {
+        Reach::Unreachable
+    }
+}
+
+/// The second question: did the walk meet something it does not evaluate? `true`
+/// means the first answer is not to be trusted — the two-query protocol of R7.3,
+/// where "safe" is the first `Unreachable` (the ASK's `false`) AND this `false`.
+fn unanswered(g: &Graph, node: &str, family: &str) -> bool {
+    let mut walk = Walk::default();
+    walk.walk(g, node, family, "");
+    walk.unknown
 }
 
 #[test]
@@ -815,4 +976,318 @@ fn a_confinement_reports_the_corridor_it_severs_into() {
     let g = Graph::parse(&tree.to_turtle());
     assert_eq!(g.kind("urn:example:ctx:doc:1"), "Confine");
     assert_eq!(g.kind(&g.space("urn:example:ctx:doc:1")), "EndpointSpace");
+}
+
+// ---- 4. The check answers for a fragment, and says so --------------------------
+//
+// Ledger #552: the 0.1.78 check called two arrangements guarded that leak (a mapper
+// behind the wall), answered `false` through an opaque space in its SPARQL form, and
+// matched templates as prefixes. Each test below pins one shape of the fragment
+// R7.3 now states, on the same walk the check above runs. `served` is the paper's
+// §12.5 arrangement with one member swapped in behind the gatekeeper.
+
+/// The root of the §12.5 arrangement: a personal space and a public one, mounted.
+fn personal_and_public() -> Arc<dyn Space> {
+    Arc::new(
+        Fallback::new(vec![
+            Arc::new(Mount::new(
+                "urn:personal:",
+                Arc::new(
+                    EndpointSpace::new()
+                        .bind(Exact::new("urn:personal:calendar"), door("calendar"))
+                        .named(iri("urn:example:space:personal")),
+                ),
+            )),
+            Arc::new(Mount::new(
+                "urn:public:",
+                Arc::new(
+                    EndpointSpace::new()
+                        .bind(Exact::new("urn:public:hello"), door("hello"))
+                        .named(iri("urn:example:space:public")),
+                ),
+            )),
+        ])
+        .named(iri("urn:example:space:root")),
+    )
+}
+
+/// `Fallback([Limit("urn:personal:"), behind])`: the gatekeeper, then whatever is
+/// placed behind it.
+fn served(behind: Arc<dyn Space>) -> Arc<dyn Space> {
+    Arc::new(Fallback::new(vec![
+        Arc::new(Limit::new("urn:personal:").named(iri("urn:example:space:gatekeeper"))),
+        behind,
+    ]))
+}
+
+/// Both questions over the root chain, for the personal family.
+fn check(space: Arc<dyn Space>) -> (Reach, bool) {
+    let g = topology(&kernel(space), &Capability::root(), Scope::empty());
+    (
+        reach(&g, "urn:ikigai:chain:root", "urn:personal:"),
+        unanswered(&g, "urn:ikigai:chain:root", "urn:personal:"),
+    )
+}
+
+#[test]
+fn an_alias_into_the_family_behind_the_wall_resolves_because_the_wall_is_over_the_name_not_the_door(
+) {
+    // The paper's §12.5: one added import — here one alias rule — opens a path to the
+    // vault that never passes the gatekeeper. `Fallback([Limit("urn:personal:"),
+    // Alias{urn:other → urn:personal:calendar} over root])`: a request for
+    // `urn:personal:calendar` is limited; a request for `urn:other` is not in the
+    // family, so it PASSES the wall, is rewritten into the family behind it, and hits
+    // the door. The kernel is RIGHT to resolve it: Def. 7's limiter admits
+    // identifiers, the wall stands over the NAME, and the name that reached it was
+    // `urn:other`. The kernel's limiter branch fires on a hit on ⊥ itself, and this
+    // hit is on the calendar door (kernel.rs, "THE LIMITER"). What was wrong is a
+    // check that called this arrangement guarded — the next test.
+    let table = Arc::new(AliasTable::new().exact("urn:other", "urn:personal:calendar"));
+    let kernel = kernel(served(Arc::new(Alias::new(table, personal_and_public()))));
+    let cap = Capability::root();
+    let limited = block_on(kernel.issue(source("urn:personal:calendar"), &cap)).unwrap_err();
+    assert!(
+        matches!(limited, Error::Unresolved(ref t) if t.as_str() == "urn:personal:calendar"),
+        "the family's own name is limited: {limited:?}"
+    );
+    let leaked = block_on(kernel.issue(source("urn:other"), &cap)).unwrap();
+    assert_eq!(leaked.bytes, b"calendar", "the alias walked round the wall");
+}
+
+#[test]
+fn the_check_reports_an_alias_into_the_family_behind_the_wall_by_its_logical_name() {
+    // (a) The arrangement above: the alias's rules are visible, so the walk expands
+    // them — `urn:other` passes the wall, its canonical is in the family, and the door
+    // is there. REACHABLE, and nothing on the path is unevaluated.
+    let table = Arc::new(AliasTable::new().exact("urn:other", "urn:personal:calendar"));
+    let behind: Arc<dyn Space> = Arc::new(Alias::new(table, personal_and_public()));
+    assert_eq!(check(served(behind)), (Reach::Reachable, false));
+
+    // A prefix rule whose canonical is BROADER than the family maps into it too:
+    // `urn:a:` → `urn:` carries `urn:a:personal:calendar` to the door.
+    let table = Arc::new(AliasTable::new().prefix("urn:a:", "urn:"));
+    let behind: Arc<dyn Space> = Arc::new(Alias::new(table, personal_and_public()));
+    assert_eq!(check(served(behind)), (Reach::Reachable, false));
+
+    // The same rule behind a wall over the LOGICAL names is no leak: the admitted
+    // names hit ⊥ before the alias.
+    let table = Arc::new(AliasTable::new().exact("urn:other", "urn:personal:calendar"));
+    let walled_logical: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(Limit::new("urn:personal:")),
+        Arc::new(Limit::new("urn:other")),
+        Arc::new(Alias::new(table, personal_and_public())),
+    ]));
+    assert_eq!(check(walled_logical), (Reach::Unreachable, false));
+
+    // And an alias ABOVE the wall is walked through: the canonical meets the wall
+    // inside, as the kernel's canonical adoption makes it (the limiter tests).
+    let table = Arc::new(AliasTable::new().exact("urn:other", "urn:personal:calendar"));
+    let above: Arc<dyn Space> = Arc::new(Alias::new(table, served(personal_and_public())));
+    assert_eq!(check(above), (Reach::Unreachable, false));
+}
+
+#[test]
+fn a_rewrite_behind_the_wall_is_not_answered() {
+    // (b) τ is a closure: the graph shows an `ik:Rewrite` enclosing the root and
+    // nothing of τ. Behind a wall over the family it may do exactly what the alias
+    // above does, so the walk says UNKNOWN — never "unreachable" — and the second
+    // question says why.
+    let behind: Arc<dyn Space> = Arc::new(Rewrite::new(personal_and_public(), |t: &Iri| {
+        (t.as_str() == "urn:other").then(|| iri("urn:personal:calendar"))
+    }));
+    assert_eq!(check(served(behind)), (Reach::Unknown, true));
+
+    // Above every wall it is walked through, and answered: τ can only choose among
+    // the doors the enclosed space has, and the wall inside meets its canonical.
+    let above: Arc<dyn Space> = Arc::new(Rewrite::new(served(personal_and_public()), |_| None));
+    assert_eq!(check(above), (Reach::Unreachable, false));
+    let open: Arc<dyn Space> = Arc::new(Rewrite::new(personal_and_public(), |_| None));
+    assert_eq!(check(open), (Reach::Reachable, false));
+}
+
+#[test]
+fn an_alias_behind_the_wall_whose_every_canonical_is_outside_the_family_is_unreachable() {
+    // (c) The rules are visible and none maps into the family; the names the table
+    // passes through unchanged meet the wall. UNREACHABLE, and answered — the one
+    // shape with a mapper behind the wall that the check calls safe, because it can
+    // see the whole table.
+    let table = Arc::new(
+        AliasTable::new()
+            .exact("urn:other", "urn:public:hello")
+            .prefix("urn:alias:", "urn:public:"),
+    );
+    let behind: Arc<dyn Space> = Arc::new(Alias::new(table, personal_and_public()));
+    assert_eq!(check(served(behind)), (Reach::Unreachable, false));
+}
+
+#[test]
+fn an_opaque_space_behind_the_wall_is_not_answered_and_the_second_question_says_so() {
+    // (d) A foreign space reports nothing: it may hold a door of the family, or be a
+    // mapper into it. Behind the wall or above it, the walk says UNKNOWN and the
+    // second question `true`. The SPARQL form's first ASK answers `false` here —
+    // which is why the protocol runs both and calls only `false` AND `false` safe.
+    assert_eq!(
+        check(served(Arc::new(Foreign(personal_and_public())))),
+        (Reach::Unknown, true)
+    );
+    let above: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(Foreign(Arc::new(EndpointSpace::new()))),
+        served(personal_and_public()),
+    ]));
+    assert_eq!(check(above), (Reach::Unknown, true));
+    // The §12.5 arrangement itself: unreachable, and nothing unevaluated — SAFE.
+    assert_eq!(
+        check(served(personal_and_public())),
+        (Reach::Unreachable, false)
+    );
+}
+
+#[test]
+fn a_template_door_is_placed_by_its_literal_head_and_answered_only_when_that_is_sound() {
+    // (e) The check does not evaluate templates. It places a template door by the
+    // text before its first `{`: inside the family, every expansion is a name of the
+    // family; diverging from it, none can be; the family EXTENDING it —
+    // `urn:{ns}:inbox` against `urn:personal:` — is the case it does not answer.
+    let doors = |patterns: &[&str]| -> Arc<dyn Space> {
+        let mut space = EndpointSpace::new();
+        for pattern in patterns {
+            space = space.bind(UriTemplate::parse(*pattern).unwrap(), door("t"));
+        }
+        Arc::new(space)
+    };
+    assert_eq!(
+        check(doors(&["urn:personal:doc/{id}"])),
+        (Reach::Reachable, false),
+        "a head inside the family is a door of it"
+    );
+    assert_eq!(
+        check(doors(&["urn:file:{path}"])),
+        (Reach::Unreachable, false),
+        "a head that diverges is not"
+    );
+    assert_eq!(
+        check(doors(&["urn:{ns}:inbox"])),
+        (Reach::Unknown, true),
+        "a head the family extends is not answered"
+    );
+    // A door found wins over one not answered; a wall over the family stops both.
+    assert_eq!(
+        check(doors(&["urn:{ns}:inbox", "urn:personal:doc/{id}"])),
+        (Reach::Reachable, true)
+    );
+    assert_eq!(
+        check(served(doors(&["urn:{ns}:inbox", "urn:personal:doc/{id}"]))),
+        (Reach::Unreachable, false)
+    );
+}
+
+#[test]
+fn a_template_family_on_a_limiter_may_wall_the_family_and_is_not_answered() {
+    // (f) `Limit::matching(template)` renders its template as `ik:family`. One whose
+    // head touches the family may stop some of it and not the rest; the check does
+    // not evaluate it, so a door found after it is at best UNKNOWN. One whose head
+    // diverges from the family stops none of it and is ignored.
+    let walled = |family: &str| -> Arc<dyn Space> {
+        Arc::new(Fallback::new(vec![
+            Arc::new(Limit::matching(UriTemplate::parse(family).unwrap())),
+            personal_and_public(),
+        ]))
+    };
+    assert_eq!(check(walled("urn:personal:{x}")), (Reach::Unknown, true));
+    assert_eq!(check(walled("urn:{ns}:calendar")), (Reach::Unknown, true));
+    assert_eq!(
+        check(walled("urn:doc:{id}:secret")),
+        (Reach::Reachable, false)
+    );
+}
+
+#[test]
+fn a_named_space_shared_behind_the_wall_and_beside_it_is_answered_per_path() {
+    // (g) One space, one IRI, stated twice: the topology renders it at each
+    // occurrence by design, and the walk answers per path in the order the kernel
+    // consults it. Beside the wall FIRST: the kernel serves the door and the walk
+    // says REACHABLE. This is the shape the SPARQL form cannot answer: a property
+    // path has no path identity, so its `NOT EXISTS` finds the guarded occurrence
+    // and answers `false` — R7.3 states it as the query's limit.
+    let personal: Arc<dyn Space> = Arc::new(
+        EndpointSpace::new()
+            .bind(Exact::new("urn:personal:calendar"), door("calendar"))
+            .named(iri("urn:example:space:personal")),
+    );
+    let cap = Capability::root();
+    let beside_first: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::clone(&personal),
+        served(Arc::clone(&personal)),
+    ]));
+    let kernel_beside = kernel(Arc::clone(&beside_first));
+    assert_eq!(
+        block_on(kernel_beside.issue(source("urn:personal:calendar"), &cap))
+            .unwrap()
+            .bytes,
+        b"calendar"
+    );
+    let g = topology(&kernel_beside, &cap, Scope::empty());
+    assert_eq!(
+        g.strs("urn:example:space:personal", &format!("{IK}pattern"))
+            .len(),
+        2,
+        "the shared space is rendered at both occurrences"
+    );
+    assert_eq!(check(beside_first), (Reach::Reachable, false));
+
+    // Behind the wall FIRST: `Fallback` returns the first hit and a hit on ⊥ is a
+    // hit, so the inner limiter ends resolution before the outer occurrence is
+    // consulted — the kernel limits, and the walk, following pre-order, says
+    // UNREACHABLE. A wall scoped to its own list would have called this reachable:
+    // a false alarm, which is the direction the SPARQL form errs in.
+    let wall_first: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        served(Arc::clone(&personal)),
+        Arc::clone(&personal),
+    ]));
+    let kernel_wall = kernel(Arc::clone(&wall_first));
+    assert!(matches!(
+        block_on(kernel_wall.issue(source("urn:personal:calendar"), &cap)).unwrap_err(),
+        Error::Unresolved(_)
+    ));
+    assert_eq!(check(wall_first), (Reach::Unreachable, false));
+}
+
+#[test]
+fn a_limiter_walls_only_what_the_mount_above_it_admits() {
+    // A limiter over the family inside a mount that admits none of it is dead, and a
+    // door elsewhere stays reachable; one inside a mount narrower than the family
+    // walls only that part, and a door outside the part stays reachable.
+    let dead: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(Mount::new(
+            "urn:other:",
+            Arc::new(Fallback::new(vec![Arc::new(Limit::new("urn:personal:"))])),
+        )),
+        personal_and_public(),
+    ]));
+    assert_eq!(check(dead), (Reach::Reachable, false));
+    let narrow: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(Mount::new(
+            "urn:personal:cal",
+            Arc::new(Fallback::new(vec![Arc::new(Limit::new("urn:personal:"))])),
+        )),
+        Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:personal:calendar"), door("calendar"))
+                .bind(Exact::new("urn:personal:mail"), door("mail")),
+        ),
+    ]));
+    let g = topology(
+        &kernel(Arc::clone(&narrow)),
+        &Capability::root(),
+        Scope::empty(),
+    );
+    assert_eq!(
+        reach(&g, "urn:ikigai:chain:root", "urn:personal:cal"),
+        Reach::Unreachable
+    );
+    assert_eq!(
+        reach(&g, "urn:ikigai:chain:root", "urn:personal:mail"),
+        Reach::Reachable
+    );
+    assert_eq!(check(narrow), (Reach::Reachable, false));
 }
