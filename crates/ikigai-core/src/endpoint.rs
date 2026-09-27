@@ -159,6 +159,47 @@ pub trait Issuer: Send + Sync {
         let _ = present;
         Vec::new()
     }
+
+    /// [`select_transreptor`](Issuer::select_transreptor) **in a resolution chain**
+    /// — the plan among what `scope` can resolve, which is what an endpoint's
+    /// sub-requests in that chain could actually run. The kernel overrides it
+    /// ([`Kernel::select_transreptor_in`](crate::Kernel::select_transreptor_in));
+    /// [`Invocation::select_transreptor`] reads it with the invocation's own chain.
+    ///
+    /// **The default honours the empty chain and offers nothing in every other.**
+    /// An empty scope delegates to `select_transreptor`, so an issuer written before
+    /// this method existed behaves exactly as it did; a non-empty scope gets `None`
+    /// rather than the root's plan — an issuer that cannot select in the chain must
+    /// not offer a step the chain cannot then resolve (the same fail-closed shape as
+    /// [`issue_in_scope`](Issuer::issue_in_scope), which would refuse the step
+    /// anyway). Override it to select in the chain.
+    fn select_transreptor_in(
+        &self,
+        from: &str,
+        to: &str,
+        scope: &Scope,
+    ) -> Option<Vec<TransreptionStep>> {
+        if !scope.is_empty() {
+            return None;
+        }
+        self.select_transreptor(from, to)
+    }
+
+    /// [`select_action`](Issuer::select_action) **in a resolution chain** — the
+    /// manifold of what `scope` can resolve. The kernel overrides it
+    /// ([`Kernel::select_action_in`](crate::Kernel::select_action_in));
+    /// [`Invocation::select_action`] reads it with the invocation's own chain.
+    ///
+    /// **The default honours the empty chain and offers nothing in every other**,
+    /// for the reason [`select_transreptor_in`](Issuer::select_transreptor_in)
+    /// gives: an offer the chain cannot resolve is the over-offer the manifold
+    /// exists to prevent. Override it to select in the chain.
+    fn select_action_in(&self, present: &[&str], scope: &Scope) -> Vec<ActionMatch> {
+        if !scope.is_empty() {
+            return Vec::new();
+        }
+        self.select_action(present)
+    }
 }
 
 /// A pinned, boxed, `Send` future — the unit of work a [`Spawner`] runs.
@@ -941,25 +982,35 @@ impl<'a> Invocation<'a> {
             .await
     }
 
-    /// Plan a transreptor chain converting media type `from` → `to` over the kernel's
-    /// mounted spaces, or `None` if there's no kernel context (detached) or no chain
-    /// exists. The endpoint then issues each [`TransreptionStep`] — piping the bytes in
-    /// as `content` and setting `as` to the step's target — to run the conversion. This
-    /// is the seam content-negotiation and octet-stream sniff-and-dispatch build on:
-    /// "find me a way from type A to type B," then drive it through the kernel like any
+    /// Plan a transreptor chain converting media type `from` → `to` over what
+    /// **this invocation's resolution chain** can resolve — the same chain its
+    /// sub-requests run in ([`scope`](Self::scope)) — or `None` if there's no kernel
+    /// context (detached) or no chain exists. The endpoint then issues each
+    /// [`TransreptionStep`] — piping the bytes in as `content` and setting `as` to
+    /// the step's target — to run the conversion. This is the seam
+    /// content-negotiation and octet-stream sniff-and-dispatch build on: "find me a
+    /// way from type A to type B," then drive it through the kernel like any
     /// sub-request.
+    ///
+    /// An endpoint does not have to know it is confined to get an honest plan:
+    /// inside a [`confine`](Self::confine) the plan names only transreptors the
+    /// severed chain reaches, and under a host-injected corridor a transreptor the
+    /// corridor shadows is the one named — exactly what the step would resolve to.
     pub fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
-        self.issuer?.select_transreptor(from, to)
+        self.issuer?.select_transreptor_in(from, to, &self.scope)
     }
 
     /// Find endpoints whose required inputs are satisfiable by the RDF classes in `present`
     /// — the actions available given a set of typed entities (see
-    /// [`select_action`](crate::select_action)). Empty if there's no kernel context
-    /// (detached). The seed of layer action-inference: a layer endpoint can surface "what you
-    /// can do with what's on the canvas," then issue the chosen one.
+    /// [`select_action`](crate::select_action)) — among what **this invocation's
+    /// resolution chain** can resolve ([`scope`](Self::scope)). Empty if there's no
+    /// kernel context (detached). The seed of layer action-inference: a layer endpoint
+    /// can surface "what you can do with what's on the canvas," then issue the chosen
+    /// one — and inside a [`confine`](Self::confine) the list never names a root-only
+    /// action the confined sub-request could not then resolve.
     pub fn select_action(&self, present: &[&str]) -> Vec<ActionMatch> {
         match self.issuer {
-            Some(issuer) => issuer.select_action(present),
+            Some(issuer) => issuer.select_action_in(present, &self.scope),
             None => Vec::new(),
         }
     }
@@ -1094,21 +1145,35 @@ impl<'a> Invocation<'a> {
             .map_err(|_| Error::Endpoint("sync scope panicked".to_string()))
     }
 
-    /// The current time per the kernel's injected [`Clock`](crate::Clock), or `None`
-    /// if the kernel has no clock. An endpoint turns a relative freshness window into
+    /// The current time **as this invocation should see it**, or `None` if nothing
+    /// supplies one. In order: a clock attached with [`with_clock`](Self::with_clock)
+    /// (what a caller stated beats what it inherited); then the **resolution
+    /// chain's** clock — the one a temporal corridor derived at injection
+    /// ([`Scope::with_named_at`]), so an endpoint resolved as-of a pinned instant
+    /// reads that instant here as well as through `urn:time:now`, without knowing
+    /// which seam it used; then the issuer's — the kernel's injected
+    /// [`Clock`](crate::Clock). An endpoint turns a relative freshness window into
     /// an absolute deadline with it — e.g.
     /// `inv.now().map(|t| repr.cacheable_until(t.plus_millis(max_age)))`.
     ///
-    /// A clock attached with [`with_clock`](Self::with_clock) answers first; otherwise
-    /// this is the issuer's clock. A [`detached`](Self::detached) invocation with
-    /// neither has no time — which is the honest answer, not a fallback to the system
-    /// clock: reading the wall clock behind the caller's back is what makes resolution
+    /// ★ **Under a pinned chain that deadline is in the corridor's time and is
+    /// judged in the kernel's.** The kernel never reads the chain's clock for
+    /// validity — a pinned past must not un-expire a live entry — so a window
+    /// computed from a pinned past is already expired (never cached) and one from
+    /// a pinned future outlives its window. Data that is as-of a pinned instant is
+    /// a pure function of its context: declare it [`cacheable`](Representation::cacheable),
+    /// not `cacheable_until`.
+    ///
+    /// A [`detached`](Self::detached) invocation with none of the three has no time
+    /// — which is the honest answer, not a fallback to the system clock: reading
+    /// the wall clock behind the caller's back is what makes resolution
     /// non-replayable, and core does it in exactly one place, inside
     /// [`SystemClock`](crate::SystemClock), where a host opts into it by name.
     pub fn now(&self) -> Option<Time> {
         self.clock
             .as_ref()
             .map(|clock| clock.now())
+            .or_else(|| self.scope.now())
             .or_else(|| self.issuer.and_then(|issuer| issuer.now()))
     }
 
@@ -1634,5 +1699,47 @@ mod tests {
         let stated = Invocation::with_issuer(&request, &bindings, &cap, &kernel)
             .with_clock(Arc::new(crate::FixedClock::at(2)));
         assert_eq!(stated.now(), Some(Time::from_millis(2)));
+    }
+
+    /// `now()` is answered by the first of three sources that has one: a clock
+    /// attached to the invocation, the chain's clock, the issuer's. Crate-private
+    /// because only the kernel can put a chain on an invocation, so the middle
+    /// rung is reachable from here alone; the two ends are public and pinned by
+    /// the integration tests (`temporal_corridor.rs`).
+    #[test]
+    fn now_prefers_an_attached_clock_then_the_chain_then_the_issuer() {
+        use crate::kernel::FixedClock;
+        use crate::space::Scope;
+        let kernel =
+            Kernel::new(Arc::new(EndpointSpace::new())).with_clock(Arc::new(FixedClock::at(3)));
+        let request = Request::new(Verb::Source, iri("urn:x"));
+        let bindings = Bindings::new();
+        let cap = Capability::root();
+        let doors: Arc<dyn Space> = Arc::new(EndpointSpace::new());
+        let chain =
+            Scope::empty().with_named_at(iri("urn:ctx:t"), doors, Arc::new(FixedClock::at(2)));
+
+        let issuer_only = Invocation::with_issuer(&request, &bindings, &cap, &kernel);
+        assert_eq!(issuer_only.now(), Some(Time::from_millis(3)));
+        let in_chain =
+            Invocation::with_issuer(&request, &bindings, &cap, &kernel).with_scope(chain.clone());
+        assert_eq!(
+            in_chain.now(),
+            Some(Time::from_millis(2)),
+            "the chain's, over the issuer's"
+        );
+        let attached = Invocation::with_issuer(&request, &bindings, &cap, &kernel)
+            .with_scope(chain)
+            .with_clock(Arc::new(FixedClock::at(1)));
+        assert_eq!(
+            attached.now(),
+            Some(Time::from_millis(1)),
+            "what was stated, over both"
+        );
+        assert_eq!(
+            Invocation::detached(&request, &bindings, &cap).now(),
+            None,
+            "nothing supplies one"
+        );
     }
 }

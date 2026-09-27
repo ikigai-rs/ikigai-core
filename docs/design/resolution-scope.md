@@ -1,8 +1,14 @@
 # Resolution scope: the chain, its two faces, and what the cache owes it
 
-**Status:** built, core 0.1.72 (ledger [#509](http://localhost:1060/l/default/item/509)).
-**Anchor types:** `ikigai_core::{Scope, Confine, Invocation::confine, Kernel::issue_in,
-Issuer::issue_in_scope, CacheKey::scope, SCOPE_NOTE, SCOPE_MISS_NOTE}`.
+**Status:** built, core 0.1.72 (ledger [#509](http://localhost:1060/l/default/item/509));
+the chain reaches selection, the probe and the pipe, and carries a clock, core 0.1.75
+([#516](http://localhost:1060/l/default/item/516),
+[#517](http://localhost:1060/l/default/item/517)).
+**Anchor types:** `ikigai_core::{Scope, Scope::with_named_at, Confine, Invocation::confine,
+Kernel::issue_in, Kernel::issue_with_incoming_in, Kernel::is_cached_in,
+Kernel::select_transreptor_in, Kernel::select_action_in, Kernel::select_actions_in,
+Issuer::issue_in_scope, Issuer::select_action_in, CacheKey::scope, CacheRow, SCOPE_NOTE,
+SCOPE_MISS_NOTE, SCOPE_CLOCK_NOTE}`.
 **Companions:** `docs/design/sub-request-authority.md` (the authority argument this reuses
 verbatim), `docs/design/cache-ejection.md` §2 (a fingerprint is not an identity),
 `docs/design/spaces-as-named-graphs.md` (where corridor identity goes next, ledger
@@ -246,28 +252,116 @@ Empty-chain events are byte-identical to before. `ikigai-log` maps note keys str
 through its vocabulary table, so these need one term each there. Test:
 `the_chain_is_disclosed_on_every_traced_event_and_a_confined_miss_is_traced`.
 
-## The clock seam — an open question, not decided here
+## The four faces (#516) — three reached in 0.1.75, one left at the wire
 
-`Invocation::now()` reads the injected `Clock` through the issuer. A temporal corridor
-pinning `urn:time:now` to a value is a **resolution-seam** claim about time; `now()` is a
-**clock-seam** claim; and an endpoint stamping `derived_at` from `now()` inside such a
-corridor would report the wall clock beside data resolved as-of the pinned instant. Either
-the corridor also carries a `Clock` the invocation prefers (a `Scope`-level clock, the
-`with_clock` precedent), or `now()` becomes sugar over resolving `urn:time:now` in the
-chain, or the two are declared different questions ("when is it" vs "as of when am I
-looking"). Settle it before the first as-of demo, or the demo lies about one of the two.
+After 0.1.72 the chain governed resolution, the key, the floor and the trace, and four faces
+still answered for the empty chain. The rule that closes three of them: **the scope is the
+resolution context everywhere the kernel answers a question about resolution**, and every
+scoped form is the existing form when the chain is empty (tested byte-identical, not argued).
+
+1. **Selection** — `Kernel::select_transreptor_in` / `select_action_in` / `select_actions_in`
+   select over the chain: the kernel's own operations ahead (as on the issue path), each
+   injected corridor innermost first, then the root unless severed. The walk is
+   `Scope::consulted`, the same one `resolve_in` takes — factored, so the manifold cannot
+   drift from resolution — presented to the `entries → Meta → describe` walks as one space
+   (`ChainView`), first hit wins, a pattern bound twice listed once as the innermost binds it
+   (a shadowed door is not reachable, so it is not offered). `Invocation::select_*` pass the
+   invocation's own chain, so an endpoint gets an honest manifold without knowing it is
+   confined; the `Meta` arm plans `transrept_meta` over the chain and runs the steps in it
+   as sub-requests of the Meta resolution (they were plain root `issue`s before, outside the
+   trace and the depth budget). `Issuer::select_*_in` are defaulted: the empty chain
+   delegates, a non-empty one offers **nothing** — the fail-closed twin of
+   `issue_in_scope`'s refusal, since an offer the chain cannot resolve is the over-offer.
+2. **The probe** — `Kernel::is_cached_in(request, cap, scope)`; `is_cached` is its
+   empty-chain case. `urn:kernel:cache` gained a scope column: `root` for the empty chain,
+   else the chain as `Scope` renders it, from a small kernel-side map fingerprint → rendered
+   chain written when a scoped result is stored (never on the empty-chain path) and pruned
+   to resident fingerprints when the readout renders; a fingerprint whose name is gone
+   prints as hex. (`Kernel::probe` in the brief does not exist; `ReprCache::probe` takes a
+   `CacheKey`, which already carries the scope.)
+3. **The pipe** — `Kernel::issue_with_incoming_in(request, cap, incoming, scope)`;
+   `issue_with_incoming` is its empty-chain case. The engine change that runs a pipeline
+   stage by stage in one chain is `ikigai-cli`'s.
+4. **The wire** — unchanged, deliberately: the chain does not cross it and the default
+   `Issuer::issue_in_scope` refuses a non-empty chain. Carrying it is a protocol bump and its
+   own decision (decision 7 above).
+
+## The clock seam — decided (#517), built 0.1.75
+
+The question as it stood: `Invocation::now()` read the injected `Clock` through the issuer,
+so a temporal corridor pinning `urn:time:now` pinned the resolution seam and left the clock
+seam live — an endpoint stamping `derived_at` from `now()` inside the corridor reported the
+wall clock beside data resolved as-of the pinned instant. Brian's decision (2026-09-25):
+option (a) with (c)'s split — a scope-level clock **derived from the corridor at injection**,
+and the kernel keeps its own clock for validity.
+
+**Mechanically, "derived at injection" is one call.** `Scope::with_named_at(name, space,
+clock)` injects the corridor and sets the chain's clock together; there is no other way to
+put a clock on a chain, so the binding and the clock cannot be set independently. Core
+cannot verify the pairing — it would have to resolve the corridor's time door to find out,
+and a corridor is any `Space` — so the pairing is a **claim the injector makes**, of exactly
+the shape a corridor's name already is: *the time this corridor binds is the time this clock
+reads.* The doctest on `with_named_at` shows the intended pairing.
+
+**Resolution order.** `Invocation::now()` answers from the first of: a clock attached with
+`with_clock` (what a caller stated beats what it inherited; reachable only on a detached
+invocation), the **chain's** clock, the issuer's. `Issuer::now` is unchanged — the chain clock
+is read off the invocation's scope, so it costs a null check on a chain-less invocation and
+nothing at all on the cache-hit path, which never calls `now()`. At most one clock per chain
+and the **innermost wins**: a temporal corridor injected inside another replaces its clock as
+its `urn:time:now` shadows the outer one's; a corridor injected without a clock leaves the
+chain's as it was; `confined` and `sever` keep it (an endpoint cannot change the host's time
+any more than it can drop the host's corridors — decision 3).
+
+**Validity stays on the kernel's clock.** `Expiry::At` is judged against `started`, read from
+`self.clock` — never from the chain — so a pinned past cannot un-expire a live entry and a
+pinned future cannot expire a fresh one; `is_cached_in` judges the same way. Pinned in both
+directions (`validity_is_judged_on_the_kernels_clock_never_the_chains`). The consequence
+worth stating because it is the one thing that changes what an endpoint *observes*: an
+endpoint that turns a freshness window into an absolute deadline from `inv.now()` gets a
+deadline in the **corridor's** time judged in the **kernel's** — under a pinned past it is
+already expired (never cached), under a pinned future it outlives its window. As-of data is
+a pure function of its context and should declare `.cacheable()`, not `cacheable_until`;
+said on `Invocation::now`.
+
+**The fingerprint does not change.** Argued rather than assumed: the clock is a property of
+the corridor's *name* — the injector pairs them, and the name already claims "same name ⇒
+same doors", of which the time door is one — so hashing it would hash a fact the name
+states. Two injections under one name with different clocks are one claim made twice with
+different content: the injector's error, exactly as two different spaces under one name,
+and the cache treats them as one context. The alternative has nothing to hash: an
+`Arc<dyn Clock>` has no stable identity (address reuse is why anonymous corridors use a
+counter), so it would have to be the instant, which exists only for a clock that does not
+move — a derived clock that ticks from a pinned origin has none. Pinned:
+`the_fingerprint_is_the_corridors_name_not_its_clock`.
+
+**Trace.** One reserved key beside `SCOPE_NOTE`: `SCOPE_CLOCK_NOTE` (`"scope-clock"`), the
+instant the chain's clock read as the event was recorded, only when the chain carries one.
+Added because the name alone cannot tell a reader whether `inv.now()` was pinned — a chain
+`with_named` under a temporal-looking name and one `with_named_at` render identically — and
+the note is what the kernel observed rather than what the injector claimed. One clock read
+per traced event in a clocked chain; nothing off the trace path. `ikigai-log` needs one
+vocabulary term for it.
+
+**The payoff, pinned exactly** (`a_temporal_corridor_pins_both_faces_of_time_and_the_pinned_read_is_cacheable`):
+an endpoint that sources `urn:time:now`, calls `inv.now()` and returns `.cacheable()` has
+effective expiry `Always` under the root (the live door is uncacheable) and `Never` under
+the pinned corridor; a second `issue_in` under the same named corridor is a cache hit; the
+same name under two corridors is two entries; both faces agree under each; and inside a
+confinement the manifold offers only what the chain resolves. Pinning the context turns an
+uncacheable "now" into an immutable "then" — the paper's §5.1 and the context-tourism
+direction, as one test.
 
 ## Not built, on purpose
 
-Temporal / geographic / personal corridors, a context resource, the limiter (#511),
+Geographic / personal corridors, a context resource, the limiter (#511),
 consulted-corridors caching, the chain on the wire (the depth budget, #513, left this list
 in 0.1.73: `Kernel::with_max_depth` bounds a confined chain that recurses through a
 corridor endpoint calling itself, though — like the chain — the depth does not cross the
-wire), space identity beyond decision 2, the topology resource. `Kernel::probe`
-/ `is_cached` and `urn:kernel:cache` answer for the empty chain only. `select_transreptor`
-/ `select_action` select over the **root** even from inside a confinement, so the manifold
-can offer a transreptor the chain cannot then resolve — selection has not learned the
-chain; a `select_*_in` over the corridors is the obvious next step and not this one.
+wire), space identity beyond decision 2, the topology resource. A ticking derived clock (a
+pinned origin plus elapsed real time) is a `Clock` implementation a host may write; core
+ships only the fixed one. The engine's `as-of` affordance, `urn:tz:now` reading through the
+invocation, and the REPL showing the scope are `ikigai-cli`'s.
 
 ## The read measurement
 
@@ -299,3 +393,21 @@ from an added *source*, which this arc adds none of — but it is the number the
 for, and it was worth the second cut.
 The bench is not committed; it is twenty lines against the
 public API and the table above is what it printed.
+
+**0.1.75, the four faces and the chain clock** — the same bench (one cacheable `FnEndpoint`,
+warmed, 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop, load
+~2.4–3.4), main (`d99a180`, a detached worktree) and the branch interleaved three times each:
+
+| tree | run | round 0 | round 1 | round 2 |
+|---|---|---|---|---|
+| main (0.1.74) | 1 | 423 ns | 306 ns | 308 ns |
+| branch | 1 | 306 ns | 304 ns | 305 ns |
+| main | 2 | 319 ns | 305 ns | 304 ns |
+| branch | 2 | 300 ns | 298 ns | 298 ns |
+| main | 3 | 316 ns | 311 ns | 311 ns |
+| branch | 3 | 300 ns | 299 ns | 300 ns |
+
+0–10 ns *under* main: nothing this arc added is on the cache-hit path. `resolve_in`'s
+empty-chain fast path is untouched (the factored walk is taken only by a non-empty chain and
+by selection); `now()` is never called on a hit; the scope-name map is written only when a
+scoped result is stored.
