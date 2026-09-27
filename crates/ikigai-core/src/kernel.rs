@@ -203,6 +203,26 @@ pub struct TraceEvent {
 /// this the refusal reaches no in-kernel observer at all.
 pub const DENIED_NOTE: &str = "denied";
 
+/// The [`TraceEvent::notes`] key under which the kernel reports that a sub-request
+/// was refused for **nesting past the budget**
+/// ([`Kernel::with_max_depth`]), paired with the depth it would have run at — e.g.
+/// `("depth", "65")` on a kernel whose bound is 64. Public so an observer can match
+/// the key without re-spelling the literal.
+///
+/// Like a denial, a depth refusal names something which never RAN: the budget is
+/// checked before resolution, so `started`/`ended` are `None` and `cache_hit` is
+/// `false`, and the event's `parent` is the span of the invocation that asked for
+/// one level too many — which is where a self-issuing endpoint or a transclusion
+/// cycle shows in the tree. The refusal reaches the caller as
+/// [`Error::DepthExceeded`]; the event is how it reaches an observer.
+pub const DEPTH_NOTE: &str = "depth";
+
+/// The nesting budget a [`Kernel`] starts with: a sub-request more than this many
+/// levels below the host's own request is refused (see
+/// [`Kernel::with_max_depth`]). NetKernel ships 40 and defaults to 32 for a counter
+/// that also pays for resolution hops; ikigai's counts sub-request nesting only.
+pub const DEFAULT_MAX_DEPTH: u32 = 64;
+
 /// The [`TraceEvent::notes`] key under which the kernel reports that a request's
 /// target arrived through a **logical rewrite**, paired with the hop — e.g.
 /// `("alias", "urn:fn:toUpper -> urn:iki:fn:toUpper")`. Public so an observer can
@@ -383,6 +403,11 @@ pub struct Kernel {
     /// vocabulary/alignment graph via [`with_subclass_axioms`](Self::with_subclass_axioms);
     /// empty ⇒ exact-class matching (the default, no inference).
     subclass_closure: BTreeMap<String, BTreeSet<String>>,
+    /// The nesting budget: a sub-request whose depth would exceed this is refused
+    /// with [`Error::DepthExceeded`] before it resolves anything. See
+    /// [`with_max_depth`](Self::with_max_depth) for what it does and does not
+    /// bound.
+    max_depth: u32,
 }
 
 /// How many recent resolutions `urn:kernel:constraint` aggregates over.
@@ -414,6 +439,7 @@ impl Kernel {
             constraint: Mutex::new(VecDeque::new()),
             aliases: None,
             subclass_closure: BTreeMap::new(),
+            max_depth: DEFAULT_MAX_DEPTH,
         }
     }
 
@@ -433,6 +459,7 @@ impl Kernel {
             constraint: Mutex::new(VecDeque::new()),
             aliases: None,
             subclass_closure: BTreeMap::new(),
+            max_depth: DEFAULT_MAX_DEPTH,
         }
     }
 
@@ -636,6 +663,70 @@ impl Kernel {
     /// host opts into time-bounded freshness (e.g. mounting the HTTP client module).
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = Some(clock);
+        self
+    }
+
+    /// Set the **nesting budget** (builder): the deepest sub-request this kernel
+    /// will run. A request the host issues is at depth 0; a sub-request an endpoint
+    /// issues — through `issue`, `source`, the attenuated forms, `fan_out`, or a
+    /// `scope_sync` bridge — is one deeper than the invocation issuing it; a
+    /// request whose depth would exceed `max_depth` is refused with
+    /// [`Error::DepthExceeded`] before it resolves anything, and the refusal is
+    /// recorded on the trace under [`DEPTH_NOTE`]. Default
+    /// [`DEFAULT_MAX_DEPTH`] (64).
+    ///
+    /// ## What it bounds, and what it does not
+    ///
+    /// It bounds **computation** — an endpoint that issues its own IRI, a
+    /// transclusion cycle (A composes B composes A), a governor stack that
+    /// forwards to itself — which used to recurse until the stack died: on an
+    /// edge process facing strangers, a one-request denial of service. It does
+    /// not need to bound *resolution*, which terminates by construction:
+    /// `Rewrite` resolves once in its inner space and returns `Miss` rather than
+    /// falling back outward with the rewritten name, and `Alias` caps its chain,
+    /// so the paper's single-mapper universality cannot arise
+    /// (`docs/formalism/README.md` §5). The counter is therefore the paper's
+    /// nesting budget alone, never its hop counter, and a legitimate chain
+    /// shorter than the bound is unaffected.
+    ///
+    /// It bounds nesting **within one kernel**. The depth is carried on the
+    /// invocation and through [`Issuer::issue_at_depth`]; an issuer that
+    /// implements only the plain `issue` seam (a module host bridge) restarts the
+    /// count on its side, and the wire has no field for it, so two peers that
+    /// mount each other stay unbounded by this budget. Carrying it across a peer
+    /// is a wire-protocol bump, decided separately.
+    ///
+    /// A refusal is never cached — errors never reach the store — and a composite
+    /// that swallows one and returns a cacheable fallback is forced uncacheable,
+    /// so a refusal at the bound is never served to a shallower request.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     AsyncFnEndpoint, Capability, EndpointSpace, Error, Exact, Iri, Kernel, Request, Verb,
+    /// };
+    ///
+    /// // An endpoint that sources ITSELF: unbounded recursion, until the budget.
+    /// let ouroboros = AsyncFnEndpoint::new("ouroboros", |inv| {
+    ///     Box::pin(async move { inv.source(&Iri::parse("urn:self").unwrap()).await })
+    /// });
+    /// let kernel = Kernel::new(Arc::new(
+    ///     EndpointSpace::new().bind(Exact::new("urn:self"), ouroboros),
+    /// ))
+    /// .with_max_depth(3);
+    ///
+    /// let err = block_on(kernel.issue(
+    ///     Request::new(Verb::Source, Iri::parse("urn:self").unwrap()),
+    ///     &Capability::root(),
+    /// ))
+    /// .unwrap_err();
+    /// // Depths 0, 1, 2 and 3 ran; the request for depth 4 was refused, typed.
+    /// assert!(matches!(err, Error::DepthExceeded { depth: 4, .. }), "{err}");
+    /// assert_eq!(kernel.cache_len(), 0, "a refusal is never cached");
+    /// ```
+    pub fn with_max_depth(mut self, max_depth: u32) -> Self {
+        self.max_depth = max_depth;
         self
     }
 
@@ -910,6 +1001,45 @@ impl Kernel {
         });
     }
 
+    /// Report a NESTING-BUDGET refusal into the resolution's [`TraceScope`] — the
+    /// refusal itself, as an event, tagged [`DEPTH_NOTE`] with the depth the
+    /// request would have run at. The shape [`trace_denial`](Self::trace_denial)
+    /// established: nothing ran, so `started`/`ended` stay `None` and `cache_hit`
+    /// is `false`; the alias hop and the chain ride along so an observer can see
+    /// which name, under which rewrite, in which chain, asked for one level too
+    /// many. The `parent` is the invocation that asked — the place a cycle shows.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_depth(
+        &self,
+        trace: &Option<TraceScope>,
+        request: &Request,
+        capability: &Capability,
+        span: Option<u64>,
+        parent: Option<u64>,
+        depth: u32,
+        alias: Option<&AliasHop>,
+        scope: &Scope,
+    ) {
+        let Some(trace_scope) = trace else {
+            return;
+        };
+        let mut notes = vec![(DEPTH_NOTE.to_string(), depth.to_string())];
+        notes.extend(alias_notes(alias));
+        notes.extend(scope_notes(scope));
+        trace_scope.record(TraceEvent {
+            target: request.target.as_str().to_string(),
+            thread: thread_label(),
+            // Nothing ran: no start, no end.
+            started: None,
+            ended: None,
+            cache_hit: false,
+            span: span.unwrap_or(0),
+            parent,
+            capability: capability.scopes().map(|s| s.iter().cloned().collect()),
+            notes,
+        });
+    }
+
     /// Record a resolution that MISSED where the miss is not the whole story: after
     /// a rewrite (the alias fired, and nothing was bound at the name it produced),
     /// or inside a non-empty chain (the name may well be bound in the root, and the
@@ -1004,7 +1134,7 @@ impl Kernel {
         // Top-level entry: no parent span (this is a trace root if one is recording
         // via the globally-installed tracer).
         let trace = self.global_scope();
-        self.issue_inner(request, capability, None, None, trace, Scope::empty())
+        self.issue_inner(request, capability, None, None, trace, Scope::empty(), 0)
             .await
     }
 
@@ -1082,7 +1212,7 @@ impl Kernel {
         scope: Scope,
     ) -> Result<Representation> {
         let trace = self.global_scope();
-        self.issue_inner(request, capability, None, None, trace, scope)
+        self.issue_inner(request, capability, None, None, trace, scope, 0)
             .await
     }
 
@@ -1114,6 +1244,7 @@ impl Kernel {
             None,
             Some(TraceScope::new(tracer)),
             Scope::empty(),
+            0,
         )
         .await
     }
@@ -1138,6 +1269,7 @@ impl Kernel {
             Some(incoming),
             trace,
             Scope::empty(),
+            0,
         )
         .await
     }
@@ -1150,6 +1282,7 @@ impl Kernel {
     /// confinement holds below the endpoint that entered it; the public
     /// [`issue`](Self::issue) is the parentless, no-upstream, empty-chain entry
     /// point.
+    #[allow(clippy::too_many_arguments)] // the one resolution path; every caller names each fact
     async fn issue_inner(
         &self,
         request: Request,
@@ -1158,6 +1291,7 @@ impl Kernel {
         incoming: Option<Provenance>,
         trace: Option<TraceScope>,
         scope: Scope,
+        depth: u32,
     ) -> Result<Representation> {
         // ★ THE CUT SNAPSHOT, BEFORE ANYTHING ELSE. Everything this request is
         // about to observe is state as of *now*; a cut that lands after this point
@@ -1204,6 +1338,31 @@ impl Kernel {
                 rewritten
             }
         };
+
+        // ★ THE NESTING BUDGET, before anything resolves. A sub-request deeper than
+        // the bound is refused here — typed, traced, never cached — rather than
+        // recursing until the stack dies. After the kernel's own rewrite so the
+        // refusal names the canonical target; before the `urn:kernel:*` arm so
+        // the bound is uniform (a kernel operation at excess depth is refused like
+        // any other request, though none can recurse). Cheap: an integer compare
+        // on every request, an event only on the refusal.
+        if depth > self.max_depth {
+            let span = trace.as_ref().map(TraceScope::next_span);
+            self.trace_depth(
+                &trace,
+                &request,
+                capability,
+                span,
+                parent,
+                depth,
+                alias.as_ref(),
+                &scope,
+            );
+            return Err(Error::DepthExceeded {
+                depth,
+                target: request.target.clone(),
+            });
+        }
 
         // The kernel-behavior namespace (`urn:kernel:*`) is resolved by the kernel
         // itself — before the root space, which cannot shadow it — exposing the
@@ -1424,7 +1583,8 @@ impl Kernel {
                     .with_concurrency(self.spawner.clone(), issuer_arc)
                     .with_span(span)
                     .with_trace(trace.clone())
-                    .with_scope(scope.clone());
+                    .with_scope(scope.clone())
+                    .with_depth(depth);
             let representation = resolved.endpoint.invoke(&invocation).await?;
             // Effective expiry propagates from the dependencies: the result is no
             // fresher than its most volatile part. The endpoint's own expiry is met
@@ -1438,6 +1598,36 @@ impl Kernel {
             // of them invalidates this composite.
             let mut threads = representation.threads().clone();
             threads.extend(invocation.dependency_threads());
+            // ★ THE DUAL OF THE AUTO-CUT. A cacheable answer to `Source` or `Exists`
+            // hangs from the thread named after its own CANONICAL target — the very
+            // name the mutating-verb cut below fires on — whether or not the
+            // endpoint declared it. Before 0.1.73 the kernel stored only the
+            // declared threads plus the sub-requests', so a write through the same
+            // name invalidated a cached read only when its endpoint had remembered
+            // `.depends_on(target)` by hand: every other cacheable endpoint fronting
+            // mutable state was one forgotten line from serving stale bytes (hole A
+            // of ledger #512; `docs/formalism/README.md` R4.4, now unconditional).
+            //
+            // Attached to the REPRESENTATION, not just the stored entry, so a
+            // composite that sources this resource inherits the thread through the
+            // dependency record above and is cut by the same write — an entry-only
+            // edge would have closed the hole one level and reopened it at the
+            // next. Canonical (post-alias, post-`Resolved::canonical`), so the
+            // logical and backing names stay one thread. Only when the answer can
+            // be stored: an `Always` result is never looked up, so the edge would
+            // cost an allocation and buy nothing. Meta is served from `describe()`
+            // in its own arm and gets no thread here — a binding change, not a
+            // write, is what invalidates a description (ledger #510) — and the
+            // `urn:kernel:*` intrinsics returned above are live state or the
+            // catalog, likewise. A pure function gains a thread nobody will ever
+            // cut: one generation lookup per validity check. Measured 2026-09-26
+            // (formalism §10): the first cut cost +20–28 ns (~7 %) on a ~325 ns
+            // cache-hit read — not the lookup but the hit's CLONE of a now
+            // non-empty thread set — and sharing the set behind an `Arc`
+            // (`repr.rs`) took all of it back, to 0–10 ns under main.
+            if effective != Expiry::Always {
+                threads.insert(Thread::from(request.target.as_str()));
+            }
             // …and from the pipe: an upstream stage's provenance folds in the same
             // way, so a transform over a piped input is no more cacheable than that
             // input, and inherits its threads.
@@ -2397,9 +2587,10 @@ impl Issuer for Kernel {
         // Compatibility path (no scope threaded — an external Issuer wrapper that
         // predates issue_scoped): record into the global tracer if one is set,
         // preserving pre-scope behavior. A sub-resource resolves on its own
-        // merits — no pipe upstream here.
+        // merits — no pipe upstream here. No depth threaded either: an external
+        // wrapper on this seam restarts the count (see `Issuer::issue_at_depth`).
         let trace = self.global_scope();
-        self.issue_inner(request, capability, parent, None, trace, Scope::empty())
+        self.issue_inner(request, capability, parent, None, trace, Scope::empty(), 0)
             .await
     }
 
@@ -2414,9 +2605,9 @@ impl Issuer for Kernel {
         // resolution's trace scope through, so the recorded events link
         // parent → child (across the fan-out spawn) inside the RIGHT trace —
         // concurrent traced resolutions never bleed into each other's collectors.
-        // (Compatibility path — no chain threaded; `issue_in_scope` is the full
-        // seam and the one `Invocation` calls.)
-        self.issue_inner(request, capability, parent, None, trace, Scope::empty())
+        // (Compatibility path — no chain and no depth threaded; `issue_at_depth`
+        // is the full seam and the one `Invocation` calls.)
+        self.issue_inner(request, capability, parent, None, trace, Scope::empty(), 0)
             .await
     }
 
@@ -2428,11 +2619,28 @@ impl Issuer for Kernel {
         trace: Option<TraceScope>,
         scope: Scope,
     ) -> Result<Representation> {
-        // The full re-entrant seam: span, trace scope AND resolution chain, so a
-        // sub-request resolves in the chain its issuer ran in — a confinement holds
-        // below the endpoint that entered it, an injected corridor is visible all
-        // the way down.
-        self.issue_inner(request, capability, parent, None, trace, scope)
+        // Span, trace scope AND resolution chain, so a sub-request resolves in the
+        // chain its issuer ran in — a confinement holds below the endpoint that
+        // entered it, an injected corridor is visible all the way down. Depth 0:
+        // a caller on this seam did not say how deep it is, and the count restarts
+        // here rather than guessing (see `Issuer::issue_at_depth`).
+        self.issue_inner(request, capability, parent, None, trace, scope, 0)
+            .await
+    }
+
+    async fn issue_at_depth(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<TraceScope>,
+        scope: Scope,
+        depth: u32,
+    ) -> Result<Representation> {
+        // The full re-entrant seam, and the one `Invocation` calls: everything
+        // `issue_in_scope` carries plus the nesting depth the budget is checked
+        // against in `issue_inner`.
+        self.issue_inner(request, capability, parent, None, trace, scope, depth)
             .await
     }
 
@@ -5571,5 +5779,726 @@ mod tests {
         let inv = Invocation::detached(&request, &bindings, &cap);
         let result: Result<()> = block_on(inv.scope_sync(|_issuer| ()));
         assert!(result.is_err());
+    }
+
+    // --- cache soundness (ledger #512) and the nesting budget (#513) ----------
+
+    /// A stateful resource like `Cell`, minus the one line: its cacheable `Source`
+    /// declares NO thread. Before 0.1.73 a write through the kernel left its cached
+    /// read stale; the kernel now hangs the read from its own canonical target.
+    struct UndeclaredCell {
+        value: Mutex<Vec<u8>>,
+        /// Shared with the test, so it can count reads after the cell is bound.
+        reads: Arc<AtomicU32>,
+    }
+
+    impl UndeclaredCell {
+        fn holding(value: &[u8]) -> (Self, Arc<AtomicU32>) {
+            let reads = Arc::new(AtomicU32::new(0));
+            let cell = UndeclaredCell {
+                value: Mutex::new(value.to_vec()),
+                reads: Arc::clone(&reads),
+            };
+            (cell, reads)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Endpoint for UndeclaredCell {
+        async fn invoke(&self, cx: &Invocation<'_>) -> Result<Representation> {
+            match cx.request.verb {
+                Verb::Source => {
+                    self.reads.fetch_add(1, Ordering::SeqCst);
+                    let value = self.value.lock().expect("cell").clone();
+                    Ok(Representation::new(ReprType::new("text/plain"), value).cacheable())
+                }
+                Verb::Exists => {
+                    self.reads.fetch_add(1, Ordering::SeqCst);
+                    let present = !self.value.lock().expect("cell").is_empty();
+                    Ok(Representation::new(
+                        ReprType::new("text/plain"),
+                        present.to_string().into_bytes(),
+                    )
+                    .cacheable())
+                }
+                Verb::Sink => {
+                    *self.value.lock().expect("cell") = cx.inline_arg("content")?.to_vec();
+                    Ok(Representation::new(
+                        ReprType::new("text/plain"),
+                        b"ok".to_vec(),
+                    ))
+                }
+                other => Err(Error::Endpoint(format!("cell: unsupported {other:?}"))),
+            }
+        }
+    }
+
+    fn sink(target: &str, content: &[u8]) -> Request {
+        Request::new(Verb::Sink, iri(target)).with_arg("content", ArgRef::Inline(content.to_vec()))
+    }
+
+    #[test]
+    fn a_cacheable_read_hangs_from_its_own_canonical_target_without_declaring_it() {
+        // `cutting_a_thread_invalidates_the_entry_that_declared_it`, with the manual
+        // `.depends_on` REMOVED and the cut fired by a `Sink` through the kernel.
+        // The proof of hole A's fix: the endpoint declares nothing, and the write
+        // still invalidates the read.
+        let (cell, reads) = UndeclaredCell::holding(b"v1");
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:data:undeclared"), cell),
+        ));
+        let cap = Capability::root();
+        let read = || Request::new(Verb::Source, iri("urn:data:undeclared"));
+
+        assert_eq!(block_on(kernel.issue(read(), &cap)).unwrap().bytes, b"v1");
+        assert_eq!(block_on(kernel.issue(read(), &cap)).unwrap().bytes, b"v1");
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "cached on the second issue"
+        );
+        assert!(kernel.is_cached(&read(), &cap));
+
+        // The write cuts `urn:data:undeclared`; the read hangs from it, undeclared.
+        block_on(kernel.issue(sink("urn:data:undeclared", b"v2"), &cap)).unwrap();
+        assert!(
+            !kernel.is_cached(&read(), &cap),
+            "the write invalidated a read that declared no thread"
+        );
+        assert_eq!(block_on(kernel.issue(read(), &cap)).unwrap().bytes, b"v2");
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+
+        // The external half is the same thread: a watcher cutting the name.
+        kernel.cut("urn:data:undeclared");
+        assert!(!kernel.is_cached(&read(), &cap));
+    }
+
+    #[test]
+    fn an_exists_answer_hangs_from_its_target_too() {
+        let (cell, _reads) = UndeclaredCell::holding(b"");
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:data:maybe"), cell),
+        ));
+        let cap = Capability::root();
+        let exists = || Request::new(Verb::Exists, iri("urn:data:maybe"));
+
+        assert_eq!(
+            block_on(kernel.issue(exists(), &cap)).unwrap().bytes,
+            b"false"
+        );
+        assert!(kernel.is_cached(&exists(), &cap));
+        block_on(kernel.issue(sink("urn:data:maybe", b"now"), &cap)).unwrap();
+        assert!(
+            !kernel.is_cached(&exists(), &cap),
+            "the write invalidated the Exists answer"
+        );
+        assert_eq!(
+            block_on(kernel.issue(exists(), &cap)).unwrap().bytes,
+            b"true"
+        );
+    }
+
+    #[test]
+    fn a_composite_over_an_undeclared_read_is_cut_by_a_sink_to_the_read() {
+        // Why the thread rides the REPRESENTATION and not only the stored entry:
+        // the composite inherits it through the dependency record, so a write to
+        // the leaf cuts the composite too. An entry-only edge would have closed
+        // the hole at the leaf and reopened it one level up.
+        let (cell, _reads) = UndeclaredCell::holding(b"hello");
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:data:leaf"), cell)
+                .bind(Exact::new("urn:test:upcase-of"), UpcaseOf),
+        ));
+        let cap = Capability::root();
+        let composite = || {
+            Request::new(Verb::Source, iri("urn:test:upcase-of"))
+                .with_arg("src", ArgRef::Reference(iri("urn:data:leaf")))
+        };
+        assert_eq!(
+            block_on(kernel.issue(composite(), &cap)).unwrap().bytes,
+            b"HELLO"
+        );
+        assert!(kernel.is_cached(&composite(), &cap));
+
+        block_on(kernel.issue(sink("urn:data:leaf", b"bye"), &cap)).unwrap();
+        assert!(
+            !kernel.is_cached(&composite(), &cap),
+            "the composite hangs from the leaf"
+        );
+        assert_eq!(
+            block_on(kernel.issue(composite(), &cap)).unwrap().bytes,
+            b"BYE"
+        );
+    }
+
+    #[test]
+    fn a_pure_function_gains_a_thread_it_never_needs_and_it_is_harmless() {
+        // The stated cost of hole A's fix: a pure function of inline arguments
+        // (`to_upper`, bound at a fixture name) now hangs from a thread nobody
+        // will ever cut in practice. Cutting it is merely a recompute of the same
+        // bytes.
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper()),
+        ));
+        let cap = Capability::root();
+        let req = || {
+            Request::new(Verb::Source, iri("urn:test:to-upper"))
+                .with_arg("in", ArgRef::Inline(b"hi".to_vec()))
+        };
+        assert_eq!(block_on(kernel.issue(req(), &cap)).unwrap().bytes, b"HI");
+        assert!(kernel.is_cached(&req(), &cap));
+        kernel.cut("urn:test:to-upper");
+        assert!(!kernel.is_cached(&req(), &cap));
+        assert_eq!(block_on(kernel.issue(req(), &cap)).unwrap().bytes, b"HI");
+    }
+
+    #[test]
+    fn meta_gains_no_automatic_thread() {
+        // Meta is served from `describe()`, not from the resource's state: a write
+        // to the resource does not change its description, so the write-cut must
+        // not evict it. What would is a binding change (ledger #510), which has no
+        // thread yet — stated, not closed here.
+        let kernel = meta_kernel();
+        let cap = Capability::root();
+        let meta = || Request::new(Verb::Meta, iri("urn:test:to-upper"));
+        block_on(kernel.issue(meta(), &cap)).unwrap();
+        assert!(kernel.is_cached(&meta(), &cap));
+        kernel.cut("urn:test:to-upper");
+        assert!(
+            kernel.is_cached(&meta(), &cap),
+            "a description does not hang from the resource's own thread"
+        );
+    }
+
+    // --- hole B: a failed sub-request is a dependency ---------------------------
+
+    /// A resource that does not exist until something is sunk into it: `Source`
+    /// is `NotFound` while empty, a cacheable read once written.
+    struct MaybeCell {
+        value: Mutex<Option<Vec<u8>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Endpoint for MaybeCell {
+        async fn invoke(&self, cx: &Invocation<'_>) -> Result<Representation> {
+            match cx.request.verb {
+                Verb::Source => match self.value.lock().expect("cell").clone() {
+                    Some(value) => {
+                        Ok(Representation::new(ReprType::new("text/plain"), value).cacheable())
+                    }
+                    None => Err(Error::NotFound("nothing here yet".to_string())),
+                },
+                Verb::Sink => {
+                    *self.value.lock().expect("cell") = Some(cx.inline_arg("content")?.to_vec());
+                    Ok(Representation::new(
+                        ReprType::new("text/plain"),
+                        b"ok".to_vec(),
+                    ))
+                }
+                other => Err(Error::Endpoint(format!("cell: unsupported {other:?}"))),
+            }
+        }
+    }
+
+    /// A composite that sources `urn:data:optional` and, if that fails with an error
+    /// the closure admits, returns a CACHEABLE fallback — the shape hole B is about.
+    /// Counts its invocations so a test can tell "served from cache" from "ran".
+    fn fallback_over(
+        target: &'static str,
+        admits: fn(&Error) -> bool,
+        runs: Arc<AtomicU32>,
+    ) -> crate::endpoint::AsyncFnEndpoint {
+        crate::endpoint::AsyncFnEndpoint::new("fallback", move |inv: &Invocation<'_>| {
+            let runs = Arc::clone(&runs);
+            Box::pin(async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                match inv.source(&iri(target)).await {
+                    Ok(repr) => Ok(repr),
+                    Err(e) if admits(&e) => Ok(Representation::new(
+                        ReprType::new("text/plain"),
+                        b"fallback".to_vec(),
+                    )
+                    .cacheable()),
+                    Err(e) => Err(e),
+                }
+            })
+        })
+    }
+
+    #[test]
+    fn a_composite_over_an_unresolved_name_hangs_from_that_name() {
+        // Nothing is bound at `urn:data:absent`. The composite swallows the
+        // `Unresolved` and caches a fallback — which now hangs from the absent
+        // name, so whoever makes it appear (a watcher, a dynamic space) cuts it.
+        let runs = Arc::new(AtomicU32::new(0));
+        let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(
+            Exact::new("urn:test:fallback"),
+            fallback_over(
+                "urn:data:absent",
+                |e| matches!(e, Error::Unresolved(_)),
+                Arc::clone(&runs),
+            ),
+        )));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        assert_eq!(
+            block_on(kernel.issue(req(), &cap)).unwrap().bytes,
+            b"fallback"
+        );
+        assert_eq!(
+            block_on(kernel.issue(req(), &cap)).unwrap().bytes,
+            b"fallback"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the fallback is cached");
+
+        kernel.cut("urn:data:absent");
+        assert!(
+            !kernel.is_cached(&req(), &cap),
+            "the fallback hung from the missing name"
+        );
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_composite_over_a_not_found_name_recomputes_when_a_sink_creates_it() {
+        // The bound-but-absent case, end to end through the kernel: `NotFound` from
+        // the endpoint, a cached fallback, a `Sink` that creates the resource — and
+        // the composite recomputes and sees it.
+        let runs = Arc::new(AtomicU32::new(0));
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:data:optional"),
+                    MaybeCell {
+                        value: Mutex::new(None),
+                    },
+                )
+                .bind(
+                    Exact::new("urn:test:fallback"),
+                    fallback_over(
+                        "urn:data:optional",
+                        |e| matches!(e, Error::NotFound(_)),
+                        Arc::clone(&runs),
+                    ),
+                ),
+        ));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        assert_eq!(
+            block_on(kernel.issue(req(), &cap)).unwrap().bytes,
+            b"fallback"
+        );
+        assert_eq!(
+            block_on(kernel.issue(req(), &cap)).unwrap().bytes,
+            b"fallback"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the fallback is cached");
+
+        block_on(kernel.issue(sink("urn:data:optional", b"created"), &cap)).unwrap();
+        assert!(
+            !kernel.is_cached(&req(), &cap),
+            "the sink cut the fallback's thread"
+        );
+        assert_eq!(
+            block_on(kernel.issue(req(), &cap)).unwrap().bytes,
+            b"created"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_composite_built_on_a_denial_is_not_cached() {
+        // A grant change has no thread, so a result built on a refusal must not be
+        // cached at all — and it is not, whatever the composite declared. This is
+        // the performance change of hole B's fix: every read of such a composite
+        // now runs it (measured in the formalism's §10).
+        let runs = Arc::new(AtomicU32::new(0));
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:gated"), Gated(Arc::new(AtomicU32::new(0))))
+                .bind(
+                    Exact::new("urn:test:fallback"),
+                    fallback_over(
+                        "urn:gated",
+                        |e| matches!(e, Error::Denied(_)),
+                        Arc::clone(&runs),
+                    ),
+                ),
+        ));
+        let narrow = Capability::root().attenuate(["urn:cap:other".to_string()]);
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        assert_eq!(
+            block_on(kernel.issue(req(), &narrow)).unwrap().bytes,
+            b"fallback"
+        );
+        assert_eq!(
+            block_on(kernel.issue(req(), &narrow)).unwrap().bytes,
+            b"fallback"
+        );
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "a result built on a denial is recomputed"
+        );
+        assert!(!kernel.is_cached(&req(), &narrow));
+        assert_eq!(kernel.cache_len(), 0);
+    }
+
+    #[test]
+    fn a_composite_built_on_any_other_failure_is_not_cached() {
+        // Conservative by design: an `Endpoint` error (a timeout, an outage) names
+        // nothing the kernel could hang a thread from, and not caching is never wrong.
+        let runs = Arc::new(AtomicU32::new(0));
+        let failing = FnEndpoint::new("failing", |_cx: &Invocation<'_>| {
+            Err(Error::Endpoint("boom".to_string()))
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:data:failing"), failing)
+                .bind(
+                    Exact::new("urn:test:fallback"),
+                    fallback_over(
+                        "urn:data:failing",
+                        |e| matches!(e, Error::Endpoint(_)),
+                        Arc::clone(&runs),
+                    ),
+                ),
+        ));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert!(!kernel.is_cached(&req(), &cap));
+    }
+
+    #[test]
+    fn fan_out_records_failed_branches_by_the_same_rules() {
+        // Two composites over a concurrent fan-out (a real spawner, so the spawned
+        // path is the one exercised): one keeps a NotFound branch and hangs from
+        // its name; the other keeps a Denied branch and is not cached at all.
+        let runs = Arc::new(AtomicU32::new(0));
+        let gatherer = |targets: &'static [&'static str], runs: Arc<AtomicU32>| {
+            crate::endpoint::AsyncFnEndpoint::new("gather", move |inv: &Invocation<'_>| {
+                let runs = Arc::clone(&runs);
+                Box::pin(async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    let requests = targets
+                        .iter()
+                        .map(|t| Request::new(Verb::Source, iri(t)))
+                        .collect();
+                    let kept: Vec<u8> = inv
+                        .fan_out(requests)
+                        .await
+                        .into_iter()
+                        .filter_map(|r| r.ok())
+                        .flat_map(|r| r.bytes)
+                        .collect();
+                    Ok(Representation::new(ReprType::new("text/plain"), kept).cacheable())
+                })
+            })
+        };
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:data:a"), leaf("a"))
+                .bind(
+                    Exact::new("urn:data:optional"),
+                    MaybeCell {
+                        value: Mutex::new(None),
+                    },
+                )
+                .bind(Exact::new("urn:gated"), Gated(Arc::new(AtomicU32::new(0))))
+                .bind(
+                    Exact::new("urn:test:over-missing"),
+                    gatherer(&["urn:data:a", "urn:data:optional"], Arc::clone(&runs)),
+                )
+                .bind(
+                    Exact::new("urn:test:over-denied"),
+                    gatherer(&["urn:data:a", "urn:gated"], Arc::clone(&runs)),
+                ),
+        ))
+        .into_scheduled(Arc::new(InlineSpawner));
+        let narrow = Capability::root().attenuate(["urn:cap:other".to_string()]);
+
+        let over_missing = || Request::new(Verb::Source, iri("urn:test:over-missing"));
+        assert_eq!(
+            block_on(kernel.issue(over_missing(), &narrow))
+                .unwrap()
+                .bytes,
+            b"a"
+        );
+        assert!(
+            kernel.is_cached(&over_missing(), &narrow),
+            "a NotFound branch still caches"
+        );
+        block_on(kernel.issue(sink("urn:data:optional", b"b"), &narrow)).unwrap();
+        assert!(
+            !kernel.is_cached(&over_missing(), &narrow),
+            "the fan-out hung from the missing branch's name"
+        );
+        assert_eq!(
+            block_on(kernel.issue(over_missing(), &narrow))
+                .unwrap()
+                .bytes,
+            b"ab"
+        );
+
+        let runs_before = runs.load(Ordering::SeqCst);
+        let over_denied = || Request::new(Verb::Source, iri("urn:test:over-denied"));
+        assert_eq!(
+            block_on(kernel.issue(over_denied(), &narrow))
+                .unwrap()
+                .bytes,
+            b"a"
+        );
+        assert_eq!(
+            block_on(kernel.issue(over_denied(), &narrow))
+                .unwrap()
+                .bytes,
+            b"a"
+        );
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            runs_before + 2,
+            "a Denied branch forbids caching"
+        );
+        assert!(!kernel.is_cached(&over_denied(), &narrow));
+    }
+
+    // --- the nesting budget (#513) ---------------------------------------------
+
+    /// An endpoint that sources ITSELF, counting how deep it got.
+    fn ouroboros(name: &'static str, runs: Arc<AtomicU32>) -> crate::endpoint::AsyncFnEndpoint {
+        crate::endpoint::AsyncFnEndpoint::new("ouroboros", move |inv: &Invocation<'_>| {
+            let runs = Arc::clone(&runs);
+            Box::pin(async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                inv.source(&iri(name)).await
+            })
+        })
+    }
+
+    #[test]
+    fn a_self_issuing_endpoint_is_refused_at_the_bound_and_the_trace_says_where() {
+        let runs = Arc::new(AtomicU32::new(0));
+        let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(
+            Exact::new("urn:self"),
+            ouroboros("urn:self", Arc::clone(&runs)),
+        )))
+        .with_max_depth(3);
+        let rec = Rec::new();
+        let err = block_on(kernel.issue_traced(
+            Request::new(Verb::Source, iri("urn:self")),
+            &Capability::root(),
+            rec.clone(),
+        ))
+        .unwrap_err();
+
+        // Depths 0..=3 ran; the request for depth 4 was refused, typed and permanent.
+        assert!(
+            matches!(&err, Error::DepthExceeded { depth: 4, target } if target.as_str() == "urn:self"),
+            "{err:?}"
+        );
+        assert!(!err.is_transient());
+        assert_eq!(runs.load(Ordering::SeqCst), 4);
+        assert_eq!(kernel.cache_len(), 0, "a refusal never reaches the store");
+
+        // The trace holds the refusal — the one event, since every invocation above
+        // it failed (an endpoint's own failure records nothing: ledger #20) — with
+        // the depth note, nothing run, and its parent the invocation that asked for
+        // one level too many: spans 0..=3 were the four that ran.
+        let events = rec.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let refusal = &events[0];
+        assert_eq!(refusal.target, "urn:self");
+        assert_eq!(
+            refusal.notes,
+            vec![(DEPTH_NOTE.to_string(), "4".to_string())]
+        );
+        assert!(refusal.started.is_none() && refusal.ended.is_none());
+        assert!(!refusal.cache_hit);
+        assert_eq!(
+            refusal.parent,
+            Some(3),
+            "the deepest invocation that ran asked for it"
+        );
+    }
+
+    #[test]
+    fn a_transclusion_cycle_is_refused_at_the_bound() {
+        // Page A transcludes B, B transcludes A: the shape a compose endpoint
+        // meets, and until now a stack overflow.
+        let runs = Arc::new(AtomicU32::new(0));
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:page:a"),
+                    ouroboros("urn:page:b", Arc::clone(&runs)),
+                )
+                .bind(
+                    Exact::new("urn:page:b"),
+                    ouroboros("urn:page:a", Arc::clone(&runs)),
+                ),
+        ))
+        .with_max_depth(5);
+        let err = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:page:a")),
+            &Capability::root(),
+        ))
+        .unwrap_err();
+        // a(0) b(1) a(2) b(3) a(4) b(5) — then a at depth 6 is refused.
+        assert!(
+            matches!(&err, Error::DepthExceeded { depth: 6, target } if target.as_str() == "urn:page:a"),
+            "{err:?}"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 6);
+    }
+
+    #[test]
+    fn a_chain_shorter_than_the_bound_is_unaffected_and_the_default_is_sixty_four() {
+        // c1 sources c2 sources c3: three invocations at depths 0, 1, 2.
+        let chain = |from: &'static str, to: Option<&'static str>| {
+            crate::endpoint::AsyncFnEndpoint::new(from, move |inv: &Invocation<'_>| {
+                Box::pin(async move {
+                    let below = match to {
+                        Some(next) => inv.source(&iri(next)).await?.bytes,
+                        None => Vec::new(),
+                    };
+                    let mut bytes = inv.depth().to_string().into_bytes();
+                    bytes.extend(below);
+                    Ok(Representation::new(ReprType::new("text/plain"), bytes).cacheable())
+                })
+            })
+        };
+        let space = || {
+            Arc::new(
+                EndpointSpace::new()
+                    .bind(Exact::new("urn:c1"), chain("c1", Some("urn:c2")))
+                    .bind(Exact::new("urn:c2"), chain("c2", Some("urn:c3")))
+                    .bind(Exact::new("urn:c3"), chain("c3", None)),
+            )
+        };
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:c1"));
+
+        // A bound the chain fits under: unaffected, and the depths are what they say.
+        let fits = Kernel::new(space()).with_max_depth(2);
+        assert_eq!(block_on(fits.issue(req(), &cap)).unwrap().bytes, b"012");
+        // One short: the deepest hop is refused, and the error names it.
+        let tight = Kernel::new(space()).with_max_depth(1);
+        let err = block_on(tight.issue(req(), &cap)).unwrap_err();
+        assert!(
+            matches!(&err, Error::DepthExceeded { depth: 2, target } if target.as_str() == "urn:c3"),
+            "{err:?}"
+        );
+        // The default budget is DEFAULT_MAX_DEPTH: a self-sourcer runs 65 times.
+        let runs = Arc::new(AtomicU32::new(0));
+        let default = Kernel::new(Arc::new(EndpointSpace::new().bind(
+            Exact::new("urn:self"),
+            ouroboros("urn:self", Arc::clone(&runs)),
+        )));
+        let err =
+            block_on(default.issue(Request::new(Verb::Source, iri("urn:self")), &cap)).unwrap_err();
+        assert!(
+            matches!(err, Error::DepthExceeded { depth, .. } if depth == DEFAULT_MAX_DEPTH + 1),
+            "{err:?}"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), DEFAULT_MAX_DEPTH + 1);
+        assert_eq!(DEFAULT_MAX_DEPTH, 64);
+    }
+
+    #[test]
+    fn fan_out_branches_inherit_the_depth() {
+        // A spawned branch is one deeper than the invocation that fanned out —
+        // exactly as a sequential `issue` would be — so the budget holds across
+        // the spawn: at bound 1 the branches run at depth 1; at bound 0 they are
+        // refused, and the parent sees the typed error per branch.
+        let depth_reporter = || {
+            FnEndpoint::new("depth", |inv: &Invocation<'_>| {
+                Ok(Representation::new(
+                    ReprType::new("text/plain"),
+                    inv.depth().to_string().into_bytes(),
+                ))
+            })
+        };
+        let spread = || {
+            crate::endpoint::AsyncFnEndpoint::new("spread", |inv: &Invocation<'_>| {
+                Box::pin(async move {
+                    let results = inv
+                        .fan_out(vec![
+                            Request::new(Verb::Source, iri("urn:depth")),
+                            Request::new(Verb::Source, iri("urn:depth")),
+                        ])
+                        .await;
+                    let mut bytes = Vec::new();
+                    for result in results {
+                        match result {
+                            Ok(repr) => bytes.extend(repr.bytes),
+                            Err(Error::DepthExceeded { depth, .. }) => {
+                                bytes.extend(format!("refused@{depth}").into_bytes())
+                            }
+                            Err(e) => return Err(e),
+                        }
+                        bytes.push(b',');
+                    }
+                    Ok(Representation::new(ReprType::new("text/plain"), bytes))
+                })
+            })
+        };
+        let build = |max_depth: u32| {
+            Kernel::new(Arc::new(
+                EndpointSpace::new()
+                    .bind(Exact::new("urn:depth"), depth_reporter())
+                    .bind(Exact::new("urn:spread"), spread()),
+            ))
+            .with_max_depth(max_depth)
+            .into_scheduled(Arc::new(InlineSpawner))
+        };
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:spread"));
+        assert_eq!(
+            block_on(build(1).issue(req(), &cap)).unwrap().bytes,
+            b"1,1,"
+        );
+        assert_eq!(
+            block_on(build(0).issue(req(), &cap)).unwrap().bytes,
+            b"refused@1,refused@1,"
+        );
+    }
+
+    #[test]
+    fn a_depth_refusal_swallowed_into_a_fallback_is_not_cached() {
+        // B.7's caching obligation, met through hole B rather than trivially: the
+        // refusal itself never reaches the store, and a composite that catches it
+        // and returns `.cacheable()` is forced uncacheable — so a shallower request
+        // is never served a result that was computed at the bound.
+        let runs = Arc::new(AtomicU32::new(0));
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:data:leaf"), leaf("x"))
+                .bind(
+                    Exact::new("urn:test:fallback"),
+                    fallback_over(
+                        "urn:data:leaf",
+                        |e| matches!(e, Error::DepthExceeded { .. }),
+                        Arc::clone(&runs),
+                    ),
+                ),
+        ))
+        .with_max_depth(0);
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        assert_eq!(
+            block_on(kernel.issue(req(), &cap)).unwrap().bytes,
+            b"fallback"
+        );
+        assert_eq!(
+            block_on(kernel.issue(req(), &cap)).unwrap().bytes,
+            b"fallback"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(kernel.cache_len(), 0);
     }
 }

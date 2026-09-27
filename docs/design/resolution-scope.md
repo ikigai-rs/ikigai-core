@@ -259,10 +259,11 @@ looking"). Settle it before the first as-of demo, or the demo lies about one of 
 
 ## Not built, on purpose
 
-Temporal / geographic / personal corridors, a context resource, the limiter (#511), the
-depth budget (#513 — and #25's re-entrancy budget is adjacent: a confined chain can still
-recurse through a corridor endpoint that calls itself), consulted-corridors caching, the
-chain on the wire, space identity beyond decision 2, the topology resource. `Kernel::probe`
+Temporal / geographic / personal corridors, a context resource, the limiter (#511),
+consulted-corridors caching, the chain on the wire (the depth budget, #513, left this list
+in 0.1.73: `Kernel::with_max_depth` bounds a confined chain that recurses through a
+corridor endpoint calling itself, though — like the chain — the depth does not cross the
+wire), space identity beyond decision 2, the topology resource. `Kernel::probe`
 / `is_cached` and `urn:kernel:cache` answer for the empty chain only. `select_transreptor`
 / `select_action` select over the **root** even from inside a confinement, so the manifold
 can offer a transreptor the chain cannot then resolve — selection has not learned the

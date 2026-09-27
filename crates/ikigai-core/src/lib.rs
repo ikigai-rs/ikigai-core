@@ -110,7 +110,8 @@ pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
-    ALIAS_MISS_NOTE, ALIAS_NOTE, DENIED_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE,
+    ALIAS_MISS_NOTE, ALIAS_NOTE, DEFAULT_MAX_DEPTH, DENIED_NOTE, DEPTH_NOTE, SCOPE_MISS_NOTE,
+    SCOPE_NOTE,
 };
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};

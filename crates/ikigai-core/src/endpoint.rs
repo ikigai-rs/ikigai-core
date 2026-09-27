@@ -92,6 +92,37 @@ pub trait Issuer: Send + Sync {
         self.issue_scoped(request, capability, parent, trace).await
     }
 
+    /// Like [`issue_in_scope`](Issuer::issue_in_scope), additionally carrying the
+    /// **nesting depth** the sub-request runs at — one deeper than the invocation
+    /// that issued it — so the kernel can refuse it past its budget
+    /// ([`Kernel::with_max_depth`](crate::Kernel::with_max_depth)) with
+    /// [`Error::DepthExceeded`] instead of recursing until the stack dies. This is
+    /// the seam [`Invocation`] calls; the kernel overrides it.
+    ///
+    /// **The default drops the depth and delegates** to `issue_in_scope`, so every
+    /// issuer written before this method existed keeps compiling and behaving as it
+    /// did. That is a deliberate asymmetry with `issue_in_scope`'s refusal of a
+    /// chain it cannot carry: a dropped chain resolves a request *somewhere it should
+    /// not*, silently; a dropped depth only stops counting at this issuer, and the
+    /// count resumes at zero on the far side. The budget therefore bounds nesting
+    /// **within one kernel**: it does not cross a module host bridge that implements
+    /// only `issue`, and it does not cross the wire (`ikigai-wire`'s `Call` has no
+    /// field for it), so two peers that mount each other remain unbounded by it.
+    /// Carrying it further is a protocol decision, not a default.
+    async fn issue_at_depth(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<crate::TraceScope>,
+        scope: Scope,
+        depth: u32,
+    ) -> Result<Representation> {
+        let _ = depth;
+        self.issue_in_scope(request, capability, parent, trace, scope)
+            .await
+    }
+
     /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s produced by *another*
     /// kernel — a remote one reached through a mounted `RemoteSpace` — into this
     /// issuer's trace, re-based under `parent` (the span of the invocation that
@@ -244,6 +275,13 @@ pub struct Invocation<'a> {
     /// by every sub-request it issues. Set by the kernel; the only change an
     /// endpoint can make to it is [`confine`](Invocation::confine), which narrows.
     scope: Scope,
+    /// How deeply this invocation is nested: 0 for a request the host issued, one
+    /// more for each sub-request between it and this one. Set by the kernel, read
+    /// by every sub-request form to hand the kernel `depth + 1`, and the number the
+    /// kernel's budget ([`Kernel::with_max_depth`](crate::Kernel::with_max_depth))
+    /// is checked against. Private: an endpoint cannot reset it, for the reason it
+    /// cannot set its own chain or its own authority.
+    depth: u32,
     /// Everything the endpoint records while it runs, shared by every reborrow of
     /// this invocation. See [`Recorded`].
     recorded: Arc<Recorded>,
@@ -270,6 +308,62 @@ struct Recorded {
     /// Union of the golden threads of every sub-resource resolved during this
     /// invocation — so the kernel can propagate them onto the result.
     dep_threads: Mutex<BTreeSet<Thread>>,
+}
+
+impl Recorded {
+    /// Record the outcome of one sub-request for `requested` as a dependency of the
+    /// invocation — **whether or not it succeeded**.
+    ///
+    /// A success contributes its expiry and its golden threads, as ever. A failure
+    /// contributes too, by error class, because an endpoint that catches the failure
+    /// and returns a cacheable fallback is otherwise cached with nothing to invalidate
+    /// it — hole B of [#512](http://localhost:1060/l/default/item/512):
+    ///
+    /// - [`Error::Unresolved`] / [`Error::NotFound`]: a thread named after the missing
+    ///   resource, so a `Sink` that later creates it (or a watcher that sees it appear)
+    ///   cuts every composite built on its absence. The name is the one the kernel
+    ///   reports for `Unresolved` — canonical, after every rewrite the kernel applied
+    ///   — and the name that was *requested* for `NotFound`, which carries no IRI of
+    ///   its own; under an alias those can differ, and a `Sink` through the alias
+    ///   cuts the canonical one. Stated so it is not mistaken for closed.
+    /// - [`Error::Denied`]: [`Expiry::Always`]. A grant change has no thread, so a
+    ///   result built on a refusal must not be cached at all.
+    /// - Every other error (`Endpoint`, `Timeout`, `Unavailable`, `DepthExceeded`,
+    ///   a bad argument): `Always` as well, conservatively — the kernel cannot name
+    ///   what would make the failure go away, and not caching is never wrong. For
+    ///   `DepthExceeded` this is the paper's B.7 obligation: a refusal at the bound
+    ///   is never served to a shallower request, even wrapped in a fallback.
+    fn record(&self, requested: &Iri, result: &Result<Representation>) {
+        match result {
+            Ok(representation) => {
+                self.deps
+                    .lock()
+                    .expect("deps lock")
+                    .push(representation.expiry);
+                // Inherit the sub-resource's golden threads so cutting any of them
+                // invalidates this (composite) result too.
+                self.dep_threads
+                    .lock()
+                    .expect("dep threads lock")
+                    .extend(representation.threads().iter().cloned());
+            }
+            Err(Error::Unresolved(canonical)) => {
+                self.dep_threads
+                    .lock()
+                    .expect("dep threads lock")
+                    .insert(Thread::from(canonical.as_str()));
+            }
+            Err(Error::NotFound(_)) => {
+                self.dep_threads
+                    .lock()
+                    .expect("dep threads lock")
+                    .insert(Thread::from(requested.as_str()));
+            }
+            Err(_) => {
+                self.deps.lock().expect("deps lock").push(Expiry::Always);
+            }
+        }
+    }
 }
 
 impl<'a> Invocation<'a> {
@@ -320,6 +414,7 @@ impl<'a> Invocation<'a> {
             span: None,
             trace: None,
             scope: Scope::empty(),
+            depth: 0,
             recorded: Arc::new(Recorded::default()),
         }
     }
@@ -348,6 +443,7 @@ impl<'a> Invocation<'a> {
             span: None,
             trace: None,
             scope: Scope::empty(),
+            depth: 0,
             recorded: Arc::new(Recorded::default()),
         }
     }
@@ -414,6 +510,7 @@ impl<'a> Invocation<'a> {
             span: self.span,
             trace: self.trace.clone(),
             scope: self.scope.clone(),
+            depth: self.depth,
             // Shared, deliberately: see the doc above. The reborrow records INTO
             // this invocation, not beside it.
             recorded: Arc::clone(&self.recorded),
@@ -520,6 +617,7 @@ impl<'a> Invocation<'a> {
             span: self.span,
             trace: self.trace.clone(),
             scope: self.scope.clone().confined(name, space),
+            depth: self.depth,
             recorded: Arc::clone(&self.recorded),
         }
     }
@@ -556,6 +654,26 @@ impl<'a> Invocation<'a> {
     /// ```
     pub(crate) fn with_scope(mut self, scope: Scope) -> Self {
         self.scope = scope;
+        self
+    }
+
+    /// How deeply this invocation is nested: 0 for a request the host issued, and
+    /// one more for each sub-request between that and this one. Every sub-request
+    /// this invocation issues — through [`issue`](Self::issue), [`source`](Self::source),
+    /// the attenuated forms, [`fan_out`](Self::fan_out) across a spawn, or a
+    /// [`scope_sync`](Self::scope_sync) bridge — runs at `depth() + 1`, and the
+    /// kernel refuses one past its budget
+    /// ([`Kernel::with_max_depth`](crate::Kernel::with_max_depth)) with
+    /// [`Error::DepthExceeded`]. A detached invocation is at 0.
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    /// Attach the nesting depth (set by the kernel, from the depth it was asked to
+    /// run the request at). Crate-private for the reason [`with_scope`](Self::with_scope)
+    /// is: an endpoint that could reset its depth could reset the budget.
+    pub(crate) fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
         self
     }
 
@@ -692,6 +810,18 @@ impl<'a> Invocation<'a> {
     /// Issue a sub-request through the kernel, recording it as a dependency of
     /// this invocation's result so expiry propagates. Errors if detached.
     ///
+    /// **A failed sub-request is recorded too.** `Unresolved` and `NotFound` add a
+    /// golden thread named after the missing resource, so a fallback built on its
+    /// absence is cut when it appears; `Denied` and every other error make this
+    /// invocation's result uncacheable. An endpoint that catches an error and
+    /// returns `.cacheable()` therefore gets exactly the cacheability its inputs
+    /// warrant — which, for a swallowed denial, is none. The rules and the reason
+    /// for each are on `Recorded::record` in this file.
+    ///
+    /// The sub-request runs one nesting level deeper than this invocation
+    /// ([`depth`](Self::depth)); past the kernel's budget it is refused with
+    /// [`Error::DepthExceeded`].
+    ///
     /// The sub-request runs under **this invocation's own capability**, unchanged.
     /// To narrow it first — the shape a module wants when it is about to resolve a
     /// caller-supplied IRI — use
@@ -768,28 +898,25 @@ impl<'a> Invocation<'a> {
         let issuer = self
             .issuer
             .ok_or_else(|| Error::Endpoint("sub-requests require a kernel context".to_string()))?;
-        let representation = issuer
-            .issue_in_scope(
+        // Kept for the failure record: `NotFound` carries no IRI, and the request
+        // is moved into the issuer. One clone per sub-request, on the path whose
+        // floor is a cache hit two orders of magnitude dearer.
+        let requested = request.target.clone();
+        let result = issuer
+            .issue_at_depth(
                 request,
                 capability,
                 self.span,
                 self.trace.clone(),
                 self.scope.clone(),
+                self.depth + 1,
             )
-            .await?;
-        self.recorded
-            .deps
-            .lock()
-            .expect("deps lock")
-            .push(representation.expiry);
-        // Inherit the sub-resource's golden threads so cutting any of them
-        // invalidates this (composite) result too.
-        self.recorded
-            .dep_threads
-            .lock()
-            .expect("dep threads lock")
-            .extend(representation.threads().iter().cloned());
-        Ok(representation)
+            .await;
+        // Recorded on BOTH branches — a failure is a dependency too (see
+        // `Recorded::record`): the endpoint may catch it and return a cacheable
+        // fallback, and that fallback must hang from something.
+        self.recorded.record(&requested, &result);
+        result
     }
 
     /// `SOURCE` another resource — dereference a by-reference argument — recording
@@ -845,7 +972,9 @@ impl<'a> Invocation<'a> {
     /// children run, and a child can run on the thread the parent released. Without a
     /// spawner it falls back to sequential [`issue`](Self::issue) — the kernel's
     /// default single-threaded behaviour. Either way each result's expiry and golden
-    /// threads are recorded as dependencies of this invocation, exactly like `issue`.
+    /// threads are recorded as dependencies of this invocation, exactly like `issue`
+    /// — the failed branches included, by the same rules — and every branch runs
+    /// one nesting level deeper than this invocation.
     pub async fn fan_out(&self, requests: Vec<Request>) -> Vec<Result<Representation>> {
         let (Some(spawner), Some(issuer)) = (&self.spawner, &self.issuer_arc) else {
             // Sequential fallback: same order, same dependency recording as `issue`.
@@ -857,10 +986,13 @@ impl<'a> Invocation<'a> {
         };
 
         // Spawn each sub-request into its own slot, then join (parking) on all.
+        // The slot keeps the requested target beside the result, for the failure
+        // record (`NotFound` carries no IRI of its own).
         let slots: Vec<Arc<Mutex<Option<Result<Representation>>>>> = requests
             .iter()
             .map(|_| Arc::new(Mutex::new(None)))
             .collect();
+        let targets: Vec<Iri> = requests.iter().map(|r| r.target.clone()).collect();
         let joins: Vec<BoxFuture<()>> = requests
             .into_iter()
             .zip(&slots)
@@ -879,9 +1011,12 @@ impl<'a> Invocation<'a> {
                 // sub-request of this invocation, so a confinement it runs in
                 // holds across the spawn.
                 let scope = self.scope.clone();
+                // …and the nesting depth: a spawned branch is one deeper than
+                // this invocation, exactly as a sequential `issue` would be.
+                let depth = self.depth + 1;
                 spawner.spawn(Box::pin(async move {
                     let result = issuer
-                        .issue_in_scope(request, &capability, parent, trace, scope)
+                        .issue_at_depth(request, &capability, parent, trace, scope, depth)
                         .await;
                     *slot.lock().expect("fan-out slot") = Some(result);
                 }))
@@ -889,26 +1024,16 @@ impl<'a> Invocation<'a> {
             .collect();
         futures_util::future::join_all(joins).await;
 
-        // Collect in order; record each result's dependency expiry and threads.
+        // Collect in order; record each branch as a dependency — the failed ones
+        // too, by the same rules as `issue` (see `Recorded::record`).
         let mut results = Vec::with_capacity(slots.len());
-        for slot in slots {
+        for (slot, requested) in slots.into_iter().zip(&targets) {
             let result = slot
                 .lock()
                 .expect("fan-out slot")
                 .take()
                 .expect("spawned fan-out task completed");
-            if let Ok(representation) = &result {
-                self.recorded
-                    .deps
-                    .lock()
-                    .expect("deps lock")
-                    .push(representation.expiry);
-                self.recorded
-                    .dep_threads
-                    .lock()
-                    .expect("dep threads lock")
-                    .extend(representation.threads().iter().cloned());
-            }
+            self.recorded.record(requested, &result);
             results.push(result);
         }
         results

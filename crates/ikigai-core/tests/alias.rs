@@ -820,3 +820,77 @@ fn a_traced_invocation_through_a_nested_alias_carries_the_hop() {
         "urn:example:store:x -> urn:example:moved:store:x".to_string()
     )));
 }
+
+// ------------------------------------- 0.1.73: the automatic thread is canonical
+
+/// The `cell` fixture above, minus its `.depends_on(target)`: a cacheable read that
+/// declares NO thread, so the only edge it has is the one the kernel adds.
+fn undeclared_cell(name: &'static str, value: Arc<Mutex<String>>) -> FnEndpoint {
+    FnEndpoint::new(name, move |inv| match inv.request.verb {
+        Verb::Sink => {
+            let incoming = inv.inline_str("content")?.to_string();
+            *value.lock().unwrap() = incoming;
+            Ok(Representation::new(text(), b"ok".to_vec()))
+        }
+        _ => {
+            let current = value.lock().unwrap().clone();
+            Ok(Representation::new(text(), current.into_bytes()).cacheable())
+        }
+    })
+    .with_description(
+        Description::new(name)
+            .verb(Verb::Source)
+            .verb(Verb::Sink)
+            .output("text/plain;charset=utf-8"),
+    )
+}
+
+#[test]
+fn the_automatic_thread_is_the_canonical_target_so_a_sink_through_either_name_cuts_an_undeclared_read(
+) {
+    // Hole A's fix names the thread after the CANONICAL target — post-alias — so
+    // the logical and backing names still share one entry and one thread, and a
+    // read that declared nothing is cut by a write through either name.
+    let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(
+        Exact::new("urn:example:moved:store:y"),
+        undeclared_cell("cellY", Arc::new(Mutex::new("one".to_string()))),
+    )))
+    .with_aliases(migration());
+    let cap = Capability::root();
+    let sink = |target: &str, content: &[u8]| {
+        block_on(
+            kernel.issue(
+                Request::new(Verb::Sink, iri(target))
+                    .with_arg("content", ArgRef::Inline(content.to_vec())),
+                &cap,
+            ),
+        )
+        .unwrap();
+    };
+
+    // Read the logical name (cached under the canonical id), write the BACKING name.
+    assert_eq!(
+        source(&kernel, "urn:example:store:y", &cap).unwrap(),
+        b"one"
+    );
+    assert_eq!(kernel.cache_len(), 1);
+    sink("urn:example:moved:store:y", b"two");
+    assert_eq!(
+        source(&kernel, "urn:example:store:y", &cap).unwrap(),
+        b"two",
+        "an undeclared read through the logical name was stale after a sink through the backing name"
+    );
+    // Read the backing name, write the LOGICAL name.
+    assert_eq!(
+        source(&kernel, "urn:example:moved:store:y", &cap).unwrap(),
+        b"two"
+    );
+    sink("urn:example:store:y", b"three");
+    assert_eq!(
+        source(&kernel, "urn:example:moved:store:y", &cap).unwrap(),
+        b"three",
+        "an undeclared read through the backing name was stale after a sink through the logical name"
+    );
+    // One entry throughout: the thread was never split across the two names.
+    assert_eq!(kernel.cache_len(), 1);
+}

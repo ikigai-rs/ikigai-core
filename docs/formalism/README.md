@@ -13,6 +13,10 @@ is [#523](http://localhost:1060/l/default/item/523); the book review is
 ([#525](http://localhost:1060/l/default/item/525)): the gate left the packaged crate (§11), four
 doctests landed (the visibility halves of R2.2 and R7.5 as `compile_fail`, `Kernel::issue_in`,
 `Invocation::confine`), and §7 cross-links the two sentences `resolution-scope.md` owed.
+Revised again 2026-09-26 for **0.1.73** ([#512](http://localhost:1060/l/default/item/512),
+[#513](http://localhost:1060/l/default/item/513)): R4.4 is unconditional (the kernel supplies
+its precondition), R4.5 closes hole B, R5.3 is the nesting budget, and §10 carries the two
+read measurements those cost.
 **Companions in this repository:** `docs/design/resolution-scope.md` (the chain),
 `docs/design/sub-request-authority.md` (attenuation, and why delegation is not built),
 `docs/design/cache-ejection.md` (what the cache key does not identify),
@@ -61,12 +65,14 @@ calls it a *space*. ikigai's trait is `Space`. Below, *corridor* is the paper's 
 built over, and the *static tree* is that space's composition of `Mount`, `Fallback`, `Rewrite`
 and `Alias` combinators. The paper's Σ* is written I.
 
-**Conditional where the code is conditional.** One theorem below has a precondition the
-kernel does not yet discharge for every endpoint (R4.4). It is stated with the precondition
-explicit and the precondition pinned to the test that supplies it by hand. That is the whole
-value of the document: it says exactly where ikigai is weaker than its own story. (R2.2's
-structural half was the second such theorem until 2026-09-26; a `compile_fail` doctest now
-holds it.)
+**Conditional where the code is conditional.** No theorem below is conditional on a
+precondition an endpoint has to discharge by hand. Two were, and the document said so: R4.4's
+precondition (a cacheable read carries an edge on its own canonical target) was supplied by
+hand in every pinned test until 0.1.73, when the kernel began supplying it; R2.2's structural
+half was review until a `compile_fail` doctest held it. What remains conditional is R3.2, on
+facts the kernel cannot *observe* (the binding behind a name, a corridor's name as a claim) —
+the register in §9. That is the whole value of the document: it says exactly where ikigai is
+weaker than its own story, and it shows the list getting shorter.
 
 ---
 
@@ -97,12 +103,12 @@ tracks it.
 | Path cache γ_path | §5.1 | **Absent, measured.** `resolve` runs on every request, before the representation-cache lookup, so that the declared-capability floor fences cached answers too. A cached read is ~0.6 µs end to end of which resolution is 7–330 ns (§10, [#510](http://localhost:1060/l/default/item/510)); a path cache would need a binding-change thread as its validity predicate, which does not exist either. | absent | pin: `kernel::tests::declared_requires_is_kernel_enforced_before_dispatch` (crates/ikigai-core/src/kernel.rs); UNPINNED — the measurement is a scratch bench, not a test (§10) |
 | Representation cache γ_rep, keyed by identifier and context | §5.1 | `CacheKey { request: RequestId, capability: u64, scope: u64 }` — the content-addressed request (verb, canonical target, arguments including `as=`), the authority fingerprint, the chain fingerprint. §3 and §7. | realised, extended | pin: `kernel::tests::cache_is_keyed_by_capability` (crates/ikigai-core/src/kernel.rs); pin: `scope::the_empty_scope_is_the_status_quo` (crates/ikigai-core/tests/scope.rs); pin: `request::tests::identity_is_deterministic` (crates/ikigai-core/src/request.rs) |
 | Validity predicate ν | §5.1 | `Expiry { Always, At(t), Never }` on the representation, plus golden-thread edges pinned to generations, plus the cut sequence that closes the lost-cut race. §4. | realised, extended | pin: `cache::tests::a_cut_after_the_snapshot_declines_the_store` (crates/ikigai-core/src/cache.rs); pin: `cache::tests::a_deadline_is_honoured_and_a_clockless_kernel_assumes_the_worst` (crates/ikigai-core/src/cache.rs) |
-| Dependency graph δ(r), golden thread | §5.3, B.6 | `Representation::depends_on(thread)` declares; sub-request results are inherited; a `Sink`/`Delete` cuts the thread named after its canonical target; an external watcher cuts the same thread. §4. | realised, conditional R4.4 | pin: `kernel::tests::a_thread_propagates_up_through_composition` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_sink_invalidates_the_cached_source_of_its_target` (crates/ikigai-core/src/kernel.rs) |
+| Dependency graph δ(r), golden thread | §5.3, B.6 | `Representation::depends_on(thread)` declares; sub-request results are inherited — the failed ones too, by error class (R4.5); every cacheable `Source`/`Exists` answer carries the thread named after its own canonical target, whether or not it declared it (R4.4); a `Sink`/`Delete` cuts that thread; an external watcher cuts the same thread. §4. | realised | pin: `kernel::tests::a_thread_propagates_up_through_composition` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_sink_invalidates_the_cached_source_of_its_target` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_cacheable_read_hangs_from_its_own_canonical_target_without_declaring_it` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_composite_over_a_not_found_name_recomputes_when_a_sink_creates_it` (crates/ikigai-core/src/kernel.rs) |
 | Clocks may be read; results are then not cacheable | Hyp. H, §5.1 | `Expiry::Always` is the default (an endpoint opts in to caching); a deadline is `At`, judged against the kernel's injected `Clock`; a clockless kernel declines to cache a deadline at all. | realised | pin: `kernel::tests::a_clockless_kernel_declines_to_cache_a_deadline` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::the_shipped_fixed_clock_drives_a_deadline_and_does_not_move` (crates/ikigai-core/src/kernel.rs); pin: `verb::tests::cacheability_matches_idempotency` (crates/ikigai-core/src/verb.rs) |
 | Metadata verb, self-description (§8.2) | §3, §8.2 | `Verb::Meta` routed to a `MetaRenderer`; `urn:kernel:catalog` lists every binding; every kernel operation describes itself. **The arrangement is not a resource**: `Fallback`, `Mount`, `Rewrite` and the chain are invisible in any representation ([#515](http://localhost:1060/l/default/item/515)). | half realised | pin: `kernel::tests::meta_is_routed_through_the_renderer` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::catalog_enumerates_every_bound_endpoint_through_the_renderer` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::every_kernel_operation_describes_itself` (crates/ikigai-core/src/kernel.rs); UNPINNED — a test would source `urn:kernel:topology` and find the tree as a graph with ordered members |
 | Verbs folded into identifiers | §3 | **Deviation, deliberate:** `Verb` is first-class and part of the request identity. §6. | deviation §6 | pin: `request::tests::distinct_inputs_have_distinct_identity` (crates/ikigai-core/src/request.rs) |
 | `new` verb | §3 | Absent: `Sink` to an unbound-but-resolvable name makes it reifiable. `exists` is `Verb::Exists`, answered by the endpoint (the paper's decidable approximation of reifiability). | deviation §6 | pin: `verb::tests::cacheability_matches_idempotency` (crates/ikigai-core/src/verb.rs) |
-| Hop bound (Cor. 3), nesting budget (B.7) | §10 | Neither. The hop counter is not needed (§5: resolution terminates by construction); the nesting budget is needed and absent ([#513](http://localhost:1060/l/default/item/513)). | absent | UNPINNED — a test would bind an endpoint that sources its own IRI and assert a typed refusal at the configured depth, not a stack overflow |
+| Hop bound (Cor. 3), nesting budget (B.7) | §10 | The hop counter is not needed (§5: resolution terminates by construction). The nesting budget is `Kernel::with_max_depth` (default 64): a request the host issues is at depth 0, each sub-request one deeper, and one past the bound is refused with `Error::DepthExceeded` before it resolves anything and recorded on the trace under `DEPTH_NOTE`. Within one kernel only — R5.3. | realised, within one kernel | pin: `kernel::tests::a_self_issuing_endpoint_is_refused_at_the_bound_and_the_trace_says_where` (crates/ikigai-core/src/kernel.rs); doctest: `Kernel::with_max_depth` |
 | Hypothesis H | §3 | Holds **structurally** for wasm modules (the shim's only import is `issue`, in `ikigai-module`); for in-process Rust endpoints it is **review**, exactly as the paper says of NetKernel. | as the paper says | UNPINNED — the wasm half lives in ikigai-module; the in-process half is not a property a test can observe (`std::fs` is one line away) |
 
 ### 1.1 One corridor with internal structure: the static tree is not a chain
@@ -201,12 +207,12 @@ value-corridor tail. The behavioural half — a by-reference argument outside th
 ### 1.5 What is absent, and the empty identifier
 
 - **Limiter** ([#511](http://localhost:1060/l/default/item/511)), **path cache**
-  ([#510](http://localhost:1060/l/default/item/510)), **nesting budget**
-  ([#513](http://localhost:1060/l/default/item/513)), **topology as a resource**
+  ([#510](http://localhost:1060/l/default/item/510)), **topology as a resource**
   ([#515](http://localhost:1060/l/default/item/515)), **lossless flag**
   ([#514](http://localhost:1060/l/default/item/514)): each is a row above, each UNPINNED.
   None is a decision against the paper; core grows capabilities incrementally, and a gap
-  is not a design until it is written down as one.
+  is not a design until it is written down as one. The **nesting budget**
+  ([#513](http://localhost:1060/l/default/item/513)) left this list in 0.1.73 (R5.3).
 - **ε.** The paper's null identifier resolves entirely from context (§2.3, Cor. 1). An `Iri`
   is absolute, so ε is not an identifier here. The nearest thing is a short identifier bound
   by an injected corridor — `urn:time:now` under a temporal corridor — which is Cor. 2 (richer
@@ -360,7 +366,7 @@ Facts the key does **not** carry, and what covers each:
 
 | Fact | Covered by | Status |
 |---|---|---|
-| the state of dependencies (files, store graphs, other resources) | ν: golden-thread edges, §4 | realised, conditional R4.4 |
+| the state of dependencies (files, store graphs, other resources) | ν: golden-thread edges, §4 | realised (R4.4, R4.5) |
 | time | ν: `Expiry::At` against the kernel clock | realised |
 | **the binding behind the canonical name — which endpoint, which code version** | nothing. Within one process the binding is assumed not to move; a root is immutable at construction, so today this bites only a space with interior mutability (dynamic mounts, module reload) — and there a catalog or Meta cached `Never` is stale forever after a rebind. Across processes it is the normal case (`docs/design/cache-ejection.md` §3). The fix is a thread the kernel cuts on binding change ([#510](http://localhost:1060/l/default/item/510)). | UNPINNED — a test would build a `Space` with a swappable binding, cache a `Never` read, swap, and assert the entry is not served; today it is |
 | a grant under delegation | not applicable: delegation is not built (§2) | n/a |
@@ -402,8 +408,9 @@ invalidation.
 {(T, g_T)}: for each golden thread T the representation depends on, the generation T held when e
 was stored. ν(e, t) holds iff every edge is current — gen(T) = g_T — and, if x = `At(d)`, the
 kernel's clock reads t < d. A kernel without a clock treats a deadline as passed and declines to
-store one. Threads are the representation's declared threads plus those inherited from every
-sub-request it resolved and from a piped input's provenance.
+store one. Threads are the representation's declared threads, plus — for a cacheable `Source`
+or `Exists` — the thread named after its own canonical target (R4.4), plus those inherited from
+every sub-request it resolved, failed ones included (R4.5), and from a piped input's provenance.
 
     pin: `cache::tests::a_cut_invalidates_and_the_lookup_evicts` (crates/ikigai-core/src/cache.rs)
     pin: `kernel::tests::cutting_a_thread_invalidates_the_entry_that_declared_it` (crates/ikigai-core/src/kernel.rs)
@@ -456,35 +463,68 @@ makes the composite `Always` — a correctness no-op and a performance change wi
 signal. Measured 2026-08-13 in `ikigai-cms-web` (PR #71): joining an uncacheable overlay into a
 cached books graph took a read from ~20 µs to ~1.0 s, every read, with 68 tests green (§10).
 
-**Theorem R4.4 (the write-cut — CONDITIONAL).** After a successful `Sink` or `Delete` on
-canonical target t, the kernel cuts thread t. Every entry with an edge on t is invalid
-thereafter. **Precondition P:** a cacheable `Source` of t carries an edge on thread t — because
-its endpoint declared `.depends_on(t)`, or inherited it. Under P, a read after a write through
-the kernel is never stale, under either name of an aliased resource, and through a nested
-alias.
+**Theorem R4.4 (the write-cut).** After a successful `Sink` or `Delete` on canonical target
+t, the kernel cuts thread t. Every entry with an edge on t is invalid thereafter. **And every
+stored `Source` or `Exists` of t carries an edge on t**: when the kernel stores such an answer
+it adds the thread named after the request's canonical target — the same name the cut fires on
+— to the representation, whether or not the endpoint declared it. Hence a read after a write
+through the kernel is never stale: for a read that declared nothing, under either name of an
+aliased resource (the thread is canonical, so the logical and backing names stay one thread),
+through a nested alias, and for a composite over such a read, which inherits the edge through
+the dependency record and is cut by the same write.
 
+    pin: `kernel::tests::a_cacheable_read_hangs_from_its_own_canonical_target_without_declaring_it` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::an_exists_answer_hangs_from_its_target_too` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_composite_over_an_undeclared_read_is_cut_by_a_sink_to_the_read` (crates/ikigai-core/src/kernel.rs)
+    pin: `alias::the_automatic_thread_is_the_canonical_target_so_a_sink_through_either_name_cuts_an_undeclared_read` (crates/ikigai-core/tests/alias.rs)
     pin: `kernel::tests::a_sink_invalidates_the_cached_source_of_its_target` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::cutting_a_thread_invalidates_the_entry_that_declared_it` (crates/ikigai-core/src/kernel.rs)
     pin: `alias::a_sink_through_one_name_invalidates_a_source_through_the_other` (crates/ikigai-core/tests/alias.rs)
     pin: `alias::a_sink_through_one_name_cuts_the_other_when_the_alias_is_nested` (crates/ikigai-core/tests/alias.rs)
 
-**P is supplied by hand.** In every pinned test the endpoint declares the thread named after
-its own target explicitly (`Cell` in the first, `.depends_on("urn:file:notes.txt")` in the
-second); `ikigai-fs` does the same. The kernel stores only the threads an endpoint declared plus
-those of its sub-requests; it does not pair a cacheable read with a thread named after its own
-canonical target. So every other cacheable endpoint fronting mutable state is one forgotten
-line from serving stale bytes after a write through the same name — hole A of
-[#512](http://localhost:1060/l/default/item/512), the declared-versus-enforced shape again.
-The unconditional theorem is what #512's fix A would discharge: the kernel adds the edge, and
-endpoints declare nothing.
+**The precondition, and who supplies it.** Until 0.1.73 this theorem was stated conditional on
+P: *a cacheable `Source` of t carries an edge on thread t*. Every pinned test supplied P by hand
+(`Cell` declared `.depends_on(target)`; the file endpoint declared `.depends_on("urn:file:notes.txt")`;
+`ikigai-fs` does the same), and every other cacheable endpoint fronting mutable state was one
+forgotten line from serving stale bytes after a write through the same name — hole A of
+[#512](http://localhost:1060/l/default/item/512), the declared-versus-enforced shape. The first
+pin above is the old `cutting_a_thread_invalidates_the_entry_that_declared_it` with the manual
+declaration removed; a declared thread still works (the sixth pin), it is merely no longer
+load-bearing. What does **not** get the edge, by decision: `Meta`, which is served from
+`describe()` and changes on a binding change, not a write (that thread is
+[#510](http://localhost:1060/l/default/item/510)); and the `urn:kernel:*` intrinsics, which are
+live state or the catalog. A pure function gains a thread nobody cuts; the cost was measured
+twice (§10) and the second cut brought it to zero.
 
-    UNPINNED — a test would bind a cacheable `Source` that does NOT call `depends_on`, `Sink` the same name, and assert the next `Source` recomputes; today it serves the stale entry
+    pin: `kernel::tests::meta_gains_no_automatic_thread` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_pure_function_gains_a_thread_it_never_needs_and_it_is_harmless` (crates/ikigai-core/src/kernel.rs)
 
-**Hole B, in the same place.** A failed sub-request records no dependency: an endpoint that
-catches `Unresolved` and returns a cacheable fallback is cached `Never` with no thread on the
-missing name, so a `Sink` that later creates it cuts nothing the entry depends on.
+**Proposition R4.5 (a failed sub-request is a dependency).** Let an invocation issue a
+sub-request for name n and receive an error. The kernel records, on the invocation: for
+`Unresolved` and `NotFound`, an edge on the thread named after the missing resource — the
+canonical name the kernel reports for `Unresolved`, the requested name for `NotFound`, which
+carries no IRI of its own; for `Denied` and every other error, `Always`. Consequently a composite
+that catches the failure and returns a cacheable fallback is stored with an edge on the missing
+name (so a `Sink` that creates it, or a watcher that sees it appear, cuts the fallback), and a
+composite built on a denial — or on a timeout, an outage, a depth refusal — is not stored at
+all. `fan_out` applies the same rule per branch. The rule is conservative in the direction that
+is never wrong: a grant change has no thread, and the kernel cannot name what would make an
+`Endpoint` error go away, so it declines to cache rather than guess. The residue, stated: under
+an alias a `NotFound` records the *logical* name while the write-cut fires on the canonical one
+— a typed `NotFound` carrying its target would close it, and is a breaking change to a public
+variant.
 
-    UNPINNED — a test would cache a composite built on an `Unresolved` sub-request, `Sink` that name into existence, and assert the composite recomputes; today it does not
+    pin: `kernel::tests::a_composite_over_an_unresolved_name_hangs_from_that_name` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_composite_over_a_not_found_name_recomputes_when_a_sink_creates_it` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_composite_built_on_a_denial_is_not_cached` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_composite_built_on_any_other_failure_is_not_cached` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::fan_out_records_failed_branches_by_the_same_rules` (crates/ikigai-core/src/kernel.rs)
+
+*Corollary (the least cacheable dependency, again).* R4.5 is the corollary of R4.3 applied to
+failures, and it has the same shape of consequence: a composite that swallowed a denial and was
+cached `Never` before 0.1.73 is recomputed on every read after it. Measured in §10 — a cache hit
+of ~335 ns became a ~880 ns recompute for the smallest such composite — and stated here so the
+day a module adopts 0.1.73 is not the day it is discovered.
 
 **Across processes.** Generations are per-process counters; another instance's 6 is not this
 one's 6, so ν does not transfer and no cache import exists — the honest first tranche would
@@ -541,16 +581,37 @@ rules, whose preimages are regular — and *is* enumerable, listing the backing 
     pin: `alias::tests::the_overlay_is_transparent_to_enumeration` (crates/ikigai-core/src/alias.rs)
     pin: `grammar::tests::pattern_reflects_the_grammar` (crates/ikigai-core/src/grammar.rs)
 
-**Computation is unbounded.** The paper separates the resolution hop counter (which ikigai
-does not need, by R5.1) from the nesting budget on sub-requests (which ikigai lacks). A
-`Request` has no depth, `issue_inner` no counter; an endpoint that sources its own IRI, or a
-transclusion cycle, recurses until the stack dies. B.7's caching obligation — a refusal at the
-bound must not be served to a shallower request — is met trivially when the budget lands,
-because errors never reach the store. The depth will not cross the wire without a protocol
-bump, so a cycle between two peers that mount each other stays unbounded even then
-([#513](http://localhost:1060/l/default/item/513)).
+**Proposition R5.3 (the nesting budget bounds computation within one kernel).** The paper
+separates the resolution hop counter (which ikigai does not need, by R5.1) from the nesting
+budget on sub-requests, and ikigai has the second: the `Invocation` carries a private depth — 0
+for a request the host issued, one more for each sub-request between it and this one, inherited
+across a `fan_out` spawn and a `scope_sync` bridge — and the kernel refuses a request whose depth
+would exceed `max_depth` (`Kernel::with_max_depth`, default 64) before it resolves anything,
+with `Error::DepthExceeded { depth, target }`, permanent, and an event under `DEPTH_NOTE` whose
+parent is the invocation that asked for one level too many. So an endpoint that sources its own
+IRI, or a transclusion cycle, terminates at the bound with the trace saying where, and a
+legitimate chain shorter than the bound is unaffected. B.7's caching obligation — a refusal at
+the bound must not be served to a shallower request — holds twice over: the refusal never
+reaches the store (errors do not), and a composite that swallows it and returns a cacheable
+fallback is forced uncacheable by R4.5.
 
-    UNPINNED — a test would set a depth bound, bind an endpoint that sources itself, and assert a typed refusal at the bound rather than a stack overflow
+    pin: `kernel::tests::a_self_issuing_endpoint_is_refused_at_the_bound_and_the_trace_says_where` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_transclusion_cycle_is_refused_at_the_bound` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_chain_shorter_than_the_bound_is_unaffected_and_the_default_is_sixty_four` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::fan_out_branches_inherit_the_depth` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_depth_refusal_swallowed_into_a_fallback_is_not_cached` (crates/ikigai-core/src/kernel.rs)
+    pin: `error::tests::transient_is_only_timeout_and_unavailable` (crates/ikigai-core/src/error.rs)
+    doctest: `Kernel::with_max_depth`
+
+**Within one kernel.** The depth travels on the `Invocation` and through
+`Issuer::issue_at_depth`; an issuer that implements only the plain `issue` seam (a module host
+bridge) restarts the count on its side, and the wire has no field for it (`ikigai-wire`'s
+`Call`), so a cycle between two peers that mount each other — the shape of ledger
+[#408](http://localhost:1060/l/default/item/408) — stays unbounded by this budget. Carrying it
+costs a wire-protocol version bump, which is a separate decision
+([#513](http://localhost:1060/l/default/item/513)'s remainder).
+
+    UNPINNED — the depth does not cross the wire: a test in ikigai-cli would mount two kernels on each other, source a cycle, and observe that no `DepthExceeded` arrives
 
 ---
 
@@ -766,16 +827,12 @@ item that would discharge it where one exists. The gate counts these; it does no
 **Absent constructs (the paper has them, ikigai does not):**
 
 - §1 — limiter: no third resolution outcome (#511).
-- §1, §5 — nesting budget on sub-requests; the depth would not cross the wire (#513).
 - §1 — path cache; its validity predicate, a binding-change thread (#510).
 - §1 — the arrangement as a resource (`urn:kernel:topology`) (#515).
 - §8 — the lossless flag on `Transreption`; selection through lossy edges (#514).
 
 **Conditional theorems (stated with the precondition explicit):**
 
-- R4.4 — the write-cut invalidates a cached read only if the read carries an edge on its own
-  canonical target; supplied by hand in every pinned test. Hole A of #512 discharges it.
-- R4 hole B — a failed sub-request records no dependency. Fix B of #512.
 - R3.2 — the key does not identify the binding behind the canonical name (#510, #26).
 - R3.2 — two facts in the key are claims: a corridor's name (same name ⇒ same doors) and a
   reported canonical (a name in this kernel's namespace). Both pinned as declarations
@@ -789,6 +846,12 @@ item that would discharge it where one exists. The gate counts these; it does no
 - §1 — opaque overlay (`MountedRemote`), the served surface (`ikigai-embedded`), Hypothesis H
   for wasm modules (`ikigai-module`), the QUIC clamp site (`ikigai-cli`).
 - R7.7 — the escape at the wire.
+- R5.3 — the nesting budget stops at the wire and at a plain-`issue` host bridge (#513's
+  remainder, a protocol decision).
+
+**Discharged since the first revision** (kept so the shortening is visible): R4.4's
+precondition P (hole A of #512) and hole B (R4.5), 0.1.73; R2.2's structural half, a
+`compile_fail` doctest, 2026-09-26.
 
 **Not built, by decision:**
 
@@ -816,6 +879,9 @@ holds thirteen tests, all pinned above.
 | 7–330 ns | `root.resolve` alone, same bench | 2026-09-25 | 7–21 / 7–96 / 7–327 ns at 12 / 300 / 3000 bindings, first / last binding. `describe()` 124–138 ns; `request.id()` 144–155 ns. Ledger #510. |
 | 408–411 ns → 410–421 ns | cache-hit read before / after the chain landed | 2026-09-25 | twenty-line bench against the public API, one cacheable `FnEndpoint`, 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop; interleaved runs under load ~2.5. First cut (two `Vec`s by value) was +16–24 ns; the shipped `Option<Arc<Chain>>` is 0–10 ns above main. Table in `docs/design/resolution-scope.md`, PR #120. Not committed. |
 | ~20 µs → ~1.0 s | a cached graph read after one uncacheable source was joined in | 2026-08-13 | `ikigai-cms-web` PR #71, measured on the live reading room; 68 tests passed on the slow version. |
+| 321–332 ns → 344–353 ns → 306–325 ns | cache-hit read before / after hole A's first cut / after its second | 2026-09-26 | the same twenty-line bench (one cacheable `FnEndpoint`, warmed, 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop, load 1.4–2.3), interleaved main / branch three times each from a detached worktree of `f6a4b01`. The first cut (the thread on an owned `BTreeSet`) cost +20–28 ns (~7 %) — every hit cloned a now non-empty set, a node and a string — and the second (`Option<Arc<BTreeSet>>`, `repr.rs`) took it all back to 0–10 ns *under* main. Not committed. |
+| ~335 ns → ~880 ns | a read of the smallest composite that swallows a `Denied` sub-request and returns `.cacheable()`, before / after R4.5 | 2026-09-26 | same bench, second case: before it was a cache hit (334–346 ns); after it recomputes every read (867–900 ns): resolve the composite, invoke, resolve the gated leaf, refuse at the floor. The 2.6× is the designed cost of not caching a result built on a refusal; every affected consumer is listed in the 0.1.73 hub report. Not committed. |
+| 64 | `DEFAULT_MAX_DEPTH`, the nesting budget | — | `kernel.rs`, a constant; `Kernel::with_max_depth` overrides it. NetKernel: 40 shipped, 32 default, for a counter that also pays for resolution hops. |
 | 8 | `DEFAULT_MAX_HOPS`, the alias chain cap | — | `alias.rs`, a constant. |
 | 4096 | `CUT_LOG`, cuts the race check remembers | — | `cache.rs`, a constant. |
 | 4096 entries / 64 MiB | the default LRU bound | — | `cache.rs`, `CachePolicy` default. |
@@ -827,16 +893,22 @@ bound, lossless flag and topology are in; re-measure, do not inherit.
 
 ## 11. Version note
 
-This document and its gate change nothing the crate publishes: no source under `src/` beyond
-doc comments, no public item, no behaviour, no vocabulary. The gate is a dev-only integration
-test that reads this file from the repository, and **it is excluded from the packaged crate**
-(`exclude = ["tests/formalism_pins.rs"]` in `crates/ikigai-core/Cargo.toml`, since 2026-09-26,
-[#525](http://localhost:1060/l/default/item/525)). The reason: `docs/` lives above the crate
-directory and is not packaged, so from an unpacked `.crate` the test could only fail on a
-missing document or skip on one — and a skip-with-a-message is the silent pass the gate was
-built to refuse. Its audience is this repository and its CI, which run from the tree the
-document lives in; a downstream running the crate's own tests is not the document's audience.
-Verified with `cargo package -p ikigai-core --list`, which packages nothing and no longer lists
-the file; the gate still runs under `cargo test` here. A patch bump would move ~31 lockstep
-consumers for nothing; the crate README's one-line link, the `exclude` line and the four
-doctests ride whatever bump comes next. **No bump.**
+**0.1.73** carries R4.4's discharge, R4.5 and R5.3 — three behaviour changes in the kernel, one
+new `Error` variant (`DepthExceeded`; the enum is `#[non_exhaustive]`, so additive), one new
+builder (`Kernel::with_max_depth`), one new defaulted `Issuer` method (`issue_at_depth`), one
+new accessor (`Invocation::depth`) and two constants (`DEPTH_NOTE`, `DEFAULT_MAX_DEPTH`). A minor
+in the lockstep workspace rather than a 0.2.0, on the scope arc's argument: a `^0.1.x` pin is a
+ceiling, and a 0.2.0 would freeze every consumer out of a change none has to adopt. Two of the
+changes alter what a consumer observes without any code of its own changing, and each is stated
+where it bites: a cacheable read fronting mutable state no longer needs `.depends_on(itself)`
+(R4.4 — the tutorial's golden-threads chapter pins the OLD behaviour on purpose and fails on
+this bump by design); a composite that swallows a denial stops being cached (R4.5 — the
+affected consumers are named in the hub report, and the cost is in §10). `vocabulary.ttl`'s
+`owl:versionInfo` moved with the crate; nothing semantic changed in the vocabulary, so the
+`/ns` deploy is a header-only drift.
+
+The gate itself is as the previous revision left it: a dev-only integration test that reads
+this file from the repository, **excluded from the packaged crate**
+(`exclude = ["tests/formalism_pins.rs"]`, [#525](http://localhost:1060/l/default/item/525)),
+because `docs/` lives above the crate directory and a skip-with-a-message is the silent pass the
+gate was built to refuse.

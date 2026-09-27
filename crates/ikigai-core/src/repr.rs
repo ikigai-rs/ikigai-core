@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -217,9 +218,21 @@ pub struct Representation {
     /// invalidates it. Kernel-local: **not serialized** (cache validity is a
     /// per-kernel concern, not part of a representation crossing a wire) and **not
     /// part of representation identity** (see the manual `PartialEq`).
+    ///
+    /// Shared, not owned: a cache hit clones the representation, and since 0.1.73
+    /// every cacheable `Source`/`Exists` answer carries at least one thread (its own
+    /// canonical target), so an owned set would cost a tree-node and a string
+    /// allocation on every hit. `None` is the empty set, which is what every
+    /// freshly built representation starts as — no allocation until a thread is
+    /// declared or inherited. Measured: the second cut of hole A took the ~7 %
+    /// hit-path cost of the first cut back down (formalism §10).
     #[serde(skip)]
-    threads: BTreeSet<Thread>,
+    threads: Option<Arc<BTreeSet<Thread>>>,
 }
+
+/// The thread set of a representation that depends on nothing — what
+/// [`Representation::threads`] hands back for `None`, so callers see one type.
+static NO_THREADS: BTreeSet<Thread> = BTreeSet::new();
 
 // Threads are cache provenance, not content: two representations with the same
 // type and bytes are equal regardless of how their validity was tracked. (Also
@@ -241,7 +254,7 @@ impl Representation {
             repr_type,
             bytes: bytes.into(),
             expiry: Expiry::Always,
-            threads: BTreeSet::new(),
+            threads: None,
         }
     }
 
@@ -274,19 +287,21 @@ impl Representation {
     /// propagate up through composition automatically, so a composer need only
     /// resolve its parts.
     pub fn depends_on(mut self, thread: impl Into<Thread>) -> Self {
-        self.threads.insert(thread.into());
+        // Copy-on-write: a set shared with a cache entry is cloned before it is
+        // grown, a set this representation owns alone is grown in place.
+        Arc::make_mut(self.threads.get_or_insert_with(Default::default)).insert(thread.into());
         self
     }
 
     /// The golden threads this representation depends on.
     pub fn threads(&self) -> &BTreeSet<Thread> {
-        &self.threads
+        self.threads.as_deref().unwrap_or(&NO_THREADS)
     }
 
     /// Replace the thread set (kernel use: install the effective set after
-    /// unioning in dependency threads).
+    /// unioning in dependency threads). An empty set is stored as nothing.
     pub(crate) fn with_threads(mut self, threads: BTreeSet<Thread>) -> Self {
-        self.threads = threads;
+        self.threads = (!threads.is_empty()).then(|| Arc::new(threads));
         self
     }
 
