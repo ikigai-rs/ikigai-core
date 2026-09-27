@@ -21,7 +21,7 @@ compiles to WebAssembly. The CLI and its transports live in
 
 That is the whole workspace: the kernel and the vocabulary it describes itself with.
 Every module crate that once lived here has moved to its own repo — capability-gated
-file behaviour to [`ikigai-fs`](https://github.com/ikigai-rs/ikigai-fs) (published;
+file behavior to [`ikigai-fs`](https://github.com/ikigai-rs/ikigai-fs) (published;
 native `std::fs` + browser `localStorage`), SHACL validation to
 [`ikigai-shacl`](https://github.com/ikigai-rs/ikigai-shacl), and the persistent RDF
 store to [`ikigai-store`](https://github.com/ikigai-rs/ikigai-store) (since 2026-09-13,

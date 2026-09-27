@@ -100,7 +100,7 @@ impl Clock for SystemClock {
 /// [`Invocation::now`](crate::Invocation::now) and twenty-three test kernels, none of
 /// which installs a clock — so every one of those five has only ever taken its `None`
 /// branch under test, and no test would notice if the other branch were wrong. A
-/// branch no test has ever entered is behaviour nobody has verified. Making the fixed
+/// branch no test has ever entered is behavior nobody has verified. Making the fixed
 /// clock free is how it stops being the expensive option.
 ///
 /// `Copy`, so a kernel and the test that asserts against it can hold the same instant
@@ -123,8 +123,8 @@ impl Clock for SystemClock {
 /// [`Expiry::At`](crate::Expiry) entry goes stale means moving time past a deadline,
 /// which this type cannot do. Three copies is a larger count than the two this
 /// replaces. It is not a larger case: all three are correct, none has drifted from
-/// another, and no behaviour goes untested because of them. The bar for pushing a
-/// shape down here is a count *plus* observed drift or unverified behaviour — the
+/// another, and no behavior goes untested because of them. The bar for pushing a
+/// shape down here is a count *plus* observed drift or unverified behavior — the
 /// same bar `docs/design/ambient-app-name.md` sets — and the settable clock clears
 /// only the count. A crate that needs to advance time keeps writing its own until it
 /// does; `docs/design/hermetic-endpoint-tests.md` records what would change that.
@@ -1136,7 +1136,7 @@ impl Kernel {
     /// golden threads and expiry are evaluated on the serving path, where no policy
     /// is consulted. Absent ⇒ [`Lru`](crate::Lru) at its
     /// [default bound](crate::CacheBound::default) (4096 entries, 64 MiB), which is a
-    /// change from the unbounded behaviour before 0.1.70 — a long-lived process now
+    /// change from the unbounded behavior before 0.1.70 — a long-lived process now
     /// evicts instead of growing.
     ///
     /// Call it before the kernel is used: it replaces the cache, so anything already
@@ -1666,7 +1666,7 @@ impl Kernel {
     /// [`set_tracer`](Self::set_tracer) *and* routes some resolutions through here
     /// will not see those resolutions in the global collector. That is deliberate —
     /// the alternative is a double-write, and a per-connection trace wants exactly one
-    /// destination — but it is a behavioural contract you would otherwise only find by
+    /// destination — but it is a behavioral contract you would otherwise only find by
     /// reading `issue_inner`, which is not where a host author looks.
     pub async fn issue_traced(
         &self,
@@ -3628,7 +3628,7 @@ mod tests {
     }
 
     /// A stub PROJECTION (`text/turtle → text/x-summary`, declared `.lossy()`): a
-    /// summariser registered as a transreptor — the exposure ledger #514 names.
+    /// summarizer registered as a transreptor — the exposure ledger #514 names.
     fn stub_summarize() -> FnEndpoint {
         FnEndpoint::new("summarize", |inv: &Invocation<'_>| {
             let content = inv.inline_str("content").unwrap_or("");
@@ -5499,7 +5499,7 @@ mod tests {
     }
 
     /// The shipped fixed clock drives a real `Expiry::At` entry, so a crate reaching
-    /// for it gets the same caching behaviour its hand-rolled copy gave it — and gets
+    /// for it gets the same caching behavior its hand-rolled copy gave it — and gets
     /// it without the copy. Stopped, so the entry stays fresh no matter how many reads
     /// consult the deadline; that immobility is the property, not a limitation.
     #[test]
@@ -5623,7 +5623,7 @@ mod tests {
     }
 
     #[test]
-    fn is_cached_honours_the_deadline() {
+    fn is_cached_honors_the_deadline() {
         // The read-only probe must agree with the serving path: an expired entry
         // is not "cached", so a cache-status label (and the `cache` REPL command)
         // doesn't claim a Hit that the next issue would actually recompute.
@@ -5822,7 +5822,7 @@ mod tests {
     fn an_attenuated_sub_request_drops_authority_the_caller_still_holds() {
         let kernel = deref_kernel();
         // The caller holds secret-read. Through the forwarding deref it reaches the
-        // secret — today's only behaviour, and the hazard: the module dereferenced a
+        // secret — today's only behavior, and the hazard: the module dereferenced a
         // target it did not choose with every scope its caller had.
         let caller = Capability::scoped(["urn:cap:secret:read", "urn:cap:fs:read"]);
         let reached = block_on(kernel.issue(deref_request("urn:demo:deref"), &caller)).unwrap();

@@ -130,7 +130,7 @@ builtins, the demo space). It does *not* give independent loading, sandboxing,
 polyglot, or per-module distribution. For those, the answer is the **WebAssembly
 Component Model + WASI**.
 
-The key realisation: **a WASM module is just another transport across the
+The key realization: **a WASM module is just another transport across the
 `Resolver` seam.** Its WIT interface mirrors what we already have:
 
 ```wit
@@ -165,7 +165,7 @@ the **structured-data transreptor at the component boundary**, complementing
 
 **Cost:** a boundary crossing per resolution. The content-addressed cache
 absorbs most of it (hot results never re-cross); `compose`'s fork/join
-parallelises module calls.
+parallelizes module calls.
 
 ---
 
@@ -177,7 +177,7 @@ pervasive but unnamed: the `MetaRenderer` (Description → Turtle/JSON), `compos
 (shape → assembled HTML), the `ikigai-wire` codec (Call ↔ bytes), and
 `describe`'s `as` argument (already a transreption request).
 
-Formalised, it has four parts:
+Formalized, it has four parts:
 
 1. **A transreptor is an endpoint** `(repr:A) → (repr:B)` — bindable,
    capability-gated, itself a module.
@@ -187,7 +187,7 @@ Formalised, it has four parts:
    (`toml → json → json-ld → rdf`) — shortest / lowest-cost path. A new
    transreptor (a new edge) lights up new conversions for free.
 3. **It is content-negotiation, and it is cached.** Keyed by
-   `content-id(source) + target-type`, every conversion is memoised — the
+   `content-id(source) + target-type`, every conversion is memoized — the
    Cacheable pillar.
 4. **Lossless is the ideal, not a guarantee.** Some directions are lossy; for
    manifests (§6) authoring is one-way (dev format is the source of truth, RDF
@@ -197,7 +197,7 @@ Formalised, it has four parts:
 
 The type graph spans **code**, not just data: its nodes include source,
 bytecode, LLVM IR, WASM, and machine code; its edges include parsers,
-serialisers, **and compilers / codegen**. `python-source → bytecode` is a
+serializers, **and compilers / codegen**. `python-source → bytecode` is a
 transreption; so is `c/rust/swift/zig/… → llvm-ir → wasm`.
 
 Three payoffs:
@@ -208,9 +208,9 @@ Three payoffs:
   becomes ingestible as modules. You own one edge; the front-ends do the rest.
 - **Content-addressed compilation = a free, shared, verifiable build cache.**
   Because transreptions cache by `content-id(source) + target-type +
-  transreptor`, compiling source → WASM is memoised. Compile once, ever; a
+  transreptor`, compiling source → WASM is memoized. Compile once, ever; a
   federated peer that already did it serves the WASM by content-id instead of
-  recompiling (#26) — distributed `sccache` / Nix-substituter behaviour as a
+  recompiling (#26) — distributed `sccache` / Nix-substituter behavior as a
   *property of the fabric*. (Nuance: keying on the *input* content-id makes the
   **local** cache sound regardless of compiler determinism; making it
   **federated/verifiable** — peers agreeing on output bytes — needs
@@ -235,7 +235,7 @@ what changes is that *"give me `in` as a String"* becomes a **resolution**.
 
 - **Arguments are references-or-values.** `ArgRef` carries `Inline(bytes)` |
   `Reference(iri)` | `Content(content-id)`. (`Invocation::source` already
-  dereferences a by-reference argument; this generalises it.)
+  dereferences a by-reference argument; this generalizes it.)
 - **The endpoint declares the type it wants** each argument in — its contract /
   self-description (already used for routing) gains `in: text/plain`.
 - **Reading an argument is a typed pull**, e.g. `inv.pull_as::<String>("in")`:
@@ -311,7 +311,7 @@ composes in the same stack.
 
 Reusable uses:
 
-- **Gate-keeping** (authorisation checks before resolution)
+- **Gate-keeping** (authorization checks before resolution)
 - **Throttling / rate-limiting**
 - **Audit / logging**
 - **Caching policy, retries**
@@ -367,7 +367,7 @@ Done well, "ROC is hard to debug" *flips* from a liability into a differentiator
 Supporting a language is two things:
 
 1. **The runtime as a (heavy) module** — RustPython, a JS engine, etc., loaded
-   once and amortised, hosting lightweight scripted endpoints (§2.1).
+   once and amortized, hosting lightweight scripted endpoints (§2.1).
 2. **An idiom-native SDK** — the surface developers actually touch. For Python:
    an `ikigai` module providing the `@ikigai.endpoint` decorator,
    `ikigai.source(iri)` / `ikigai.compose(...)` (wired to the host's
@@ -465,7 +465,7 @@ cases, trust-root / cert management) are paid only on the locked-down path.
 - **Wire-bytes vs typed-WIT** at the component boundary — consistency
   (reuse `ikigai-wire`) vs. structured-type ergonomics (§3).
 - **Capability-on-the-wire is now blocking.** The module boundary forces
-  `Capability` to serialise (§3, §5); it is currently only `Clone + Debug`. This
+  `Capability` to serialize (§3, §5); it is currently only `Clone + Debug`. This
   is the foundation the whole loadable-module story stands on (#17).
 - **Interceptor ordering** and how the chain is made legible in traces (§7, §8).
 - **RDF canonicalization edge cases** for signing (§10).

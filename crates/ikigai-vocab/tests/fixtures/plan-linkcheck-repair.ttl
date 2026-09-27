@@ -1,5 +1,5 @@
 # Variant 2 of the link check — REPAIR INSTEAD OF REMOVE: add stages. A durably-gone link
-# is looked up in the archive and rewritten rather than struck. New behaviour with no new
+# is looked up in the archive and rewritten rather than struck. New behavior with no new
 # Rust in the CMS: two stages naming two resources, and `urn:wayback:latest` is general.
 # The validator checks the route (the archive's output type -> the replace sink's input)
 # before anything runs, or refuses the plan.

@@ -19,7 +19,7 @@ build host and shipping the answer is worth real time on the edge and in CI.
 
 ## The part that is not the problem
 
-Serialisation. `Representation`, `ReprType`, `Expiry`, `Thread` and `RequestId` all
+Serialization. `Representation`, `ReprType`, `Expiry`, `Thread` and `RequestId` all
 derive `serde` already, so `CacheEntry` and `CacheKey` derive it for free — they do, as
 of 0.1.70, precisely so the door stays open at no cost. A postcard or JSON bundle of
 entries is an afternoon.

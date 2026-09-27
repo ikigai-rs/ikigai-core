@@ -647,7 +647,7 @@ fn an_issuer_that_cannot_carry_the_chain_refuses_a_non_empty_scope_rather_than_e
     let confined = inv.confine(iri("urn:ctx:box"), empty_corridor);
     let err = block_on(confined.source(&iri("urn:data:secret"))).unwrap_err();
     assert!(
-        matches!(err, Error::Endpoint(ref m) if m.contains("urn:ctx:box severed") && m.contains("cannot honour")),
+        matches!(err, Error::Endpoint(ref m) if m.contains("urn:ctx:box severed") && m.contains("cannot honor")),
         "got {err:?}"
     );
     assert_eq!(

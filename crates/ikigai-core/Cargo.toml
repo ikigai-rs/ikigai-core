@@ -15,7 +15,8 @@ readme = "README.md"
 # carry the document the test reads. Excluded rather than taught to skip: a skip on an
 # absent document is the silent pass the gate exists to refuse, and its audience is
 # this repository and its CI, not a downstream running the crate's own tests.
-exclude = ["tests/formalism_pins.rs"]
+# `tests/american_spelling.rs` reads `docs/` too, and is excluded for the same reason.
+exclude = ["tests/formalism_pins.rs", "tests/american_spelling.rs"]
 
 [dependencies]
 # Dyn-compatible async traits; runtime-free (boxes the returned future), so the

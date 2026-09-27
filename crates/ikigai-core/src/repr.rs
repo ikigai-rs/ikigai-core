@@ -148,7 +148,7 @@ pub enum Expiry {
     Always,
     /// Cached until an absolute deadline (e.g. an HTTP `Cache-Control: max-age`
     /// turned into `now + max-age`). Evaluated against the kernel's injected
-    /// [`Clock`](crate::Clock); a kernel with no clock cannot honour a deadline, so
+    /// [`Clock`](crate::Clock); a kernel with no clock cannot honor a deadline, so
     /// it declines to cache such a result rather than risk serving it forever.
     At(Time),
     /// Never expires — permanently cacheable. Correct for a pure function of

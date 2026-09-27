@@ -192,5 +192,5 @@ A related count is already accumulating next door and deliberately not acted on,
 worked example of this bar: **three** crates (`ikigai-core`'s own tests, `ikigai-http`,
 `ikigai-cms-web`) carry an `AtomicU64`-backed settable test clock, which is one more
 copy than the fixed clock that just got pushed down. It stays out of core because all
-three are correct, none has drifted, and no behaviour goes untested because of them —
+three are correct, none has drifted, and no behavior goes untested because of them —
 count without drift, which is exactly the case this section says is not enough.
