@@ -16,10 +16,15 @@ doctests landed (the visibility halves of R2.2 and R7.5 as `compile_fail`, `Kern
 Revised again 2026-09-26 for **0.1.73** ([#512](http://localhost:1060/l/default/item/512),
 [#513](http://localhost:1060/l/default/item/513)): R4.4 is unconditional (the kernel supplies
 its precondition), R4.5 closes hole B, R5.3 is the nesting budget, and §10 carries the two
-read measurements those cost.
+read measurements those cost. Revised 2026-09-26 for **0.1.74** ([#510](http://localhost:1060/l/default/item/510),
+[#26](http://localhost:1060/l/default/item/26), [#22](http://localhost:1060/l/default/item/22)): `urn:kernel:bindings` is the binding-change thread every
+self-description face hangs from, R3.2's binding row splits into a pinned half (derived faces)
+and a decided half (stored reads), the capability floor memoizes `describe()` per endpoint, and
+§10 carries that read; the path cache stays absent, its design written down.
 **Companions in this repository:** `docs/design/resolution-scope.md` (the chain),
 `docs/design/sub-request-authority.md` (attenuation, and why delegation is not built),
 `docs/design/cache-ejection.md` (what the cache key does not identify),
+`docs/design/path-cache.md` (the resolution memo: parked, shape and triggers),
 `docs/design/spaces-as-named-graphs.md` (where corridor identity goes next).
 **The gate:** `crates/ikigai-core/tests/formalism_pins.rs`. Every pin in this document is
 resolved against the source tree on every `cargo test`. A renamed or deleted test turns this
@@ -70,7 +75,8 @@ precondition an endpoint has to discharge by hand. Two were, and the document sa
 precondition (a cacheable read carries an edge on its own canonical target) was supplied by
 hand in every pinned test until 0.1.73, when the kernel began supplying it; R2.2's structural
 half was review until a `compile_fail` doctest held it. What remains conditional is R3.2, on
-facts the kernel cannot *observe* (the binding behind a name, a corridor's name as a claim) —
+facts the kernel cannot *observe* (the binding behind a name — for a stored read; the derived
+faces have hung from `urn:kernel:bindings` since 0.1.74 — and a corridor's name as a claim) —
 the register in §9. That is the whole value of the document: it says exactly where ikigai is
 weaker than its own story, and it shows the list getting shorter.
 
@@ -100,7 +106,7 @@ tracks it.
 | Value corridors | §3 | **Not modelled.** Values travel on the `Request` as `ArgRef`s (inline bytes, a content address, or a by-reference IRI) and are part of the request's identity; they are never doors and can shadow nothing. A by-reference argument naming something outside the chain is `Unresolved` inside it — the trapdoor working. §1.4. | deviation §1.4 | pin: `request::tests::distinct_inputs_have_distinct_identity` (crates/ikigai-core/src/request.rs); UNPINNED — a test would confine an endpoint, hand it `ArgRef::Reference` to a root-bound IRI, and assert `Unresolved` on dereference |
 | Sticky header (who is asking) | §3 | the **capability**: carried into every sub-request, and only ever narrowed (§2). There is no principal on the request; attribution is a tracer concern (`ikigai-log`'s `Principal`). | realised as the capability | pin: `kernel::tests::each_event_records_the_capability_it_ran_under` (crates/ikigai-core/src/kernel.rs) |
 | Continuation vs sub-request | §3 | A mapper's continuation is a nested `resolve` call inside one synchronous resolution, never a new request; every request an endpoint issues is a sub-request through `Invocation`. The two cannot be confused because only one of them exists as a request. | realised | pin: `with_bindings::a_sub_request_through_the_reborrow_reaches_the_kernel` (crates/ikigai-core/tests/with_bindings.rs) |
-| Path cache γ_path | §5.1 | **Absent, measured.** `resolve` runs on every request, before the representation-cache lookup, so that the declared-capability floor fences cached answers too. A cached read is ~0.6 µs end to end of which resolution is 7–330 ns (§10, [#510](http://localhost:1060/l/default/item/510)); a path cache would need a binding-change thread as its validity predicate, which does not exist either. | absent | pin: `kernel::tests::declared_requires_is_kernel_enforced_before_dispatch` (crates/ikigai-core/src/kernel.rs); UNPINNED — the measurement is a scratch bench, not a test (§10) |
+| Path cache γ_path | §5.1 | **Absent, measured, designed.** `resolve` runs on every request, before the representation-cache lookup, so that the declared-capability floor fences cached answers too. A cached read is ~0.6 µs end to end of which resolution is 7–330 ns (§10, [#510](http://localhost:1060/l/default/item/510)). Since 0.1.74 its validity predicate exists — `urn:kernel:bindings`, `BINDINGS_THREAD` — and the contract half of what it would hold is memoized per endpoint identity (the floor memo, `FloorMemo`, ~135 ns off a module-shaped read, §10). The route half stays absent; its key, value, bound and the triggers that would make it worth building are `docs/design/path-cache.md`. | absent, predicate realised | pin: `kernel::tests::declared_requires_is_kernel_enforced_before_dispatch` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::the_floor_describes_an_endpoint_once_until_the_bindings_change` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_swapped_endpoint_is_floored_on_its_own_contract` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_per_resolution_wrapper_is_bounded_and_floored_correctly` (crates/ikigai-core/src/kernel.rs); UNPINNED — the measurement is a scratch bench, not a test (§10) |
 | Representation cache γ_rep, keyed by identifier and context | §5.1 | `CacheKey { request: RequestId, capability: u64, scope: u64 }` — the content-addressed request (verb, canonical target, arguments including `as=`), the authority fingerprint, the chain fingerprint. §3 and §7. | realised, extended | pin: `kernel::tests::cache_is_keyed_by_capability` (crates/ikigai-core/src/kernel.rs); pin: `scope::the_empty_scope_is_the_status_quo` (crates/ikigai-core/tests/scope.rs); pin: `request::tests::identity_is_deterministic` (crates/ikigai-core/src/request.rs) |
 | Validity predicate ν | §5.1 | `Expiry { Always, At(t), Never }` on the representation, plus golden-thread edges pinned to generations, plus the cut sequence that closes the lost-cut race. §4. | realised, extended | pin: `cache::tests::a_cut_after_the_snapshot_declines_the_store` (crates/ikigai-core/src/cache.rs); pin: `cache::tests::a_deadline_is_honoured_and_a_clockless_kernel_assumes_the_worst` (crates/ikigai-core/src/cache.rs) |
 | Dependency graph δ(r), golden thread | §5.3, B.6 | `Representation::depends_on(thread)` declares; sub-request results are inherited — the failed ones too, by error class (R4.5); every cacheable `Source`/`Exists` answer carries the thread named after its own canonical target, whether or not it declared it (R4.4); a `Sink`/`Delete` cuts that thread; an external watcher cuts the same thread. §4. | realised | pin: `kernel::tests::a_thread_propagates_up_through_composition` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_sink_invalidates_the_cached_source_of_its_target` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_cacheable_read_hangs_from_its_own_canonical_target_without_declaring_it` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_composite_over_a_not_found_name_recomputes_when_a_sink_creates_it` (crates/ikigai-core/src/kernel.rs) |
@@ -212,7 +218,10 @@ value-corridor tail. The behavioural half — a by-reference argument outside th
   ([#514](http://localhost:1060/l/default/item/514)): each is a row above, each UNPINNED.
   None is a decision against the paper; core grows capabilities incrementally, and a gap
   is not a design until it is written down as one. The **nesting budget**
-  ([#513](http://localhost:1060/l/default/item/513)) left this list in 0.1.73 (R5.3).
+  ([#513](http://localhost:1060/l/default/item/513)) left this list in 0.1.73 (R5.3). The path
+  cache's validity predicate (`urn:kernel:bindings`) landed in 0.1.74 and its design is
+  written down (`docs/design/path-cache.md`); the cache itself stays on this list until a
+  trigger named there arrives.
 - **ε.** The paper's null identifier resolves entirely from context (§2.3, Cor. 1). An `Iri`
   is absolute, so ε is not an identifier here. The nearest thing is a short identifier bound
   by an injected corridor — `urn:time:now` under a temporal corridor — which is Cor. 2 (richer
@@ -368,8 +377,29 @@ Facts the key does **not** carry, and what covers each:
 |---|---|---|
 | the state of dependencies (files, store graphs, other resources) | ν: golden-thread edges, §4 | realised (R4.4, R4.5) |
 | time | ν: `Expiry::At` against the kernel clock | realised |
-| **the binding behind the canonical name — which endpoint, which code version** | nothing. Within one process the binding is assumed not to move; a root is immutable at construction, so today this bites only a space with interior mutability (dynamic mounts, module reload) — and there a catalog or Meta cached `Never` is stale forever after a rebind. Across processes it is the normal case (`docs/design/cache-ejection.md` §3). The fix is a thread the kernel cuts on binding change ([#510](http://localhost:1060/l/default/item/510)). | UNPINNED — a test would build a `Space` with a swappable binding, cache a `Never` read, swap, and assert the entry is not served; today it is |
+| **the binding behind the canonical name, for a face DERIVED from the bindings** — the catalog, the manifold, a validation report, every `Meta` answer (canonical and transrepted), and the floor memo | ν: `urn:kernel:bindings` (`BINDINGS_THREAD`), since 0.1.74. Cut by the party that changed the root — `Kernel::bindings_changed`, or `sink urn:kernel:cut urn:kernel:bindings` — never by an ordinary write. The kernel cannot observe a rebind, so the theorem is conditional on the host reporting one: a condition of the same kind as ν itself. | pin: `kernel::tests::a_binding_change_recomputes_every_self_description_face` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_transrepted_meta_face_hangs_from_the_bindings_thread_too` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::the_resource_form_cuts_the_bindings_thread_and_the_floor_memo` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::an_ordinary_sink_does_not_cut_the_bindings_thread` (crates/ikigai-core/src/kernel.rs); doctest: `Kernel::bindings_changed` |
+| **the binding behind the canonical name, for a STORED READ of the resource** — which endpoint, which code version | nothing, by decision (below). The read hangs from the thread named after its target (R4.4) and its declared threads; a rebind does not cut it, because the target's NAME did not change — hole A's automatic thread cannot see a binding move. The host that rebinds cuts the names it moved. Across processes it is the normal case (`docs/design/cache-ejection.md` §3). | UNPINNED — by decision (0.1.74): a test would build a `Space` with a swappable binding, cache a `Never` read, swap, cut `urn:kernel:bindings`, and assert the entry is not served; today it is served, and the host cuts the moved name instead |
 | a grant under delegation | not applicable: delegation is not built (§2) | n/a |
+
+**Why the derived faces hang from `urn:kernel:bindings` and a stored read does not** (0.1.74).
+The thread does not put the binding in the key — K is unchanged — it invalidates on change,
+which is the honest statement of what a golden thread is. A description is a function of the
+binding and of nothing else, so the binding-change thread is its *complete* validity predicate,
+and the four faces plus the floor memo are exactly the representations with no other dependency.
+A stored read differs in both directions. It is a function of the resource's STATE, which the
+target thread and the declared threads already track; it depends on the binding only in that
+different code might compute a different representation from the same state — rare, and known
+to the host that changed the code, never to the kernel. Hanging every entry from the thread
+would be *safe*: one more edge per entry, one more generation lookup per hit (§10: 0–10 ns once
+the set is shared). It would also make the cache exactly as warm as the binding set is stable:
+a discovery-driven root that gains and loses peers would empty every cached read in the process
+on each event, including reads of resources whose binding never moved, and a module host
+reloading one module would cold-start every other. *Cheap* wins: the host that rebinds knows
+which names it moved and cuts those by name. What it cannot do today is cut a PREFIX — a swapped
+`Mount` under `urn:file:` moves every name beneath it and `Kernel::cut` takes one — so it reads
+them off `urn:kernel:cache` and cuts each; that is a gap recorded for the hub, not a reason to
+charge the thread to every entry. The stored-read row stays UNPINNED by decision, and R3.2 stays
+conditional on the host reporting a rebind, which is a condition of the same kind as ν.
 
 Two of the facts the key *does* carry are **claims**, not observations, and the theorem is
 conditional on them in the same way it is conditional on ν:
@@ -827,13 +857,16 @@ item that would discharge it where one exists. The gate counts these; it does no
 **Absent constructs (the paper has them, ikigai does not):**
 
 - §1 — limiter: no third resolution outcome (#511).
-- §1 — path cache; its validity predicate, a binding-change thread (#510).
+- §1 — path cache (#510). Its validity predicate, `urn:kernel:bindings`, exists since 0.1.74;
+  its design is `docs/design/path-cache.md`; a trigger named there brings it back.
 - §1 — the arrangement as a resource (`urn:kernel:topology`) (#515).
 - §8 — the lossless flag on `Transreption`; selection through lossy edges (#514).
 
 **Conditional theorems (stated with the precondition explicit):**
 
-- R3.2 — the key does not identify the binding behind the canonical name (#510, #26).
+- R3.2 — the key does not identify the binding behind the canonical name, for a STORED READ
+  (#510, #26). By decision since 0.1.74; the derived faces hang from `urn:kernel:bindings`
+  and are pinned.
 - R3.2 — two facts in the key are claims: a corridor's name (same name ⇒ same doors) and a
   reported canonical (a name in this kernel's namespace). Both pinned as declarations
   (doctests), neither observable by the kernel.
@@ -851,13 +884,18 @@ item that would discharge it where one exists. The gate counts these; it does no
 
 **Discharged since the first revision** (kept so the shortening is visible): R4.4's
 precondition P (hole A of #512) and hole B (R4.5), 0.1.73; R2.2's structural half, a
-`compile_fail` doctest, 2026-09-26.
+`compile_fail` doctest, 2026-09-26; R3.2's derived-faces half (#26) and the per-request
+`describe()` at the floor (#22), 0.1.74.
 
 **Not built, by decision:**
 
 - §2 — delegation (Part B of `sub-request-authority.md`).
 - §7 — the scope-level clock (#517, decided 2026-09-25).
 - §1.4 — the behavioural half of "values are not corridors" has no test.
+- R3.2 — a stored read does not hang from `urn:kernel:bindings` (0.1.74; argued above and at
+  `Kernel::bindings_changed`). The host cuts the names it moved.
+- A mutable root (`Kernel::set_root`, an `ArcSwap`): who may rebind a running kernel is the
+  `Capability::root()` trust line and its own item; 0.1.74 built the thread, not the swap.
 
 **Pins that did not exist under the name the outline guessed** (recorded for the hub): the
 race test from PR #108 is `a_cut_during_an_in_flight_invocation_is_not_consumed_by_the_entry_it_invalidates`;
@@ -881,6 +919,7 @@ holds thirteen tests, all pinned above.
 | ~20 µs → ~1.0 s | a cached graph read after one uncacheable source was joined in | 2026-08-13 | `ikigai-cms-web` PR #71, measured on the live reading room; 68 tests passed on the slow version. |
 | 321–332 ns → 344–353 ns → 306–325 ns | cache-hit read before / after hole A's first cut / after its second | 2026-09-26 | the same twenty-line bench (one cacheable `FnEndpoint`, warmed, 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop, load 1.4–2.3), interleaved main / branch three times each from a detached worktree of `f6a4b01`. The first cut (the thread on an owned `BTreeSet`) cost +20–28 ns (~7 %) — every hit cloned a now non-empty set, a node and a string — and the second (`Option<Arc<BTreeSet>>`, `repr.rs`) took it all back to 0–10 ns *under* main. Not committed. |
 | ~335 ns → ~880 ns | a read of the smallest composite that swallows a `Denied` sub-request and returns `.cacheable()`, before / after R4.5 | 2026-09-26 | same bench, second case: before it was a cache hit (334–346 ns); after it recomputes every read (867–900 ns): resolve the composite, invoke, resolve the gated leaf, refuse at the floor. The 2.6× is the designed cost of not caching a result built on a refusal; every affected consumer is listed in the 0.1.73 hub report. Not committed. |
+| 431–454 ns → 297–328 ns | cache-hit read of an endpoint with an explicit `ActionSpec` (the module shape), before / after the floor memo; a bare `FnEndpoint` 312–324 → 299–316 ns | 2026-09-26 | the same twenty-line bench, three cases (a bare `FnEndpoint`; one declaring an `ActionSpec` that requires a scope, read as root and as the holder), 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop, main (a detached worktree of `fb63bb0`) and branch interleaved three times each, load 1.5–2.6. The memo took ~135 ns (≈ 31 %) off the module-shaped read — the per-request `describe()` AND the `action_specs()` clone it fed the floor — and ~10 ns off the bare one, whose default description is a single string. Ledger #22. Not committed. |
 | 64 | `DEFAULT_MAX_DEPTH`, the nesting budget | — | `kernel.rs`, a constant; `Kernel::with_max_depth` overrides it. NetKernel: 40 shipped, 32 default, for a counter that also pays for resolution hops. |
 | 8 | `DEFAULT_MAX_HOPS`, the alias chain cap | — | `alias.rs`, a constant. |
 | 4096 | `CUT_LOG`, cuts the race check remembers | — | `cache.rs`, a constant. |
@@ -906,6 +945,19 @@ this bump by design); a composite that swallows a denial stops being cached (R4.
 affected consumers are named in the hub report, and the cost is in §10). `vocabulary.ttl`'s
 `owl:versionInfo` moved with the crate; nothing semantic changed in the vocabulary, so the
 `/ns` deploy is a header-only drift.
+
+**0.1.74** carries `BINDINGS_THREAD` (`urn:kernel:bindings`) and `Kernel::bindings_changed` —
+one constant, one method, both additive — and two changes in what a consumer observes without
+code of its own changing. The catalog, the manifold, validation reports and every `Meta` answer
+now carry a golden thread: a consumer reading `threads()` on one of those sees an edge where
+there was none, and a consumer that cuts `urn:kernel:bindings` for a purpose of its own now
+invalidates them all. And the capability floor reads a memoized contract keyed by endpoint
+identity, so an endpoint whose `describe()` varied per request is floored on its first
+description until the thread is cut — which was never sound (the catalog already cached it
+`Never`) and is now stated where it is assumed (`FloorMemo`). A patch in the lockstep 0.1.x line
+on the same argument as 0.1.73. `vocabulary.ttl`'s `owl:versionInfo` moved with the crate;
+nothing semantic changed, so the `/ns` deploy is header-only drift. Not built, on purpose: a
+mutable root (§9), and a path cache (`docs/design/path-cache.md`).
 
 The gate itself is as the previous revision left it: a dev-only integration test that reads
 this file from the repository, **excluded from the packaged crate**

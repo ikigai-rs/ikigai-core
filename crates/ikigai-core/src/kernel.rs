@@ -32,7 +32,10 @@
 //! The kernel also reserves the **`urn:kernel:*`** namespace for its own
 //! operations as capability-gated resources, resolved intrinsically before the
 //! root space: `sink urn:kernel:cut <thread>` cuts a thread (so an endpoint or a
-//! remote peer can invalidate by *resolving*, not via a special method), and
+//! remote peer can invalidate by *resolving*, not via a special method — and
+//! `urn:kernel:bindings`, [`BINDINGS_THREAD`], is the well-known thread meaning
+//! "the binding set changed", which every face derived from the bindings hangs
+//! from), and
 //! `source urn:kernel:cache` / `urn:kernel:threads` introspect cache and threads,
 //! and `source urn:kernel:aliases` reads out the installed logical-rewrite table
 //! (see [`alias`](crate::alias)) with its per-rule hop and miss counters.
@@ -42,7 +45,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use async_trait::async_trait;
 
@@ -51,7 +54,7 @@ use crate::arg::ArgRef;
 use crate::cache::{CacheKey, CachePolicy, ReprCache};
 use crate::capability::Capability;
 use crate::describe::Description;
-use crate::endpoint::{Invocation, Issuer, Spawner};
+use crate::endpoint::{Endpoint, Invocation, Issuer, Spawner};
 use crate::error::{Error, Result};
 use crate::iri::Iri;
 use crate::meta::MetaRenderer;
@@ -271,6 +274,30 @@ pub const SCOPE_NOTE: &str = "scope";
 /// chain record no event, unchanged.
 pub const SCOPE_MISS_NOTE: &str = "scope-unresolved";
 
+/// The well-known golden thread meaning **"the set of bindings this kernel resolves
+/// against has changed"**: `urn:kernel:bindings`.
+///
+/// Every representation the kernel derives from its bindings hangs from it — the
+/// catalog (`urn:kernel:catalog`), the action manifold (`urn:kernel:actions`, both
+/// faces), a validation report (`urn:kernel:validate`), and every `Meta` answer, the
+/// canonical Turtle and any transrepted face alike — and so does the kernel's memo of
+/// each resolved endpoint's declared floor (the `requires` the capability floor
+/// checks before dispatch — `FloorMemo` in `kernel.rs`). Cutting it recomputes all of them on
+/// their next read. Nothing else the kernel caches depends on it — a stored read of
+/// a resource hangs from the thread named after its target, not from this one; see
+/// [`Kernel::bindings_changed`] for why that is a decision.
+///
+/// **Who cuts it.** The kernel cannot observe a binding change: [`Kernel`] holds its
+/// root as an `Arc<dyn Space>` fixed at construction, and a `Space` is a resolver,
+/// not a registry — whether it can change at all is the space's own business (a
+/// wrapper with interior mutability, a mount table discovery appends to, a module
+/// host that reloads code under a name). So the party that changed it cuts the
+/// thread: [`Kernel::bindings_changed`] from Rust, or the resource form
+/// `sink urn:kernel:cut urn:kernel:bindings` under `urn:cap:kernel:cut` from an
+/// endpoint or a peer. An ordinary `Sink` cuts the thread named after its target and
+/// never this one — a write changes state, not the binding set.
+pub const BINDINGS_THREAD: &str = "urn:kernel:bindings";
+
 /// Receives a [`TraceEvent`] per invocation while installed. The kernel records
 /// only when one is set ([`Kernel::set_tracer`]) — off the hot path otherwise — so
 /// the `trace` command can capture one real resolution and render it. The host
@@ -408,6 +435,157 @@ pub struct Kernel {
     /// [`with_max_depth`](Self::with_max_depth) for what it does and does not
     /// bound.
     max_depth: u32,
+    /// The declared floor of every endpoint resolved so far, memoized per endpoint
+    /// identity — see [`FloorMemo`]. Consulted on every request (the floor runs
+    /// before the cache lookup); cleared by a cut of [`BINDINGS_THREAD`].
+    floors: FloorMemo,
+}
+
+/// How many endpoints' floors the memo holds before it sweeps — dead entries first,
+/// then everything. The cache's default entry bound, chosen for the same reason: a
+/// ceiling on memory for a root that hands out a fresh endpoint per resolution, not
+/// a tuning knob (see [`FloorMemo`]).
+const FLOOR_MEMO_BOUND: usize = 4096;
+
+/// What the capability floor checks: the `requires` an endpoint declares per verb,
+/// in [`Description::action_specs`] order — the only part of a description the floor
+/// reads. Extracted once per endpoint and memoized (see [`FloorMemo`]).
+struct Floor {
+    requires: Vec<(Verb, Vec<String>)>,
+}
+
+impl Floor {
+    fn of(description: &Description) -> Self {
+        Floor {
+            requires: description
+                .action_specs()
+                .into_iter()
+                .map(|spec| (spec.verb, spec.requires))
+                .collect(),
+        }
+    }
+
+    /// The first scope declared for `request.verb` that `capability` does not satisfy —
+    /// on the same `cap_satisfies` predicate selection and `urn:kernel:validate` use, so
+    /// what the manifold offers is exactly what the kernel admits. `None` ⇒ admitted.
+    fn unsatisfied(&self, request: &Request, capability: &Capability) -> Option<String> {
+        self.requires
+            .iter()
+            .filter(|(verb, _)| *verb == request.verb)
+            .flat_map(|(_, requires)| requires.iter())
+            .find(|scope| !crate::select::cap_satisfies(capability, scope))
+            .cloned()
+    }
+}
+
+/// The per-endpoint memo of declared floors, keyed by the endpoint's identity, so
+/// `describe()` runs once per bound endpoint instead of once per request (ledger #22:
+/// ~130 ns of a ~600 ns cached read, a `Description` built by a builder each time).
+///
+/// **Why it is sound.** A description is a STATIC contract. Two places already
+/// assume so: the catalog renders every description once and caches it `Never`,
+/// and selection matches on it (MCP projects what selection sees). An endpoint
+/// whose `describe()` varied at runtime would already be lying to both; this memo
+/// makes the same assumption a third time and states it here so that a future
+/// endpoint wanting a live contract knows what it is breaking. So one endpoint has
+/// one floor for as long as it is bound, and "the same endpoint" is exactly "the
+/// same `Arc` allocation": the key is the address of [`Resolved::endpoint`], and
+/// every entry holds a [`Weak`] to it. The weak is not there to be upgraded — it is
+/// there to RESERVE the address. An `Arc` allocation outlives its last strong
+/// reference for as long as any weak one exists, so no other endpoint can be
+/// allocated at a key this memo holds, and a lookup hit is the same endpoint by
+/// construction rather than by comparison. Without the reservation a rebind that
+/// dropped one endpoint and allocated another at the same address would be served
+/// the old contract — a floor leak, the class of bug ikigai-throttle #14 was. A
+/// strong reference would reserve it too, but would keep a replaced endpoint's
+/// VALUE (a wasm instance, a socket) alive until the next sweep; the weak keeps only
+/// the allocation's shell.
+///
+/// **An overlay that swaps the endpoint gets its own entry for free.** Throttle's
+/// over-budget stand-in is a different allocation with a different contract, so it
+/// is a different key, and the floor evaluates the stand-in's own declaration —
+/// exactly as it did without the memo. Pinned by
+/// `a_swapped_endpoint_is_floored_on_its_own_contract`.
+///
+/// **What it costs where it cannot hit.** An overlay that wraps the resolved
+/// endpoint in a fresh `Arc` on every resolution (every ikigai-throttle governor
+/// does today) never presents the same address twice: each request misses,
+/// describes, and inserts an entry whose weak dies at once. The bound keeps that
+/// from being a leak — at [`FLOOR_MEMO_BOUND`] entries the dead ones are swept, and
+/// if none were dead everything is — so such a resource pays the old per-request
+/// `describe()` plus one insert, while every stably bound resource pays one read
+/// lock and a hash. Reusing the wrapper per inner endpoint is the overlay's fix,
+/// not the kernel's. Pinned by `a_per_resolution_wrapper_is_bounded_and_floored_correctly`.
+///
+/// Invalidated as a whole by a cut of [`BINDINGS_THREAD`]: the thread is this memo's
+/// validity predicate, the same one the catalog hangs from.
+#[derive(Default)]
+struct FloorMemo {
+    entries: RwLock<HashMap<usize, FloorEntry>>,
+}
+
+struct FloorEntry {
+    /// Reserves the key's address for as long as the entry lives; see [`FloorMemo`].
+    endpoint: Weak<dyn Endpoint>,
+    floor: Floor,
+}
+
+impl FloorMemo {
+    /// The thin address of the endpoint's allocation — the identity a binding keeps.
+    fn key(endpoint: &Arc<dyn Endpoint>) -> usize {
+        Arc::as_ptr(endpoint) as *const () as usize
+    }
+
+    /// The first scope `request.verb` on `endpoint` requires that `capability` lacks:
+    /// from the memo when it has seen this endpoint, else from `describe()`, memoized.
+    fn unsatisfied(
+        &self,
+        endpoint: &Arc<dyn Endpoint>,
+        request: &Request,
+        capability: &Capability,
+    ) -> Option<String> {
+        let key = Self::key(endpoint);
+        {
+            let entries = self.entries.read().expect("floor memo lock");
+            if let Some(entry) = entries.get(&key) {
+                // The reservation makes this a tautology; it is asserted so a change
+                // to the entry's shape that loses the weak fails here, not in the field.
+                debug_assert_eq!(
+                    Weak::as_ptr(&entry.endpoint) as *const () as usize,
+                    key,
+                    "a memo hit is the same allocation by construction"
+                );
+                return entry.floor.unsatisfied(request, capability);
+            }
+        }
+        let floor = Floor::of(&endpoint.describe());
+        let lacking = floor.unsatisfied(request, capability);
+        let mut entries = self.entries.write().expect("floor memo lock");
+        if entries.len() >= FLOOR_MEMO_BOUND {
+            entries.retain(|_, entry| entry.endpoint.strong_count() > 0);
+            if entries.len() >= FLOOR_MEMO_BOUND {
+                entries.clear();
+            }
+        }
+        // Two threads that missed on one key both insert one floor; last wins, same value.
+        entries.insert(
+            key,
+            FloorEntry {
+                endpoint: Arc::downgrade(endpoint),
+                floor,
+            },
+        );
+        lacking
+    }
+
+    fn clear(&self) {
+        self.entries.write().expect("floor memo lock").clear();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.read().expect("floor memo lock").len()
+    }
 }
 
 /// How many recent resolutions `urn:kernel:constraint` aggregates over.
@@ -440,6 +618,7 @@ impl Kernel {
             aliases: None,
             subclass_closure: BTreeMap::new(),
             max_depth: DEFAULT_MAX_DEPTH,
+            floors: FloorMemo::default(),
         }
     }
 
@@ -460,6 +639,7 @@ impl Kernel {
             aliases: None,
             subclass_closure: BTreeMap::new(),
             max_depth: DEFAULT_MAX_DEPTH,
+            floors: FloorMemo::default(),
         }
     }
 
@@ -1495,9 +1675,12 @@ impl Kernel {
         // ever see the refusal. This is the only point that holds it.
         // The floor runs against the endpoint the CHAIN resolved to, whichever
         // corridor answered — a corridor that shadows a root door is checked on its
-        // own declaration, not the root's.
-        if let Some(lacking) =
-            unsatisfied_scope(&resolved.endpoint.describe(), &request, capability)
+        // own declaration, not the root's. The declaration comes from the
+        // per-endpoint memo: `describe()` runs once per bound endpoint, not once per
+        // request, and a cut of `urn:kernel:bindings` forgets it (ledger #22, #510).
+        if let Some(lacking) = self
+            .floors
+            .unsatisfied(&resolved.endpoint, &request, capability)
         {
             self.trace_denial(
                 &trace, &request, capability, span, parent, &lacking, alias, &scope,
@@ -1554,7 +1737,7 @@ impl Kernel {
                 .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
             let description = resolved.endpoint.describe();
             let target = meta_target(&request);
-            match renderer.render(&description, &target) {
+            let rendered = match renderer.render(&description, &target) {
                 Ok(repr) => repr.cacheable(),
                 // The renderer doesn't emit this type directly — transrept the canonical
                 // Turtle to it.
@@ -1562,7 +1745,11 @@ impl Kernel {
                     self.transrept_meta(&description, &target, capability)
                         .await?
                 }
-            }
+            };
+            // A description is a function of the BINDING, not of any state, so the
+            // one thread it hangs from is the binding-change thread — every face,
+            // the canonical rendering and a transrepted one alike (ledger #26).
+            rendered.depends_on(BINDINGS_THREAD)
         } else {
             // Invocation is asynchronous. On a scheduled kernel, hand it the spawner
             // and an owned self-handle so re-entrant fan-out runs concurrently.
@@ -1616,11 +1803,13 @@ impl Kernel {
             // logical and backing names stay one thread. Only when the answer can
             // be stored: an `Always` result is never looked up, so the edge would
             // cost an allocation and buy nothing. Meta is served from `describe()`
-            // in its own arm and gets no thread here — a binding change, not a
-            // write, is what invalidates a description (ledger #510) — and the
-            // `urn:kernel:*` intrinsics returned above are live state or the
-            // catalog, likewise. A pure function gains a thread nobody will ever
-            // cut: one generation lookup per validity check. Measured 2026-09-26
+            // in its own arm and gets no target thread — a binding change, not a
+            // write, is what invalidates a description, so it hangs from
+            // `urn:kernel:bindings` instead (ledger #510) — and the `urn:kernel:*`
+            // intrinsics returned above are live state or faces derived from the
+            // bindings, which hang from the same thread. A pure function gains a
+            // thread nobody will ever cut: one generation lookup per validity
+            // check. Measured 2026-09-26
             // (formalism §10): the first cut cost +20–28 ns (~7 %) on a ~325 ns
             // cache-hit read — not the lookup but the hit's CLONE of a now
             // non-empty thread set — and sharing the set behind an `Arc`
@@ -1703,7 +1892,68 @@ impl Kernel {
     /// The cut is also *sequenced*, so a request already in flight cannot file a
     /// result that predates it (see [`cache`](crate::cache)).
     pub fn cut(&self, thread: impl Into<Thread>) {
-        self.cache.cut(thread.into());
+        let thread = thread.into();
+        // The binding-change thread also forgets the floor memo, which is not a cache
+        // entry but hangs from the same predicate — so whoever cuts it, by this
+        // method or by resolving `urn:kernel:cut`, invalidates both.
+        if thread.as_str() == BINDINGS_THREAD {
+            self.floors.clear();
+        }
+        self.cache.cut(thread);
+    }
+
+    /// Tell the kernel **the set of bindings it resolves against has changed**: cut
+    /// [`BINDINGS_THREAD`], so the catalog, the action manifold, validation reports,
+    /// every `Meta` answer and the per-endpoint floor memo are recomputed on their
+    /// next read instead of describing a root that no longer exists.
+    ///
+    /// **When to call it.** After any change to what a name resolves to: a space with
+    /// interior mutability took a new binding (a discovery mount table gained a peer,
+    /// a module host reloaded code under a name), or the host swapped a space inside
+    /// the tree. The kernel cannot see any of these — its root is an `Arc<dyn Space>`
+    /// fixed at construction and a `Space` reports resolutions, not changes — so the
+    /// party that made the change makes this call. Cheap: one generation bump and one
+    /// map clear; dependents recompute lazily on their next read. Equivalent to
+    /// `sink urn:kernel:cut urn:kernel:bindings`, the form for an endpoint or a remote
+    /// peer (gated by `urn:cap:kernel:cut`).
+    ///
+    /// **What it does not do — a decision, not an omission.** A stored READ of a
+    /// resource whose binding moved is not invalidated: a cached representation hangs
+    /// from the thread named after its target and from the threads it declared, never
+    /// from this one. Two reasons. A rebind is rare and usually leaves the resource's
+    /// content as it was — the same module reloaded, a peer that came back — so
+    /// throwing away every cached read in the kernel on each one would make the cache
+    /// only as warm as the binding set is stable, and a discovery-driven root could
+    /// keep it cold forever. And the host that rebinds knows which names it moved,
+    /// which the kernel does not: it cuts those ([`Kernel::cut`] by name, or reads
+    /// them off `urn:kernel:cache` and cuts what lies under the moved prefix) when the
+    /// new binding answers differently. "Safe" would have been one more thread on
+    /// every entry; "cheap" is the line that is not there (`docs/formalism/README.md`,
+    /// R3.2).
+    ///
+    /// **Not a rebind API.** This reports a change; it does not make one. A
+    /// `Kernel::set_root` — who may replace a running kernel's root — sits on the same
+    /// trust line as [`Capability::root`] and is its own design question, deliberately
+    /// not answered here.
+    ///
+    /// ```
+    /// use ikigai_core::{builtins, Capability, EndpointSpace, Exact, Iri, Kernel, Request, Verb};
+    /// use std::sync::Arc;
+    ///
+    /// let space = EndpointSpace::new().bind(Exact::new("urn:demo:up"), builtins::to_upper());
+    /// let kernel = Kernel::new(Arc::new(space));
+    /// let root = Capability::root();
+    /// let manifold = || Request::new(Verb::Source, Iri::parse("urn:kernel:actions").unwrap());
+    ///
+    /// futures::executor::block_on(kernel.issue(manifold(), &root)).unwrap();
+    /// assert!(kernel.is_cached(&manifold(), &root));
+    ///
+    /// // …the host swapped a space, discovery added a mount, a module reloaded:
+    /// kernel.bindings_changed();
+    /// assert!(!kernel.is_cached(&manifold(), &root), "recomputed on its next read");
+    /// ```
+    pub fn bindings_changed(&self) {
+        self.cut(BINDINGS_THREAD);
     }
 
     /// Resolve a `urn:kernel:*` request — a kernel operation exposed as a
@@ -1713,7 +1963,8 @@ impl Kernel {
     /// invalidate another resource by *resolving* `urn:kernel:cut` (no special
     /// `Issuer` method); a remote peer can do the same over the wire, gated by its
     /// capability; and `describe`/the dashboard can see them. Results are live
-    /// kernel state, so they are uncacheable.
+    /// kernel state, so they are uncacheable — except the faces derived from the
+    /// bindings (catalog, actions, validate), which cache under [`BINDINGS_THREAD`].
     fn issue_kernel(
         &self,
         op: &str,
@@ -1904,9 +2155,10 @@ impl Kernel {
             }
             // The kernel's own catalog: every bound endpoint's `describe()` as one RDF
             // (Turtle) graph — so the kernel is queryable *about itself* with SPARQL and
-            // renderable to HTML via transreption. Cacheable: the binding set is stable
-            // within a session. Each Exact-bound endpoint is resolved and rendered via the
-            // meta renderer; template patterns (not concrete IRIs) render after them via
+            // renderable to HTML via transreption. Cacheable under `urn:kernel:bindings`:
+            // valid until the host reports that the binding set changed
+            // ([`Kernel::bindings_changed`]). Each Exact-bound endpoint is resolved and
+            // rendered via the meta renderer; template patterns (not concrete IRIs) render after them via
             // the probe walk, once per description id — an endpoint bound both exactly
             // and by template (the calendar shape) is not described twice, and an
             // endpoint bound ONLY by template (urn:file:{path}) is no longer invisible.
@@ -1963,7 +2215,8 @@ impl Kernel {
                     ReprType::new("text/turtle").with_param("charset", "utf-8"),
                     body.into_bytes(),
                 )
-                .cacheable())
+                .cacheable()
+                .depends_on(BINDINGS_THREAD))
             }
             // Selection as a resource: the endpoints whose required inputs are satisfiable by
             // the RDF classes in `types` (comma/space-separated IRIs) — "given these typed
@@ -2050,7 +2303,8 @@ impl Kernel {
                         ReprType::new("text/turtle").with_param("charset", "utf-8"),
                         body.into_bytes(),
                     )
-                    .cacheable());
+                    .cacheable()
+                    .depends_on(BINDINGS_THREAD));
                 }
                 // The plain face stays one endpoint identifier per line (deduped across
                 // its matched actions): a resolvable IRI for an exact binding, the
@@ -2068,7 +2322,8 @@ impl Kernel {
                     ReprType::new("text/plain").with_param("charset", "utf-8"),
                     body.into_bytes(),
                 )
-                .cacheable())
+                .cacheable()
+                .depends_on(BINDINGS_THREAD))
             }
             // Validated invoke, stage four of the selection funnel: check a PROPOSED
             // invocation against the action's declared contract BEFORE firing it —
@@ -2151,7 +2406,8 @@ impl Kernel {
                     ReprType::new("text/turtle").with_param("charset", "utf-8"),
                     report.into_bytes(),
                 )
-                .cacheable())
+                .cacheable()
+                .depends_on(BINDINGS_THREAD))
             }
             // `describe urn:kernel:<op>` — the operation's own self-description, so every
             // kernel operation is introspectable exactly like a bound endpoint (and the
@@ -2363,19 +2619,6 @@ fn capability_key(capability: &Capability) -> u64 {
 /// call site can REPORT the denial ([`Kernel::trace_denial`]) before returning it.
 /// `None` means the floor is met. Short-circuits on the first failure, as the
 /// error form did.
-fn unsatisfied_scope(
-    description: &crate::describe::Description,
-    request: &Request,
-    capability: &Capability,
-) -> Option<String> {
-    description
-        .action_specs()
-        .into_iter()
-        .filter(|spec| spec.verb == request.verb)
-        .flat_map(|spec| spec.requires)
-        .find(|scope| !crate::select::cap_satisfies(capability, scope))
-}
-
 /// The trace notes disclosing a logical rewrite: empty when the target was not
 /// aliased, so an un-aliased request's events are byte-identical to before.
 fn alias_notes(alias: Option<&AliasHop>) -> Vec<(String, String)> {
@@ -6500,5 +6743,370 @@ mod tests {
         );
         assert_eq!(runs.load(Ordering::SeqCst), 2);
         assert_eq!(kernel.cache_len(), 0);
+    }
+
+    // ---- urn:kernel:bindings: the binding-change thread, and the floor memo ----
+    use crate::grammar::Bindings;
+    use crate::space::Resolved;
+
+    /// A root whose bindings can change under a running kernel — the shape a
+    /// discovery mount table or a module host has, which none of core's own spaces
+    /// do. The kernel cannot see the swap; only the caller of `rebind` can say so.
+    struct Swappable(RwLock<EndpointSpace>);
+    impl Swappable {
+        fn over(space: EndpointSpace) -> Arc<Self> {
+            Arc::new(Swappable(RwLock::new(space)))
+        }
+        fn rebind(&self, space: EndpointSpace) {
+            *self.0.write().expect("swappable lock") = space;
+        }
+    }
+    impl Space for Swappable {
+        fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+            self.0
+                .read()
+                .expect("swappable lock")
+                .resolve(request, scope)
+        }
+        fn entries(&self) -> Option<Vec<SpaceEntry>> {
+            self.0.read().expect("swappable lock").entries()
+        }
+    }
+
+    /// A second endpoint to bind under `urn:test:to-upper`, distinguishable from
+    /// `toUpper` by id in every face.
+    fn shout() -> FnEndpoint {
+        FnEndpoint::new("shout", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), b"!".to_vec()).cacheable())
+        })
+        .with_description(Description::new("shout").verb(Verb::Source))
+    }
+
+    #[test]
+    fn a_binding_change_recomputes_every_self_description_face() {
+        let root = Swappable::over(
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper()),
+        );
+        let kernel = Kernel::with_meta_renderer(root.clone(), Arc::new(EchoIdRenderer));
+        let cap = Capability::root();
+        let text = |req: Request| -> Result<String> {
+            block_on(kernel.issue(req, &cap)).map(|r| String::from_utf8(r.bytes).unwrap())
+        };
+        let catalog = || Request::new(Verb::Source, iri("urn:kernel:catalog"));
+        let actions = || Request::new(Verb::Source, iri("urn:kernel:actions"));
+        let meta = || Request::new(Verb::Meta, iri("urn:test:to-upper"));
+        let validate = || {
+            Request::new(Verb::Source, iri("urn:kernel:validate"))
+                .with_arg(
+                    "action",
+                    ArgRef::Inline(b"urn:ikigai:endpoint:toUpper:action:source".to_vec()),
+                )
+                .with_arg("args", ArgRef::Inline(b"in=x".to_vec()))
+        };
+
+        // All four faces describe the first root, and all four are cached.
+        assert!(text(catalog()).unwrap().contains("toUpper"));
+        assert!(text(actions()).unwrap().contains("urn:test:to-upper"));
+        assert_eq!(text(meta()).unwrap(), "toUpper");
+        let report = text(validate()).unwrap();
+        assert!(report.contains("sh:conforms true"), "{report}");
+        for req in [catalog(), actions(), meta(), validate()] {
+            assert!(
+                kernel.is_cached(&req, &cap),
+                "{} should be cached",
+                req.target
+            );
+        }
+
+        // The root changes under the kernel: the same name binds a different
+        // endpoint, a new name appears, the old id is gone. The kernel cannot see
+        // it — every face is still served from cache — which is exactly why the
+        // party that changed the root has to say so.
+        root.rebind(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:test:to-upper"), shout())
+                .bind(Exact::new("urn:test:echo"), builtins::echo()),
+        );
+        assert_eq!(
+            text(meta()).unwrap(),
+            "toUpper",
+            "stale until the thread is cut"
+        );
+        assert!(kernel.is_cached(&catalog(), &cap));
+
+        kernel.bindings_changed();
+
+        // Every face is invalidated, recomputes, and SHOWS the new binding.
+        for req in [catalog(), actions(), meta(), validate()] {
+            assert!(
+                !kernel.is_cached(&req, &cap),
+                "{} should be invalidated",
+                req.target
+            );
+        }
+        let body = text(catalog()).unwrap();
+        assert!(body.contains("shout") && body.contains("echo"), "{body}");
+        assert!(!body.contains("toUpper"), "{body}");
+        assert!(text(actions()).unwrap().contains("urn:test:echo"));
+        assert_eq!(text(meta()).unwrap(), "shout");
+        let err = text(validate()).unwrap_err();
+        assert!(
+            err.to_string().contains("no endpoint with id `toUpper`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_transrepted_meta_face_hangs_from_the_bindings_thread_too() {
+        // The canonical rendering is one face; a transrepted one is produced by a
+        // sub-issue through a selected transreptor and re-marked cacheable. Both
+        // are descriptions of a binding, so both go when the binding set changes.
+        let kernel = meta_kernel();
+        let cap = Capability::root();
+        let rep = meta_as(&kernel, "urn:test:to-upper", "application/rdf+xml");
+        assert!(rep.threads().contains(&Thread::from(BINDINGS_THREAD)));
+        assert!(String::from_utf8(rep.bytes).unwrap().starts_with("RDFXML("));
+        let req = || {
+            Request::new(Verb::Meta, iri("urn:test:to-upper"))
+                .with_arg("as", ArgRef::Inline(b"application/rdf+xml".to_vec()))
+        };
+        assert!(kernel.is_cached(&req(), &cap));
+        kernel.bindings_changed();
+        assert!(!kernel.is_cached(&req(), &cap));
+    }
+
+    #[test]
+    fn the_resource_form_cuts_the_bindings_thread_and_the_floor_memo() {
+        // `sink urn:kernel:cut urn:kernel:bindings` — the form for an endpoint or a
+        // peer — is the same cut as `bindings_changed()`: the faces AND the memo go.
+        let root = Swappable::over(
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper()),
+        );
+        let kernel = Kernel::with_meta_renderer(root.clone(), Arc::new(EchoIdRenderer));
+        let cap = Capability::root();
+        let catalog = || Request::new(Verb::Source, iri("urn:kernel:catalog"));
+        block_on(kernel.issue(catalog(), &cap)).unwrap();
+        let upper = Request::new(Verb::Source, iri("urn:test:to-upper"))
+            .with_arg("in", ArgRef::Inline(b"x".to_vec()));
+        block_on(kernel.issue(upper, &cap)).unwrap();
+        assert_eq!(kernel.floors.len(), 1, "to-upper's floor is memoized");
+
+        root.rebind(EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), shout()));
+        block_on(kernel.issue(cut_request(BINDINGS_THREAD), &cap)).unwrap();
+
+        assert!(!kernel.is_cached(&catalog(), &cap));
+        assert_eq!(kernel.floors.len(), 0, "the memo goes with the thread");
+        let body =
+            String::from_utf8(block_on(kernel.issue(catalog(), &cap)).unwrap().bytes).unwrap();
+        assert!(body.contains("shout"), "{body}");
+    }
+
+    #[test]
+    fn an_ordinary_sink_does_not_cut_the_bindings_thread() {
+        // A write changes STATE, not the binding set: the auto-cut fires on the
+        // target's own thread, and the catalog and the memo stand.
+        let cell = FnEndpoint::new("cell", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), b"ok".to_vec()).cacheable())
+        })
+        .with_description(Description::new("cell").verb(Verb::Source).verb(Verb::Sink));
+        let space = EndpointSpace::new().bind(Exact::new("urn:test:cell"), cell);
+        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
+        let cap = Capability::root();
+        let catalog = || Request::new(Verb::Source, iri("urn:kernel:catalog"));
+        let read = || Request::new(Verb::Source, iri("urn:test:cell"));
+        block_on(kernel.issue(catalog(), &cap)).unwrap();
+        block_on(kernel.issue(read(), &cap)).unwrap();
+        assert!(kernel.is_cached(&read(), &cap));
+        assert_eq!(kernel.floors.len(), 1);
+
+        let write = Request::new(Verb::Sink, iri("urn:test:cell"))
+            .with_arg("content", ArgRef::Inline(b"v".to_vec()));
+        block_on(kernel.issue(write, &cap)).unwrap();
+
+        assert!(!kernel.is_cached(&read(), &cap), "the auto-cut still fires");
+        assert!(
+            kernel.is_cached(&catalog(), &cap),
+            "a write changes state, not the binding set"
+        );
+        assert_eq!(kernel.floors.len(), 1, "the memo is untouched by a write");
+    }
+
+    /// Counts its own `describe()` calls — the per-request cost ledger #22 is
+    /// about — and declares a floor, or not, as the test needs.
+    struct Described {
+        describes: Arc<AtomicU32>,
+        requires: Option<&'static str>,
+    }
+    #[async_trait::async_trait]
+    impl Endpoint for Described {
+        async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+            Ok(Representation::new(ReprType::new("text/plain"), b"d".to_vec()).cacheable())
+        }
+        fn name(&self) -> &str {
+            "described"
+        }
+        fn describe(&self) -> Description {
+            self.describes.fetch_add(1, Ordering::SeqCst);
+            let mut spec = crate::describe::ActionSpec::new(Verb::Source);
+            if let Some(scope) = self.requires {
+                spec = spec.requires(scope);
+            }
+            Description::new("described").action(spec)
+        }
+    }
+    fn described(requires: Option<&'static str>) -> (Described, Arc<AtomicU32>) {
+        let describes = Arc::new(AtomicU32::new(0));
+        (
+            Described {
+                describes: describes.clone(),
+                requires,
+            },
+            describes,
+        )
+    }
+
+    #[test]
+    fn the_floor_describes_an_endpoint_once_until_the_bindings_change() {
+        let (endpoint, describes) = described(Some("urn:cap:demo:read"));
+        let space = EndpointSpace::new().bind(Exact::new("urn:test:d"), endpoint);
+        let kernel = Kernel::new(Arc::new(space));
+        let holder = Capability::scoped(["urn:cap:demo:read"]);
+        let other = Capability::scoped(["urn:cap:other"]);
+        let req = || Request::new(Verb::Source, iri("urn:test:d"));
+        for _ in 0..5 {
+            block_on(kernel.issue(req(), &holder)).unwrap();
+        }
+        // A different capability is a different cache key but the same endpoint:
+        // the memoized floor refuses it without describing again — the memo is
+        // keyed by the endpoint, the cache by the authority, and neither leaks.
+        let err = block_on(kernel.issue(req(), &other)).unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "{err:?}");
+        assert_eq!(
+            describes.load(Ordering::SeqCst),
+            1,
+            "described once, floored six times"
+        );
+        kernel.bindings_changed();
+        block_on(kernel.issue(req(), &holder)).unwrap();
+        assert_eq!(
+            describes.load(Ordering::SeqCst),
+            2,
+            "a binding change re-describes"
+        );
+    }
+
+    /// An overlay that answers with a STAND-IN endpoint while a flag is set — the
+    /// shape of throttle's over-budget substitute, whose contract is not the real
+    /// endpoint's (ikigai-throttle #14 was the stand-in's description leaking the
+    /// real one's absence of a floor).
+    struct Switch {
+        real: Arc<dyn Endpoint>,
+        stand_in: Arc<dyn Endpoint>,
+        over: AtomicBool,
+    }
+    impl Space for Switch {
+        fn resolve(&self, request: &Request, _scope: &Scope) -> Resolution {
+            if request.target.as_str() != "urn:test:limited" {
+                return Resolution::Miss;
+            }
+            let endpoint = if self.over.load(Ordering::SeqCst) {
+                &self.stand_in
+            } else {
+                &self.real
+            };
+            Resolution::Hit(Resolved::new(Arc::clone(endpoint), Bindings::default()))
+        }
+    }
+
+    #[test]
+    fn a_swapped_endpoint_is_floored_on_its_own_contract() {
+        let (real, _) = described(None);
+        let (stand_in, _) = described(Some("urn:cap:limited:admin"));
+        let switch = Arc::new(Switch {
+            real: Arc::new(real),
+            stand_in: Arc::new(stand_in),
+            over: AtomicBool::new(false),
+        });
+        let kernel = Kernel::new(switch.clone());
+        let cap = Capability::scoped(["urn:cap:something"]);
+        let req = || Request::new(Verb::Source, iri("urn:test:limited"));
+
+        // The real endpoint is public: admitted, cached, and its floor memoized.
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert!(kernel.is_cached(&req(), &cap));
+        assert_eq!(kernel.floors.len(), 1);
+
+        // Over budget: the SAME request resolves to the stand-in, which declares a
+        // scope this caller lacks. Identity is the endpoint, not the name, so the
+        // stand-in gets its own entry and the memoized public floor is not applied
+        // to it — and the cached representation, which the floor guards, is not
+        // served around it either.
+        switch.over.store(true, Ordering::SeqCst);
+        let err = block_on(kernel.issue(req(), &cap)).unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "{err:?}");
+        assert_eq!(
+            kernel.floors.len(),
+            2,
+            "one entry per endpoint, not per name"
+        );
+
+        // Back under budget: the real endpoint's entry still stands, still public.
+        switch.over.store(false, Ordering::SeqCst);
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(kernel.floors.len(), 2);
+    }
+
+    /// A wrapper endpoint that delegates its contract, over a space that wraps
+    /// the resolved endpoint in a FRESH `Arc` on every resolution — the shape of
+    /// every ikigai-throttle governor today.
+    struct Wrapped(Arc<dyn Endpoint>);
+    #[async_trait::async_trait]
+    impl Endpoint for Wrapped {
+        async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+            self.0.invoke(inv).await
+        }
+        fn describe(&self) -> Description {
+            self.0.describe()
+        }
+    }
+    struct WrapEveryTime(EndpointSpace);
+    impl Space for WrapEveryTime {
+        fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+            self.0
+                .resolve(request, scope)
+                .map_endpoint(|inner| Arc::new(Wrapped(inner)) as Arc<dyn Endpoint>)
+        }
+    }
+
+    #[test]
+    fn a_per_resolution_wrapper_is_bounded_and_floored_correctly() {
+        let (open, _) = described(None);
+        let (gated, _) = described(Some("urn:cap:demo:read"));
+        let inner = EndpointSpace::new()
+            .bind(Exact::new("urn:test:open"), open)
+            .bind(Exact::new("urn:test:gated"), gated);
+        let kernel = Kernel::new(Arc::new(WrapEveryTime(inner)));
+        let cap = Capability::scoped(["urn:cap:other"]);
+        // Alternate two contracts through freshly allocated wrappers, each dropped
+        // before the next is allocated — the pattern under which an allocator hands
+        // the same address back. The memo's weak reservation is what keeps a gated
+        // wrapper from ever being served an open one's floor; past the bound the
+        // dead entries are swept and the addresses become reusable, legitimately.
+        for i in 0..(FLOOR_MEMO_BOUND + 64) {
+            let open =
+                block_on(kernel.issue(Request::new(Verb::Source, iri("urn:test:open")), &cap));
+            assert!(open.is_ok(), "iteration {i}: open is public");
+            let gated =
+                block_on(kernel.issue(Request::new(Verb::Source, iri("urn:test:gated")), &cap));
+            assert!(
+                matches!(gated, Err(Error::Denied(_))),
+                "iteration {i}: gated stays gated: {gated:?}"
+            );
+        }
+        assert!(
+            kernel.floors.len() <= FLOOR_MEMO_BOUND,
+            "the memo is bounded: {}",
+            kernel.floors.len()
+        );
     }
 }

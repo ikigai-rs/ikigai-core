@@ -209,7 +209,10 @@ fn cut() -> Description {
         .requires(CAP_CUT)
         .input(
             ArgSpec::new("thread")
-                .summary("the golden thread to cut")
+                .summary(
+                    "the golden thread to cut; `urn:kernel:bindings` is the well-known one \
+                     meaning the binding set changed, and recomputes every self-description face",
+                )
                 .optional(),
         )
         .input(
