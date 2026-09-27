@@ -1177,6 +1177,65 @@ mod tests {
     /// `xsd:positiveInteger` arrived with the review and LLM terms and neither was
     /// enumerated in `context.gen.py`. (`ikigai-browse` emits its counts with the
     /// `^^xsd:nonNegativeInteger` tag already, so the two faces agree term-for-term.)
+    /// The topology family — what `urn:kernel:topology` emits (ikigai-core 0.1.78,
+    /// ledger #515): a space is a node typed by its kind, a fallback's order is an
+    /// `rdf:List`, and a leaf's doors are `ik:pattern` literals. ★ `ik:pattern` and
+    /// not `ik:binds`, which the draft sketched: `ik:binds` carries
+    /// `rdfs:domain ik:Step`, so reusing it would have typed every leaf space a plan
+    /// step under RDFS entailment — the V-1 mistake a third time.
+    #[test]
+    fn the_topology_family_is_defined() {
+        let subjects: std::collections::BTreeSet<String> = oxttl::TurtleParser::new()
+            .for_reader(VOCABULARY.as_bytes())
+            .map(|t| t.expect("valid turtle").subject.to_string())
+            .collect();
+        for term in [
+            "Space",
+            "EndpointSpace",
+            "Fallback",
+            "Mount",
+            "Rewrite",
+            "Alias",
+            "RewriteRule",
+            "Limit",
+            "Confine",
+            "OpaqueSpace",
+            "Chain",
+            "layers",
+            "space",
+            "prefix",
+            "family",
+            "pattern",
+            "severed",
+            "rewrites",
+            "ruleKind",
+            "logical",
+            "canonical",
+        ] {
+            assert!(
+                subjects.contains(&format!("<{NS}{term}>")),
+                "ik:{term} is emitted by urn:kernel:topology — without it that face \
+                 emits an undefined term"
+            );
+        }
+        // The shared structural properties carry no domain: `ik:layers` sits on a
+        // chain and a fallback, `ik:space` on four kinds, `ik:pattern` on a leaf
+        // today and on a remote that reports its published patterns tomorrow.
+        for term in ["layers", "space", "prefix", "family", "pattern", "rewrites"] {
+            let block = VOCABULARY
+                .split("\n\n")
+                .find(|b| {
+                    b.trim_start()
+                        .starts_with(&format!("ik:{term} a rdf:Property"))
+                })
+                .unwrap_or_else(|| panic!("ik:{term} is declared"));
+            assert!(
+                !block.contains("rdfs:domain"),
+                "ik:{term} is shared across node kinds and must not declare a domain:\n{block}"
+            );
+        }
+    }
+
     #[test]
     fn a_range_the_generator_never_enumerated_still_coerces() {
         let ctx: serde_json::Value = serde_json::from_str(CONTEXT).unwrap();

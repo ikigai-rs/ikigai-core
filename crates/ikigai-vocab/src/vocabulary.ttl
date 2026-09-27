@@ -46,7 +46,7 @@
 <https://ikigai-rs.dev/ns#> a owl:Ontology ;
     rdfs:label "ikigai endpoint vocabulary" ;
     rdfs:comment "Self-description vocabulary for ikigai resource-oriented endpoints, and the process vocabulary that makes a plan (a DAG of requests) a resource in the same graph." ;
-    owl:versionInfo "0.1.77" .
+    owl:versionInfo "0.1.78" .
 
 #
 # Classes
@@ -181,6 +181,123 @@ ik:requires a rdf:Property ;
     rdfs:range rdfs:Resource ;
     rdfs:label "requires" ;
     rdfs:comment "A capability scope the subject requires to be invoked — an endpoint, one of its ik:Action nodes, or an ik:Process (the union over its steps, which the plan validator checks before any step runs). A capability IRI such as urn:cap:personal:calendar:write, or the wildcard form urn:cap:net:* (\"holds some grant under this prefix\"). Declared = enforced: the kernel refuses a dispatch whose capability does not satisfy it (ikigai-core 0.1.49+), selection projects a capability-scoped catalog from it, and urn:kernel:validate pre-flights against it — one predicate, three uses. A legacy descriptive label (\"cap:net\") is still emitted, as a literal; it joins nothing." .
+
+# ---- topology (urn:kernel:topology — the arrangement as a resource) ----------
+# The resolution arrangement is itself a resource (the formalism's §8.2: doors,
+# corridors and the rules of resolution are resources among resources).
+# urn:kernel:topology renders the chain a request is resolved in as a graph of
+# ik:Space nodes — every node an IRI (the identity a space claims for itself, or a
+# skolem under urn:ikigai:space:_:{n}), with order explicit wherever it is meaning:
+# ik:layers is an rdf:List written as addressable cells ({node}:layer:{n}), never a
+# blank-node collection. What the catalog lists flat, this states as structure, so a
+# path property of the arrangement — "is this family reachable from the entry without
+# passing a limiter?" — is a query over the graph rather than a request.
+
+ik:Space a rdfs:Class ;
+    rdfs:label "Space" ;
+    rdfs:comment "A resolution space: one node of the arrangement urn:kernel:topology renders. Named by the IRI the space claims for itself (a claim: same name, same doors — the cache partitions on it) or skolemized under urn:ikigai:space:_:{n} in render order. A node is typed by its kind (the subclasses below), so query by kind, or by this class under RDFS entailment." .
+
+ik:EndpointSpace a rdfs:Class ;
+    rdfs:subClassOf ik:Space ;
+    rdfs:label "EndpointSpace" ;
+    rdfs:comment "A leaf space: an ordered set of doors, each stated as an ik:pattern. First match wins, in the order the space enumerates them; the graph states membership, and each door's contract is in the catalog under the endpoint it binds." .
+
+ik:Fallback a rdfs:Class ;
+    rdfs:subClassOf ik:Space ;
+    rdfs:label "Fallback" ;
+    rdfs:comment "An ordered first-hit list of spaces: its ik:layers, an rdf:List in the order resolution consults them — precedence and shadowing made explicit, and the order the chain's fingerprint hashes." .
+
+ik:Mount a rdfs:Class ;
+    rdfs:subClassOf ik:Space ;
+    rdfs:label "Mount" ;
+    rdfs:comment "A prefix-guarded import: a request whose target starts with ik:prefix is delegated to the ik:space it mounts. No rewrite — the mounted space's patterns are already full identifiers." .
+
+ik:Rewrite a rdfs:Class ;
+    rdfs:subClassOf ik:Space ;
+    rdfs:label "Rewrite" ;
+    rdfs:comment "A rewrite by a function: a request's target is rewritten before the enclosed ik:space resolves it, and the rewrite is reported as the resolution's canonical name. The function is opaque, so the node says that a rewrite happens here and what it encloses, not what it does; ik:Alias is the table-driven form the graph can state." .
+
+ik:Alias a rdfs:Class ;
+    rdfs:subClassOf ik:Space ;
+    rdfs:label "Alias" ;
+    rdfs:comment "A table-driven rewrite over the enclosed ik:space: its rules are the node's ik:rewrites, each an ik:RewriteRule, in table order. A rewrite is reported as the resolution's canonical name, so the logical and backing names are one resource; the catalog lists the backing names only." .
+
+ik:RewriteRule a rdfs:Class ;
+    rdfs:label "RewriteRule" ;
+    rdfs:comment "One rule of an ik:Alias table: ik:ruleKind (exact or prefix), ik:logical (the name or prefix it matches) and ik:canonical (what it rewrites to). Skolemized under the alias node as {alias}:rule:{n}, n its position in the table." .
+
+ik:Limit a rdfs:Class ;
+    rdfs:subClassOf ik:Space ;
+    rdfs:label "Limit" ;
+    rdfs:comment "A limiter: a hole over the family its ik:family names. A name in the family resolves to the distinguished bottom and is unresolved, exactly as a name bound nowhere. Ahead of a member in an ik:Fallback it carves the family out of that member; injected as a corridor (a layer of the ik:Chain) it limits for one request." .
+
+ik:Confine a rdfs:Class ;
+    rdfs:subClassOf ik:Space ;
+    rdfs:label "Confine" ;
+    rdfs:comment "A confinement: the corridor an endpoint's sub-requests resolve in with the root cut off, enclosing the ik:space that is that corridor. Bound at one door inside an endpoint, so not reachable from the chain's graph — the endpoint reports it." .
+
+ik:OpaqueSpace a rdfs:Class ;
+    rdfs:subClassOf ik:Space ;
+    rdfs:label "OpaqueSpace" ;
+    rdfs:comment "A space that reports nothing about its structure — a remote, or any space that does not describe itself. The graph says where structural knowledge stops rather than implying the space is empty: a reachability query answers \"unknown\" through it, not \"no\"." .
+
+ik:Chain a rdfs:Class ;
+    rdfs:label "Chain" ;
+    rdfs:comment "The resolution chain a request is resolved in — the entry node of urn:kernel:topology. Its ik:layers list the injected corridors innermost first, then the root unless the chain is ik:severed. Named urn:ikigai:chain:root for the empty chain and urn:ikigai:chain:{fingerprint} (sixteen hex digits) otherwise, so two chains' graphs can share one store without their entry points colliding." .
+
+ik:layers a rdf:Property ;
+    rdfs:range rdf:List ;
+    rdfs:label "layers" ;
+    rdfs:comment "The ordered members of an ik:Fallback or an ik:Chain, as an rdf:List in the order resolution consults them: first hit wins, an earlier member shadows a later one, and an ik:Limit stops the family it names for every member after it. Written as addressable cells ({node}:layer:{n}) rather than a blank-node collection, so a cell can be cited." .
+
+ik:space a rdf:Property ;
+    rdfs:range ik:Space ;
+    rdfs:label "space" ;
+    rdfs:comment "The one space an ik:Mount, ik:Rewrite, ik:Alias or ik:Confine encloses." .
+
+ik:prefix a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "prefix" ;
+    rdfs:comment "The identifier prefix an ik:Mount admits: only a request whose target starts with it reaches the mounted space." .
+
+ik:family a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "family" ;
+    rdfs:comment "The family an ik:Limit carves out: a prefix (every identifier under it) or a grammar's pattern (an exact IRI, or a URI template such as urn:doc:{id}:secret)." .
+
+ik:pattern a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "pattern" ;
+    rdfs:comment "One door of an ik:EndpointSpace: its grammar's pattern — an exact IRI, or a URI template (RFC 6570 level 1), which is not an IRI and so is a literal here as it is on an ik:ActionMatch. The door's contract is in the catalog under the endpoint it binds." .
+
+ik:severed a rdf:Property ;
+    rdfs:domain ik:Chain ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "severed" ;
+    rdfs:comment "Whether the root has been cut off an ik:Chain: true inside a confinement, where a name no corridor binds is unresolved rather than answered by the root." .
+
+ik:rewrites a rdf:Property ;
+    rdfs:range ik:RewriteRule ;
+    rdfs:label "rewrites" ;
+    rdfs:comment "Links an ik:Alias to one of its rules — one triple per rule; the order is the {n} in each rule's IRI." .
+
+ik:ruleKind a rdf:Property ;
+    rdfs:domain ik:RewriteRule ;
+    rdfs:range xsd:string ;
+    rdfs:label "ruleKind" ;
+    rdfs:comment "How an ik:RewriteRule matches: \"exact\" (the whole name) or \"prefix\" (a leading namespace, the remainder carried over)." .
+
+ik:logical a rdf:Property ;
+    rdfs:domain ik:RewriteRule ;
+    rdfs:range xsd:string ;
+    rdfs:label "logical" ;
+    rdfs:comment "The logical name (an exact rule) or namespace prefix (a prefix rule) an ik:RewriteRule matches." .
+
+ik:canonical a rdf:Property ;
+    rdfs:domain ik:RewriteRule ;
+    rdfs:range xsd:string ;
+    rdfs:label "canonical" ;
+    rdfs:comment "The backing name or prefix an ik:RewriteRule rewrites to — what the resolution reports as its canonical name, under which the logical and backing names share one cache entry and one golden thread." .
 
 # ---- events (the calendar/agenda event graph) --------------------------------
 # Events themselves are typed with the iCalendar vocabulary
