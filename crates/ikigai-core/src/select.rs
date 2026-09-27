@@ -6,7 +6,11 @@
 //!   ([`EndpointKind::Transreptor`](crate::EndpointKind)). This is what metadata rendering,
 //!   content-negotiation, and sniff-and-dispatch build on: "give me a way from media type A
 //!   to B." v1 finds a **direct single hop**, else a **two-hop pivot via the canonical RDF
-//!   type (`text/turtle`)** — the hub our transreptors share.
+//!   type (`text/turtle`)** — the hub our transreptors share. Through **lossless edges
+//!   only** by default: a transreptor that declares itself a projection
+//!   ([`Description::lossy`](crate::Description::lossy)) is planned through only under an
+//!   explicit [`TransreptionPolicy`] ([`select_transreptor_with`]), and every plan reports
+//!   which of its steps are lossy.
 //! - [`select_action`] — find endpoints whose required inputs are satisfiable by the **RDF
 //!   classes** present in a context: "given these typed entities, what can I do with them?"
 //!   (the seed of layer action-inference). Matches on [`ArgSpec::class`](crate::ArgSpec).
@@ -35,13 +39,83 @@ use crate::verb::Verb;
 pub const CANONICAL: &str = "text/turtle";
 
 /// One step of a transreption plan: invoke the transreptor at `endpoint` with the input
-/// piped as `content` and `as` set to `to`.
+/// piped as `content` and `as` set to `to`. `#[non_exhaustive]`: a step is read, never
+/// authored, outside core.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TransreptionStep {
     /// The transreptor endpoint's IRI.
     pub endpoint: String,
     /// The media type to request from it (its `as`).
     pub to: String,
+    /// Whether the transreptor DECLARES this edge lossless
+    /// ([`Transreption::lossless`](crate::Transreption::lossless)). A plan reports it per
+    /// step so a caller that consented to a lossy hop can still see which hop it was;
+    /// under the default policy every step is `true` by construction.
+    pub lossless: bool,
+}
+
+impl TransreptionStep {
+    fn new(endpoint: &str, to: &str, lossless: bool) -> Self {
+        TransreptionStep {
+            endpoint: endpoint.to_string(),
+            to: to.to_string(),
+            lossless,
+        }
+    }
+}
+
+/// Whether every step of a plan is declared lossless — the plan is a transreption in
+/// the formal sense (a composition of injective functions is injective) iff each edge
+/// is. A lossy first hop is never rescued by a lossless second; a lossy second hop is
+/// lossy for the plan. `true` for the empty plan.
+pub fn is_lossless_plan(plan: &[TransreptionStep]) -> bool {
+    plan.iter().all(|step| step.lossless)
+}
+
+/// How selection may plan: whether a **lossy** edge (a declared projection) may appear
+/// in a plan at all. The default is lossless-only — a caller that asks for a
+/// representation in another form receives the same resource in that form, or no
+/// plan. Consent ([`allow_lossy`](Self::allow_lossy)) WIDENS the search: a lossless plan
+/// is still preferred wherever one exists, and a lossy plan is the residual, with its
+/// lossy steps reported ([`TransreptionStep::lossless`]). `#[non_exhaustive]`: build
+/// it with the constructors — a later axis (cost, capability) is then not a flag day.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TransreptionPolicy {
+    /// Plan through edges declared lossless only (the default).
+    pub lossless_only: bool,
+}
+
+impl Default for TransreptionPolicy {
+    fn default() -> Self {
+        TransreptionPolicy {
+            lossless_only: true,
+        }
+    }
+}
+
+impl TransreptionPolicy {
+    /// Lossless edges only — the default, and what [`select_transreptor`] applies.
+    pub const fn lossless() -> Self {
+        TransreptionPolicy {
+            lossless_only: true,
+        }
+    }
+
+    /// Consent to a lossy edge where no lossless plan exists. The plan reports each
+    /// lossy step; the consent is the caller's to give per request (`lossy=allow` on a
+    /// `Meta` request), never a kernel-wide setting.
+    pub const fn allow_lossy() -> Self {
+        TransreptionPolicy {
+            lossless_only: false,
+        }
+    }
+
+    /// Whether a lossy edge may appear in a plan under this policy.
+    pub const fn allows_lossy(&self) -> bool {
+        !self.lossless_only
+    }
 }
 
 /// A transreptor's declared conversions, paired with its IRI.
@@ -49,11 +123,16 @@ struct Candidate {
     iri: String,
     from: Vec<String>,
     to: Vec<String>,
+    lossless: bool,
 }
 
 impl Candidate {
     fn handles(&self, from: &str, to: &str) -> bool {
         self.from.iter().any(|f| f == from) && self.to.iter().any(|t| t == to)
+    }
+
+    fn step(&self, to: &str) -> TransreptionStep {
+        TransreptionStep::new(&self.iri, to, self.lossless)
     }
 }
 
@@ -69,37 +148,76 @@ pub fn is_auto_invocable(description: &Description) -> bool {
         .all(|i| i.name == "content" || i.name == "as")
 }
 
-/// Find a chain of auto-invocable transreptors in `root` converting `from` → `to`: a direct
-/// single hop if one exists, else a two-hop pivot via [`CANONICAL`]. `None` if no chain is
-/// available (or if `from == to`, which needs no transreption).
+/// Find a chain of auto-invocable transreptors in `root` converting `from` → `to`
+/// through **lossless edges only** (the default [`TransreptionPolicy`]): a direct single
+/// hop if one exists, else a two-hop pivot via [`CANONICAL`]. `None` if no such chain is
+/// available (or if `from == to`, which needs no transreption). A transreptor declared
+/// lossy ([`Description::lossy`](crate::Description::lossy)) is invisible here; to
+/// consent to one, plan with [`select_transreptor_with`].
 pub fn select_transreptor(root: &dyn Space, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
+    select_transreptor_with(root, from, to, &TransreptionPolicy::lossless())
+}
+
+/// [`select_transreptor`] under an explicit [`TransreptionPolicy`]. The search order is
+/// fixed and consent only WIDENS it: (1) a lossless direct hop, (2) a lossless pivot via
+/// [`CANONICAL`], then — only if the policy allows lossy edges — (3) any direct hop,
+/// (4) any pivot. So a lossless plan is chosen wherever one exists whatever the policy
+/// (a two-hop transreption conserves information; a one-hop projection does not), and a
+/// plan that crosses a lossy edge says so on the step.
+///
+/// The two-hop rule is per edge: the pivot is lossless iff BOTH edges are. A lossy first
+/// hop under a lossless second is a lossy plan (refused by default, reported when
+/// allowed), and so is the converse.
+pub fn select_transreptor_with(
+    root: &dyn Space,
+    from: &str,
+    to: &str,
+    policy: &TransreptionPolicy,
+) -> Option<Vec<TransreptionStep>> {
     if from == to {
         return None;
     }
     let candidates = collect(root);
+    if let Some(plan) = plan_over(&candidates, from, to, true) {
+        return Some(plan);
+    }
+    if policy.allows_lossy() {
+        return plan_over(&candidates, from, to, false);
+    }
+    None
+}
+
+/// One pass of the star walk over `candidates`: a direct hop, else the pivot through
+/// [`CANONICAL`]. With `lossless_only`, only candidates declaring the edge lossless are
+/// eligible; otherwise every candidate is, and the steps carry each one's declaration.
+fn plan_over(
+    candidates: &[Candidate],
+    from: &str,
+    to: &str,
+    lossless_only: bool,
+) -> Option<Vec<TransreptionStep>> {
+    let eligible = |c: &&Candidate| !lossless_only || c.lossless;
 
     // Direct: a single transreptor that reads `from` and produces `to`.
-    if let Some(c) = candidates.iter().find(|c| c.handles(from, to)) {
-        return Some(vec![TransreptionStep {
-            endpoint: c.iri.clone(),
-            to: to.to_string(),
-        }]);
+    if let Some(c) = candidates
+        .iter()
+        .filter(eligible)
+        .find(|c| c.handles(from, to))
+    {
+        return Some(vec![c.step(to)]);
     }
 
     // Pivot: `from → text/turtle` then `text/turtle → to` (two distinct hops).
     if from != CANONICAL && to != CANONICAL {
-        let first = candidates.iter().find(|c| c.handles(from, CANONICAL))?;
-        let second = candidates.iter().find(|c| c.handles(CANONICAL, to))?;
-        return Some(vec![
-            TransreptionStep {
-                endpoint: first.iri.clone(),
-                to: CANONICAL.to_string(),
-            },
-            TransreptionStep {
-                endpoint: second.iri.clone(),
-                to: to.to_string(),
-            },
-        ]);
+        let first = candidates
+            .iter()
+            .filter(eligible)
+            .find(|c| c.handles(from, CANONICAL))?;
+        let second = candidates
+            .iter()
+            .filter(eligible)
+            .find(|c| c.handles(CANONICAL, to))?;
+        return Some(vec![first.step(CANONICAL), second.step(to)]);
     }
 
     None
@@ -123,6 +241,7 @@ fn collect(root: &dyn Space) -> Vec<Candidate> {
                         iri: entry.pattern.clone(),
                         from: t.from.clone(),
                         to: t.to.clone(),
+                        lossless: t.lossless,
                     });
                 }
             }
@@ -131,13 +250,24 @@ fn collect(root: &dyn Space) -> Vec<Candidate> {
     candidates
 }
 
-/// Convenience: select over an `Arc<dyn Space>` root (as a kernel holds).
+/// Convenience: select over an `Arc<dyn Space>` root (as a kernel holds) — lossless
+/// edges only, as [`select_transreptor`].
 pub fn select_transreptor_in(
     root: &Arc<dyn Space>,
     from: &str,
     to: &str,
 ) -> Option<Vec<TransreptionStep>> {
     select_transreptor(root.as_ref(), from, to)
+}
+
+/// Convenience: [`select_transreptor_with`] over an `Arc<dyn Space>` root.
+pub fn select_transreptor_in_with(
+    root: &Arc<dyn Space>,
+    from: &str,
+    to: &str,
+    policy: &TransreptionPolicy,
+) -> Option<Vec<TransreptionStep>> {
+    select_transreptor_with(root.as_ref(), from, to, policy)
 }
 
 /// The placeholder each `{var}` takes when a template pattern is probe-expanded into a
@@ -493,6 +623,148 @@ mod tests {
     fn none_when_unreachable_or_identity() {
         assert!(select_transreptor(&space(), "text/turtle", "text/turtle").is_none());
         assert!(select_transreptor(&space(), "application/pdf", "image/png").is_none());
+    }
+
+    // --- lossless by default; a lossy edge only with consent ---
+
+    /// A stub PROJECTION: the same shape as `transreptor`, declared lossy.
+    fn projection(id: &'static str, from: &[&str], to: &[&str]) -> FnEndpoint {
+        FnEndpoint::new(id, |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new(id)
+                .verb(Verb::Source)
+                .input(crate::describe::ArgSpec::new("content"))
+                .input(crate::describe::ArgSpec::new("as"))
+                .transreptor(from.iter().copied(), to.iter().copied())
+                .lossy(),
+        )
+    }
+
+    const ALLOW: TransreptionPolicy = TransreptionPolicy::allow_lossy();
+
+    #[test]
+    fn every_default_plan_is_lossless_and_says_so() {
+        // Nothing here declares `.lossy()`: the plans of 0.1.76 are unchanged, and each
+        // step now carries the declaration it planned on.
+        let direct = select_transreptor(&space(), "application/rdf+xml", "text/turtle").unwrap();
+        assert!(is_lossless_plan(&direct));
+        let space = space().bind(
+            Exact::new("urn:demo:csv"),
+            transreptor("csv", &["text/turtle"], &["text/csv"]),
+        );
+        let pivot = select_transreptor(&space, "application/rdf+xml", "text/csv").unwrap();
+        assert_eq!(pivot.len(), 2);
+        assert!(is_lossless_plan(&pivot));
+        assert!(is_lossless_plan(&[]));
+    }
+
+    #[test]
+    fn a_lossy_direct_hop_is_not_chosen_by_default_but_is_with_consent_and_reported() {
+        let space = space().bind(
+            Exact::new("urn:demo:summarize"),
+            projection("summarize", &["text/turtle"], &["text/x-summary"]),
+        );
+        // Default: the only route is a projection, so there is no plan.
+        assert!(select_transreptor(&space, "text/turtle", "text/x-summary").is_none());
+        // Consent: the same route is planned, and the step says it is lossy.
+        let plan = select_transreptor_with(&space, "text/turtle", "text/x-summary", &ALLOW)
+            .expect("consented");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].endpoint, "urn:demo:summarize");
+        assert!(!plan[0].lossless);
+        assert!(!is_lossless_plan(&plan));
+    }
+
+    #[test]
+    fn consent_widens_the_search_but_a_lossless_plan_still_wins() {
+        // Two direct routes to the same type, the projection bound FIRST (first-match
+        // would pick it): under consent the lossless one is still chosen — consent
+        // admits a lossy edge, it does not prefer one.
+        let space = EndpointSpace::new()
+            .bind(
+                Exact::new("urn:demo:lossy-html"),
+                projection("lossy-html", &["text/turtle"], &["text/html"]),
+            )
+            .bind(
+                Exact::new("urn:demo:html"),
+                transreptor("html", &["text/turtle"], &["text/html"]),
+            );
+        for policy in [TransreptionPolicy::lossless(), ALLOW] {
+            let plan = select_transreptor_with(&space, "text/turtle", "text/html", &policy)
+                .expect("a lossless route exists");
+            assert_eq!(plan[0].endpoint, "urn:demo:html", "{policy:?}");
+            assert!(is_lossless_plan(&plan));
+        }
+        // And a lossless TWO-hop beats a lossy ONE-hop: information conservation over
+        // hop count (a composition of injections is an injection; a projection is not).
+        let space = EndpointSpace::new()
+            .bind(
+                Exact::new("urn:demo:lossy-direct"),
+                projection("lossy-direct", &["application/rdf+xml"], &["text/csv"]),
+            )
+            .bind(
+                Exact::new("urn:rdf:transrept"),
+                transreptor("rdf", &["application/rdf+xml"], &["text/turtle"]),
+            )
+            .bind(
+                Exact::new("urn:demo:csv"),
+                transreptor("csv", &["text/turtle"], &["text/csv"]),
+            );
+        let plan =
+            select_transreptor_with(&space, "application/rdf+xml", "text/csv", &ALLOW).unwrap();
+        assert_eq!(plan.len(), 2, "{plan:?}");
+        assert!(is_lossless_plan(&plan));
+    }
+
+    #[test]
+    fn a_pivot_is_lossless_iff_both_edges_are() {
+        // Three pivots to text/csv from rdf+xml, each with one edge lossy — or neither.
+        let cases: [(&str, bool, bool); 3] = [
+            ("lossless+lossy", true, false),
+            ("lossy+lossless", false, true),
+            ("lossy+lossy", false, false),
+        ];
+        for (label, first_lossless, second_lossless) in cases {
+            let first = if first_lossless {
+                transreptor("rdf", &["application/rdf+xml"], &["text/turtle"])
+            } else {
+                projection("rdf", &["application/rdf+xml"], &["text/turtle"])
+            };
+            let second = if second_lossless {
+                transreptor("csv", &["text/turtle"], &["text/csv"])
+            } else {
+                projection("csv", &["text/turtle"], &["text/csv"])
+            };
+            let space = EndpointSpace::new()
+                .bind(Exact::new("urn:rdf:transrept"), first)
+                .bind(Exact::new("urn:demo:csv"), second);
+            // Refused by default: a lossy edge anywhere in the pivot is a lossy plan —
+            // a lossy first hop is never rescued by a lossless second, and a lossless
+            // first hop does not make a lossy second one a transreption.
+            assert!(
+                select_transreptor(&space, "application/rdf+xml", "text/csv").is_none(),
+                "{label}: planned through a lossy edge without consent"
+            );
+            // Allowed with consent, and each step reports its own declaration.
+            let plan = select_transreptor_with(&space, "application/rdf+xml", "text/csv", &ALLOW)
+                .unwrap_or_else(|| panic!("{label}: consented and still no plan"));
+            assert_eq!(plan.len(), 2, "{label}: {plan:?}");
+            assert_eq!(plan[0].lossless, first_lossless, "{label}");
+            assert_eq!(plan[1].lossless, second_lossless, "{label}");
+            assert!(!is_lossless_plan(&plan), "{label}");
+        }
+    }
+
+    #[test]
+    fn the_policy_defaults_to_lossless_only() {
+        assert_eq!(
+            TransreptionPolicy::default(),
+            TransreptionPolicy::lossless()
+        );
+        assert!(!TransreptionPolicy::default().allows_lossy());
+        assert!(ALLOW.allows_lossy());
     }
 
     #[test]

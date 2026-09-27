@@ -60,7 +60,7 @@ use crate::iri::Iri;
 use crate::meta::MetaRenderer;
 use crate::repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 use crate::request::Request;
-use crate::select::{ActionMatch, TransreptionStep};
+use crate::select::{ActionMatch, TransreptionPolicy, TransreptionStep};
 use crate::space::{Fallback, Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
 
@@ -694,11 +694,26 @@ impl Kernel {
     }
 
     /// Find a transreptor chain converting `from` → `to` among this kernel's mounted
-    /// endpoints — a direct single hop, else a two-hop pivot via `text/turtle`. `None` if
-    /// no auto-invocable chain exists. The basis for selection-driven metadata rendering,
-    /// content negotiation, and sniff-and-dispatch. See [`crate::select_transreptor`].
+    /// endpoints — a direct single hop, else a two-hop pivot via `text/turtle`, through
+    /// **lossless edges only**. `None` if no auto-invocable lossless chain exists. The
+    /// basis for selection-driven metadata rendering, content negotiation, and
+    /// sniff-and-dispatch. See [`crate::select_transreptor`]; to consent to a declared
+    /// projection, [`select_transreptor_with`](Self::select_transreptor_with).
     pub fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
         crate::select::select_transreptor(self.root.as_ref(), from, to)
+    }
+
+    /// [`select_transreptor`](Self::select_transreptor) under an explicit
+    /// [`TransreptionPolicy`]. See [`crate::select_transreptor_with`] for the search
+    /// order: consent widens it, a lossless plan still wins, and every step reports its
+    /// own declaration.
+    pub fn select_transreptor_with(
+        &self,
+        from: &str,
+        to: &str,
+        policy: &TransreptionPolicy,
+    ) -> Option<Vec<TransreptionStep>> {
+        crate::select::select_transreptor_with(self.root.as_ref(), from, to, policy)
     }
 
     /// [`select_transreptor`](Self::select_transreptor) **in a resolution chain**:
@@ -716,10 +731,23 @@ impl Kernel {
         to: &str,
         scope: &Scope,
     ) -> Option<Vec<TransreptionStep>> {
+        self.select_transreptor_in_with(from, to, scope, &TransreptionPolicy::lossless())
+    }
+
+    /// [`select_transreptor_in`](Self::select_transreptor_in) under an explicit
+    /// [`TransreptionPolicy`] — what a `Meta` request carrying `lossy=allow` plans
+    /// over, and what [`Invocation::select_transreptor_with`] reaches.
+    pub fn select_transreptor_in_with(
+        &self,
+        from: &str,
+        to: &str,
+        scope: &Scope,
+        policy: &TransreptionPolicy,
+    ) -> Option<Vec<TransreptionStep>> {
         if scope.is_empty() {
-            return self.select_transreptor(from, to);
+            return self.select_transreptor_with(from, to, policy);
         }
-        crate::select::select_transreptor(&scope.view(None, &self.root), from, to)
+        crate::select::select_transreptor_with(&scope.view(None, &self.root), from, to, policy)
     }
 
     /// Install an `rdfs:subClassOf` axiom set — `(subclass, superclass)` IRI pairs, e.g.
@@ -889,19 +917,43 @@ impl Kernel {
     }
 
     /// Render `description` to `target` by transrepting its canonical Turtle: render the
-    /// Turtle, [`select`](Self::select_transreptor_in) a transreptor chain `text/turtle →
-    /// target` **in the resolution chain the Meta request runs in**, and run it (piping
-    /// `content`, setting `as`) through the kernel in that same chain, as sub-requests
-    /// of the Meta resolution. Falls back to the canonical Turtle if no transreptor
-    /// reaches `target` from inside the chain — a root transreptor a severed chain
-    /// cannot resolve is not offered, so it is not a plan that fails on a branch that
-    /// looked selectable. Used by the `Meta` path for any type the renderer doesn't
-    /// emit directly.
+    /// Turtle, [`select`](Self::select_transreptor_in_with) a transreptor chain
+    /// `text/turtle → target` **in the resolution chain the Meta request runs in** and
+    /// under the request's [`TransreptionPolicy`], and run it (piping `content`, setting
+    /// `as`) through the kernel in that same chain, as sub-requests of the Meta
+    /// resolution. Used by the `Meta` path for any type the renderer doesn't emit
+    /// directly.
+    ///
+    /// **When no plan reaches `target`, the answer is the canonical Turtle — a
+    /// substitution, and not a lie.** The representation's `repr_type` SAYS
+    /// `text/turtle`: a caller that reads the type it was handed learns exactly what it
+    /// got, and the canonical face is the honest self-description when no renderer
+    /// exists for the one asked for — Meta prefers a description in a space the caller
+    /// did not ask for to no description (the formal document, §8, states this as a
+    /// deviation in strictness from Definition 8; ledger #21 records the JSON case,
+    /// where a client that does not read the type parses Turtle as JSON). A root
+    /// transreptor a severed chain cannot resolve is not offered, so it is not a plan
+    /// that fails on a branch that looked selectable.
+    ///
+    /// **A lossy route is a different matter, and is refused.** If the only chain to
+    /// `target` crosses a transreptor declared a projection
+    /// ([`Description::lossy`]), Meta must not take it without consent: that would be a
+    /// description that LOST information while claiming the very type asked for — the
+    /// type would then be true and the content would not, which no reader of
+    /// `repr_type` can detect. And it is not silently substituted either: a substitution
+    /// would hide that a route exists at all, so the refusal names the lossy step and
+    /// the consent (`lossy=allow` on the `Meta` request) that admits it. The error is
+    /// [`Error::Endpoint`]: the face is not absent (`NotFound` would say the type is
+    /// unreachable, and it is reachable, with consent), no capability is at issue
+    /// (`Denied` is a principal's authority, and consent here is per request, not per
+    /// holder), and the request's arguments are each well-formed (`InvalidArgument`
+    /// would blame `as`). The engine's `describe <iri> <type>` shows the message.
     #[allow(clippy::too_many_arguments)] // the Meta arm's sub-request: every fact of its resolution, named
     async fn transrept_meta(
         &self,
         description: &Description,
         target: &ReprType,
+        policy: &TransreptionPolicy,
         capability: &Capability,
         parent: Option<u64>,
         trace: &Option<TraceScope>,
@@ -913,9 +965,36 @@ impl Kernel {
             .as_ref()
             .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
         let canonical = renderer.render(description, &ReprType::new(crate::select::CANONICAL))?;
-        let Some(plan) =
-            self.select_transreptor_in(crate::select::CANONICAL, &target.media_type, scope)
-        else {
+        let Some(plan) = self.select_transreptor_in_with(
+            crate::select::CANONICAL,
+            &target.media_type,
+            scope,
+            policy,
+        ) else {
+            // No permitted plan. If a LOSSY one exists, the caller must consent to it,
+            // and is told so — the second walk runs only on this branch, which used to
+            // substitute; the default path is the one walk it always was.
+            if !policy.allows_lossy() {
+                if let Some(lossy) = self.select_transreptor_in_with(
+                    crate::select::CANONICAL,
+                    &target.media_type,
+                    scope,
+                    &TransreptionPolicy::allow_lossy(),
+                ) {
+                    let steps = lossy
+                        .iter()
+                        .filter(|s| !s.lossless)
+                        .map(|s| format!("`{}`", s.endpoint))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(Error::Endpoint(format!(
+                        "meta face `{}` is reachable only through a lossy transreptor \
+                         ({steps}): a projection loses information and would not describe \
+                         the endpoint; pass `lossy=allow` to consent",
+                        target.media_type
+                    )));
+                }
+            }
             // Nothing converts Turtle to the requested type — hand back the canonical Turtle.
             return Ok(canonical.cacheable());
         };
@@ -1926,6 +2005,7 @@ impl Kernel {
                 .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
             let description = resolved.endpoint.describe();
             let target = meta_target(&request);
+            let policy = meta_policy(&request)?;
             let rendered = match renderer.render(&description, &target) {
                 Ok(repr) => repr.cacheable(),
                 // The renderer doesn't emit this type directly — transrept the canonical
@@ -1934,6 +2014,7 @@ impl Kernel {
                     self.transrept_meta(
                         &description,
                         &target,
+                        &policy,
                         capability,
                         span,
                         &trace,
@@ -3061,6 +3142,31 @@ fn meta_target(request: &Request) -> ReprType {
     ReprType::new("text/turtle")
 }
 
+/// The name of the `Meta` argument that consents to a lossy transreption step:
+/// `lossy=allow`. `lossy=deny` is the default, spelled; any other value is refused
+/// rather than read as the default, so a mistyped consent cannot silently become a
+/// refusal that then blames the face.
+pub const META_LOSSY_ARG: &str = "lossy";
+
+/// The [`TransreptionPolicy`] a `Meta` request plans under: lossless-only unless it
+/// carries [`META_LOSSY_ARG`]`=allow`.
+fn meta_policy(request: &Request) -> Result<TransreptionPolicy> {
+    let Some(ArgRef::Inline(bytes)) = request.args.get(META_LOSSY_ARG) else {
+        return Ok(TransreptionPolicy::lossless());
+    };
+    match std::str::from_utf8(bytes) {
+        Ok("allow") => Ok(TransreptionPolicy::allow_lossy()),
+        Ok("deny") => Ok(TransreptionPolicy::lossless()),
+        other => Err(Error::InvalidArgument {
+            name: META_LOSSY_ARG.to_string(),
+            detail: format!(
+                "expected `allow` or `deny`, got `{}`",
+                other.unwrap_or("<non-utf8>")
+            ),
+        }),
+    }
+}
+
 #[async_trait]
 impl Issuer for Kernel {
     async fn issue(&self, request: Request, capability: &Capability) -> Result<Representation> {
@@ -3156,6 +3262,16 @@ impl Issuer for Kernel {
         // Selection in the chain the invocation runs in: what its sub-requests could
         // actually resolve.
         Kernel::select_transreptor_in(self, from, to, scope)
+    }
+
+    fn select_transreptor_in_with(
+        &self,
+        from: &str,
+        to: &str,
+        scope: &Scope,
+        policy: &TransreptionPolicy,
+    ) -> Option<Vec<TransreptionStep>> {
+        Kernel::select_transreptor_in_with(self, from, to, scope, policy)
     }
 
     fn select_action_in(&self, present: &[&str], scope: &Scope) -> Vec<ActionMatch> {
@@ -3416,6 +3532,144 @@ mod tests {
         assert!(String::from_utf8(rep.bytes)
             .unwrap()
             .contains("ik:id \"toUpper\""));
+    }
+
+    /// A stub PROJECTION (`text/turtle → text/x-summary`, declared `.lossy()`): a
+    /// summariser registered as a transreptor — the exposure ledger #514 names.
+    fn stub_summarize() -> FnEndpoint {
+        FnEndpoint::new("summarize", |inv: &Invocation<'_>| {
+            let content = inv.inline_str("content").unwrap_or("");
+            Ok(Representation::new(
+                ReprType::new("text/x-summary"),
+                format!("SUMMARY({})", content.len()).into_bytes(),
+            )
+            .cacheable())
+        })
+        .with_description(
+            Description::new("summarize")
+                .verb(Verb::Source)
+                .input(crate::describe::ArgSpec::new("content"))
+                .input(crate::describe::ArgSpec::new("as"))
+                .transreptor(["text/turtle"], ["text/x-summary"])
+                .lossy(),
+        )
+    }
+
+    fn meta_kernel_with_a_projection() -> Kernel {
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:test:to-upper"), builtins::to_upper())
+            .bind(Exact::new("urn:rdf:transrept"), stub_rdf_transrept())
+            .bind(Exact::new("urn:demo:summarize"), stub_summarize());
+        Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleishRenderer))
+    }
+
+    #[test]
+    fn meta_refuses_a_lossy_route_by_default_and_names_the_consent() {
+        // as=text/x-summary: the only route is a projection. Not substituted (a
+        // substitution would hide that a route exists), not taken (it would lose
+        // information under the type asked for): refused, naming the step and the
+        // argument that consents.
+        let kernel = meta_kernel_with_a_projection();
+        let request = Request::new(Verb::Meta, iri("urn:test:to-upper"))
+            .with_arg("as", ArgRef::Inline(b"text/x-summary".to_vec()));
+        let err = block_on(kernel.issue(request, &Capability::root())).unwrap_err();
+        match &err {
+            Error::Endpoint(msg) => {
+                assert!(msg.contains("lossy"), "{msg}");
+                assert!(msg.contains("`urn:demo:summarize`"), "{msg}");
+                assert!(msg.contains("lossy=allow"), "{msg}");
+            }
+            other => panic!("expected Error::Endpoint, got {other:?}"),
+        }
+        // Spelling the default is the default.
+        let request = Request::new(Verb::Meta, iri("urn:test:to-upper"))
+            .with_arg("as", ArgRef::Inline(b"text/x-summary".to_vec()))
+            .with_arg(META_LOSSY_ARG, ArgRef::Inline(b"deny".to_vec()));
+        assert!(matches!(
+            block_on(kernel.issue(request, &Capability::root())),
+            Err(Error::Endpoint(_))
+        ));
+    }
+
+    #[test]
+    fn meta_crosses_a_lossy_route_with_consent() {
+        let kernel = meta_kernel_with_a_projection();
+        let request = Request::new(Verb::Meta, iri("urn:test:to-upper"))
+            .with_arg("as", ArgRef::Inline(b"text/x-summary".to_vec()))
+            .with_arg(META_LOSSY_ARG, ArgRef::Inline(b"allow".to_vec()));
+        let rep = block_on(kernel.issue(request, &Capability::root())).unwrap();
+        assert_eq!(rep.repr_type.media_type, "text/x-summary");
+        assert!(String::from_utf8(rep.bytes)
+            .unwrap()
+            .starts_with("SUMMARY("));
+    }
+
+    #[test]
+    fn meta_through_a_lossless_route_is_unchanged_beside_a_projection() {
+        // The projection's presence changes nothing for a type a lossless route reaches,
+        // and nothing for a type no route reaches (canonical Turtle, as before).
+        let kernel = meta_kernel_with_a_projection();
+        let rep = meta_as(&kernel, "urn:test:to-upper", "application/rdf+xml");
+        assert_eq!(rep.repr_type.media_type, "application/rdf+xml");
+        let rep = meta_as(&kernel, "urn:test:to-upper", "application/pdf");
+        assert_eq!(rep.repr_type.media_type, "text/turtle");
+    }
+
+    #[test]
+    fn a_mistyped_consent_is_refused_not_read_as_the_default() {
+        let kernel = meta_kernel_with_a_projection();
+        let request = Request::new(Verb::Meta, iri("urn:test:to-upper"))
+            .with_arg("as", ArgRef::Inline(b"text/x-summary".to_vec()))
+            .with_arg(META_LOSSY_ARG, ArgRef::Inline(b"alow".to_vec()));
+        assert!(matches!(
+            block_on(kernel.issue(request, &Capability::root())),
+            Err(Error::InvalidArgument { name, .. }) if name == META_LOSSY_ARG
+        ));
+    }
+
+    #[test]
+    fn an_invocation_plans_through_a_projection_only_with_its_own_consent() {
+        // The seam an endpoint consents through: `select_transreptor` (the default
+        // policy) sees no route; `select_transreptor_with(allow_lossy)` sees it and the
+        // step reports the loss.
+        let probe = FnEndpoint::new("probe", |inv: &Invocation<'_>| {
+            let by_default = inv.select_transreptor("text/turtle", "text/x-summary");
+            let consented = inv.select_transreptor_with(
+                "text/turtle",
+                "text/x-summary",
+                &TransreptionPolicy::allow_lossy(),
+            );
+            let body = format!(
+                "{} {}",
+                by_default.map_or("none".to_string(), |p| p.len().to_string()),
+                consented.map_or("none".to_string(), |p| format!(
+                    "{}:{}",
+                    p[0].endpoint,
+                    if crate::select::is_lossless_plan(&p) {
+                        "lossless"
+                    } else {
+                        "lossy"
+                    }
+                )),
+            );
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                body.into_bytes(),
+            ))
+        });
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:probe"), probe)
+            .bind(Exact::new("urn:demo:summarize"), stub_summarize());
+        let kernel = Kernel::new(Arc::new(space));
+        let rep = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:probe")),
+            &Capability::root(),
+        ))
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(rep.bytes).unwrap(),
+            "none urn:demo:summarize:lossy"
+        );
     }
 
     #[test]

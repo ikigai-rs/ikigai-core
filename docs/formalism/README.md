@@ -881,13 +881,30 @@ and a projection of r is a different resource with its own identifier; Thm. 1: H
 with equality iff f is injective on the support.
 
 **R8.1 (the declaration).** A transreptor is an endpoint of kind `Transreptor(Transreption
-{ from, to })`: the media types it reads and the media types it produces. Selection finds a
+{ from, to, lossless })`: the media types it reads, the media types it produces, and whether
+it DECLARES the conversion a transreption (Def. 8, `lossless: true`) or a projection (Def. 9,
+`lossless: false`, authored by `Description::lossy`). The default is the definition: a
+transreptor that says nothing claims to be one, in Rust, in the JSON contract (a contract
+without the field reads `true`) and in the graph (`ik:lossless`, emitted on every transreptor,
+`true` included, so the claim is stated rather than implied by absence). Selection finds a
 direct edge from → to if one exists, else a two-hop pivot through the canonical hub
 `text/turtle`; only auto-invocable transreptors (every required input is `content` or `as`)
 are selected; identity and unreachable pairs select nothing. Meta rendering rides the same
 selection to reach a non-canonical type.
 
+**Injectivity is a declaration** ([#514](http://localhost:1060/l/default/item/514)), and stays
+one. Core cannot decide from a description whether a function on representations is injective;
+like `requires` before 0.1.49 it carries the claim and plans by it, and conformance can
+round-trip a declared-lossless transreptor where a reverse edge exists. A declaration that is
+wrong is a module defect the planner cannot see — stated on the field, pinned as a declaration.
+
     pin: `describe::tests::transreptor_builder_records_its_conversions` (crates/ikigai-core/src/describe.rs)
+    pin: `describe::tests::a_projection_declares_itself_lossy` (crates/ikigai-core/src/describe.rs)
+    pin: `describe::tests::a_contract_without_the_flag_reads_as_lossless` (crates/ikigai-core/src/describe.rs)
+    pin: `describe::tests::lossy_on_a_plain_endpoint_is_refused_not_ignored` (crates/ikigai-core/src/describe.rs)
+    doctest: `Description::lossy`
+    pin: `lib::tests::renders_a_transreptor` (crates/ikigai-vocab/src/lib.rs)
+    pin: `lib::tests::renders_a_projection_as_a_lossy_transreptor` (crates/ikigai-vocab/src/lib.rs)
     pin: `select::tests::finds_a_direct_hop` (crates/ikigai-core/src/select.rs)
     pin: `select::tests::pivots_via_turtle_when_no_direct_hop` (crates/ikigai-core/src/select.rs)
     pin: `select::tests::none_when_unreachable_or_identity` (crates/ikigai-core/src/select.rs)
@@ -901,27 +918,52 @@ one: a composition of injective functions is injective, and the defining equatio
 Conversely, if the two-hop plan is a transreption then t₁ is injective on its domain and t₂ is
 injective on t₁'s image — so a lossy first edge is never rescued, and a lossy second edge is
 rescued only where the hub representations actually reached happen to be distinguished by it.
-"Two-hop lossless iff both edges are" is the safe reading; the pivot test pins the plan shape,
-not injectivity.
+**"Two-hop lossless iff both edges are" is the reading the planner takes**, per edge: a pivot
+with a lossy first hop under a lossless second is a lossy plan, and so is the converse — refused
+by default, planned with consent, and then each step reports its own declaration. The pivot
+test pins the plan shape; the per-edge test pins the rule; neither pins injectivity (R8.1).
 
     pin: `select::tests::pivots_via_turtle_when_no_direct_hop` (crates/ikigai-core/src/select.rs)
+    pin: `select::tests::a_pivot_is_lossless_iff_both_edges_are` (crates/ikigai-core/src/select.rs)
 
-**Injectivity is a declaration, and today an undeclared one** ([#514](http://localhost:1060/l/default/item/514)).
-`Transreption` carries no lossless flag; nothing in core distinguishes a transreption from a
-projection, so a structural lift (markdown → RDF), an arbitrary XSLT, or a model's output
-registered as a transreptor becomes a silent hop in an `as=` request, and the caller receives a
-projection believing it received the same resource in another form. The pivot doubles the
-exposure. Core cannot enforce injectivity — like `requires` before 0.1.49 it can only carry the
-declaration and let conformance round-trip where a reverse edge exists.
+**R8.3 (lossless-only planning, and consent).** Selection plans through lossless edges only
+under the default `TransreptionPolicy`; every plan of 0.1.76 is unchanged, and each step now
+carries the declaration it planned on. A lossy edge is admitted only by an explicit policy
+(`TransreptionPolicy::allow_lossy`; `lossy=allow` on a `Meta` request; an endpoint's
+`Invocation::select_transreptor_with`), and consent WIDENS the search without reordering it:
+(1) a lossless direct hop, (2) a lossless pivot, then (3) any direct hop, (4) any pivot — so a
+lossless plan is chosen wherever one exists whatever the policy, a lossless two-hop beats a
+lossy one-hop (Thm. 1: a composition of injections conserves information; a projection does
+not), and a plan that crosses a lossy edge says so on the step (`TransreptionStep::lossless`,
+`is_lossless_plan`). An issuer that cannot see the declarations offers nothing under a
+consenting policy rather than a plan it cannot vouch for (the `Issuer` default; fail closed, as
+`select_transreptor_in` does for a chain it cannot select in).
 
-    UNPINNED — a test would register a lossy transreptor and assert `select_transreptor` will not route through it without an explicit opt-in; today it routes
+    pin: `select::tests::every_default_plan_is_lossless_and_says_so` (crates/ikigai-core/src/select.rs)
+    pin: `select::tests::a_lossy_direct_hop_is_not_chosen_by_default_but_is_with_consent_and_reported` (crates/ikigai-core/src/select.rs)
+    pin: `select::tests::consent_widens_the_search_but_a_lossless_plan_still_wins` (crates/ikigai-core/src/select.rs)
+    pin: `select::tests::the_policy_defaults_to_lossless_only` (crates/ikigai-core/src/select.rs)
+    pin: `kernel::tests::an_invocation_plans_through_a_projection_only_with_its_own_consent` (crates/ikigai-core/src/kernel.rs)
 
-**A deviation in strictness.** When no transreptor reaches a requested Meta type, the kernel
-serves the canonical Turtle rather than failing. The paper's "choice of representation space"
-would call that a substitution; ikigai's Meta prefers a description in a space the caller did
-not ask for to no description. Stated so a reader is not surprised.
+**A deviation in strictness, kept — and one route it never takes.** When no transreptor
+reaches a requested Meta type, the kernel serves the canonical Turtle rather than failing. The
+paper's "choice of representation space" would call that a substitution; ikigai's Meta prefers
+a description in a space the caller did not ask for to no description. It is a substitution
+and not a lie: the representation's `repr_type` SAYS `text/turtle`, so a caller that reads the
+type it was handed learns exactly what it got (#21 records the client that did not). Decided
+in 0.1.77 to stay, stated on `transrept_meta`. **A lossy route is not a substitution and is
+not taken**: when the only chain to the requested type crosses a declared projection, Meta
+refuses by default rather than answering a description that lost information under the very
+type asked for — which no reader of `repr_type` could detect — and rather than substituting,
+which would hide that a route exists; the refusal (`Error::Endpoint`, argued on the method)
+names the lossy step and the consent (`lossy=allow`) that admits it. A mistyped consent is
+refused as an argument, never read as the default.
 
     pin: `kernel::tests::meta_falls_back_to_turtle_when_no_transreptor_reaches_the_type` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::meta_refuses_a_lossy_route_by_default_and_names_the_consent` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::meta_crosses_a_lossy_route_with_consent` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::meta_through_a_lossless_route_is_unchanged_beside_a_projection` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_mistyped_consent_is_refused_not_read_as_the_default` (crates/ikigai-core/src/kernel.rs)
 
 ---
 
@@ -935,9 +977,14 @@ item that would discharge it where one exists. The gate counts these; it does no
 - §1 — path cache (#510). Its validity predicate, `urn:kernel:bindings`, exists since 0.1.74;
   its design is `docs/design/path-cache.md`; a trigger named there brings it back.
 - §1 — the arrangement as a resource (`urn:kernel:topology`) (#515).
-- §8 — the lossless flag on `Transreption`; selection through lossy edges (#514).
 
 **Conditional theorems (stated with the precondition explicit):**
+
+- R8.1/R8.3 — a plan is a transreption iff every edge it crosses IS injective, and the
+  planner sees only what each edge DECLARES (`Transreption::lossless`). The declaration is
+  pinned (the `Description::lossy` doctest, the serde default), the planning by it is pinned
+  (R8.3); injectivity itself is not observable by the kernel, and a wrong declaration is a
+  module defect for conformance's round-trip to find where a reverse edge exists.
 
 - R3.2 — the key does not identify the binding behind the canonical name, for a STORED READ
   (#510, #26). By decision since 0.1.74; the derived faces hang from `urn:kernel:bindings`
@@ -964,7 +1011,9 @@ precondition P (hole A of #512) and hole B (R4.5), 0.1.73; R2.2's structural hal
 `compile_fail` doctest, 2026-09-26; R3.2's derived-faces half (#26) and the per-request
 `describe()` at the floor (#22), 0.1.74; R2.3's second qualification (selection over the root)
 and the §7 clock seam, 0.1.75 (R7.8–R7.10); the limiter (#511) — the first absent construct
-to leave the list — and the subtraction half of R2.3's first qualification, 0.1.76.
+to leave the list — and the subtraction half of R2.3's first qualification, 0.1.76; the
+lossless flag and lossless-only selection (#514) — the second absent construct to leave the
+list — with R8.2's two-hop rule and Meta's refusal of a lossy route, 0.1.77 (R8.1, R8.3).
 
 **Not built, by decision:**
 
@@ -1009,6 +1058,14 @@ all three rungs of `now()` be set).
 
 Brian's instruction on the first two rows (2026-09-25): revisit once scope, limiter, depth
 bound, lossless flag and topology are in; re-measure, do not inherit.
+
+Not measured in 0.1.77, and why: the lossless flag moved no planning cost on the default
+path. `select_transreptor` is the one `entries → Meta → describe` walk it was, with one
+`bool` read per candidate and the same first-match scans; a cache hit never plans. The one
+new cost is a SECOND walk in `transrept_meta`, taken only on the branch where the default
+policy found no plan — the branch that used to substitute Turtle — to decide refusal from
+substitution. That branch is a Meta miss on a type no lossless route reaches; it was never on
+a hot path, and the topology row above will cover it when the star is re-measured.
 
 ---
 
@@ -1076,6 +1133,38 @@ so the `/ns` deploy is header-only drift; `ikigai-log` wants one term for `limit
 changed here, on purpose: `ikigai-embedded`'s per-process surfaces (the follow-up that adopts
 `Fallback([Limit("urn:personal:"), root])` is the hub's), and `Kernel::entries()`, which stays
 the raw pattern list.
+
+**0.1.77** carries the lossless flag of [#514](http://localhost:1060/l/default/item/514):
+`Transreption::lossless` (default `true`; `#[non_exhaustive]` on the struct now, while no
+literal exists outside core — the ecosystem was grepped, only the builder is in use — so the
+next field is never a flag day), `Description::lossy`, `Transreption::is_lossless`,
+`TransreptionPolicy` (`lossless`/`allow_lossy`/`allows_lossy`; `#[non_exhaustive]`, built by
+constructor), `TransreptionStep::lossless` (`#[non_exhaustive]` likewise; a step is read, never
+authored, outside core), `is_lossless_plan`, `select_transreptor_with` and
+`select_transreptor_in_with` (free, on `Kernel`, and on `Issuer` as a defaulted method that
+fails closed under a consenting policy), `Invocation::select_transreptor_with`, the constant
+`META_LOSSY_ARG` — all additive. In the vocabulary, one new term, `ik:lossless`
+(`rdf:Property`, domain `ik:Transreptor`, range `xsd:boolean`), emitted on every transreptor
+by the Turtle face, `(lossy)` on the text face, `lossless` in the JSON contract: **a semantic
+vocabulary change**, so the context is regenerated, `owl:versionInfo` moves, and the `/ns`
+deploy after the vocab publish is a real change, not header drift. A property rather than an
+`ik:Projection` class, on three grounds: the JSON face is a boolean field and the context maps
+it to the term by the same name, so the two faces say one thing; `?t ik:lossless false` finds
+every projection in SPARQL without a consumer knowing a default, because the claim is stated on
+every transreptor rather than implied by absence; and a class under `ik:Transreptor` would
+assert of a projection the very thing Definition 9 denies, while a sibling class would take it
+out of the star the planner walks, where — with consent — it belongs. Two changes in what a
+consumer observes without code of its own changing, both deliberate: a Meta `as=` whose only
+route crosses a declared projection is refused (`Error::Endpoint`, naming the step and
+`lossy=allow`) where it used to run the projection silently — and since no module declares
+`.lossy()` until it adopts 0.1.77, nothing is refused today; and every transreptor's Meta
+graph carries one more triple. A patch in the lockstep 0.1.x line on the same argument as
+0.1.73. Decided here, on purpose: Meta's substitution of canonical Turtle when no route exists
+STAYS (the type it hands back says what it is; the alternative breaks the engine's
+`describe <iri> <type>` and the book's transreption chapter, and is a separate decision). Not
+built here: the engine's spelling of the consent (`describe <iri> <type>` has no way to pass
+`lossy=allow` yet), any per-module `.lossy()` declaration (each is a one-line PR in its own
+repo), and conformance's round-trip check.
 
 The gate itself is as the previous revision left it: a dev-only integration test that reads
 this file from the repository, **excluded from the packaged crate**

@@ -113,14 +113,15 @@ pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
     ALIAS_MISS_NOTE, ALIAS_NOTE, BINDINGS_THREAD, DEFAULT_MAX_DEPTH, DENIED_NOTE, DEPTH_NOTE,
-    LIMITED_NOTE, SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE,
+    LIMITED_NOTE, META_LOSSY_ARG, SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE,
 };
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};
 pub use select::{
-    is_auto_invocable, select_action, select_action_in, select_transreptor, select_transreptor_in,
-    ActionMatch, ActionQuery, TransreptionStep, CANONICAL,
+    is_auto_invocable, is_lossless_plan, select_action, select_action_in, select_transreptor,
+    select_transreptor_in, select_transreptor_in_with, select_transreptor_with, ActionMatch,
+    ActionQuery, TransreptionPolicy, TransreptionStep, CANONICAL,
 };
 pub use space::{
     EndpointSpace, Fallback, Limit, Mount, Resolution, Resolved, Rewrite, Scope, Space, SpaceEntry,

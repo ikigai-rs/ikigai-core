@@ -46,7 +46,7 @@
 <https://ikigai-rs.dev/ns#> a owl:Ontology ;
     rdfs:label "ikigai endpoint vocabulary" ;
     rdfs:comment "Self-description vocabulary for ikigai resource-oriented endpoints, and the process vocabulary that makes a plan (a DAG of requests) a resource in the same graph." ;
-    owl:versionInfo "0.1.76" .
+    owl:versionInfo "0.1.77" .
 
 #
 # Classes
@@ -133,6 +133,12 @@ ik:transreptsTo a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "transreptsTo" ;
     rdfs:comment "A media type this transreptor can produce (convert to)." .
+
+ik:lossless a rdf:Property ;
+    rdfs:domain ik:Transreptor ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "lossless" ;
+    rdfs:comment "Whether this transreptor DECLARES its conversion a transreption in the formal sense — an injective function on representations that changes form and loses nothing, so the output represents the same resource (true) — or a projection: a summary, extraction, embedding, classification or arbitrary transform whose output is a different resource that has lost information (false). Emitted on every transreptor, so a graph states the claim rather than implying it by absence; absent, read true. A declaration, not a checked property: the kernel plans through lossless edges only unless the caller consents, and cannot verify injectivity." .
 
 ik:class a rdf:Property ;
     rdfs:range rdfs:Resource ;

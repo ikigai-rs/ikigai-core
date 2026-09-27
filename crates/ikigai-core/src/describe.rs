@@ -280,14 +280,58 @@ impl EndpointKind {
 }
 
 /// The media-type conversions a transreptor supports: it can accept any of `from` and
-/// produce any of `to`. Used both to type the endpoint in RDF (`ik:transreptsFrom`/`To`) and
-/// to select a transreptor for a needed `from → to` conversion.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// produce any of `to`. Used both to type the endpoint in RDF (`ik:transreptsFrom`/`To`,
+/// `ik:lossless`) and to select a transreptor for a needed `from → to` conversion.
+///
+/// Built by [`Description::transreptor`] (and [`Description::lossy`]); the struct is
+/// `#[non_exhaustive]` so a later field is never a flag day for a consumer that
+/// authored it by literal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Transreption {
     /// The media types it can read.
     pub from: Vec<String>,
     /// The media types it can produce.
     pub to: Vec<String>,
+    /// Whether the conversion is a **transreption** in the formal sense — an injective
+    /// function on representations that changes form and loses nothing, so the output
+    /// represents the SAME resource — or a **projection**: a summary, an extraction, an
+    /// embedding, a classification, an arbitrary transform, whose output is a different
+    /// resource that has lost information. **Default `true`**: the definition is the
+    /// default, and a transreptor that says nothing claims to be one. A projection
+    /// declares itself with [`Description::lossy`].
+    ///
+    /// **This is a declaration, not a checked property** — like `requires` before 0.1.49.
+    /// Core cannot decide injectivity from a description; it can only carry the claim and
+    /// plan by it: selection routes through lossless edges only unless the caller
+    /// consents (`TransreptionPolicy`), and every plan reports which steps are lossy.
+    /// Conformance can round-trip a declared-lossless transreptor where a reverse edge
+    /// exists; a declaration that is wrong is a module defect the planner cannot see.
+    #[serde(default = "lossless_default")]
+    pub lossless: bool,
+}
+
+/// The `serde` default for [`Transreption::lossless`]: a contract that predates the
+/// field (or omits it) is read as lossless, exactly as an authored one that says nothing.
+fn lossless_default() -> bool {
+    true
+}
+
+impl Default for Transreption {
+    fn default() -> Self {
+        Transreption {
+            from: Vec::new(),
+            to: Vec::new(),
+            lossless: true,
+        }
+    }
+}
+
+impl Transreption {
+    /// Whether the conversion is declared lossless (see [`lossless`](Self::lossless)).
+    pub fn is_lossless(&self) -> bool {
+        self.lossless
+    }
 }
 
 impl Description {
@@ -381,6 +425,9 @@ impl Description {
 
     /// Mark this endpoint a **transreptor** that converts representations from any of `from`
     /// to any of `to` (media-type strings) — builder. Sets [`EndpointKind::Transreptor`].
+    /// The conversion is declared **lossless** (a transreption in the formal sense: the
+    /// output represents the same resource in another form); a projection follows this
+    /// with [`lossy`](Self::lossy).
     pub fn transreptor(
         mut self,
         from: impl IntoIterator<Item = impl Into<String>>,
@@ -389,7 +436,49 @@ impl Description {
         self.kind = EndpointKind::Transreptor(Transreption {
             from: from.into_iter().map(Into::into).collect(),
             to: to.into_iter().map(Into::into).collect(),
+            lossless: true,
         });
+        self
+    }
+
+    /// Declare the transreption **lossy** — a *projection* (a summary, an extraction, an
+    /// embedding, a classification, an arbitrary transform): its output is a different
+    /// resource that has lost information, not the same resource in another form.
+    /// Builder; follows [`transreptor`](Self::transreptor). Selection will not route
+    /// through this endpoint unless the caller consents, and a plan that does reports
+    /// the step as lossy (see [`Transreption::lossless`]).
+    ///
+    /// The word is the paper's negation: Definition 8 makes a transreption injective,
+    /// and "lossy" is the one-word way to say this edge is not.
+    ///
+    /// # Panics
+    ///
+    /// If the endpoint is not a transreptor — a projection is declared by its
+    /// conversions first (`transreptor(from, to).lossy()`); there is nothing to mark
+    /// lossy on a plain endpoint, and a silent no-op here would leave a projection
+    /// declared lossless, the very defect the flag exists to name.
+    ///
+    /// ```
+    /// use ikigai_core::Description;
+    ///
+    /// let lift = Description::new("summarize")
+    ///     .transreptor(["text/plain"], ["text/x-summary"])
+    ///     .lossy();
+    /// assert!(!lift.transreption().unwrap().is_lossless());
+    ///
+    /// // Saying nothing claims the definition.
+    /// let gzip = Description::new("gzip").transreptor(["text/plain"], ["application/gzip"]);
+    /// assert!(gzip.transreption().unwrap().is_lossless());
+    /// ```
+    pub fn lossy(mut self) -> Self {
+        match &mut self.kind {
+            EndpointKind::Transreptor(t) => t.lossless = false,
+            EndpointKind::Endpoint => panic!(
+                "`Description::lossy` on `{}`, which is not a transreptor: declare the \
+                 conversions first (`.transreptor(from, to).lossy()`)",
+                self.id
+            ),
+        }
         self
     }
 
@@ -541,10 +630,46 @@ mod tests {
         assert_eq!(t.from, vec!["text/turtle", "application/rdf+xml"]);
         assert_eq!(t.to, vec!["text/turtle", "text/html"]);
         assert!(!d.kind.is_endpoint());
-        // The transreptor kind round-trips through serde.
+        // Saying nothing claims the definition: a transreptor is lossless by default.
+        assert!(t.is_lossless());
+        // The transreptor kind round-trips through serde, and the JSON face carries the
+        // declaration explicitly (a client reads a claim, not an absence).
         let json = serde_json::to_string(&d).unwrap();
         assert!(json.contains("transreptor"), "{json}");
+        assert!(json.contains("\"lossless\":true"), "{json}");
         assert_eq!(serde_json::from_str::<Description>(&json).unwrap(), d);
+    }
+
+    #[test]
+    fn a_projection_declares_itself_lossy() {
+        let d = Description::new("lift")
+            .transreptor(["text/markdown"], ["text/turtle"])
+            .lossy();
+        let t = d.transreption().expect("still a transreptor");
+        assert!(!t.is_lossless());
+        assert_eq!(t.from, vec!["text/markdown"]);
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("\"lossless\":false"), "{json}");
+        assert_eq!(serde_json::from_str::<Description>(&json).unwrap(), d);
+    }
+
+    #[test]
+    fn a_contract_without_the_flag_reads_as_lossless() {
+        // A JSON contract from a kernel that predates the field (or a hand-written one
+        // that omits it) is read exactly as an authored declaration that says nothing.
+        let with =
+            serde_json::to_string(&Description::new("rdf").transreptor(["a/b"], ["c/d"])).unwrap();
+        let without = with.replace(",\"lossless\":true", "");
+        assert_ne!(with, without, "the field was present to strip: {with}");
+        let d: Description = serde_json::from_str(&without).unwrap();
+        assert!(d.transreption().unwrap().is_lossless());
+        assert!(Transreption::default().lossless);
+    }
+
+    #[test]
+    #[should_panic(expected = "not a transreptor")]
+    fn lossy_on_a_plain_endpoint_is_refused_not_ignored() {
+        let _ = Description::new("plain").lossy();
     }
 
     #[test]
