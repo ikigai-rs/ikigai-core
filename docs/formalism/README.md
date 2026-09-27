@@ -151,7 +151,11 @@ are combinators over one `resolve` function, not levels of the chain. Consequenc
   carries it as SPARQL; the test runs it as a triple walk over the rendered graph — NO for
   `Fallback([Limit("urn:personal:"), root])`, YES with the limiter removed, and the same
   answer for a limiter injected as a corridor, which is a layer of the `ik:Chain`
-  ([#515](http://localhost:1060/l/default/item/515), the paper's §12.5).
+  ([#515](http://localhost:1060/l/default/item/515), the paper's §12.5). The reduction holds for the FRAGMENT R7.3 states —
+  the combinators whose structure the graph shows in full, with a visible alias table
+  expanded; a closure rewrite behind a wall, an opaque space and a template astride the
+  family are outside it, and the check answers "unknown" for those rather than "no"
+  ([#552](http://localhost:1060/l/default/item/552)).
 
 Pinned by the sub-request half of the shadowing test, by the reborrow test, and by the
 check:
@@ -783,42 +787,187 @@ subject is the chain: it renders ⟨corridors innermost first, root unless sever
 fingerprint as any scoped resolution is (`urn:kernel:cache` names the chain on its row). It is
 the resource face of "what can I see from here" ([#516](http://localhost:1060/l/default/item/516)
 said the manifold had one and the arrangement did not), and the reachability check of §1.1 is
-a query over it. In SPARQL, for a host doctor with a store (the fragment the test walks —
-`Chain`, `Fallback`, `Mount`, `Limit`, `EndpointSpace`; an `ik:OpaqueSpace` on a path is
-"unknown", never "no", and a rewrite is walked through, which over-reports rather than
-under-reports):
+a query over it — **for a fragment of the arrangement, and it says so**
+([#552](http://localhost:1060/l/default/item/552)). Two questions, both over the graph; the check is the pair, and *safe* is
+the first `false` AND the second `false`.
+
+**The first: is a door of the family reachable from the entry with no limiter over it ahead
+of it on the path?** A limiter counts when its family is a prefix of the door's pattern. An
+`ik:Alias` is EXPANDED, because its table is visible: a rule whose canonical is prefix-related
+to the family maps into it; the family's names as that rule admits them are
+`logical ++ family[|canonical|..]` (`urn:other` for an exact rule into the family;
+`urn:a:personal:` for `urn:a:` → `urn:`); if no wall ahead of the alias is a prefix of those,
+the canonical is followed inside the alias's space, with the walls the admitted name passed
+left behind. That is the paper's §12.5 — one added rule opens a path that never passes the
+gatekeeper — and the kernel is RIGHT to resolve it: Def. 7's limiter admits identifiers, the
+wall stands over the NAME, and the name that reached it was the logical one (the limiter
+branch fires on a hit on ⊥ itself, and this hit is on the door). 0.1.78's check called that
+arrangement guarded; it is pinned now as the leak it is. A rule whose every canonical is
+outside the family maps nothing into it, and the names the table passes through unchanged
+meet the wall: that alias is the one mapper behind a wall the check calls safe, because it
+sees the whole table.
+
+**The second: does a reachable path hold something the first question does not evaluate?**
+`true` means the first answer is not to be trusted. Four things: an `ik:OpaqueSpace`
+anywhere (it may hold a door of the family, or be a mapper into it); an `ik:Rewrite` behind a
+wall that touches the family (τ is a closure — behind the wall it may do what the alias above
+does, and the graph cannot show it; above every such wall it can only choose among the doors
+its space has, and is walked through); a template door whose `{` falls inside the family; a
+template family on a limiter whose head touches the family. **Templates are placed by their
+literal head — the text before the first `{` — never evaluated.** A head inside the family is
+a door of it (every expansion is: `urn:personal:doc/{id}`, which the first question's
+`STRSTARTS` already counts); a head that diverges from the family is not (no expansion can be:
+`urn:file:{path}`); a head the family *extends* (`urn:{ns}:inbox` against `urn:personal:`)
+may or may not, and is what the check does not answer. A template family on a limiter can
+never be shown to cover the family, so the first question ignores it and the second reports it
+when its head touches the family. Evaluating templates is a different arc (`select::probe`
+does it for the manifold).
+
+**The fragment, stated.** Answered: `Chain`, `Fallback`, `Mount`, `Limit` with a plain
+family, `EndpointSpace` with exact patterns or templates whose head is inside or outside the
+family, `Alias` expanded, `Rewrite` above every wall that touches the family. Not answered,
+and the second question says so: `Rewrite` behind such a wall, `OpaqueSpace`, a template
+astride the family, a template family on a limiter whose head touches it. `Confine` is walked
+through (it renders only from `Confine::topology()`, never in a chain). One place the fragment
+can under-report: `ik:family` is read as a prefix (`Limit::new`), and `Limit::matching(Exact(i))`
+renders the same literal `i`, so a door that *extends* `i` is read as walled when that limiter
+would not stop it — a kind marker on the family, `ik:ruleKind`'s analogue, would close it and
+is not built.
+
+**Where the SPARQL form is coarser than the walk the test runs** — three places, the first two
+in the direction of a false alarm, the third not: (1) a mount's prefix is not checked against
+the door, nor against an alias's admitted names; the walk checks both. (2) The query's wall is
+per LIST — a limiter in an earlier cell of the same `ik:layers` list as the branch that leads to
+the door — while the kernel's is per ORDER: `Fallback` returns the first hit and a hit on ⊥ is
+a hit, so a limiter met earlier in pre-order on an admitting path ends resolution for a door in
+an outer list too (`Fallback([Fallback([Limit(p), x]), personal])` is limited). The query calls
+that door reachable; the walk follows pre-order, narrows a wall to the mount it sits under,
+keeps a wall met inside a mapper to the mapper's own subtree (the closure or the table may
+rename the family away before it), and does not. (3) A named space stated twice — beside a wall
+and behind it — has one IRI, and a property path has no path identity: `NOT EXISTS` finds the
+guarded occurrence and the query answers `false` for a door the kernel serves; the walk
+answers per path. Fixable without a store extension only as two steps — CONSTRUCT the
+family-relative unguarded-edge relation, then ASK over its closure — because the guard is a
+property of an EDGE (a cell's position after a limiter) and a property path closes over a
+predicate, not a filtered pattern; one ASK cannot keep it.
+
+Both queries were run over the rendered Turtle of every arrangement the tests below pin, in
+an in-memory oxigraph store (the engine behind `urn:sparql:*`), and answer as each test
+states. One SPARQL trap, recorded because it cost a round: the family is bound INSIDE each
+`UNION` branch — a `BIND` ahead of a `UNION` is not in scope for the branches' filters, and an
+unbound variable in a `FILTER` is an error, which an `ASK` reads as `false`.
 
 ```sparql
 PREFIX ik:  <https://ikigai-rs.dev/ns#>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-# Is a door of the family reachable from the entry without passing a limiter over it?
+# 1. Is a door of the family reachable from the entry without passing a limiter over it?
 ASK {
-  BIND("urn:personal:" AS ?family)
-  <urn:ikigai:chain:root> (ik:layers/rdf:rest*/rdf:first | ik:space)* ?leaf .
-  ?leaf a ik:EndpointSpace ; ik:pattern ?door .
-  FILTER(STRSTARTS(?door, ?family))
-  FILTER NOT EXISTS {
-    # a layer list on the path with a covering limiter AHEAD of the layer that leads to the door
-    <urn:ikigai:chain:root> (ik:layers/rdf:rest*/rdf:first | ik:space)* ?list_owner .
-    ?list_owner ik:layers ?head .
-    ?head rdf:rest* ?cell . ?cell rdf:first ?limiter .
-    ?limiter a ik:Limit ; ik:family ?limited .
-    FILTER(STRSTARTS(?family, ?limited))
-    ?cell rdf:rest+ ?later . ?later rdf:first ?branch .
-    ?branch (ik:layers/rdf:rest*/rdf:first | ik:space)* ?leaf .
+  {
+    # A plain door of the family, with no plain limiter over it AHEAD of it on the path.
+    BIND("urn:personal:" AS ?family)
+    <urn:ikigai:chain:root> (ik:layers/rdf:rest*/rdf:first | ik:space)* ?leaf .
+    ?leaf a ik:EndpointSpace ; ik:pattern ?door .
+    FILTER(STRSTARTS(?door, ?family))
+    FILTER NOT EXISTS {
+      <urn:ikigai:chain:root> (ik:layers/rdf:rest*/rdf:first | ik:space)* ?owner .
+      ?owner ik:layers ?head . ?head rdf:rest* ?cell . ?cell rdf:first ?limiter .
+      ?limiter a ik:Limit ; ik:family ?limited .
+      FILTER(!CONTAINS(?limited, "{") && STRSTARTS(?door, ?limited))
+      ?cell rdf:rest+ ?later . ?later rdf:first ?branch .
+      ?branch (ik:layers/rdf:rest*/rdf:first | ik:space)* ?leaf .
+    }
+  } UNION {
+    # An alias rule INTO the family: the family's names as the table admits them pass
+    # every wall ahead of the alias, and the canonical is followed inside it.
+    BIND("urn:personal:" AS ?family)
+    <urn:ikigai:chain:root> (ik:layers/rdf:rest*/rdf:first | ik:space)* ?alias .
+    ?alias a ik:Alias ; ik:rewrites ?rule ; ik:space ?inner .
+    ?rule ik:logical ?logical ; ik:canonical ?canonical .
+    FILTER(STRSTARTS(?canonical, ?family) || STRSTARTS(?family, ?canonical))
+    BIND(IF(STRSTARTS(?canonical, ?family), ?canonical, ?family) AS ?sub)
+    BIND(CONCAT(?logical, SUBSTR(?family, STRLEN(?canonical) + 1)) AS ?admitted)
+    ?inner (ik:layers/rdf:rest*/rdf:first | ik:space)* ?leaf .
+    ?leaf a ik:EndpointSpace ; ik:pattern ?door .
+    FILTER(STRSTARTS(?door, ?sub))
+    FILTER NOT EXISTS {   # a wall ahead of the alias over the admitted names
+      <urn:ikigai:chain:root> (ik:layers/rdf:rest*/rdf:first | ik:space)* ?owner .
+      ?owner ik:layers ?head . ?head rdf:rest* ?cell . ?cell rdf:first ?limiter .
+      ?limiter a ik:Limit ; ik:family ?limited .
+      FILTER(!CONTAINS(?limited, "{") && STRSTARTS(?admitted, ?limited))
+      ?cell rdf:rest+ ?later . ?later rdf:first ?branch .
+      ?branch (ik:layers/rdf:rest*/rdf:first | ik:space)* ?alias .
+    }
+    FILTER NOT EXISTS {   # a wall inside the alias, ahead of the door, over the canonical
+      ?inner (ik:layers/rdf:rest*/rdf:first | ik:space)* ?owner .
+      ?owner ik:layers ?head . ?head rdf:rest* ?cell . ?cell rdf:first ?limiter .
+      ?limiter a ik:Limit ; ik:family ?limited .
+      FILTER(!CONTAINS(?limited, "{") && STRSTARTS(?door, ?limited))
+      ?cell rdf:rest+ ?later . ?later rdf:first ?branch .
+      ?branch (ik:layers/rdf:rest*/rdf:first | ik:space)* ?leaf .
+    }
   }
 }
 ```
 
-`false` for `Fallback([Limit("urn:personal:"), root])`, `true` for `root` alone; for a
-non-empty chain the entry is `urn:ikigai:chain:{fingerprint}`, and a limiter injected as a
-corridor is a cell of the chain's own list, so the same query finds it.
+```sparql
+PREFIX ik:  <https://ikigai-rs.dev/ns#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+# 2. Does a reachable path hold something the first query does not evaluate?
+#    `true` means the first answer is not to be trusted. (The family is bound in each
+#    branch: a BIND ahead of a UNION is not in scope for the branches' filters.)
+ASK {
+  <urn:ikigai:chain:root> (ik:layers/rdf:rest*/rdf:first | ik:space)* ?node .
+  {
+    # An opaque space: it may hold a door of the family, or be a mapper into it.
+    ?node a ik:OpaqueSpace .
+  } UNION {
+    # A closure rewrite behind a wall that touches the family: τ may map an admitted
+    # name into it. Above every such wall it can only choose among visible doors.
+    BIND("urn:personal:" AS ?family)
+    ?node a ik:Rewrite .
+    <urn:ikigai:chain:root> (ik:layers/rdf:rest*/rdf:first | ik:space)* ?owner .
+    ?owner ik:layers ?head . ?head rdf:rest* ?cell . ?cell rdf:first ?limiter .
+    ?limiter a ik:Limit ; ik:family ?limited .
+    FILTER(!CONTAINS(?limited, "{") && (STRSTARTS(?family, ?limited) || STRSTARTS(?limited, ?family)))
+    ?cell rdf:rest+ ?later . ?later rdf:first ?branch .
+    ?branch (ik:layers/rdf:rest*/rdf:first | ik:space)* ?node .
+  } UNION {
+    # A template door whose `{` falls inside the family: `urn:{ns}:inbox` may or may
+    # not expand into it. (A head inside the family is a door of it and the first
+    # query counts it; a head that diverges from the family is not, and is ignored.)
+    BIND("urn:personal:" AS ?family)
+    ?node a ik:EndpointSpace ; ik:pattern ?door .
+    FILTER(CONTAINS(?door, "{") && !STRSTARTS(?door, ?family) && STRSTARTS(?family, STRBEFORE(?door, "{")))
+  } UNION {
+    # A template family on a limiter whose head touches the family: it may wall part
+    # of it, and the first query ignored it.
+    BIND("urn:personal:" AS ?family)
+    ?node a ik:Limit ; ik:family ?limited .
+    FILTER(CONTAINS(?limited, "{") && (STRSTARTS(?family, STRBEFORE(?limited, "{")) || STRSTARTS(STRBEFORE(?limited, "{"), ?family)))
+  }
+}
+```
+
+`false`/`false` for `Fallback([Limit("urn:personal:"), root])` — safe; `true`/`false` for
+`root` alone, and for the alias into the family behind the wall; `false`/`true` for an
+opaque space or a closure rewrite behind it; for a non-empty chain the entry is
+`urn:ikigai:chain:{fingerprint}`, and a limiter injected as a corridor is a cell of the
+chain's own list, so the same queries find it.
 
     pin: `scope::an_injected_corridor_cannot_shadow_urn_kernel_and_a_severed_chain_still_reaches_it` (crates/ikigai-core/tests/scope.rs)
     pin: `alias::the_kernel_namespace_cannot_be_aliased_away` (crates/ikigai-core/tests/alias.rs)
     pin: `alias::tests::the_kernel_namespace_is_not_aliasable` (crates/ikigai-core/src/alias.rs)
     pin: `topology::the_topology_renders_the_chain_and_every_core_combinator_as_iris_with_ordered_layers` (crates/ikigai-core/tests/topology.rs)
     pin: `topology::the_papers_12_5_check_is_a_walk_over_the_topology_no_with_the_limiter_and_yes_without` (crates/ikigai-core/tests/topology.rs)
+    pin: `topology::an_alias_into_the_family_behind_the_wall_resolves_because_the_wall_is_over_the_name_not_the_door` (crates/ikigai-core/tests/topology.rs)
+    pin: `topology::the_check_reports_an_alias_into_the_family_behind_the_wall_by_its_logical_name` (crates/ikigai-core/tests/topology.rs)
+    pin: `topology::a_rewrite_behind_the_wall_is_not_answered` (crates/ikigai-core/tests/topology.rs)
+    pin: `topology::an_alias_behind_the_wall_whose_every_canonical_is_outside_the_family_is_unreachable` (crates/ikigai-core/tests/topology.rs)
+    pin: `topology::an_opaque_space_behind_the_wall_is_not_answered_and_the_second_question_says_so` (crates/ikigai-core/tests/topology.rs)
+    pin: `topology::a_template_door_is_placed_by_its_literal_head_and_answered_only_when_that_is_sound` (crates/ikigai-core/tests/topology.rs)
+    pin: `topology::a_template_family_on_a_limiter_may_wall_the_family_and_is_not_answered` (crates/ikigai-core/tests/topology.rs)
+    pin: `topology::a_named_space_shared_behind_the_wall_and_beside_it_is_answered_per_path` (crates/ikigai-core/tests/topology.rs)
+    pin: `topology::a_limiter_walls_only_what_the_mount_above_it_admits` (crates/ikigai-core/tests/topology.rs)
 
 **R7.4 (the floor runs against whichever corridor answered).** A corridor shadowing an open
 root door with a gated one is gated on its own declaration, and its cached entry is fenced from
@@ -1046,6 +1195,12 @@ item that would discharge it where one exists. The gate counts these; it does no
 - R7.2 — the fingerprint covers the whole chain, not the corridors consulted; the corridor
   that answered is reported since 0.1.78 (`Resolved::answered_by`), the keying on it is not
   built.
+- R7.3 — the gatekeeper check answers for a fragment ([#552](http://localhost:1060/l/default/item/552)): a closure rewrite
+  behind a wall, an opaque space, a template astride the family and a template family that
+  touches it are reported unanswered by the second query, never answered `false`; an
+  `Exact` limiter's family is read as a prefix; the SPARQL form is per list where the kernel
+  is per order, and loses path identity on a shared named space — the walk answers, the
+  query does not.
 - R7.10 — a temporal corridor's door and its clock answer the same instant: the injector's
   claim, pinned as a declaration (the `with_named_at` doctest), not observable by the kernel.
 - R5.1 — hypotheses (i) foreign `Space`s call only what they enclose and (ii) the `Arc` graph
@@ -1264,6 +1419,27 @@ Not built here, on purpose: consulted-corridors keying (§9), a `Remote` node ki
 engine's `topology` command, and `Space::topology` on the overlays outside core
 (`ikigai-throttle`'s governors, `ikigai-embedded`'s guards), each of which today makes the
 tree under it `ik:OpaqueSpace` — one forwarding line each.
+
+**0.1.79** carries the gatekeeper check's fragment ([#552](http://localhost:1060/l/default/item/552)): a document-and-test
+change, nothing in `src/`. The check of R7.3 — the SPARQL a host doctor runs and the walk
+`tests/topology.rs` runs — answers only for what the graph shows in full, and says so. An
+alias's visible table is expanded, so a rule into the family behind the wall is reported as
+the leak it is, by the names the table admits — and the kernel's resolving it is pinned as
+CORRECT, the wall being over the name and the limiter branch firing only on a hit on ⊥. A
+closure rewrite behind a wall, an opaque space, a template door astride the family and a
+template family on a limiter are "not answered", by a second query, so the protocol is two
+answers and safe is `false` AND `false`; templates are placed by their literal head, never
+evaluated; the walk follows the kernel's order (first hit, ⊥ is a hit; a wall narrowed to its
+mount; a wall inside a mapper kept to the mapper) where the query stays per list, and the
+query's loss of path identity on a shared named space is stated. The sentence "a rewrite is
+walked through, which over-reports rather than under-reports" is gone: it was false for a
+mapper behind the wall. Nothing a consumer observes changes; the version moves in lockstep
+so this note and the crate agree. `vocabulary.ttl`'s `owl:versionInfo` moves with the crate;
+nothing semantic changed, so the `/ns` deploy is header-only drift. Not built here, on
+purpose: a kind marker on `ik:family` (an `Exact` limiter is read as a prefix — a vocabulary
+term, the hub's call), template evaluation in the check, the two-step CONSTRUCT form that
+would keep path identity, and the walk inside the crate (it stays a test until a host doctor
+exists, [#67](http://localhost:1060/l/default/item/67)).
 
 The gate itself is as the previous revision left it: a dev-only integration test that reads
 this file from the repository, **excluded from the packaged crate**
