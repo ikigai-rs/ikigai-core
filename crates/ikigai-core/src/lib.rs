@@ -14,7 +14,9 @@
 //!
 //! M1 adds resolution: a [`Request`] is matched by a [`Grammar`] within a
 //! [`Space`] to an [`Endpoint`] that produces a [`Representation`]. Spaces
-//! compose via [`Mount`], [`Fallback`], and [`Rewrite`].
+//! compose via [`Mount`] (union), [`Fallback`] (first hit), [`Rewrite`]
+//! (preimage) and [`Limit`] (difference: a family carved out of a chain, by
+//! structure).
 //!
 //! [`Scope`] is the resolution **chain** a request is resolved in — corridors a
 //! host injects ahead of the root ([`Kernel::issue_in`]), or a chain with the
@@ -111,7 +113,7 @@ pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
     ALIAS_MISS_NOTE, ALIAS_NOTE, BINDINGS_THREAD, DEFAULT_MAX_DEPTH, DENIED_NOTE, DEPTH_NOTE,
-    SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE,
+    LIMITED_NOTE, SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE,
 };
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
@@ -121,6 +123,6 @@ pub use select::{
     ActionMatch, ActionQuery, TransreptionStep, CANONICAL,
 };
 pub use space::{
-    EndpointSpace, Fallback, Mount, Resolution, Resolved, Rewrite, Scope, Space, SpaceEntry,
+    EndpointSpace, Fallback, Limit, Mount, Resolution, Resolved, Rewrite, Scope, Space, SpaceEntry,
 };
 pub use verb::Verb;

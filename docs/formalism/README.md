@@ -25,7 +25,10 @@ for **0.1.75** ([#516](http://localhost:1060/l/default/item/516),
 [#517](http://localhost:1060/l/default/item/517)): the chain reaches selection, the cache probe
 and the pipe (R7.8, R7.9; R2.3's second qualification is discharged), and carries a clock derived
 from the corridor that pins time, with validity kept on the kernel's clock (R7.10); §10 carries
-that read.
+that read. Revised 2026-09-26 for **0.1.76** ([#511](http://localhost:1060/l/default/item/511)):
+the limiter is realised — `Limit`, a hit on a kernel-known ⊥ rather than a third `Resolution`
+outcome — so §1's "Limiter (difference)" row is pinned, R2.3's first qualification gains the
+subtraction, and the register loses its first absent construct.
 **Companions in this repository:** `docs/design/resolution-scope.md` (the chain),
 `docs/design/sub-request-authority.md` (attenuation, and why delegation is not built),
 `docs/design/cache-ejection.md` (what the cache key does not identify),
@@ -104,10 +107,10 @@ tracks it.
 | Mapper (preimage) | Def. 6 | `Rewrite` (a closure τ) and `Alias` (a table of exact and prefix rules, with counters). Both resolve τ(i) **once** in the enclosed space and **report** the rewrite on `Resolved::canonical`, which the kernel adopts before the cache key, the capability floor and the write-cut. **No outward fallback with τ(i)** — §1.2 and §5. | realised, deviation §1.2 | pin: `resolution::rewrite_remaps_target_before_resolution` (crates/ikigai-core/tests/resolution.rs); doctest: `Resolved::canonical`; pin: `alias::an_alias_can_never_launder_authority` (crates/ikigai-core/tests/alias.rs); pin: `alias::every_core_overlay_forwards_a_reported_canonical` (crates/ikigai-core/tests/alias.rs) |
 | Transparent overlay | Def. 5 | the interception family: `Resolution::map_endpoint` decorates the endpoint of an inner resolution and forwards `entries()`, so the overlay's family is exactly the union of what it encloses — the paper's transparent family, by enumeration. Every governor in `ikigai-throttle` is this shape; core's own overlays forward a reported canonical through it. | realised | doctest: `Resolution::map_endpoint`; pin: `space::tests::a_governor_stacks_on_an_already_erased_space` (crates/ikigai-core/src/space.rs) |
 | Opaque overlay | Def. 5 | `MountedRemote` in `ikigai-cli`: declares the remote's published patterns as its own family and hides the rest. Outside this crate. | realised elsewhere | UNPINNED — lives in ikigai-cli (`MountedRemote`), which a test in this crate cannot reach |
-| Limiter (difference) | Def. 7 | **Absent.** `Resolution` is `Hit \| Miss`; a miss always falls through, so no space can carve a family out of a chain. Subtraction exists only by construction site (a smaller root per process). Ledger [#511](http://localhost:1060/l/default/item/511). | absent | UNPINNED — a test would bind `Fallback([Limit("urn:personal:"), S])` with S binding `urn:personal:x`, and assert `Unresolved` for it and its absence from `urn:kernel:actions` |
+| Limiter (difference) | Def. 7 | `Limit::new(prefix)` / `Limit::matching(grammar)` — a door whose endpoint is the distinguished ⊥, exactly as Def. 7 has it: for a name in its family it **hits** a kernel-known endpoint (`Endpoint::is_limiter`, defaulted `false`, so no implementor changed), and the kernel answers `Unresolved` — the same variant, the same text — as for a name bound nowhere, right after canonical adoption and before the floor, the cache and dispatch. `Fallback([Limit("urn:personal:"), S])` is S minus the family; a `Limit` injected as a corridor is the limiter at a position. **Not a third `Resolution` outcome** — nine external match sites would each have been a flag day ([#511](http://localhost:1060/l/default/item/511)). `entries()` is `Some(vec![])` and every `entries → Meta → describe` walk drops a hit on ⊥ (`select::probe`): the manifold subtracts (R2.3). `Meta` on a limited name is unresolved (a trapdoor passes metadata; a limiter is a hole, and describing it would reveal it). A governor cannot decorate ⊥ away. Since 0.1.76. | realised | pin: `limiter::a_limiter_carves_a_family_out_of_the_chain_and_out_of_every_manifold` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::a_limited_name_answers_exactly_as_an_unbound_name_does` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::an_alias_into_a_limited_family_is_limited_under_the_canonical_and_one_out_of_it_resolves` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::a_limiter_injected_as_a_corridor_limits_under_that_scope_only` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::inside_a_confinement_a_limited_name_is_traced_as_limited_not_scope_unresolved` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::a_governor_over_a_limited_family_still_limits_it` (crates/ikigai-core/tests/limiter.rs); pin: `space::tests::a_decorated_limiter_is_still_a_limiter` (crates/ikigai-core/src/space.rs); pin: `space::tests::a_limiter_is_enumerable_and_binds_nothing` (crates/ikigai-core/src/space.rs); pin: `select::tests::a_probe_that_lands_in_a_limited_family_is_subtracted_not_listed` (crates/ikigai-core/src/select.rs); doctest: `Limit` |
 | Trapdoor (severs the chain) | Def. 10 | `Confine` (endpoint-side) and `Invocation::confine`: the inner endpoint's sub-requests resolve in ⟨host corridors…, S⟩ with no root; a root-bound name is `Unresolved`, never `Denied`, and the root endpoint is never entered. Two deviations from Def. 10, argued in §1.3. | realised, deviation §1.3 | doctest: `Confine`; doctest: `Invocation::confine`; pin: `scope::a_confined_sub_request_for_a_root_bound_iri_is_unresolved_and_the_root_endpoint_is_never_entered` (crates/ikigai-core/tests/scope.rs); pin: `scope::an_endpoint_can_only_narrow_its_chain` (crates/ikigai-core/tests/scope.rs); pin: `scope::fan_out_from_a_confined_endpoint_stays_confined` (crates/ikigai-core/tests/scope.rs); pin: `scope::confine_describes_and_names_as_its_inner_endpoint` (crates/ikigai-core/tests/scope.rs) |
 | Gatekeeper | §9.5 | Not a construct. The kernel's **capability floor** is a gatekeeper on every door at once: the scopes a description `requires` for the verb are checked before dispatch and before the cache, and a refusal is recorded on the trace before it is returned. Who is asking is established at the transport (per-identity grants, `ikigai-cli`), outside this crate. This is the paper's *interception*: a decision, not structure (§9.6). | realised as the floor | pin: `kernel::tests::declared_requires_is_kernel_enforced_before_dispatch` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_denied_bound_endpoint_reports_the_refusal` (crates/ikigai-core/src/kernel.rs) |
-| Projection across a boundary (restricted union) | §9.6 | Two halves. The **authority** half is in core: a carried capability is clamped to the ceiling the channel authenticated (`Capability::clamp`). The **surface** half — only declared doors are visible to the far side — is the served kernel's choice of root per process (`ikigai-embedded`), outside this crate. | realised, half here | pin: `capability::tests::clamp_bounds_a_carried_capability_to_the_ceiling` (crates/ikigai-core/src/capability.rs); UNPINNED — the served surface is chosen in ikigai-embedded, which a test in this crate cannot reach |
+| Projection across a boundary (restricted union) | §9.6 | Two halves. The **authority** half is in core: a carried capability is clamped to the ceiling the channel authenticated (`Capability::clamp`). The **surface** half — only declared doors are visible to the far side — is the served kernel's choice of root per process (`ikigai-embedded`), outside this crate; since 0.1.76 it can be structure instead — the one root behind `Fallback([Limit(family), root])` — and the `Limit` doctest shows the two forms side by side. | realised, half here | pin: `capability::tests::clamp_bounds_a_carried_capability_to_the_ceiling` (crates/ikigai-core/src/capability.rs); UNPINNED — the served surface is chosen in ikigai-embedded, which a test in this crate cannot reach |
 | Value corridors | §3 | **Not modelled.** Values travel on the `Request` as `ArgRef`s (inline bytes, a content address, or a by-reference IRI) and are part of the request's identity; they are never doors and can shadow nothing. A by-reference argument naming something outside the chain is `Unresolved` inside it — the trapdoor working. §1.4. | deviation §1.4 | pin: `request::tests::distinct_inputs_have_distinct_identity` (crates/ikigai-core/src/request.rs); UNPINNED — a test would confine an endpoint, hand it `ArgRef::Reference` to a root-bound IRI, and assert `Unresolved` on dereference |
 | Sticky header (who is asking) | §3 | the **capability**: carried into every sub-request, and only ever narrowed (§2). There is no principal on the request; attribution is a tracer concern (`ikigai-log`'s `Principal`). | realised as the capability | pin: `kernel::tests::each_event_records_the_capability_it_ran_under` (crates/ikigai-core/src/kernel.rs) |
 | Continuation vs sub-request | §3 | A mapper's continuation is a nested `resolve` call inside one synchronous resolution, never a new request; every request an endpoint issues is a sub-request through `Invocation`. The two cannot be confused because only one of them exists as a request. | realised | pin: `with_bindings::a_sub_request_through_the_reborrow_reaches_the_kernel` (crates/ikigai-core/tests/with_bindings.rs) |
@@ -217,16 +220,18 @@ value-corridor tail. The behavioural half — a by-reference argument outside th
 
 ### 1.5 What is absent, and the empty identifier
 
-- **Limiter** ([#511](http://localhost:1060/l/default/item/511)), **path cache**
-  ([#510](http://localhost:1060/l/default/item/510)), **topology as a resource**
-  ([#515](http://localhost:1060/l/default/item/515)), **lossless flag**
+- **Path cache** ([#510](http://localhost:1060/l/default/item/510)), **topology as a
+  resource** ([#515](http://localhost:1060/l/default/item/515)), **lossless flag**
   ([#514](http://localhost:1060/l/default/item/514)): each is a row above, each UNPINNED.
   None is a decision against the paper; core grows capabilities incrementally, and a gap
   is not a design until it is written down as one. The **nesting budget**
-  ([#513](http://localhost:1060/l/default/item/513)) left this list in 0.1.73 (R5.3). The path
-  cache's validity predicate (`urn:kernel:bindings`) landed in 0.1.74 and its design is
-  written down (`docs/design/path-cache.md`); the cache itself stays on this list until a
-  trigger named there arrives.
+  ([#513](http://localhost:1060/l/default/item/513)) left this list in 0.1.73 (R5.3); the
+  **limiter** ([#511](http://localhost:1060/l/default/item/511)) left it in 0.1.76, as a hit
+  on a kernel-known ⊥ rather than the third `Resolution` outcome the item first sketched —
+  the same construct, at no consumer's cost. The path cache's validity predicate
+  (`urn:kernel:bindings`) landed in 0.1.74 and its design is written down
+  (`docs/design/path-cache.md`); the cache itself stays on this list until a trigger named
+  there arrives.
 - **ε.** The paper's null identifier resolves entirely from context (§2.3, Cor. 1). An `Iri`
   is absolute, so ε is not an identifier here. The nearest thing is a short identifier bound
   by an injected corridor — `urn:time:now` under a temporal corridor — which is Cor. 2 (richer
@@ -300,10 +305,20 @@ in turn.
 
 Three qualifications, each the difference between the theorem and the code:
 
-1. **Reach by enumeration under-approximates.** A space that cannot enumerate (`Rewrite`, a
-   remote) contributes nothing; `Alias` lists the backing names once, not the logical
-   preimage. The manifold may therefore omit a reachable door; it never offers an unreachable
-   one on this account. Safe direction.
+1. **Reach by enumeration under-approximates — and, since 0.1.76, subtracts.** A space that
+   cannot enumerate (`Rewrite`, a remote) contributes nothing; `Alias` lists the backing names
+   once, not the logical preimage. The manifold may therefore omit a reachable door; it never
+   offers an unreachable one on this account. Safe direction. With a limiter the other
+   direction had to be closed too: `Fallback([Limit(F), S])` still *enumerates* S's patterns
+   inside F (a pattern list cannot decide membership of a template in a grammar's family), so
+   enumeration alone would OVER-approximate — offer a name the kernel refuses. The subtraction
+   happens where reach is computed: every `entries → Meta → describe` walk resolves each
+   pattern through one probe (`select::probe`, used by the catalog, the manifold, describe-by-IRI,
+   selection and validation) and drops a hit on ⊥ as it drops a miss — for an exact row inside
+   the family and for a template row whose probe expansion lands in it. Reach(Γ) is therefore
+   computed by the same resolution the kernel performs, and `Kernel::entries()` — the raw
+   pattern list, names and not content — is the one face that still lists what a limiter
+   carved out.
 2. **Selection is over the chain** (since 0.1.75, [#516](http://localhost:1060/l/default/item/516);
    R7.8). Before it selected over the root, so inside a confinement the manifold could offer
    an action the chain could not resolve — an over-offer, the unsafe direction, one layer up
@@ -318,6 +333,8 @@ Three qualifications, each the difference between the theorem and the code:
     pin: `kernel::tests::a_non_enumerable_root_still_reports_that_it_cannot_say` (crates/ikigai-core/src/kernel.rs)
     pin: `alias::the_catalog_lists_the_backing_name_once` (crates/ikigai-core/tests/alias.rs)
     pin: `temporal_corridor::a_confined_endpoints_manifold_never_lists_a_root_only_action_or_transreptor` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `select::tests::a_probe_that_lands_in_a_limited_family_is_subtracted_not_listed` (crates/ikigai-core/src/select.rs)
+    pin: `limiter::a_limiter_carves_a_family_out_of_the_chain_and_out_of_every_manifold` (crates/ikigai-core/tests/limiter.rs)
 
 **The confused deputy, located.** In the paper's terms the deputy is confused where *effect*
 authority departs from *caller* authority. By R2.2 they never depart: at every hop exactly one
@@ -334,13 +351,21 @@ request-derived grant nobody has decided how to express safely.
 **What the boundary reveals.** The paper's limiter leaves a requester unable to distinguish
 "limited" from "matched by no door anywhere" (§9.6, remark). ikigai's capability floor is an
 interception and reveals what a limiter would not: a bound-but-refused name is `Denied`, an
-unbound one `Unresolved`, so any caller can learn whether a name is bound. Inside a
-confinement the distinction collapses the way the paper wants — a root-bound name is
-`Unresolved`, structurally — which is the reason `Confine` exists.
+unbound one `Unresolved`, so any caller can learn whether a name is bound. The two
+structural bounds reveal nothing: inside a confinement a root-bound name is `Unresolved`,
+which is the reason `Confine` exists, and since 0.1.76 a limited name is `Unresolved`
+anywhere — pinned as text, the error string of a limited name and of an unbound one differ
+only in the name asked for, and the floor is never evaluated for ⊥ (a door behind the limiter
+demanding a scope the caller lacks would otherwise leak a `Denied`). The one face that may know
+is the trace (`LIMITED_NOTE`), the operator's face — and a limited miss is traced where a
+plain miss is not, on the rule this crate already followed for aliased and confined misses:
+trace the miss whose cause the response deliberately hides.
 
     pin: `kernel::tests::unresolved_target_errors` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::declared_requires_is_kernel_enforced_before_dispatch` (crates/ikigai-core/src/kernel.rs)
     pin: `scope::a_confined_sub_request_for_a_root_bound_iri_is_unresolved_and_the_root_endpoint_is_never_entered` (crates/ikigai-core/tests/scope.rs)
+    pin: `limiter::a_limited_name_answers_exactly_as_an_unbound_name_does` (crates/ikigai-core/tests/limiter.rs)
+    pin: `limiter::inside_a_confinement_a_limited_name_is_traced_as_limited_not_scope_unresolved` (crates/ikigai-core/tests/limiter.rs)
 
 ---
 
@@ -907,7 +932,6 @@ item that would discharge it where one exists. The gate counts these; it does no
 
 **Absent constructs (the paper has them, ikigai does not):**
 
-- §1 — limiter: no third resolution outcome (#511).
 - §1 — path cache (#510). Its validity predicate, `urn:kernel:bindings`, exists since 0.1.74;
   its design is `docs/design/path-cache.md`; a trigger named there brings it back.
 - §1 — the arrangement as a resource (`urn:kernel:topology`) (#515).
@@ -939,7 +963,8 @@ item that would discharge it where one exists. The gate counts these; it does no
 precondition P (hole A of #512) and hole B (R4.5), 0.1.73; R2.2's structural half, a
 `compile_fail` doctest, 2026-09-26; R3.2's derived-faces half (#26) and the per-request
 `describe()` at the floor (#22), 0.1.74; R2.3's second qualification (selection over the root)
-and the §7 clock seam, 0.1.75 (R7.8–R7.10).
+and the §7 clock seam, 0.1.75 (R7.8–R7.10); the limiter (#511) — the first absent construct
+to leave the list — and the subtraction half of R2.3's first qualification, 0.1.76.
 
 **Not built, by decision:**
 
@@ -1031,6 +1056,26 @@ the Meta resolution's chain, trace and depth rather than as plain root issues. A
 lockstep 0.1.x line on the same argument as 0.1.73. `vocabulary.ttl`'s `owl:versionInfo` moved
 with the crate; nothing semantic changed, so the `/ns` deploy is header-only drift; `ikigai-log`
 wants one term for `scope-clock`.
+
+**0.1.76** carries the limiter ([#511](http://localhost:1060/l/default/item/511)): `Limit`
+(a `Space`: `new(prefix)`, `matching(grammar)`), one new **defaulted** `Endpoint` method
+(`is_limiter`, `false` unless overridden — no implementor changed), one constant
+(`LIMITED_NOTE`) — all additive — and one new kernel branch. The design decision, made on
+purpose: a limiter is a HIT on a kernel-known ⊥, not a third `Resolution` variant, because
+`Resolution` is matched exhaustively at nine sites outside core and both a new variant and a
+prior `#[non_exhaustive]` would each have been a flag day on the `SpaceEntry` scar;
+`#[non_exhaustive]` stays with [#27](http://localhost:1060/l/default/item/27)'s one-time
+sweep. Two changes in what a consumer observes without code of its own changing, each
+deliberate: `Resolution::map_endpoint` no longer runs the wrapper for a hit on ⊥ and
+`Resolved::with_endpoint` keeps ⊥ (a governor cannot un-limit — only a stack that contains a
+`Limit` sees either), and every self-description walk drops a hit on ⊥ (only a stack with a
+`Limit` has one). A limited miss is traced (`LIMITED_NOTE`) where a plain miss is not — the
+argument is on the constant. A patch in the lockstep 0.1.x line on the same argument as
+0.1.73. `vocabulary.ttl`'s `owl:versionInfo` moved with the crate; nothing semantic changed,
+so the `/ns` deploy is header-only drift; `ikigai-log` wants one term for `limited`. Not
+changed here, on purpose: `ikigai-embedded`'s per-process surfaces (the follow-up that adopts
+`Fallback([Limit("urn:personal:"), root])` is the hub's), and `Kernel::entries()`, which stays
+the raw pattern list.
 
 The gate itself is as the previous revision left it: a dev-only integration test that reads
 this file from the repository, **excluded from the packaged crate**

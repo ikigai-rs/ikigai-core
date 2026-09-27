@@ -1266,6 +1266,23 @@ pub trait Endpoint: Send + Sync {
     fn describe(&self) -> Description {
         Description::new(self.name())
     }
+
+    /// Whether this endpoint is the distinguished ⊥ a [`Limit`](crate::Limit)
+    /// resolves to. `false` for every endpoint that does work — the default, and
+    /// the only answer an implementor outside core should ever give.
+    ///
+    /// The kernel asks this of every resolved endpoint, right after resolution
+    /// and before the capability floor, the cache and dispatch: a `true` makes
+    /// the request [`Unresolved`](crate::Error::Unresolved), byte-identical to a
+    /// name bound nowhere, and nothing further happens. Every `entries → Meta →
+    /// describe` walk drops a hit on ⊥, so a limited name is offered by no
+    /// manifold. Defaulted so that adding it cost no implementor a line: a
+    /// limiter is a hit on a known endpoint, not a third
+    /// [`Resolution`](crate::Resolution) outcome, precisely so that nobody's
+    /// `match` had to change.
+    fn is_limiter(&self) -> bool {
+        false
+    }
 }
 
 /// The boxed invocation function behind a [`FnEndpoint`].

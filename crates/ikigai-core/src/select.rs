@@ -27,7 +27,7 @@ use crate::describe::{Description, InputSource};
 use crate::grammar::{Bindings, UriTemplate};
 use crate::iri::Iri;
 use crate::request::Request;
-use crate::space::{Resolution, Scope, Space, SpaceEntry};
+use crate::space::{Resolution, Resolved, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
 
 /// The canonical RDF media type the transreptor graph hubs on — the pivot for two-hop
@@ -115,9 +115,7 @@ fn collect(root: &dyn Space) -> Vec<Candidate> {
         let Ok(iri) = Iri::parse(&entry.pattern) else {
             continue;
         };
-        if let Resolution::Hit(resolved) =
-            root.resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
-        {
+        if let Some(resolved) = probe(root, iri) {
             let description = resolved.endpoint.describe();
             if let Some(t) = description.transreption() {
                 if is_auto_invocable(&description) {
@@ -147,6 +145,23 @@ pub fn select_transreptor_in(
 /// `describe()` does not depend on bindings, and [`describe_entry`]'s identity guard
 /// catches the case where the probe IRI resolves elsewhere.
 const PROBE: &str = "probe";
+
+/// **The one resolver every `entries → Meta → describe` walk uses**, and where the
+/// reachability algebra's subtraction lands: `Meta`-resolve `iri` in the empty chain
+/// and hand back the resolution — unless it is a hit on ⊥
+/// ([`Endpoint::is_limiter`](crate::Endpoint::is_limiter)), which is `None` exactly
+/// as a miss is. A [`Limit`](crate::Limit) ahead of a member carves a family out of
+/// what resolution reaches; enumeration cannot see that (a pattern list cannot decide
+/// membership of a template in a grammar's family), so the walks decide it here, per
+/// name, by the same resolution the kernel would perform. Without this the catalog
+/// would describe a hole and the manifold would offer a name the kernel refuses —
+/// the over-offer R2.3 forbids.
+pub(crate) fn probe(space: &dyn Space, iri: Iri) -> Option<Resolved> {
+    match space.resolve(&Request::new(Verb::Meta, iri), &Scope::empty()) {
+        Resolution::Hit(resolved) if !resolved.endpoint.is_limiter() => Some(resolved),
+        _ => None,
+    }
+}
 
 /// A space entry's self-description, with how its pattern names the endpoint: `None`
 /// for an exact, directly resolvable IRI; `Some(vars)` for a URI-template pattern
@@ -182,11 +197,7 @@ pub(crate) struct EntryDescription {
 /// while resolving correctly through the REPL.
 pub(crate) fn describe_entry(root: &dyn Space, entry: &SpaceEntry) -> Option<EntryDescription> {
     if let Ok(iri) = Iri::parse(&entry.pattern) {
-        let Resolution::Hit(resolved) =
-            root.resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
-        else {
-            return None;
-        };
+        let resolved = probe(root, iri)?;
         return Some(EntryDescription {
             description: resolved.endpoint.describe(),
             template_vars: None,
@@ -201,11 +212,10 @@ pub(crate) fn describe_entry(root: &dyn Space, entry: &SpaceEntry) -> Option<Ent
     for var in &vars {
         bindings.insert(var.clone(), PROBE);
     }
-    let probe = Iri::parse(template.expand(&bindings)?).ok()?;
-    let Resolution::Hit(resolved) = root.resolve(&Request::new(Verb::Meta, probe), &Scope::empty())
-    else {
-        return None;
-    };
+    let expanded = Iri::parse(template.expand(&bindings)?).ok()?;
+    // A probe expansion that lands in a limited family hits ⊥ and is dropped here,
+    // ahead of the identity guard below — the row is not listed, not misattributed.
+    let resolved = probe(root, expanded)?;
     let description = resolved.endpoint.describe();
     if resolved.endpoint.name() != entry.endpoint && description.id != entry.endpoint {
         return None;
@@ -657,6 +667,64 @@ mod tests {
         );
         // The exact binding itself is still offered normally.
         assert!(matches.iter().any(|m| m.endpoint == "urn:t:probe:x"));
+    }
+
+    #[test]
+    fn a_probe_that_lands_in_a_limited_family_is_subtracted_not_listed() {
+        // Reach by enumeration must not OVER-approximate under a limiter: the raw
+        // pattern list still carries every later member's rows, and it is the probe
+        // — the same resolution the kernel performs — that subtracts the family.
+        // Two shapes: an exact row inside the family, and a template row whose
+        // probe expansion (`urn:t:probe:secret`) lands inside it.
+        use crate::space::{Fallback, Limit};
+        let public = FnEndpoint::new("public", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(Description::new("public").verb(Verb::Source));
+        let s = Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:t:public"), public)
+                .bind(Exact::new("urn:t:probe:secret"), template_file_endpoint())
+                .bind(
+                    UriTemplate::parse("urn:t:{v}:secret").unwrap(),
+                    template_file_endpoint(),
+                ),
+        );
+        let limited: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+            Arc::new(Limit::matching(
+                UriTemplate::parse("urn:t:{v}:secret").unwrap(),
+            )),
+            s,
+        ]));
+
+        // Enumeration lists all three: it is a list of what is bound.
+        let patterns: Vec<String> = limited
+            .entries()
+            .expect("enumerable")
+            .into_iter()
+            .map(|e| e.pattern)
+            .collect();
+        assert_eq!(
+            patterns,
+            ["urn:t:public", "urn:t:probe:secret", "urn:t:{v}:secret"]
+        );
+        // The walk subtracts the family — both rows — and keeps the rest.
+        let offered: Vec<String> = select_actions(limited.as_ref(), &ActionQuery::default())
+            .into_iter()
+            .map(|m| m.endpoint)
+            .collect();
+        assert_eq!(
+            offered,
+            ["urn:t:public"],
+            "a limited name reached the manifold"
+        );
+        // And the shared step says so for each row directly.
+        for pattern in ["urn:t:probe:secret", "urn:t:{v}:secret"] {
+            assert!(
+                describe_entry(limited.as_ref(), &SpaceEntry::new(pattern, "file")).is_none(),
+                "`{pattern}` described a hole"
+            );
+        }
     }
 
     // --- template rows behind a MOUNT ---
