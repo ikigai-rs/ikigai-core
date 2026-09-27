@@ -40,6 +40,22 @@ pub enum Error {
     /// A dependency or transport is unavailable (down, connection refused,
     /// unreachable). **Transient**, like [`Timeout`](Error::Timeout).
     Unavailable(String),
+    /// A sub-request was refused because it would nest deeper than the kernel's
+    /// budget (`Kernel::with_max_depth`, default 64) — the typed answer to an
+    /// endpoint that issues its own IRI or a transclusion cycle, which used to
+    /// recurse until the stack died. **Permanent**: re-issuing the same request
+    /// takes the same path. `depth` is the nesting depth the refused request would
+    /// have run at (a host's own request is 0; each sub-request is one deeper);
+    /// `target` is the canonical name it asked for. Never cached: errors never
+    /// reach the representation store, and a composite that swallows this error
+    /// and returns a cacheable fallback is forced uncacheable (see
+    /// `Invocation::issue` on failed sub-requests).
+    DepthExceeded {
+        /// The depth the refused sub-request would have run at.
+        depth: u32,
+        /// The canonical target it asked for.
+        target: Iri,
+    },
 }
 
 impl Error {
@@ -68,6 +84,10 @@ impl fmt::Display for Error {
             Error::NotFound(msg) => write!(f, "not found: {msg}"),
             Error::Timeout(msg) => write!(f, "timeout: {msg}"),
             Error::Unavailable(msg) => write!(f, "unavailable: {msg}"),
+            Error::DepthExceeded { depth, target } => write!(
+                f,
+                "nesting budget exceeded: sub-request for {target} would run at depth {depth}"
+            ),
         }
     }
 }
@@ -88,5 +108,11 @@ mod tests {
         assert!(!Error::Endpoint("boom".into()).is_transient());
         assert!(!Error::MissingArgument("in".into()).is_transient());
         assert!(!Error::Unresolved(Iri::parse("urn:x").unwrap()).is_transient());
+        // A depth refusal is permanent too: the same request takes the same path.
+        assert!(!Error::DepthExceeded {
+            depth: 65,
+            target: Iri::parse("urn:x").unwrap()
+        }
+        .is_transient());
     }
 }
