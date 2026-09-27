@@ -7028,6 +7028,87 @@ mod tests {
     }
 
     #[test]
+    fn a_conflict_is_never_stored_and_a_change_of_state_clears_it() {
+        // A read that refuses while its state says no, and answers — cacheably — once
+        // the state moves. The refusal must not be stored: the second request runs the
+        // endpoint again (and is refused again, permanently, against the same state),
+        // and the first request after the state changes sees the change.
+        let runs = Arc::new(AtomicU32::new(0));
+        let open = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = {
+            let (runs, open) = (Arc::clone(&runs), Arc::clone(&open));
+            FnEndpoint::new("gate", move |_cx: &Invocation<'_>| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                if open.load(Ordering::SeqCst) {
+                    Ok(
+                        Representation::new(ReprType::new("text/plain"), b"open".to_vec())
+                            .cacheable(),
+                    )
+                } else {
+                    Err(Error::Conflict("the gate is shut".to_string()))
+                }
+            })
+        };
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:test:gate"), gate),
+        ));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:test:gate"));
+        for _ in 0..2 {
+            let err = block_on(kernel.issue(req(), &cap)).unwrap_err();
+            assert!(matches!(err, Error::Conflict(_)), "got {err:?}");
+            assert!(!err.is_transient());
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "a refusal is re-invoked");
+        assert!(!kernel.is_cached(&req(), &cap));
+        assert_eq!(kernel.cache_len(), 0);
+
+        open.store(true, Ordering::SeqCst);
+        assert_eq!(block_on(kernel.issue(req(), &cap)).unwrap().bytes, b"open");
+        assert_eq!(runs.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_composite_built_on_a_conflict_is_not_cached() {
+        // R4.5 for the new variant: the state that refused is whatever the leaf
+        // consulted, not the requested name, so there is no thread to hang from and
+        // a fallback built on the refusal is recomputed every read.
+        let runs = Arc::new(AtomicU32::new(0));
+        let refusing = FnEndpoint::new("refusing", |_cx: &Invocation<'_>| {
+            Err(Error::Conflict("not in a state to answer".to_string()))
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:data:refusing"), refusing)
+                .bind(
+                    Exact::new("urn:test:fallback"),
+                    fallback_over(
+                        "urn:data:refusing",
+                        |e| matches!(e, Error::Conflict(_)),
+                        Arc::clone(&runs),
+                    ),
+                ),
+        ));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        assert_eq!(
+            block_on(kernel.issue(req(), &cap)).unwrap().bytes,
+            b"fallback"
+        );
+        assert_eq!(
+            block_on(kernel.issue(req(), &cap)).unwrap().bytes,
+            b"fallback"
+        );
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "a result built on a conflict is recomputed"
+        );
+        assert!(!kernel.is_cached(&req(), &cap));
+        assert_eq!(kernel.cache_len(), 0);
+    }
+
+    #[test]
     fn fan_out_records_failed_branches_by_the_same_rules() {
         // Two composites over a concurrent fan-out (a real spawner, so the spawned
         // path is the one exercised): one keeps a NotFound branch and hangs from

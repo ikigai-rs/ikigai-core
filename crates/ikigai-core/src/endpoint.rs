@@ -395,10 +395,15 @@ impl Recorded {
     /// - [`Error::Denied`]: [`Expiry::Always`]. A grant change has no thread, so a
     ///   result built on a refusal must not be cached at all.
     /// - Every other error (`Endpoint`, `Timeout`, `Unavailable`, `DepthExceeded`,
-    ///   a bad argument): `Always` as well, conservatively — the kernel cannot name
-    ///   what would make the failure go away, and not caching is never wrong. For
-    ///   `DepthExceeded` this is the paper's B.7 obligation: a refusal at the bound
-    ///   is never served to a shallower request, even wrapped in a fallback.
+    ///   `Conflict`, a bad argument): `Always` as well, conservatively — the kernel
+    ///   cannot name what would make the failure go away, and not caching is never
+    ///   wrong. For `DepthExceeded` this is the paper's B.7 obligation: a refusal at
+    ///   the bound is never served to a shallower request, even wrapped in a fallback.
+    ///   For [`Error::Conflict`] a thread would look tempting — a change of state is
+    ///   what clears it — but the state that refused is whatever the endpoint
+    ///   consulted, not the name that was requested (a move conflicts on the board's
+    ///   cells, not on the move's own IRI), so a thread on `requested` is one no write
+    ///   would ever cut.
     fn record(&self, requested: &Iri, result: &Result<Representation>) {
         match result {
             Ok(representation) => {
