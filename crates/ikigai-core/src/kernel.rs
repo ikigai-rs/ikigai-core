@@ -274,6 +274,36 @@ pub const SCOPE_NOTE: &str = "scope";
 /// chain record no event, unchanged.
 pub const SCOPE_MISS_NOTE: &str = "scope-unresolved";
 
+/// The [`TraceEvent::notes`] key marking that a request resolved onto a
+/// **limiter** ([`Limit`](crate::Limit)) — paired with the (canonical) target the
+/// limiter admitted, e.g. `("limited", "urn:personal:calendar")`. Public so an
+/// observer can match the key without re-spelling the literal.
+///
+/// The caller's answer is [`Unresolved`](crate::Error::Unresolved), byte-identical
+/// to a name bound nowhere — that indistinguishability is the construct's whole
+/// point (a boundary that reveals nothing). The trace is the one place the fact can
+/// show, and it is the operator's face: whoever reads the trace is whoever placed
+/// the limiter, so the note reveals nothing to anyone it was hidden from. Like a
+/// denial, the event names something that never RAN: `started`/`ended` are `None`,
+/// `cache_hit` is `false`; the alias hop and the chain ride along.
+///
+/// **Why a limited miss is traced when a plain miss is not.** The rule this crate
+/// already follows is not "trace every miss" but *trace a miss whose cause the
+/// response deliberately hides*: an aliased miss records ([`ALIAS_MISS_NOTE`] —
+/// the rewrite is the part the caller cannot see), a miss inside a non-empty chain
+/// records ([`SCOPE_MISS_NOTE`] — the name may well be bound in the root), and a
+/// plain miss in the empty chain records nothing, because there is nothing hidden:
+/// the caller asked for a name nobody binds and the error says so. A limited miss
+/// has a hidden half — the name may be bound just behind the limiter — so it falls
+/// on the traced side of that line. Tracing plain misses "for symmetry" would
+/// instead change what every existing tracer sees for every typo, a change in what
+/// a consumer observes with no code of its own changing; the line stays where it
+/// was. Inside a confinement a limited name carries this note, NOT
+/// [`SCOPE_MISS_NOTE`]: the chain *has* a door for it and the door is ⊥, which is a
+/// different fact from the chain having no door at all, and the operator debugging
+/// "why is this unresolved" wants to know which.
+pub const LIMITED_NOTE: &str = "limited";
+
 /// The [`TraceEvent::notes`] key under which the kernel reports the **chain's
 /// clock** — the instant a temporal corridor's derived clock
 /// ([`Scope::with_named_at`]) read as the event was recorded, in milliseconds since
@@ -800,13 +830,10 @@ impl Kernel {
     /// contracts without re-parsing Turtle. The companion to [`select_actions`](Self::select_actions):
     /// list the allowed actions, then `describe` each endpoint for its schema.
     pub fn describe(&self, iri: &Iri) -> Option<Description> {
-        match self
-            .described()
-            .resolve(&Request::new(Verb::Meta, iri.clone()), &Scope::empty())
-        {
-            Resolution::Hit(resolved) => Some(resolved.endpoint.describe()),
-            _ => None,
-        }
+        // Through the shared probe, so a limited name is `None` here as it is
+        // unresolved on the issue path: describing a hole would reveal it.
+        crate::select::probe(&self.described(), iri.clone())
+            .map(|resolved| resolved.endpoint.describe())
     }
 
     /// Find a bound endpoint's description by its `Description::id` (the catalog
@@ -1367,6 +1394,45 @@ impl Kernel {
         });
     }
 
+    /// Record a resolution that landed on a LIMITER: the request is about to be
+    /// answered `Unresolved` exactly as an unbound name would be, so — like a
+    /// confined miss — the trace is the only place the fact can show. The
+    /// [`trace_denial`](Self::trace_denial) shape: nothing ran, `started`/`ended`
+    /// stay `None`, `cache_hit` is `false`; the alias hop and the chain ride along.
+    /// See [`LIMITED_NOTE`] for why this records when a plain miss does not.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_limited(
+        &self,
+        trace: &Option<TraceScope>,
+        request: &Request,
+        capability: &Capability,
+        span: Option<u64>,
+        parent: Option<u64>,
+        alias: Option<&AliasHop>,
+        scope: &Scope,
+    ) {
+        let Some(trace_scope) = trace else {
+            return;
+        };
+        let mut notes = vec![(
+            LIMITED_NOTE.to_string(),
+            request.target.as_str().to_string(),
+        )];
+        notes.extend(alias_notes(alias));
+        notes.extend(scope_notes(scope));
+        trace_scope.record(TraceEvent {
+            target: request.target.as_str().to_string(),
+            thread: thread_label(),
+            started: None,
+            ended: None,
+            cache_hit: false,
+            span: span.unwrap_or(0),
+            parent,
+            capability: capability.scopes().map(|s| s.iter().cloned().collect()),
+            notes,
+        });
+    }
+
     /// The denial message for an unmet capability floor. When the target arrived
     /// through a rewrite it names the hop, and — if the caller's own grants mention
     /// a namespace this table rewrites — says plainly that the grant looks
@@ -1762,6 +1828,23 @@ impl Kernel {
             }
         }
         let alias = alias.as_ref();
+
+        // ★ THE LIMITER. A hit on ⊥ (`Endpoint::is_limiter`) is the paper's
+        // Definition 7: the identifier is admitted by a door whose endpoint is the
+        // distinguished bottom, so it is UNRESOLVED — resolution neither serves it
+        // nor continues outward — and the caller gets the SAME error, the same
+        // text, as a name bound nowhere (§9.6's remark: a limiter leaves the
+        // requester unable to tell "limited" from "no door anywhere"). Placed
+        // after canonical adoption so an aliased name that lands on a limiter is
+        // limited under its canonical, and before everything that would reveal or
+        // remember a door: no request id is needed, the capability floor never
+        // sees ⊥ (it declares nothing — and a `Denied` would reveal a binding),
+        // nothing is looked up or stored, and `Meta` never reaches its arm
+        // (describing a hole would reveal it). Only the trace may know.
+        if resolved.endpoint.is_limiter() {
+            self.trace_limited(&trace, &request, capability, span, parent, alias, &scope);
+            return Err(Error::Unresolved(request.target.clone()));
+        }
 
         // Identity is settled: the id keys the representation cache, and it is
         // derived from the target AFTER every rewrite has been accounted for.
@@ -2323,9 +2406,10 @@ impl Kernel {
                         templates.push(entry);
                         continue;
                     };
-                    if let Resolution::Hit(resolved) =
-                        space.resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
-                    {
+                    // Through the shared probe: a hit on ⊥ is dropped, so a name a
+                    // limiter carved out is listed by no catalog (the subtraction
+                    // of the reachability algebra, at the face that computes reach).
+                    if let Some(resolved) = crate::select::probe(&space, iri) {
                         let description = resolved.endpoint.describe();
                         rendered_ids.insert(description.id.clone());
                         if let Ok(repr) = renderer.render(&description, &turtle) {
@@ -2499,10 +2583,9 @@ impl Kernel {
                         let iri = Iri::parse(endpoint).map_err(|e| {
                             Error::Endpoint(format!("validate: bad endpoint IRI: {e}"))
                         })?;
-                        let Resolution::Hit(resolved) = self
-                            .root
-                            .resolve(&Request::new(Verb::Meta, iri), &Scope::empty())
-                        else {
+                        // Through the shared probe: a limited name pre-flights as
+                        // unresolved, as it would resolve.
+                        let Some(resolved) = crate::select::probe(&self.root, iri) else {
                             return Err(Error::Unresolved(Iri::parse(endpoint).expect("parsed")));
                         };
                         let verb_name = kernel_arg(request, "verb")

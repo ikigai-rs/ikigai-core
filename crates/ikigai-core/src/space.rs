@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::endpoint::Endpoint;
+use crate::endpoint::{Endpoint, Invocation};
+use crate::error::{Error, Result};
 use crate::grammar::{Bindings, Grammar};
 use crate::iri::Iri;
 use crate::kernel::Clock;
-use crate::repr::Time;
+use crate::repr::{Representation, Time};
 use crate::request::Request;
 
 /// The resolution chain a request is resolved in: the corridors a host injected
@@ -518,6 +519,13 @@ impl Resolution {
         wrap: impl FnOnce(Arc<dyn Endpoint>) -> Arc<dyn Endpoint>,
     ) -> Resolution {
         match self {
+            // A hit on ⊥ is forwarded untouched, and `wrap` never runs: a governor
+            // decorates what will be INVOKED, and a limiter is never invoked. Were
+            // the wrapper built, its own `is_limiter()` — defaulted `false` on a
+            // type that has never heard of limiters — would turn the hole back
+            // into a door, and every governor in the ecosystem would un-limit
+            // whatever it fronted. See [`Limit`].
+            Resolution::Hit(hit) if hit.endpoint.is_limiter() => Resolution::Hit(hit),
             Resolution::Hit(hit) => {
                 let endpoint = wrap(Arc::clone(&hit.endpoint));
                 Resolution::Hit(hit.with_endpoint(endpoint))
@@ -677,8 +685,18 @@ impl Resolved {
     /// Substitute the endpoint, keeping the bindings and the reported canonical
     /// (builder). The shape a decorating overlay wants: wrapping the endpoint is
     /// not a new resolution, so it must not lose what the inner one reported.
+    ///
+    /// **⊥ is never substituted.** A resolution onto a limiter
+    /// ([`Endpoint::is_limiter`]) keeps its endpoint whatever is offered: a
+    /// decorated limiter is still a limiter, because the alternative — a wrapper
+    /// whose defaulted `is_limiter()` says `false` — would let any overlay
+    /// un-limit a family by wrapping it, which is the one thing a structural bound
+    /// must not yield to. The way to make a limited family resolvable again is to
+    /// bind it AHEAD of the limiter, not to decorate the hole. See [`Limit`].
     pub fn with_endpoint(mut self, endpoint: Arc<dyn Endpoint>) -> Self {
-        self.endpoint = endpoint;
+        if !self.endpoint.is_limiter() {
+            self.endpoint = endpoint;
+        }
         self
     }
 }
@@ -886,6 +904,182 @@ impl Space for Fallback {
     }
 }
 
+/// The family a [`Limit`] admits: a literal prefix (the shape [`Mount`] takes) or
+/// any [`Grammar`] (the shape a binding takes).
+enum Family {
+    Prefix(String),
+    Grammar(Box<dyn Grammar>),
+}
+
+/// **A limiter: carve a family of identifiers OUT of a chain, by structure.**
+/// The paper's Definition 7 — a door whose endpoint is the distinguished ⊥ — and
+/// §9.6's *difference* in the algebra of reachability (import is union, mapper is
+/// preimage, limiter is difference).
+///
+/// For a target in its family a `Limit` answers a **hit** on a kernel-known
+/// endpoint ([`Endpoint::is_limiter`]); for anything else it misses. So placed
+/// ahead of a member in a [`Fallback`] it stops resolution for the family before
+/// that member is consulted — `Fallback([Limit("urn:personal:"), S])` is *S minus
+/// `urn:personal:*`* — and the kernel answers exactly what it answers for a name
+/// bound nowhere: [`Error::Unresolved`](crate::Error::Unresolved), the same
+/// variant, the same text. Not a denial: a denial is a decision that reveals a
+/// binding exists (§9.6's remark on what a boundary reveals); a limited name has
+/// nowhere to go. Nothing is stored, no capability floor is evaluated, `Meta` on
+/// the name is unresolved too (describing a hole would reveal it), and the cache
+/// probe answers `false`. The trace alone may know ([`LIMITED_NOTE`](crate::LIMITED_NOTE)).
+///
+/// # Enumeration subtracts
+///
+/// A limiter [`entries`](Space::entries) as `Some(vec![])` — enumerable, and
+/// binding nothing a caller may reach. A later member's pattern inside the family
+/// still appears in the raw concatenation of [`Fallback::entries`] (a list of
+/// PATTERNS, which cannot decide membership of a template in a grammar's family),
+/// but every `entries → Meta → describe` walk — `urn:kernel:catalog`,
+/// `urn:kernel:actions`, [`Kernel::describe`](crate::Kernel::describe),
+/// selection, validation — probes each pattern through resolution and **drops** a
+/// hit on ⊥, so the manifold never offers a limited name. That is the reachability
+/// algebra's subtraction landing where reach is computed.
+///
+/// # A limiter is not decorated away
+///
+/// [`Resolution::map_endpoint`] forwards a hit on ⊥ without running the wrapper,
+/// and [`Resolved::with_endpoint`] keeps ⊥ whatever it is offered: a governor
+/// stacked over a limited family still limits it. The way to make the family
+/// reachable again is structural — bind it *ahead* of the limiter.
+///
+/// # At a position
+///
+/// A `Limit` is a [`Space`], so it is also a **corridor**: injected with
+/// [`Scope::with_named`] it limits the family for that request and its
+/// sub-requests and for nothing else — the paper's "limiter at a position", with
+/// no new mechanism. Inside a confinement whose space is `Fallback([Limit(..), S])`
+/// a limited name is unresolved, and the trace says *limited*, not
+/// *scope-unresolved*: the chain **has** a door for it, and the door is ⊥.
+///
+/// # Structure instead of a construction site
+///
+/// Before this the only way to keep `urn:personal:*` off a served surface was to
+/// build a different root per process (`ikigai-embedded`'s `base_space` /
+/// `served_space` / `local_space`, chosen by grant). With a limiter the host
+/// serves its ONE space with the family carved out, and the same space object is
+/// used everywhere:
+///
+/// ```
+/// use std::sync::Arc;
+/// use futures::executor::block_on;
+/// use ikigai_core::{
+///     Capability, EndpointSpace, Error, Exact, Fallback, FnEndpoint, Iri, Kernel, Limit,
+///     ReprType, Representation, Request, Space, Verb,
+/// };
+///
+/// fn text(s: &str) -> Representation {
+///     Representation::new(ReprType::new("text/plain"), s.as_bytes().to_vec())
+/// }
+/// // ONE space: a public door and a personal one.
+/// let root: Arc<dyn Space> = Arc::new(
+///     EndpointSpace::new()
+///         .bind(Exact::new("urn:public:hello"), FnEndpoint::new("hello", |_| Ok(text("hi"))))
+///         .bind(Exact::new("urn:personal:calendar"), FnEndpoint::new("cal", |_| Ok(text("…")))),
+/// );
+/// let cap = Capability::root();
+/// let get = |name: &str| Request::new(Verb::Source, Iri::parse(name).unwrap());
+///
+/// // The construction-site form: a smaller root per process — TWO spaces to keep
+/// // in step. (What `ikigai-embedded` does today.)
+/// let local = Kernel::new(Arc::clone(&root));
+/// assert!(block_on(local.issue(get("urn:personal:calendar"), &cap)).is_ok());
+///
+/// // The structural form: the SAME root, served behind a limiter.
+/// let served = Kernel::new(Arc::new(Fallback::new(vec![
+///     Arc::new(Limit::new("urn:personal:")),
+///     Arc::clone(&root),
+/// ])));
+/// assert!(block_on(served.issue(get("urn:public:hello"), &cap)).is_ok());
+/// let limited = block_on(served.issue(get("urn:personal:calendar"), &cap)).unwrap_err();
+/// // …and the answer is the one an unbound name gets, byte for byte.
+/// let unbound = block_on(served.issue(get("urn:nowhere:x"), &cap)).unwrap_err();
+/// assert!(matches!(limited, Error::Unresolved(_)));
+/// assert_eq!(
+///     limited.to_string().replace("urn:personal:calendar", "urn:nowhere:x"),
+///     unbound.to_string()
+/// );
+/// ```
+///
+/// For the day ikigai has a boot: the paper's §11 notes that limiters, refusals
+/// and catch-alls are the ONLY constructs that make an annealing boot
+/// non-monotone — adding a limiter can make a name that resolved stop resolving,
+/// so a boot that composes spaces incrementally cannot treat a `Limit` as a plain
+/// addition.
+pub struct Limit {
+    family: Family,
+    /// The distinguished endpoint, shared by every hit this limiter answers.
+    bottom: Arc<dyn Endpoint>,
+}
+
+impl Limit {
+    /// A limiter over every identifier under `prefix` — the family shape
+    /// [`Mount`] takes.
+    pub fn new(prefix: impl Into<String>) -> Self {
+        Limit {
+            family: Family::Prefix(prefix.into()),
+            bottom: Arc::new(Bottom),
+        }
+    }
+
+    /// A limiter over the family a grammar accepts — an [`Exact`](crate::Exact)
+    /// name, a [`UriTemplate`](crate::UriTemplate), or any decidable
+    /// [`Grammar`]; the captures are discarded.
+    pub fn matching(grammar: impl Grammar + 'static) -> Self {
+        Limit {
+            family: Family::Grammar(Box::new(grammar)),
+            bottom: Arc::new(Bottom),
+        }
+    }
+
+    fn admits(&self, iri: &Iri) -> bool {
+        match &self.family {
+            Family::Prefix(prefix) => iri.as_str().starts_with(prefix.as_str()),
+            Family::Grammar(grammar) => grammar.match_iri(iri).is_some(),
+        }
+    }
+}
+
+impl Space for Limit {
+    fn resolve(&self, request: &Request, _scope: &Scope) -> Resolution {
+        if self.admits(&request.target) {
+            Resolution::Hit(Resolved::new(Arc::clone(&self.bottom), Bindings::new()))
+        } else {
+            Resolution::Miss
+        }
+    }
+
+    /// Enumerable, and empty: a limiter binds nothing a caller may reach.
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        Some(Vec::new())
+    }
+}
+
+/// ⊥ — the distinguished endpoint a [`Limit`] resolves to. The kernel recognises
+/// it by [`Endpoint::is_limiter`] and never invokes it. Should something else
+/// invoke it — a harness that matches [`Resolution`] and calls `invoke` on a hit
+/// without asking — it answers as the kernel would: the target is unresolved.
+struct Bottom;
+
+#[async_trait::async_trait]
+impl Endpoint for Bottom {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        Err(Error::Unresolved(inv.request.target.clone()))
+    }
+
+    fn name(&self) -> &str {
+        "bottom"
+    }
+
+    fn is_limiter(&self) -> bool {
+        true
+    }
+}
+
 /// The boxed rewrite rule behind a [`Rewrite`] space.
 type RewriteRule = Box<dyn Fn(&Iri) -> Option<Iri> + Send + Sync>;
 
@@ -1019,5 +1213,129 @@ mod tests {
             ),
             Resolution::Hit(_)
         ));
+    }
+
+    // ---- the limiter ----------------------------------------------------------
+
+    fn source(target: &str) -> Request {
+        Request::new(crate::Verb::Source, Iri::parse(target).unwrap())
+    }
+
+    #[test]
+    fn a_limiter_hits_bottom_inside_its_family_and_misses_outside_it() {
+        let by_prefix = Limit::new("urn:personal:");
+        match by_prefix.resolve(&source("urn:personal:x"), &Scope::empty()) {
+            Resolution::Hit(hit) => {
+                assert!(hit.endpoint.is_limiter());
+                assert!(hit.canonical.is_none(), "a limiter rewrites nothing");
+            }
+            Resolution::Miss => panic!("a name in the family must hit ⊥, not fall through"),
+        }
+        assert!(matches!(
+            by_prefix.resolve(&source("urn:public:x"), &Scope::empty()),
+            Resolution::Miss
+        ));
+
+        // The grammar form takes what a binding takes.
+        let by_grammar = Limit::matching(UriTemplate::parse("urn:doc:{id}:secret").unwrap());
+        assert!(matches!(
+            by_grammar.resolve(&source("urn:doc:7:secret"), &Scope::empty()),
+            Resolution::Hit(hit) if hit.endpoint.is_limiter()
+        ));
+        assert!(matches!(
+            by_grammar.resolve(&source("urn:doc:7"), &Scope::empty()),
+            Resolution::Miss
+        ));
+    }
+
+    #[test]
+    fn a_limiter_is_enumerable_and_binds_nothing() {
+        // `Some(vec![])`, not `None`: the limiter's family is fully known — nothing
+        // in it is reachable — so it must not make a `Fallback` of limiters and
+        // rewrites read as "cannot say".
+        assert_eq!(Limit::new("urn:personal:").entries(), Some(Vec::new()));
+        let s = Arc::new(EndpointSpace::new().bind(Exact::new("urn:personal:x"), builtins::echo()));
+        let fallback = Fallback::new(vec![Arc::new(Limit::new("urn:personal:")), s]);
+        // The raw concatenation still lists the pattern — it is a list of what is
+        // BOUND; the walks that compute reach subtract it (see `select::probe`).
+        assert_eq!(
+            fallback.entries().expect("enumerable"),
+            vec![SpaceEntry::new("urn:personal:x", "echo")]
+        );
+        // …and resolution stops on ⊥ before the later member is consulted.
+        assert!(matches!(
+            fallback.resolve(&source("urn:personal:x"), &Scope::empty()),
+            Resolution::Hit(hit) if hit.endpoint.is_limiter()
+        ));
+    }
+
+    #[test]
+    fn a_decorated_limiter_is_still_a_limiter() {
+        // A governor wraps every endpoint it fronts with a type of its own; that
+        // type's `is_limiter()` is the trait default, `false`. If decoration
+        // reached ⊥, stacking a governor over a limited family would silently
+        // un-limit it. So `map_endpoint` forwards a hit on ⊥ without running the
+        // wrapper, and `with_endpoint` keeps ⊥ whatever it is offered.
+        struct Wrapped(Arc<dyn Endpoint>);
+        #[async_trait::async_trait]
+        impl Endpoint for Wrapped {
+            async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+                self.0.invoke(inv).await
+            }
+        }
+        let wrapped = std::sync::atomic::AtomicU32::new(0);
+        let limited = Fallback::new(vec![
+            Arc::new(Limit::new("urn:personal:")),
+            Arc::new(EndpointSpace::new().bind(Exact::new("urn:personal:x"), builtins::echo())),
+        ]);
+        let wrap = |endpoint: Arc<dyn Endpoint>| -> Arc<dyn Endpoint> {
+            wrapped.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Arc::new(Wrapped(endpoint))
+        };
+
+        let hit = limited
+            .resolve(&source("urn:personal:x"), &Scope::empty())
+            .map_endpoint(wrap);
+        assert!(matches!(&hit, Resolution::Hit(hit) if hit.endpoint.is_limiter()));
+        assert_eq!(
+            wrapped.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the wrapper must not run for a hit on ⊥"
+        );
+
+        let Resolution::Hit(hit) = hit else {
+            unreachable!()
+        };
+        let kept = hit.with_endpoint(Arc::new(Wrapped(Arc::new(builtins::echo()))));
+        assert!(
+            kept.endpoint.is_limiter(),
+            "`with_endpoint` substituted ⊥ away"
+        );
+
+        // The ordinary case is untouched: a real door IS decorated.
+        let public = EndpointSpace::new().bind(Exact::new("urn:public:x"), builtins::echo());
+        let hit = public
+            .resolve(&source("urn:public:x"), &Scope::empty())
+            .map_endpoint(wrap);
+        assert!(matches!(&hit, Resolution::Hit(hit) if !hit.endpoint.is_limiter()));
+        assert_eq!(wrapped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn bottom_invoked_directly_answers_unresolved() {
+        // A harness that matches `Resolution` itself and invokes a hit without
+        // asking `is_limiter` — every consumer written before limiters existed —
+        // still gets the kernel's answer, not a panic and not a representation.
+        let Resolution::Hit(hit) =
+            Limit::new("urn:personal:").resolve(&source("urn:personal:x"), &Scope::empty())
+        else {
+            panic!("in the family")
+        };
+        let request = source("urn:personal:x");
+        let bindings = Bindings::new();
+        let cap = crate::Capability::root();
+        let inv = Invocation::detached(&request, &bindings, &cap);
+        let err = futures::executor::block_on(hit.endpoint.invoke(&inv)).unwrap_err();
+        assert!(matches!(err, Error::Unresolved(ref t) if t.as_str() == "urn:personal:x"));
     }
 }
