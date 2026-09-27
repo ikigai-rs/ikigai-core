@@ -24,7 +24,11 @@ assert_eq!(rep.bytes, b"IKIGAI");
 - **Identity & representations** — validated IRIs, request verbs, content-addressed
   `RequestId`/`ContentId`, and typed `Representation`s with opt-in caching.
 - **Resolution** — a `Grammar` (`Exact`, RFC 6570 `UriTemplate`) matches a request
-  within a `Space` to an `Endpoint`; spaces compose via `Mount` / `Fallback` / `Rewrite`.
+  within a `Space` to an `Endpoint`; spaces compose via `Mount` / `Fallback` / `Rewrite` /
+  `Limit`, may claim an identity (`.named(iri)`), and **the arrangement is itself a
+  resource**: `urn:kernel:topology` renders the chain a request is resolved in as a graph
+  (every node an IRI, order explicit), so "is this family reachable without passing the
+  limiter?" is a query, and a resolution reports which space answered.
 - **Logical rewrite** — an `AliasTable` maps stable logical URIs onto different
   backing resources (`urn:fn:` → `urn:iki:fn:`, `urn:log:config` →
   `file:/logConfig.yaml`), installed as the `Alias` overlay via

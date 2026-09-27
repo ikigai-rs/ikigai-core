@@ -1,8 +1,13 @@
 # Spaces: composition, resolution, and named-graph representation (design draft)
 
-**Status:** design draft. Companion to
-[`resolution-architecture.md`](resolution-architecture.md) (§1) and
-[`vocab/`](vocab/). Placeholder namespaces.
+**Status:** §3(b) — the topology graph — is **built**, core 0.1.78
+(`urn:kernel:topology`, ledger [#515](http://localhost:1060/l/default/item/515)); §3(a)
+— one named graph per space carrying its endpoints' descriptions — is not (the catalog
+stays one flat graph). See "What landed" at the end for where the built vocabulary
+diverges from the sketch below, which is kept as the picture. Companion to
+[`resolution-architecture.md`](resolution-architecture.md) (§1),
+[`resolution-scope.md`](resolution-scope.md) (the chain the topology renders) and
+[`vocab/`](vocab/).
 
 This document does three things: shows how spaces **compose**, how **resolution**
 walks the composition, and how the whole thing is **represented as named graphs
@@ -166,3 +171,33 @@ The payoff: the **dashboard/control-plane (#20) and the debugger (#30) are just
 SPARQL over these graphs** — "show me space X," "what's exposed," "what's the
 topology," "why did this route here." The kernel's own structure is a resource
 you query through the kernel.
+
+---
+
+## 6. What landed (core 0.1.78) — and where it differs from the sketch
+
+`urn:kernel:topology` (Turtle, `urn:cap:kernel:inspect`, cacheable under
+`urn:kernel:bindings`) renders the **chain** a request is resolved in: an `ik:Chain`
+whose `ik:layers` are the injected corridors innermost first, then the root unless
+severed. Every node is an IRI; identity comes from the space itself (`Space::id`,
+`.named(iri)` on every core combinator — a claim, same name ⇒ same doors) and anonymous
+spaces are skolemized `urn:ikigai:space:_:{n}`. A resolution reports which space answered
+(`Resolved::answered_by`, `ANSWERED_NOTE` on the trace). The terms are declared in
+`vocabulary.ttl` (the "topology" section) and differ from §3's sketch in five places, each
+for a reason:
+
+| sketched | landed | why |
+|---|---|---|
+| `ik:EndpointSpace ik:binds <pattern>` | `ik:pattern "…"` (a literal) | `ik:binds` already exists with `rdfs:domain ik:Step` — reusing it would type every leaf space a plan step under RDFS entailment; and a URI template is not an IRI, so a door is a literal, as on `ik:ActionMatch`. |
+| `ik:mount [ ik:prefix ; ik:space ; ik:rewrite … ]` (blank nodes off a `Mount` node) | the `ik:Mount` **is** a node: `ik:prefix` + `ik:space` | a `Mount` is one prefix over one space in core, so there is nothing to nest; and no blank nodes. |
+| `ik:rewrite [ ik:from ; ik:to ]` | `ik:Alias ik:rewrites <alias:rule:n>`, each an `ik:RewriteRule` with `ik:ruleKind` / `ik:logical` / `ik:canonical`; `ik:Rewrite` carries no rules (τ is a closure) | `ik:from` already exists with `rdfs:domain ik:Binding`; and the table's exact/prefix distinction is what a preimage query needs. |
+| `ik:layers ( a b )` | `ik:layers` as explicit `rdf:first`/`rdf:rest` cells under `{node}:layer:{n}` | `( … )` parses to blank nodes; explicit cells can be cited (a doctor's finding names the cell the limiter sits in). |
+| `ik:RemoteSpace` with `ik:transport` | `ik:OpaqueSpace` — the default for any space that does not describe itself | a remote reporting its transport and published patterns is `ikigai-cli`'s `MountedRemote` implementing `Space::topology`, a follow-up; until then the graph says where knowledge stops rather than guessing. |
+
+Also landed: `ik:Chain` (`ik:severed`, the entry node, `urn:ikigai:chain:root` or
+`urn:ikigai:chain:{fingerprint}`), `ik:Limit` with `ik:family`, `ik:Confine` (reported by
+the endpoint, `Confine::topology()`, since a confinement is bound at one door the chain
+cannot see into), and `ik:Space` as the superclass. §4's "which space would X route to?"
+becomes a walk over `ik:layers`/`ik:space`; the paper's Theorem 4(b) check — reachable
+without passing a limiter? — is the SPARQL in `docs/formalism/README.md` R7.3 and the
+triple walk in `tests/topology.rs`.

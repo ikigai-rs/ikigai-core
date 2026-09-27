@@ -161,7 +161,8 @@ use crate::error::Error;
 use crate::grammar::Bindings;
 use crate::iri::Iri;
 use crate::request::Request;
-use crate::space::{Resolution, Resolved, Scope, Space, SpaceEntry};
+use crate::space::{answered, Resolution, Resolved, Scope, Space, SpaceEntry};
+use crate::topology::{SpaceKind, Topology, TopologyRule};
 use crate::verb::Verb;
 
 /// How many rewrites one canonicalization will follow before refusing. Chains are
@@ -681,12 +682,24 @@ impl AliasTable {
 pub struct Alias {
     table: Arc<AliasTable>,
     inner: Arc<dyn Space>,
+    id: Option<Iri>,
 }
 
 impl Alias {
     /// Wrap `inner`, rewriting through `table`.
     pub fn new(table: Arc<AliasTable>, inner: Arc<dyn Space>) -> Self {
-        Alias { table, inner }
+        Alias {
+            table,
+            inner,
+            id: None,
+        }
+    }
+
+    /// Claim an identity for this overlay (builder) — a claim, same name ⇒ same
+    /// doors; see [`EndpointSpace::named`](crate::EndpointSpace::named).
+    pub fn named(mut self, id: Iri) -> Self {
+        self.id = Some(id);
+        self
     }
 
     /// The table this overlay rewrites through.
@@ -697,6 +710,39 @@ impl Alias {
 
 impl Space for Alias {
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        // The innermost named space answered; this overlay only fills an absence.
+        answered(self.resolve_through(request, scope), &self.id)
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        // Decision 4: transparent to enumeration. The catalog and the action
+        // manifold see the BACKING names, once each; the aliases are their own
+        // resource at `urn:kernel:aliases`.
+        self.inner.entries()
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.id.clone()
+    }
+
+    /// The table is data, so the node carries it: one `ik:RewriteRule` per rule,
+    /// in table order — the preimage a reachability query needs to see.
+    fn topology(&self) -> Topology {
+        Topology::new(SpaceKind::Alias {
+            rules: self
+                .table
+                .rules()
+                .iter()
+                .map(|rule| TopologyRule::new(rule.kind(), rule.from(), rule.to()))
+                .collect(),
+        })
+        .with_id(self.id.clone())
+        .child(self.inner.topology())
+    }
+}
+
+impl Alias {
+    fn resolve_through(&self, request: &Request, scope: &Scope) -> Resolution {
         match self.table.canonicalize(&request.target) {
             Canonical::Direct => self.inner.resolve(request, scope),
             Canonical::Aliased(hop) => {
@@ -727,13 +773,6 @@ impl Space for Alias {
                 Bindings::default(),
             )),
         }
-    }
-
-    fn entries(&self) -> Option<Vec<SpaceEntry>> {
-        // Decision 4: transparent to enumeration. The catalog and the action
-        // manifold see the BACKING names, once each; the aliases are their own
-        // resource at `urn:kernel:aliases`.
-        self.inner.entries()
     }
 }
 

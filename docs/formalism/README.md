@@ -119,7 +119,7 @@ tracks it.
 | Validity predicate ν | §5.1 | `Expiry { Always, At(t), Never }` on the representation, plus golden-thread edges pinned to generations, plus the cut sequence that closes the lost-cut race. §4. | realised, extended | pin: `cache::tests::a_cut_after_the_snapshot_declines_the_store` (crates/ikigai-core/src/cache.rs); pin: `cache::tests::a_deadline_is_honoured_and_a_clockless_kernel_assumes_the_worst` (crates/ikigai-core/src/cache.rs) |
 | Dependency graph δ(r), golden thread | §5.3, B.6 | `Representation::depends_on(thread)` declares; sub-request results are inherited — the failed ones too, by error class (R4.5); every cacheable `Source`/`Exists` answer carries the thread named after its own canonical target, whether or not it declared it (R4.4); a `Sink`/`Delete` cuts that thread; an external watcher cuts the same thread. §4. | realised | pin: `kernel::tests::a_thread_propagates_up_through_composition` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_sink_invalidates_the_cached_source_of_its_target` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_cacheable_read_hangs_from_its_own_canonical_target_without_declaring_it` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_composite_over_a_not_found_name_recomputes_when_a_sink_creates_it` (crates/ikigai-core/src/kernel.rs) |
 | Clocks may be read; results are then not cacheable | Hyp. H, §5.1 | `Expiry::Always` is the default (an endpoint opts in to caching); a deadline is `At`, judged against the kernel's injected `Clock`; a clockless kernel declines to cache a deadline at all. | realised | pin: `kernel::tests::a_clockless_kernel_declines_to_cache_a_deadline` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::the_shipped_fixed_clock_drives_a_deadline_and_does_not_move` (crates/ikigai-core/src/kernel.rs); pin: `verb::tests::cacheability_matches_idempotency` (crates/ikigai-core/src/verb.rs) |
-| Metadata verb, self-description (§8.2) | §3, §8.2 | `Verb::Meta` routed to a `MetaRenderer`; `urn:kernel:catalog` lists every binding; every kernel operation describes itself. **The arrangement is not a resource**: `Fallback`, `Mount`, `Rewrite` and the chain are invisible in any representation ([#515](http://localhost:1060/l/default/item/515)). | half realised | pin: `kernel::tests::meta_is_routed_through_the_renderer` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::catalog_enumerates_every_bound_endpoint_through_the_renderer` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::every_kernel_operation_describes_itself` (crates/ikigai-core/src/kernel.rs); UNPINNED — a test would source `urn:kernel:topology` and find the tree as a graph with ordered members |
+| Metadata verb, self-description (§8.2) | §3, §8.2 | `Verb::Meta` routed to a `MetaRenderer`; `urn:kernel:catalog` lists every binding; every kernel operation describes itself. **And the arrangement is a resource**, since 0.1.78 ([#515](http://localhost:1060/l/default/item/515)): a space claims an identity (`Space::id`, `.named(iri)` on every core combinator — a claim, *same name ⇒ same doors*, the one `Scope::with_named` and `Resolved::canonical` already make; `Scope::with` injects a self-named space under its own name, and renaming one at injection is refused), reports its structure (`Space::topology`, a `Topology` tree; a space that says nothing is `ik:OpaqueSpace`, where the graph honestly stops), and `urn:kernel:topology` renders the **chain** the request is resolved in — corridors innermost first, then the root unless severed — as Turtle over `ik:Chain` / `ik:Fallback` (ordered `ik:layers`) / `ik:Mount` / `ik:Limit` / `ik:EndpointSpace` / `ik:Alias` / `ik:Rewrite`, every node an IRI (no blank nodes; anonymous spaces skolemized `urn:ikigai:space:_:{n}`). A hit reports which space answered (`Resolved::answered_by`, the innermost named space on the path or the named corridor; `ANSWERED_NOTE` on every traced event). Thm. 4(b) over the tree is then a query — §1.1, R7.3. | realised | pin: `kernel::tests::meta_is_routed_through_the_renderer` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::catalog_enumerates_every_bound_endpoint_through_the_renderer` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::every_kernel_operation_describes_itself` (crates/ikigai-core/src/kernel.rs); pin: `topology::a_space_that_names_itself_is_injected_under_its_own_name_and_shares_one_cache_entry` (crates/ikigai-core/tests/topology.rs); pin: `topology::renaming_a_self_named_space_at_injection_is_refused` (crates/ikigai-core/tests/topology.rs); pin: `topology::every_core_combinator_can_be_named_and_reports_its_name` (crates/ikigai-core/tests/topology.rs); pin: `topology::a_hit_reports_the_innermost_named_space_and_every_combinator_forwards_it` (crates/ikigai-core/tests/topology.rs); pin: `topology::a_named_corridor_answers_for_an_anonymous_space_and_every_traced_event_says_who` (crates/ikigai-core/tests/topology.rs); pin: `topology::the_topology_renders_the_chain_and_every_core_combinator_as_iris_with_ordered_layers` (crates/ikigai-core/tests/topology.rs); pin: `topology::a_confinement_reports_the_corridor_it_severs_into` (crates/ikigai-core/tests/topology.rs); doctest: `EndpointSpace::named`; doctest: `Scope::with_named`; doctest: `Resolved::with_answered_by` |
 | Verbs folded into identifiers | §3 | **Deviation, deliberate:** `Verb` is first-class and part of the request identity. §6. | deviation §6 | pin: `request::tests::distinct_inputs_have_distinct_identity` (crates/ikigai-core/src/request.rs) |
 | `new` verb | §3 | Absent: `Sink` to an unbound-but-resolvable name makes it reifiable. `exists` is `Verb::Exists`, answered by the endpoint (the paper's decidable approximation of reifiability). | deviation §6 | pin: `verb::tests::cacheability_matches_idempotency` (crates/ikigai-core/src/verb.rs) |
 | Hop bound (Cor. 3), nesting budget (B.7) | §10 | The hop counter is not needed (§5: resolution terminates by construction). The nesting budget is `Kernel::with_max_depth` (default 64): a request the host issues is at depth 0, each sub-request one deeper, and one past the bound is refused with `Error::DepthExceeded` before it resolves anything and recorded on the trace under `DEPTH_NOTE`. Within one kernel only — R5.3. | realised, within one kernel | pin: `kernel::tests::a_self_issuing_endpoint_is_refused_at_the_bound_and_the_trace_says_where` (crates/ikigai-core/src/kernel.rs); doctest: `Kernel::with_max_depth` |
@@ -143,13 +143,22 @@ are combinators over one `resolve` function, not levels of the chain. Consequenc
   **original** request. §1.2 and §5 rest on this.
 - For Thm. 4(b) the pushdown stack has depth at most |injected| + 1, and the static tree
   contributes no pushes. Gatekeeper completeness over the static tree is therefore a
-  question about the tree's *structure*, which today is Rust values a host built and not a
-  resource — the gap [#515](http://localhost:1060/l/default/item/515) names.
+  question about the tree's *structure* — and since 0.1.78 the structure is a resource
+  (`urn:kernel:topology`, the §8.2 row), so **the check reduces to a query**: is there a
+  path from the chain's entry to a door of the protected family that passes no limiter over
+  that family standing ahead of it in a layer list? A path query over the graph, not a
+  pushdown analysis, because a walk down the tree pushes nothing it has to pop. R7.3
+  carries it as SPARQL; the test runs it as a triple walk over the rendered graph — NO for
+  `Fallback([Limit("urn:personal:"), root])`, YES with the limiter removed, and the same
+  answer for a limiter injected as a corridor, which is a layer of the `ik:Chain`
+  ([#515](http://localhost:1060/l/default/item/515), the paper's §12.5).
 
-Pinned by the sub-request half of the shadowing test and by the reborrow test:
+Pinned by the sub-request half of the shadowing test, by the reborrow test, and by the
+check:
 
     pin: `scope::an_injected_corridor_shadows_a_root_door_for_the_request_and_for_its_sub_requests` (crates/ikigai-core/tests/scope.rs)
     pin: `with_bindings::a_sub_request_through_the_reborrow_reaches_the_kernel` (crates/ikigai-core/tests/with_bindings.rs)
+    pin: `topology::the_papers_12_5_check_is_a_walk_over_the_topology_no_with_the_limiter_and_yes_without` (crates/ikigai-core/tests/topology.rs)
 
 ### 1.2 The mapper does not fall back with τ(i)
 
@@ -220,18 +229,20 @@ value-corridor tail. The behavioural half — a by-reference argument outside th
 
 ### 1.5 What is absent, and the empty identifier
 
-- **Path cache** ([#510](http://localhost:1060/l/default/item/510)), **topology as a
-  resource** ([#515](http://localhost:1060/l/default/item/515)), **lossless flag**
-  ([#514](http://localhost:1060/l/default/item/514)): each is a row above, each UNPINNED.
-  None is a decision against the paper; core grows capabilities incrementally, and a gap
-  is not a design until it is written down as one. The **nesting budget**
-  ([#513](http://localhost:1060/l/default/item/513)) left this list in 0.1.73 (R5.3); the
-  **limiter** ([#511](http://localhost:1060/l/default/item/511)) left it in 0.1.76, as a hit
-  on a kernel-known ⊥ rather than the third `Resolution` outcome the item first sketched —
-  the same construct, at no consumer's cost. The path cache's validity predicate
-  (`urn:kernel:bindings`) landed in 0.1.74 and its design is written down
+- **Path cache** ([#510](http://localhost:1060/l/default/item/510)) is the one row above
+  still absent and UNPINNED. Not a decision against the paper; core grows capabilities
+  incrementally, and a gap is not a design until it is written down as one. Its validity
+  predicate (`urn:kernel:bindings`) landed in 0.1.74 and its design is written down
   (`docs/design/path-cache.md`); the cache itself stays on this list until a trigger named
-  there arrives.
+  there arrives. The others have left it, one release each: the **nesting budget**
+  ([#513](http://localhost:1060/l/default/item/513)) in 0.1.73 (R5.3); the **limiter**
+  ([#511](http://localhost:1060/l/default/item/511)) in 0.1.76, as a hit on a kernel-known
+  ⊥ rather than the third `Resolution` outcome the item first sketched — the same
+  construct, at no consumer's cost; the **lossless flag**
+  ([#514](http://localhost:1060/l/default/item/514)) in 0.1.77; and **topology as a
+  resource** ([#515](http://localhost:1060/l/default/item/515)) in 0.1.78 — identity on
+  the space, the answering space on the resolution, and the chain as `urn:kernel:topology`
+  (the §8.2 row, R7.3).
 - **ε.** The paper's null identifier resolves entirely from context (§2.3, Cor. 1). An `Iri`
   is absolute, so ε is not an identifier here. The nearest thing is a short identifier bound
   by an injected corridor — `urn:time:now` under a temporal corridor — which is Cor. 2 (richer
@@ -747,15 +758,17 @@ the injector supplied, or a process-unique number for an anonymous corridor. Sam
 entry across rebuilt corridors; a different name, a different order, or severing ⇒ a different
 entry; an anonymous corridor shares only with its own clones. The empty chain fingerprints to
 0, so every key built before scopes existed is the empty chain's key, byte for byte. The
-fingerprint covers the **whole chain, not the corridors consulted**: sound and over-partitioned
-(the paper's §5.1 remedy, keying on consulted corridors, needs the resolver to report which
-corridor answered — the same seam a trace that names the answering corridor needs, and not
-built).
+fingerprint covers the **whole chain, not the corridors consulted**: sound and over-partitioned.
+The paper's §5.1 remedy, keying on the corridors consulted, needs the resolver to report which
+corridor answered; since 0.1.78 it does (`Resolved::answered_by` — the innermost named space
+on the path, or the named corridor the hit came from — disclosed as `ANSWERED_NOTE`), and the
+keying on it is **not built**: the datum exists, the cache still hashes the whole chain.
 
     pin: `scope::two_requests_with_the_same_named_scope_share_one_cache_entry_and_different_names_do_not` (crates/ikigai-core/tests/scope.rs)
     pin: `scope::the_empty_scope_is_the_status_quo` (crates/ikigai-core/tests/scope.rs)
     doctest: `Scope`
-    UNPINNED — consulted-corridors keying: a test would inject two corridors, source a name only the outer binds, and assert one entry is shared with a chain lacking the inner corridor; today it is not
+    pin: `topology::a_named_corridor_answers_for_an_anonymous_space_and_every_traced_event_says_who` (crates/ikigai-core/tests/topology.rs)
+    UNPINNED — consulted-corridors keying: a test would inject two corridors, source a name only the outer binds, and assert one entry is shared with a chain lacking the inner corridor; today it is not, though `answered_by` now says which corridor it would key on
 
 **R7.3 (`urn:kernel:*` is ahead of the chain).** The kernel intercepts its own namespace before
 the chain and before the root: an injected corridor cannot shadow a kernel operation, a severed
@@ -764,9 +777,48 @@ answer therefore does not depend on the chain and is keyed with scope 0. Consequ
 a confined endpoint can read `urn:kernel:catalog` and see names it cannot resolve — names, not
 content, the same leak golden-thread names already carry.
 
+**One operation answers FOR the chain rather than ahead of it.** `urn:kernel:topology`'s
+subject is the chain: it renders ⟨corridors innermost first, root unless severed⟩ as an
+`ik:Chain` whose `ik:layers` are those spaces in that order, and it is keyed by the chain's
+fingerprint as any scoped resolution is (`urn:kernel:cache` names the chain on its row). It is
+the resource face of "what can I see from here" ([#516](http://localhost:1060/l/default/item/516)
+said the manifold had one and the arrangement did not), and the reachability check of §1.1 is
+a query over it. In SPARQL, for a host doctor with a store (the fragment the test walks —
+`Chain`, `Fallback`, `Mount`, `Limit`, `EndpointSpace`; an `ik:OpaqueSpace` on a path is
+"unknown", never "no", and a rewrite is walked through, which over-reports rather than
+under-reports):
+
+```sparql
+PREFIX ik:  <https://ikigai-rs.dev/ns#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+# Is a door of the family reachable from the entry without passing a limiter over it?
+ASK {
+  BIND("urn:personal:" AS ?family)
+  <urn:ikigai:chain:root> (ik:layers/rdf:rest*/rdf:first | ik:space)* ?leaf .
+  ?leaf a ik:EndpointSpace ; ik:pattern ?door .
+  FILTER(STRSTARTS(?door, ?family))
+  FILTER NOT EXISTS {
+    # a layer list on the path with a covering limiter AHEAD of the layer that leads to the door
+    <urn:ikigai:chain:root> (ik:layers/rdf:rest*/rdf:first | ik:space)* ?list_owner .
+    ?list_owner ik:layers ?head .
+    ?head rdf:rest* ?cell . ?cell rdf:first ?limiter .
+    ?limiter a ik:Limit ; ik:family ?limited .
+    FILTER(STRSTARTS(?family, ?limited))
+    ?cell rdf:rest+ ?later . ?later rdf:first ?branch .
+    ?branch (ik:layers/rdf:rest*/rdf:first | ik:space)* ?leaf .
+  }
+}
+```
+
+`false` for `Fallback([Limit("urn:personal:"), root])`, `true` for `root` alone; for a
+non-empty chain the entry is `urn:ikigai:chain:{fingerprint}`, and a limiter injected as a
+corridor is a cell of the chain's own list, so the same query finds it.
+
     pin: `scope::an_injected_corridor_cannot_shadow_urn_kernel_and_a_severed_chain_still_reaches_it` (crates/ikigai-core/tests/scope.rs)
     pin: `alias::the_kernel_namespace_cannot_be_aliased_away` (crates/ikigai-core/tests/alias.rs)
     pin: `alias::tests::the_kernel_namespace_is_not_aliasable` (crates/ikigai-core/src/alias.rs)
+    pin: `topology::the_topology_renders_the_chain_and_every_core_combinator_as_iris_with_ordered_layers` (crates/ikigai-core/tests/topology.rs)
+    pin: `topology::the_papers_12_5_check_is_a_walk_over_the_topology_no_with_the_limiter_and_yes_without` (crates/ikigai-core/tests/topology.rs)
 
 **R7.4 (the floor runs against whichever corridor answered).** A corridor shadowing an open
 root door with a gated one is gated on its own declaration, and its cached entry is fenced from
@@ -976,7 +1028,6 @@ item that would discharge it where one exists. The gate counts these; it does no
 
 - §1 — path cache (#510). Its validity predicate, `urn:kernel:bindings`, exists since 0.1.74;
   its design is `docs/design/path-cache.md`; a trigger named there brings it back.
-- §1 — the arrangement as a resource (`urn:kernel:topology`) (#515).
 
 **Conditional theorems (stated with the precondition explicit):**
 
@@ -992,7 +1043,9 @@ item that would discharge it where one exists. The gate counts these; it does no
 - R3.2 — two facts in the key are claims: a corridor's name (same name ⇒ same doors) and a
   reported canonical (a name in this kernel's namespace). Both pinned as declarations
   (doctests), neither observable by the kernel.
-- R7.2 — the fingerprint covers the whole chain, not the corridors consulted.
+- R7.2 — the fingerprint covers the whole chain, not the corridors consulted; the corridor
+  that answered is reported since 0.1.78 (`Resolved::answered_by`), the keying on it is not
+  built.
 - R7.10 — a temporal corridor's door and its clock answer the same instant: the injector's
   claim, pinned as a declaration (the `with_named_at` doctest), not observable by the kernel.
 - R5.1 — hypotheses (i) foreign `Space`s call only what they enclose and (ii) the `Arc` graph
@@ -1013,7 +1066,10 @@ precondition P (hole A of #512) and hole B (R4.5), 0.1.73; R2.2's structural hal
 and the §7 clock seam, 0.1.75 (R7.8–R7.10); the limiter (#511) — the first absent construct
 to leave the list — and the subtraction half of R2.3's first qualification, 0.1.76; the
 lossless flag and lossless-only selection (#514) — the second absent construct to leave the
-list — with R8.2's two-hop rule and Meta's refusal of a lossy route, 0.1.77 (R8.1, R8.3).
+list — with R8.2's two-hop rule and Meta's refusal of a lossy route, 0.1.77 (R8.1, R8.3); the
+arrangement as a resource (#515) — the third, leaving {path cache} — with identity on the
+space, the answering space on the resolution and the check of §1.1 as a query, 0.1.78 (§1,
+R7.3).
 
 **Not built, by decision:**
 
@@ -1051,13 +1107,17 @@ all three rungs of `now()` be set).
 | ~335 ns → ~880 ns | a read of the smallest composite that swallows a `Denied` sub-request and returns `.cacheable()`, before / after R4.5 | 2026-09-26 | same bench, second case: before it was a cache hit (334–346 ns); after it recomputes every read (867–900 ns): resolve the composite, invoke, resolve the gated leaf, refuse at the floor. The 2.6× is the designed cost of not caching a result built on a refusal; every affected consumer is listed in the 0.1.73 hub report. Not committed. |
 | 304–311 ns → 298–305 ns | cache-hit read before / after the chain reached selection, the probe and the pipe and gained a clock (0.1.75) | 2026-09-26 | the same twenty-line bench (one cacheable `FnEndpoint`, warmed, 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop, load 2.4–3.4), main (a detached worktree of `d99a180`) and branch interleaved three times each. 0–10 ns under main: nothing added is on the hit path — `resolve_in`'s empty-chain fast path is untouched, `now()` is never called on a hit, the scope-name map is written only on a scoped store. Table in `docs/design/resolution-scope.md`. Not committed. |
 | 431–454 ns → 297–328 ns | cache-hit read of an endpoint with an explicit `ActionSpec` (the module shape), before / after the floor memo; a bare `FnEndpoint` 312–324 → 299–316 ns | 2026-09-26 | the same twenty-line bench, three cases (a bare `FnEndpoint`; one declaring an `ActionSpec` that requires a scope, read as root and as the holder), 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop, main (a detached worktree of `fb63bb0`) and branch interleaved three times each, load 1.5–2.6. The memo took ~135 ns (≈ 31 %) off the module-shaped read — the per-request `describe()` AND the `action_specs()` clone it fed the floor — and ~10 ns off the bare one, whose default description is a single string. Ledger #22. Not committed. |
+| 376–458 ns → 352–396 ns (anonymous); +19–45 ns for a NAMED leaf | cache-hit read before / after the topology landed (0.1.78), and the cost of the one opt-in allocation | 2026-09-27 | the same twenty-line bench (one cacheable `FnEndpoint`, warmed, 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop), main (a detached worktree of `4dfe3f2`) and branch interleaved three times each. First run at load 4.4: main 376–458, branch 352–396 — at or under main; nothing added is on the anonymous hit path (`EndpointSpace::resolve` gained one `Option` compare, the kernel one `Option` borrow). A hit through a **named** leaf pays one `Iri` clone to report `answered_by`: +19–45 ns over the anonymous read in the second run (load 6.4–6.7, absolutes 527–688 — read the interleaved pairs, not the rows). The first cut of that path cost ~+100 ns (a second clone in the kernel and note strings built untraced at the cache-hit site); both were removed before merge, which is what the second run measures. Not committed. |
 | 64 | `DEFAULT_MAX_DEPTH`, the nesting budget | — | `kernel.rs`, a constant; `Kernel::with_max_depth` overrides it. NetKernel: 40 shipped, 32 default, for a counter that also pays for resolution hops. |
 | 8 | `DEFAULT_MAX_HOPS`, the alias chain cap | — | `alias.rs`, a constant. |
 | 4096 | `CUT_LOG`, cuts the race check remembers | — | `cache.rs`, a constant. |
 | 4096 entries / 64 MiB | the default LRU bound | — | `cache.rs`, `CachePolicy` default. |
 
 Brian's instruction on the first two rows (2026-09-25): revisit once scope, limiter, depth
-bound, lossless flag and topology are in; re-measure, do not inherit.
+bound, lossless flag and topology are in; re-measure, do not inherit. **All five are in as of
+0.1.78**; the 0.1.78 row above is the branch-versus-main measurement for the last of them.
+The star's own re-measure — the first two rows, over `Fallback` of `Mount`s at 12 / 300 /
+3000 bindings — is still owed and is not this row.
 
 Not measured in 0.1.77, and why: the lossless flag moved no planning cost on the default
 path. `select_transreptor` is the one `entries → Meta → describe` walk it was, with one
@@ -1165,6 +1225,45 @@ STAYS (the type it hands back says what it is; the alternative breaks the engine
 built here: the engine's spelling of the consent (`describe <iri> <type>` has no way to pass
 `lossy=allow` yet), any per-module `.lossy()` declaration (each is a one-line PR in its own
 repo), and conformance's round-trip check.
+
+**0.1.78** carries the arrangement as a resource ([#515](http://localhost:1060/l/default/item/515)),
+in three parts. **Identity on the space**: one new defaulted `Space` method (`id`, `None`
+unless overridden — no implementor changed) and a `.named(iri)` builder on `EndpointSpace`,
+`Fallback`, `Mount`, `Rewrite`, `Alias` and `Limit`; `Scope::with` injects a self-named space
+under its own name, and `with_named` / `with_named_at` / `confined` / `Confine::new` **refuse**
+(a panic — a builder has no error channel, and the conflict is a construction-time claim
+made twice) a name that disagrees with the space's own, on the argument that either quiet
+resolution is the two-partitions bug: the injector's name over the space's puts one set of
+doors under two names, the space's over the injector's drops what the injector's carried (a
+temporal corridor named for its instant, one space named for its kind, every instant one
+cached answer). No existing space claims an id, so nothing reaches the refusal. **Who
+answered**: one new public field, `Resolved::answered_by` (the innermost named space on the
+path, else the named corridor the hit came from), `Resolved::with_answered_by`
+(get-or-insert, the `with_canonical` rule), `Scope::resolve_in` filling it from a named
+corridor, and `ANSWERED_NOTE` on every traced event. ⚠ A **public field is a flag day for a
+struct literal**, stated on `Resolved` itself, and there are seven outside core: `ikigai-cli`
+(`ikigai-resolve`, three), `ikigai-module` (two) and `ikigai-gonk` (two) cannot compile
+against 0.1.78 until each adds `answered_by: None` or takes `Resolved::new` — the same
+sequencing `canonical` cost at 0.1.64. Consulted-corridors caching is **not built**; this is
+its datum (R7.2). **The resource**: one new defaulted `Space` method (`topology`, an opaque
+node unless overridden), the public tree (`Topology`, `SpaceKind`, `TopologyRule`, all
+`#[non_exhaustive]`), `Confine::topology()`, `Kernel::topology` / `topology_in`, and
+`urn:kernel:topology` — the tenth kernel operation, `urn:cap:kernel:inspect`, Turtle,
+cacheable under `urn:kernel:bindings`, and the one operation keyed by the chain's fingerprint
+because the chain is its subject (R7.3). In the vocabulary, **twenty-one new terms** (the
+"topology" section: `ik:Space` and its kinds, `ik:Chain`, `ik:RewriteRule`, `ik:layers`,
+`ik:space`, `ik:prefix`, `ik:family`, `ik:pattern`, `ik:severed`, `ik:rewrites`,
+`ik:ruleKind`, `ik:logical`, `ik:canonical`): **a semantic vocabulary change**, so the context
+is regenerated, `owl:versionInfo` moves, and the `/ns` deploy after the vocab publish is a
+real change. `ik:pattern` rather than the draft's `ik:binds`, whose `rdfs:domain ik:Step`
+would have typed every leaf space a plan step. One change in what a consumer observes without
+code of its own changing: a traced event through a named space carries one more note — and
+no shipped space is named. A patch in the lockstep 0.1.x line on the same argument as 0.1.73.
+Not built here, on purpose: consulted-corridors keying (§9), a `Remote` node kind (a
+`MountedRemote` reporting its transport and published patterns is `ikigai-cli`'s), the
+engine's `topology` command, and `Space::topology` on the overlays outside core
+(`ikigai-throttle`'s governors, `ikigai-embedded`'s guards), each of which today makes the
+tree under it `ik:OpaqueSpace` — one forwarding line each.
 
 The gate itself is as the previous revision left it: a dev-only integration test that reads
 this file from the repository, **excluded from the packaged crate**
