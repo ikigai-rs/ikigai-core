@@ -191,6 +191,25 @@ pub struct EntryFacts<'a> {
     pub last_used_tick: u64,
 }
 
+/// One resident entry as `urn:kernel:cache` reports it — a human face
+/// (ledger #59), not a wire format; `#[non_exhaustive]` so a later fact is not a
+/// break for a reader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CacheRow {
+    /// The IRI the entry was resolved from.
+    pub target: String,
+    /// The representation's media type.
+    pub media_type: String,
+    /// The entry's payload size in bytes.
+    pub bytes: usize,
+    /// How many golden threads it depends on.
+    pub threads: usize,
+    /// The fingerprint of the resolution chain it was computed in
+    /// ([`Scope::fingerprint`](crate::Scope::fingerprint)); `0` for the empty chain.
+    pub scope: u64,
+}
+
 /// The ceiling a [`CachePolicy`] enforces: a count and a byte budget, both hard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CacheBound {
@@ -553,8 +572,27 @@ impl ReprCache {
         self.policy.capacity()
     }
 
+    /// One row per entry for `urn:kernel:cache`, with the resolution chain each
+    /// was computed in — as the key's scope fingerprint, which is all the cache
+    /// holds; the kernel maps it back to a rendered chain for the readout.
+    pub fn rows_with_scope(&self) -> Vec<CacheRow> {
+        let state = self.state.lock().expect("cache lock");
+        state
+            .entries
+            .iter()
+            .map(|(key, entry)| CacheRow {
+                target: entry.target.clone(),
+                media_type: entry.representation.repr_type.media_type.clone(),
+                bytes: entry.bytes(),
+                threads: entry.edges.len(),
+                scope: key.scope,
+            })
+            .collect()
+    }
+
     /// One row per entry for `urn:kernel:cache`: the IRI it was resolved from, its
     /// media type, its size in bytes, and how many golden threads it depends on.
+    /// [`rows_with_scope`](Self::rows_with_scope) adds the chain.
     pub fn rows(&self) -> Vec<(String, String, usize, usize)> {
         let state = self.state.lock().expect("cache lock");
         state

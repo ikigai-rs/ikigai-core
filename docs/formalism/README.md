@@ -20,7 +20,12 @@ read measurements those cost. Revised 2026-09-26 for **0.1.74** ([#510](http://l
 [#26](http://localhost:1060/l/default/item/26), [#22](http://localhost:1060/l/default/item/22)): `urn:kernel:bindings` is the binding-change thread every
 self-description face hangs from, R3.2's binding row splits into a pinned half (derived faces)
 and a decided half (stored reads), the capability floor memoizes `describe()` per endpoint, and
-§10 carries that read; the path cache stays absent, its design written down.
+§10 carries that read; the path cache stays absent, its design written down. Revised 2026-09-26
+for **0.1.75** ([#516](http://localhost:1060/l/default/item/516),
+[#517](http://localhost:1060/l/default/item/517)): the chain reaches selection, the cache probe
+and the pipe (R7.8, R7.9; R2.3's second qualification is discharged), and carries a clock derived
+from the corridor that pins time, with validity kept on the kernel's clock (R7.10); §10 carries
+that read.
 **Companions in this repository:** `docs/design/resolution-scope.md` (the chain),
 `docs/design/sub-request-authority.md` (attenuation, and why delegation is not built),
 `docs/design/cache-ejection.md` (what the cache key does not identify),
@@ -299,9 +304,11 @@ Three qualifications, each the difference between the theorem and the code:
    remote) contributes nothing; `Alias` lists the backing names once, not the logical
    preimage. The manifold may therefore omit a reachable door; it never offers an unreachable
    one on this account. Safe direction.
-2. **Selection is over the root, not the chain** ([#516](http://localhost:1060/l/default/item/516)).
-   Inside a confinement the manifold can offer an action the chain cannot resolve — an
-   over-offer, the unsafe direction, one layer up from the rule that prevents it at the door.
+2. **Selection is over the chain** (since 0.1.75, [#516](http://localhost:1060/l/default/item/516);
+   R7.8). Before it selected over the root, so inside a confinement the manifold could offer
+   an action the chain could not resolve — an over-offer, the unsafe direction, one layer up
+   from the rule that prevents it at the door. Now Reach(Γ) is computed over Γ: an endpoint's
+   `select_action` / `select_transreptor` run in its invocation's chain.
 3. **Declared ⊆ enforced holds by construction; the converse is discipline.** An endpoint's own
    finer runtime gate (a path ACL) is its ceiling on top of the floor. An endpoint that gates
    at runtime on a scope it never declared makes the manifold lie; the conformance suite, not
@@ -310,7 +317,7 @@ Three qualifications, each the difference between the theorem and the code:
     pin: `space::tests::rewrite_is_not_enumerable` (crates/ikigai-core/src/space.rs)
     pin: `kernel::tests::a_non_enumerable_root_still_reports_that_it_cannot_say` (crates/ikigai-core/src/kernel.rs)
     pin: `alias::the_catalog_lists_the_backing_name_once` (crates/ikigai-core/tests/alias.rs)
-    UNPINNED — a test would confine an endpoint and assert `inv.select_action` omits root-bound actions; today it offers them
+    pin: `temporal_corridor::a_confined_endpoints_manifold_never_lists_a_root_only_action_or_transreptor` (crates/ikigai-core/tests/temporal_corridor.rs)
 
 **The confused deputy, located.** In the paper's terms the deputy is confused where *effect*
 authority departs from *caller* authority. By R2.2 they never depart: at every hop exactly one
@@ -784,16 +791,60 @@ branch that looks like success.
     pin: `scope::an_issuer_that_cannot_carry_the_chain_refuses_a_non_empty_scope_rather_than_escaping_it` (crates/ikigai-core/tests/scope.rs)
     UNPINNED — the escape at the wire is in ikigai-cli's `MountedRemote`; a test there would confine an endpoint to a corridor holding a mount and record that the remote resolved in its own root
 
-**The clock seam.** `Invocation::now()` reads the injected `Clock`; a temporal corridor pinning
-`urn:time:now` is a resolution-seam claim about time. Decided 2026-09-25
-([#517](http://localhost:1060/l/default/item/517)): the chain carries a `Clock` *derived* from
-the corridor that binds `urn:time:now` at injection, `now()` prefers it, and the kernel keeps
-its own clock for validity so a pinned past never un-expires a live entry. Not built.
+**R7.8 (selection is over the chain).** `Kernel::select_transreptor_in` / `select_action_in` /
+`select_actions_in` enumerate the kernel's own operations, then each injected corridor innermost
+first, then the root unless severed — the walk `resolve_in` takes (`Scope::consulted`), presented
+to the `entries → Meta → describe` walks as one space with a shadowed pattern listed once as the
+innermost binds it. `Invocation::select_*` pass the invocation's chain, so a confined endpoint's
+manifold never names a root-only action or transreptor, a corridor that shadows a transreptor's
+IRI is the one the plan names, and the `Meta` arm plans and runs `transrept_meta` inside the
+chain (falling back to canonical Turtle where the chain has no plan, instead of failing on a
+branch the root made look selectable). The empty chain's results are equal to the unscoped
+forms', and the defaulted `Issuer::select_*_in` offer nothing in a chain they cannot select in.
 
-    UNPINNED — a test would inject a corridor binding `urn:time:now` to T and assert `inv.now()` inside reads T while a cached `At` entry is still judged against the kernel clock
+    pin: `temporal_corridor::a_confined_endpoints_manifold_never_lists_a_root_only_action_or_transreptor` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `temporal_corridor::a_corridor_that_shadows_a_transreptor_is_the_one_the_plan_uses_and_meta_transrepts_through_it` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `temporal_corridor::selection_in_the_empty_scope_is_byte_identical_to_selection_over_the_root` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `temporal_corridor::an_issuer_that_cannot_select_in_a_chain_offers_nothing_rather_than_the_root` (crates/ikigai-core/tests/temporal_corridor.rs)
+
+**R7.9 (the probe and the pipe are over the chain).** `Kernel::is_cached_in` answers for the
+chain's entry — the empty chain's and a corridor's are different entries — judging freshness on
+the kernel's clock as serving does; `urn:kernel:cache` names the chain each row was computed in.
+`Kernel::issue_with_incoming_in` resolves a pipe stage in the chain with the upstream provenance
+folded as in the empty chain. Each unscoped form is its scoped form at the empty chain.
+
+    pin: `temporal_corridor::is_cached_in_answers_for_the_chain_and_the_readout_names_it` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `temporal_corridor::a_pipe_stage_resolves_in_the_chain_and_folds_its_upstream` (crates/ikigai-core/tests/temporal_corridor.rs)
+
+**R7.10 (the chain's clock is derived from the corridor that pins time; validity is not).**
+Decided 2026-09-25 ([#517](http://localhost:1060/l/default/item/517)), built 0.1.75.
+`Scope::with_named_at(name, space, clock)` injects a corridor and sets the chain's clock in one
+call — the only way a chain acquires a clock, so the binding and the clock cannot be set
+independently. `Invocation::now()` answers from an attached clock, then the chain's, then the
+issuer's; innermost wins; a corridor without a clock leaves the chain's; confinement keeps it.
+The kernel judges `Expiry::At` against its **own** clock, never the chain's: a pinned past
+cannot un-expire a live entry and a pinned future cannot expire a fresh one. The fingerprint
+does not include the clock — it is a property of the corridor's name, and two injections under
+one name with different clocks are one claim made twice, the injector's error (an `Arc<dyn
+Clock>` has no stable identity; the instant exists only for a fixed clock). The pairing of door
+and clock is a **claim** core cannot observe, pinned as a declaration; the trace discloses the
+instant the chain's clock read beside the chain (`SCOPE_CLOCK_NOTE`). The payoff is one test: an
+endpoint reading time by resolution and by `now()` sees one instant under the corridor and the
+live one under the root, is `Never` under the corridor and `Always` under the root, and is served
+from the cache on a second request under the same name.
+
+    pin: `temporal_corridor::a_temporal_corridor_pins_both_faces_of_time_and_the_pinned_read_is_cacheable` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `temporal_corridor::validity_is_judged_on_the_kernels_clock_never_the_chains` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `temporal_corridor::the_innermost_clock_wins_and_confinement_keeps_it` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `temporal_corridor::the_fingerprint_is_the_corridors_name_not_its_clock` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `temporal_corridor::the_trace_discloses_the_chains_clock_beside_the_chain` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `endpoint::tests::now_prefers_an_attached_clock_then_the_chain_then_the_issuer` (crates/ikigai-core/src/endpoint.rs)
+    doctest: `Scope::with_named_at`
+    UNPINNED — by construction: that the corridor's time door answers the instant its clock reads is the injector's claim; core would have to resolve the door to check it, and a corridor is any `Space`
 
 **The read measurement** (§10): injecting the chain into every issue cost 0–10 ns on a ~410 ns
-cache-hit read once the empty chain became a null handle.
+cache-hit read once the empty chain became a null handle; reaching the four faces and adding the
+chain clock cost nothing measurable on a ~305 ns read (0–10 ns under main).
 
 ---
 
@@ -871,6 +922,8 @@ item that would discharge it where one exists. The gate counts these; it does no
   reported canonical (a name in this kernel's namespace). Both pinned as declarations
   (doctests), neither observable by the kernel.
 - R7.2 — the fingerprint covers the whole chain, not the corridors consulted.
+- R7.10 — a temporal corridor's door and its clock answer the same instant: the injector's
+  claim, pinned as a declaration (the `with_named_at` doctest), not observable by the kernel.
 - R5.1 — hypotheses (i) foreign `Space`s call only what they enclose and (ii) the `Arc` graph
   is acyclic are review, not tests.
 
@@ -885,12 +938,13 @@ item that would discharge it where one exists. The gate counts these; it does no
 **Discharged since the first revision** (kept so the shortening is visible): R4.4's
 precondition P (hole A of #512) and hole B (R4.5), 0.1.73; R2.2's structural half, a
 `compile_fail` doctest, 2026-09-26; R3.2's derived-faces half (#26) and the per-request
-`describe()` at the floor (#22), 0.1.74.
+`describe()` at the floor (#22), 0.1.74; R2.3's second qualification (selection over the root)
+and the §7 clock seam, 0.1.75 (R7.8–R7.10).
 
 **Not built, by decision:**
 
 - §2 — delegation (Part B of `sub-request-authority.md`).
-- §7 — the scope-level clock (#517, decided 2026-09-25).
+- §7 — the chain on the wire (#516's fourth face): a protocol bump, not a default.
 - §1.4 — the behavioural half of "values are not corridors" has no test.
 - R3.2 — a stored read does not hang from `urn:kernel:bindings` (0.1.74; argued above and at
   `Kernel::bindings_changed`). The host cuts the names it moved.
@@ -905,7 +959,9 @@ the `urn:kernel:actions` test is `the_action_manifold_is_capability_scoped`; the
 pivot test is `pivots_via_turtle_when_no_direct_hop`; the "cycle/over-long chain refusal tests
 in `alias.rs`" are `a_cycle_is_refused_not_truncated` and `an_over_long_chain_is_refused`
 (unit) plus `a_cycle_is_refused_rather_than_recursed_or_truncated` (integration); `tests/scope.rs`
-holds thirteen tests, all pinned above.
+holds thirteen tests, all pinned above, and `tests/temporal_corridor.rs` eleven, all pinned
+above (R7.10 also pins a unit test in `endpoint.rs`, where the crate-private `with_scope` lets
+all three rungs of `now()` be set).
 
 ---
 
@@ -919,6 +975,7 @@ holds thirteen tests, all pinned above.
 | ~20 µs → ~1.0 s | a cached graph read after one uncacheable source was joined in | 2026-08-13 | `ikigai-cms-web` PR #71, measured on the live reading room; 68 tests passed on the slow version. |
 | 321–332 ns → 344–353 ns → 306–325 ns | cache-hit read before / after hole A's first cut / after its second | 2026-09-26 | the same twenty-line bench (one cacheable `FnEndpoint`, warmed, 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop, load 1.4–2.3), interleaved main / branch three times each from a detached worktree of `f6a4b01`. The first cut (the thread on an owned `BTreeSet`) cost +20–28 ns (~7 %) — every hit cloned a now non-empty set, a node and a string — and the second (`Option<Arc<BTreeSet>>`, `repr.rs`) took it all back to 0–10 ns *under* main. Not committed. |
 | ~335 ns → ~880 ns | a read of the smallest composite that swallows a `Denied` sub-request and returns `.cacheable()`, before / after R4.5 | 2026-09-26 | same bench, second case: before it was a cache hit (334–346 ns); after it recomputes every read (867–900 ns): resolve the composite, invoke, resolve the gated leaf, refuse at the floor. The 2.6× is the designed cost of not caching a result built on a refusal; every affected consumer is listed in the 0.1.73 hub report. Not committed. |
+| 304–311 ns → 298–305 ns | cache-hit read before / after the chain reached selection, the probe and the pipe and gained a clock (0.1.75) | 2026-09-26 | the same twenty-line bench (one cacheable `FnEndpoint`, warmed, 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop, load 2.4–3.4), main (a detached worktree of `d99a180`) and branch interleaved three times each. 0–10 ns under main: nothing added is on the hit path — `resolve_in`'s empty-chain fast path is untouched, `now()` is never called on a hit, the scope-name map is written only on a scoped store. Table in `docs/design/resolution-scope.md`. Not committed. |
 | 431–454 ns → 297–328 ns | cache-hit read of an endpoint with an explicit `ActionSpec` (the module shape), before / after the floor memo; a bare `FnEndpoint` 312–324 → 299–316 ns | 2026-09-26 | the same twenty-line bench, three cases (a bare `FnEndpoint`; one declaring an `ActionSpec` that requires a scope, read as root and as the holder), 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop, main (a detached worktree of `fb63bb0`) and branch interleaved three times each, load 1.5–2.6. The memo took ~135 ns (≈ 31 %) off the module-shaped read — the per-request `describe()` AND the `action_specs()` clone it fed the floor — and ~10 ns off the bare one, whose default description is a single string. Ledger #22. Not committed. |
 | 64 | `DEFAULT_MAX_DEPTH`, the nesting budget | — | `kernel.rs`, a constant; `Kernel::with_max_depth` overrides it. NetKernel: 40 shipped, 32 default, for a counter that also pays for resolution hops. |
 | 8 | `DEFAULT_MAX_HOPS`, the alias chain cap | — | `alias.rs`, a constant. |
@@ -958,6 +1015,22 @@ description until the thread is cut — which was never sound (the catalog alrea
 on the same argument as 0.1.73. `vocabulary.ttl`'s `owl:versionInfo` moved with the crate;
 nothing semantic changed, so the `/ns` deploy is header-only drift. Not built, on purpose: a
 mutable root (§9), and a path cache (`docs/design/path-cache.md`).
+
+**0.1.75** carries the three faces of [#516](http://localhost:1060/l/default/item/516) and the
+clock of [#517](http://localhost:1060/l/default/item/517): on `Kernel`, `select_transreptor_in`,
+`select_action_in`, `select_actions_in`, `is_cached_in`, `issue_with_incoming_in`; on `Scope`,
+`with_named_at`, `clock`, `now`; on `Issuer`, two defaulted methods (`select_transreptor_in`,
+`select_action_in`); on `ReprCache`, `rows_with_scope` and the `CacheRow` it returns; one
+constant (`SCOPE_CLOCK_NOTE`) — all additive. Three changes in what a consumer observes without
+code of its own changing, each stated where it bites: `Invocation::select_action` /
+`select_transreptor` answer for the invocation's chain (a confined endpoint's manifold shrinks to
+what it can resolve — the correction, not a regression); `Invocation::now()` prefers the chain's
+clock (only a chain built with `with_named_at` has one, so no existing caller sees a change); and
+`urn:kernel:cache` prints a fifth column. A `Meta` request's transreption steps now run inside
+the Meta resolution's chain, trace and depth rather than as plain root issues. A patch in the
+lockstep 0.1.x line on the same argument as 0.1.73. `vocabulary.ttl`'s `owl:versionInfo` moved
+with the crate; nothing semantic changed, so the `/ns` deploy is header-only drift; `ikigai-log`
+wants one term for `scope-clock`.
 
 The gate itself is as the previous revision left it: a dev-only integration test that reads
 this file from the repository, **excluded from the packaged crate**

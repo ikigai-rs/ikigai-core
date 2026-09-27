@@ -274,6 +274,17 @@ pub const SCOPE_NOTE: &str = "scope";
 /// chain record no event, unchanged.
 pub const SCOPE_MISS_NOTE: &str = "scope-unresolved";
 
+/// The [`TraceEvent::notes`] key under which the kernel reports the **chain's
+/// clock** — the instant a temporal corridor's derived clock
+/// ([`Scope::with_named_at`]) read as the event was recorded, in milliseconds since
+/// the epoch, e.g. `("scope-clock", "1000000")`. Appears only beside
+/// [`SCOPE_NOTE`], and only when the chain carries a clock. A corridor's name is
+/// the injector's *claim* about time; this is what the kernel actually observed,
+/// so a reader can tell a chain that pinned `inv.now()` from one merely named as
+/// if it had. The kernel's own clock is on the event as `started` / `ended`,
+/// unchanged: validity is judged there, never here.
+pub const SCOPE_CLOCK_NOTE: &str = "scope-clock";
+
 /// The well-known golden thread meaning **"the set of bindings this kernel resolves
 /// against has changed"**: `urn:kernel:bindings`.
 ///
@@ -414,6 +425,13 @@ pub struct Kernel {
     /// Read-only handle to the host scheduler, for `urn:kernel:scheduler`. Injected
     /// by a scheduled host (the [`Clock`] pattern); absent ⇒ single-threaded default.
     scheduler: Option<Arc<dyn SchedulerReporter>>,
+    /// The rendered chain behind each non-empty scope fingerprint an entry was
+    /// stored under, so `urn:kernel:cache` can NAME the chain a row was computed in
+    /// rather than print a hash. The cache itself keeps only the fingerprint (the
+    /// key); this is the readout's memory of what it meant. Written only when a
+    /// scoped result is stored — never on the empty-chain path — and pruned to the
+    /// fingerprints still resident whenever the readout renders.
+    scope_names: Mutex<BTreeMap<u64, String>>,
     /// Rolling window of the most recent resolutions (target, time, cache outcome),
     /// for `urn:kernel:constraint` — the kernel's throughput readout. Always-on like
     /// the cache; bounded to [`CONSTRAINT_WINDOW`]. `urn:kernel:*` introspection
@@ -619,6 +637,7 @@ impl Kernel {
             subclass_closure: BTreeMap::new(),
             max_depth: DEFAULT_MAX_DEPTH,
             floors: FloorMemo::default(),
+            scope_names: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -640,6 +659,7 @@ impl Kernel {
             subclass_closure: BTreeMap::new(),
             max_depth: DEFAULT_MAX_DEPTH,
             floors: FloorMemo::default(),
+            scope_names: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -649,6 +669,27 @@ impl Kernel {
     /// content negotiation, and sniff-and-dispatch. See [`crate::select_transreptor`].
     pub fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
         crate::select::select_transreptor(self.root.as_ref(), from, to)
+    }
+
+    /// [`select_transreptor`](Self::select_transreptor) **in a resolution chain**:
+    /// the plan is found among the transreptors the chain can resolve — each
+    /// injected corridor innermost first, then the root unless the chain is
+    /// severed — so a corridor that shadows a transreptor's IRI is the one the plan
+    /// names, and a severed chain without one plans nothing though the root has one.
+    /// The empty chain is [`select_transreptor`](Self::select_transreptor) exactly.
+    /// This is what [`Invocation::select_transreptor`] reaches, with the
+    /// invocation's own chain, and what the `Meta` path plans over inside a scoped
+    /// resolution.
+    pub fn select_transreptor_in(
+        &self,
+        from: &str,
+        to: &str,
+        scope: &Scope,
+    ) -> Option<Vec<TransreptionStep>> {
+        if scope.is_empty() {
+            return self.select_transreptor(from, to);
+        }
+        crate::select::select_transreptor(&scope.view(None, &self.root), from, to)
     }
 
     /// Install an `rdfs:subClassOf` axiom set — `(subclass, superclass)` IRI pairs, e.g.
@@ -703,6 +744,22 @@ impl Kernel {
         crate::select::select_action(&self.described(), &refs)
     }
 
+    /// [`select_action`](Self::select_action) **in a resolution chain**: the
+    /// manifold of what the chain can resolve — the kernel's own operations (ahead
+    /// of every chain, as on the issue path), each injected corridor innermost
+    /// first, then the root unless severed. A confined endpoint's manifold
+    /// therefore never lists a root-only action: an offer the chain could not then
+    /// resolve is the over-offer "declared = enforced" exists to prevent, one layer
+    /// up. The empty chain is [`select_action`](Self::select_action) exactly.
+    pub fn select_action_in(&self, present: &[&str], scope: &Scope) -> Vec<ActionMatch> {
+        if scope.is_empty() {
+            return self.select_action(present);
+        }
+        let expanded = self.expand_present(present);
+        let refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
+        crate::select::select_action(&self.described_in(scope), &refs)
+    }
+
     /// The action-level selection funnel over this kernel's bindings (see
     /// `select::select_actions`, crate-private): capability-scoped, verb- and output-aware,
     /// with the present types expanded through the `rdfs:subClassOf` closure first.
@@ -714,6 +771,26 @@ impl Kernel {
             ..*query
         };
         crate::select::select_actions(&self.described(), &expanded_query)
+    }
+
+    /// [`select_actions`](Self::select_actions) **in a resolution chain** — see
+    /// [`select_action_in`](Self::select_action_in) for what the chain's manifold
+    /// is. The empty chain is [`select_actions`](Self::select_actions) exactly.
+    pub fn select_actions_in(
+        &self,
+        query: &crate::select::ActionQuery<'_>,
+        scope: &Scope,
+    ) -> Vec<ActionMatch> {
+        if scope.is_empty() {
+            return self.select_actions(query);
+        }
+        let expanded = self.expand_present(query.present);
+        let refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
+        let expanded_query = crate::select::ActionQuery {
+            present: &refs,
+            ..*query
+        };
+        crate::select::select_actions(&self.described_in(scope), &expanded_query)
     }
 
     /// The typed self-description of the endpoint bound at `iri`, or `None` if the
@@ -785,22 +862,32 @@ impl Kernel {
     }
 
     /// Render `description` to `target` by transrepting its canonical Turtle: render the
-    /// Turtle, [`select`](Self::select_transreptor) a transreptor chain `text/turtle →
-    /// target`, and run it (piping `content`, setting `as`) through the kernel. Falls back
-    /// to the canonical Turtle if no transreptor reaches `target`. Used by the `Meta` path
-    /// for any type the renderer doesn't emit directly.
+    /// Turtle, [`select`](Self::select_transreptor_in) a transreptor chain `text/turtle →
+    /// target` **in the resolution chain the Meta request runs in**, and run it (piping
+    /// `content`, setting `as`) through the kernel in that same chain, as sub-requests
+    /// of the Meta resolution. Falls back to the canonical Turtle if no transreptor
+    /// reaches `target` from inside the chain — a root transreptor a severed chain
+    /// cannot resolve is not offered, so it is not a plan that fails on a branch that
+    /// looked selectable. Used by the `Meta` path for any type the renderer doesn't
+    /// emit directly.
+    #[allow(clippy::too_many_arguments)] // the Meta arm's sub-request: every fact of its resolution, named
     async fn transrept_meta(
         &self,
         description: &Description,
         target: &ReprType,
         capability: &Capability,
+        parent: Option<u64>,
+        trace: &Option<TraceScope>,
+        scope: &Scope,
+        depth: u32,
     ) -> Result<Representation> {
         let renderer = self
             .meta
             .as_ref()
             .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
         let canonical = renderer.render(description, &ReprType::new(crate::select::CANONICAL))?;
-        let Some(plan) = self.select_transreptor(crate::select::CANONICAL, &target.media_type)
+        let Some(plan) =
+            self.select_transreptor_in(crate::select::CANONICAL, &target.media_type, scope)
         else {
             // Nothing converts Turtle to the requested type — hand back the canonical Turtle.
             return Ok(canonical.cacheable());
@@ -815,8 +902,18 @@ impl Kernel {
                 .with_arg("as", ArgRef::Inline(step.to.into_bytes()));
             // Box the re-entrant issue: the async call graph (issue → transrept_meta →
             // issue) is a cycle the compiler must size via indirection, even though at
-            // runtime these are plain `Source` transreptions, never `Meta`.
-            current = Box::pin(self.issue(request, capability)).await?;
+            // runtime these are plain `Source` transreptions, never `Meta`. A step runs
+            // one level below the Meta resolution, in its chain and its trace.
+            current = Box::pin(self.issue_inner(
+                request,
+                capability,
+                parent,
+                None,
+                trace.clone(),
+                scope.clone(),
+                depth + 1,
+            ))
+            .await?;
         }
         Ok(current.cacheable())
     }
@@ -1441,17 +1538,26 @@ impl Kernel {
         capability: &Capability,
         incoming: Provenance,
     ) -> Result<Representation> {
+        self.issue_with_incoming_in(request, capability, incoming, Scope::empty())
+            .await
+    }
+
+    /// [`issue_with_incoming`](Self::issue_with_incoming) **in a resolution chain**
+    /// — the pipe stage resolved in `scope` ([`issue_in`](Self::issue_in)'s chain)
+    /// with the upstream's provenance folded in exactly as in the empty chain. This
+    /// is what lets an engine run a whole pipeline inside one chain, stage by stage,
+    /// instead of resolving every stage in the plain root; the empty chain is
+    /// [`issue_with_incoming`](Self::issue_with_incoming) exactly.
+    pub async fn issue_with_incoming_in(
+        &self,
+        request: Request,
+        capability: &Capability,
+        incoming: Provenance,
+        scope: Scope,
+    ) -> Result<Representation> {
         let trace = self.global_scope();
-        self.issue_inner(
-            request,
-            capability,
-            None,
-            Some(incoming),
-            trace,
-            Scope::empty(),
-            0,
-        )
-        .await
+        self.issue_inner(request, capability, None, Some(incoming), trace, scope, 0)
+            .await
     }
 
     /// The resolution path, carrying the `parent` span of the invocation that issued
@@ -1600,7 +1706,7 @@ impl Kernel {
         // miss, exactly as if nothing were bound. That "exactly" is the point of
         // confinement: the caller cannot tell a name outside the chain from a name
         // that does not exist, so there is no decision here to misconfigure.
-        let mut resolved = match scope.resolve_in(&request, self.root.as_ref()) {
+        let mut resolved = match scope.resolve_in(&request, &self.root) {
             Resolution::Hit(resolved) => resolved,
             Resolution::Miss => {
                 // A rewrite that lands on nothing is reported as a rewrite. The error
@@ -1742,8 +1848,16 @@ impl Kernel {
                 // The renderer doesn't emit this type directly — transrept the canonical
                 // Turtle to it.
                 Err(_) => {
-                    self.transrept_meta(&description, &target, capability)
-                        .await?
+                    self.transrept_meta(
+                        &description,
+                        &target,
+                        capability,
+                        span,
+                        &trace,
+                        &scope,
+                        depth,
+                    )
+                    .await?
                 }
             };
             // A description is a function of the BINDING, not of any state, so the
@@ -1872,13 +1986,22 @@ impl Kernel {
         if storable {
             // The store may still decline: `taken` predates the invocation, so a cut
             // that landed while it ran means this representation is already stale.
-            self.cache.store(
+            let stored = self.cache.store(
                 key,
                 request.target.as_str().to_string(),
                 representation.clone(),
                 taken,
                 self.elapsed_since(started),
             );
+            // Remember what the fingerprint meant, for the readout. Off the
+            // empty-chain path entirely: a plain `issue` never takes this lock.
+            if stored && !scope.is_empty() {
+                self.scope_names
+                    .lock()
+                    .expect("scope names lock")
+                    .entry(key.scope)
+                    .or_insert_with(|| scope.to_string());
+            }
         }
         Ok(representation)
     }
@@ -2041,12 +2164,20 @@ impl Kernel {
                 Ok(kernel_text(format!("cut {thread}\n")))
             }
             // Inspect the cache: a count, then one line per entry — the IRI it was
-            // resolved from, its representation type and size, and how many golden
-            // threads it depends on (cut any of them and this entry recomputes).
+            // resolved from, its representation type and size, how many golden
+            // threads it depends on (cut any of them and this entry recomputes), and
+            // the resolution chain it was computed in (`root` for the empty chain,
+            // else the chain as `Scope` renders it, or its fingerprint if the name
+            // is no longer known).
             ("cache", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
-                let mut rows = self.cache.rows();
-                rows.sort();
+                let mut rows = self.cache.rows_with_scope();
+                rows.sort_by(|a, b| (&a.target, a.scope).cmp(&(&b.target, b.scope)));
+                let names = {
+                    let mut names = self.scope_names.lock().expect("scope names lock");
+                    names.retain(|fingerprint, _| rows.iter().any(|r| r.scope == *fingerprint));
+                    names.clone()
+                };
                 let bound = self.cache.bound();
                 let mut body = format!(
                     "cache\n  entries  {} / {}\n  size     {} / {}\n",
@@ -2057,19 +2188,27 @@ impl Kernel {
                 );
                 let width = rows
                     .iter()
-                    .map(|r| r.0.chars().count())
+                    .map(|r| r.target.chars().count())
                     .max()
                     .unwrap_or(0)
                     .min(48);
-                for (target, media, size, deps) in rows {
-                    let deps = if deps == 1 {
+                for row in rows {
+                    let deps = if row.threads == 1 {
                         "1 thread".to_string()
                     } else {
-                        format!("{deps} threads")
+                        format!("{} threads", row.threads)
                     };
-                    let size = human_size(size);
+                    let size = human_size(row.bytes);
+                    let scope = match row.scope {
+                        0 => "root".to_string(),
+                        fingerprint => names
+                            .get(&fingerprint)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{fingerprint:016x}")),
+                    };
+                    let (target, media) = (row.target, row.media_type);
                     body.push_str(&format!(
-                        "  {target:<width$}  {media:<24}  {size:>9}  {deps}\n"
+                        "  {target:<width$}  {media:<24}  {size:>9}  {deps:<10}  {scope}\n"
                     ));
                 }
                 Ok(kernel_text(body))
@@ -2506,6 +2645,18 @@ impl Kernel {
     /// (including one that would be a miss). Lets a caller report cache state
     /// without the observer effect of actually issuing the request.
     pub fn is_cached(&self, request: &Request, capability: &Capability) -> bool {
+        self.is_cached_in(request, capability, &Scope::empty())
+    }
+
+    /// [`is_cached`](Self::is_cached) **in a resolution chain**: whether issuing
+    /// `request` through [`issue_in`](Self::issue_in) with `scope` right now would
+    /// be served from the cache. The chain is a dimension of the key, so the
+    /// empty chain's entry and a corridor's are different entries and the probe
+    /// answers for the one asked about; the empty chain is
+    /// [`is_cached`](Self::is_cached) exactly. Freshness is judged on the
+    /// **kernel's** clock, as serving is — a chain's own clock
+    /// ([`Scope::with_named_at`]) never enters it.
+    pub fn is_cached_in(&self, request: &Request, capability: &Capability, scope: &Scope) -> bool {
         if !request.verb.is_cacheable() {
             return false;
         }
@@ -2538,7 +2689,7 @@ impl Kernel {
         // authority*" — consistent with what issuing under it would actually serve.
         // Does not evict — eviction happens on the serving path.
         self.cache.probe(
-            &CacheKey::new(id, capability_key(capability)),
+            &CacheKey::new(id, capability_key(capability)).in_scope(scope.fingerprint()),
             self.now_stamp(),
         )
     }
@@ -2577,6 +2728,14 @@ impl Kernel {
             Arc::new(crate::kernel_ops::KernelOps),
             Arc::clone(&self.root),
         ])
+    }
+
+    /// [`described`](Self::described) for a non-empty chain: the kernel's own
+    /// operations ahead, then the chain's corridors innermost first, then the root
+    /// unless severed — the same order [`Scope::resolve_in`] consults, from the
+    /// same walk, so a chain's manifold is what resolution in that chain reaches.
+    fn described_in(&self, scope: &Scope) -> crate::space::ChainView {
+        scope.view(Some(Arc::new(crate::kernel_ops::KernelOps)), &self.root)
     }
 }
 
@@ -2627,13 +2786,18 @@ fn alias_notes(alias: Option<&AliasHop>) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// The trace note disclosing the resolution chain: empty for the empty chain, so
-/// a plain `issue`'s events are byte-identical to before scopes existed.
+/// The trace notes disclosing the resolution chain — and, when the chain carries a
+/// clock, the instant it read: empty for the empty chain, so a plain `issue`'s
+/// events are byte-identical to before scopes existed.
 fn scope_notes(scope: &Scope) -> Vec<(String, String)> {
     if scope.is_empty() {
         return Vec::new();
     }
-    vec![(SCOPE_NOTE.to_string(), scope.to_string())]
+    let mut notes = vec![(SCOPE_NOTE.to_string(), scope.to_string())];
+    if let Some(now) = scope.now() {
+        notes.push((SCOPE_CLOCK_NOTE.to_string(), now.as_millis().to_string()));
+    }
+    notes
 }
 
 /// The reserved kernel-behavior namespace prefix.
@@ -2898,6 +3062,21 @@ impl Issuer for Kernel {
 
     fn select_action(&self, present: &[&str]) -> Vec<ActionMatch> {
         Kernel::select_action(self, present)
+    }
+
+    fn select_transreptor_in(
+        &self,
+        from: &str,
+        to: &str,
+        scope: &Scope,
+    ) -> Option<Vec<TransreptionStep>> {
+        // Selection in the chain the invocation runs in: what its sub-requests could
+        // actually resolve.
+        Kernel::select_transreptor_in(self, from, to, scope)
+    }
+
+    fn select_action_in(&self, present: &[&str], scope: &Scope) -> Vec<ActionMatch> {
+        Kernel::select_action_in(self, present, scope)
     }
 
     fn record_subtree(&self, parent: Option<u64>, spans: Vec<TraceEvent>) {

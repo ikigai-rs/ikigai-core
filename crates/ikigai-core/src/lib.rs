@@ -93,8 +93,8 @@ pub use alias::{
 };
 pub use arg::ArgRef;
 pub use cache::{
-    CacheBound, CacheEntry, CacheKey, CachePolicy, CostAware, CutSnapshot, EntryFacts, Fifo, Lru,
-    ReprCache,
+    CacheBound, CacheEntry, CacheKey, CachePolicy, CacheRow, CostAware, CutSnapshot, EntryFacts,
+    Fifo, Lru, ReprCache,
 };
 pub use capability::Capability;
 pub use confine::Confine;
@@ -111,7 +111,7 @@ pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
     ALIAS_MISS_NOTE, ALIAS_NOTE, BINDINGS_THREAD, DEFAULT_MAX_DEPTH, DENIED_NOTE, DEPTH_NOTE,
-    SCOPE_MISS_NOTE, SCOPE_NOTE,
+    SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE,
 };
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};

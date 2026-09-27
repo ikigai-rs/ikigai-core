@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::endpoint::Endpoint;
 use crate::grammar::{Bindings, Grammar};
 use crate::iri::Iri;
+use crate::kernel::Clock;
+use crate::repr::Time;
 use crate::request::Request;
 
 /// The resolution chain a request is resolved in: the corridors a host injected
@@ -34,6 +36,18 @@ use crate::request::Request;
 /// [`Kernel::issue`](crate::Kernel::issue) resolves in, and it is the status quo:
 /// its [`fingerprint`](Self::fingerprint) is `0`, so today's cache entries and
 /// today's cache keys are untouched.
+///
+/// The chain is the resolution context **everywhere** the kernel answers a
+/// question about resolution, not only on the issue path: selection
+/// ([`Kernel::select_action_in`](crate::Kernel::select_action_in) and the
+/// invocation forms) offers what the chain can resolve, the cache probe
+/// ([`Kernel::is_cached_in`](crate::Kernel::is_cached_in)) answers for the
+/// chain's entry, and a pipe stage can run in it
+/// ([`Kernel::issue_with_incoming_in`](crate::Kernel::issue_with_incoming_in)).
+/// A chain may also carry a **clock**, derived from a temporal corridor at
+/// injection ([`with_named_at`](Self::with_named_at)), which
+/// [`Invocation::now`](crate::Invocation::now) prefers — so pinning time pins
+/// both the resolved `urn:time:now` and the clock an endpoint reads.
 ///
 /// The kernel reserves `urn:kernel:*` ahead of the chain: no corridor can shadow
 /// a kernel operation, and a severed chain still reaches them (capability-gated,
@@ -107,6 +121,13 @@ struct Chain {
     /// The chain's fingerprint, computed once when the chain is built so reading
     /// it costs nothing on the issue path.
     fingerprint: u64,
+    /// The chain's clock: the one a temporal corridor DERIVED at injection
+    /// ([`Scope::with_named_at`]), read by [`Invocation::now`](crate::Invocation::now)
+    /// ahead of the issuer's. Innermost wins; a corridor injected without one leaves
+    /// it as it was; confinement keeps it. **Not fingerprinted** — the clock is a
+    /// property of the corridor's name (see `with_named_at` on why), and the kernel
+    /// never reads it for validity.
+    clock: Option<Arc<dyn Clock>>,
 }
 
 /// What a corridor is fingerprinted by: the name its injector claimed for it, or
@@ -154,6 +175,115 @@ impl Scope {
         })
     }
 
+    /// Inject a **named temporal corridor**: a corridor that binds the time name
+    /// (`urn:time:now`, say) to one instant, AND the [`Clock`] derived from that
+    /// instant, in one call — so an endpoint under it sees the same pinned time
+    /// whether it *resolves* time or calls [`Invocation::now`](crate::Invocation::now).
+    /// The two cannot be set independently: there is no way to put a clock on a
+    /// chain except beside the corridor it is derived from (ledger #517).
+    ///
+    /// # The pairing is a claim the injector makes
+    ///
+    /// Core cannot verify that the corridor's time door answers the instant the
+    /// clock reads — it would have to resolve the door to find out, and a corridor
+    /// is any [`Space`]. So `with_named_at(n, s, c)` asserts, beside what
+    /// [`with_named`](Self::with_named) already asserts about `n` and `s`: *the time
+    /// `s` binds under `n` is the time `c` reads.* That is the same shape as a
+    /// corridor's name being a claim, and it is why the clock is **not** part of
+    /// the [fingerprint](Self::fingerprint): the clock is a property of the name.
+    /// Two injections under one name with different clocks are one claim made
+    /// twice with different content — the injector's error, exactly as two
+    /// different spaces under one name would be — and the cache treats them as one
+    /// context. (The alternative, fingerprinting the clock, has nothing to hash: an
+    /// `Arc<dyn Clock>` has no stable identity, and the instant exists only for a
+    /// clock that does not move.)
+    ///
+    /// At most one clock per chain, and the **innermost** wins: a temporal corridor
+    /// injected inside another replaces its clock, as its `urn:time:now` shadows the
+    /// outer one's. A corridor injected without a clock leaves the chain's as it
+    /// was, and [`confined`](Self::confined) keeps it — an endpoint cannot change
+    /// the host's time any more than it can drop the host's corridors.
+    ///
+    /// The kernel keeps its **own** clock for validity: an [`Expiry::At`](crate::Expiry)
+    /// deadline is judged against [`Kernel::with_clock`](crate::Kernel::with_clock),
+    /// never against this one, so a pinned past cannot un-expire a live entry and a
+    /// pinned future cannot expire a fresh one. What this clock changes is what an
+    /// endpoint *computes*; what it never changes is what the cache *serves*.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     AsyncFnEndpoint, Capability, EndpointSpace, Exact, Expiry, FixedClock, FnEndpoint, Iri,
+    ///     Kernel, ReprType, Representation, Request, Scope, Verb,
+    /// };
+    ///
+    /// fn text(s: String) -> Representation {
+    ///     Representation::new(ReprType::new("text/plain"), s.into_bytes())
+    /// }
+    /// // An endpoint that reads time BOTH ways, and is cacheable on its own account.
+    /// let stamp = AsyncFnEndpoint::new("stamp", move |inv| {
+    ///     Box::pin(async move {
+    ///         let resolved = inv.source(&Iri::parse("urn:time:now").unwrap()).await?;
+    ///         let clock = inv.now().map(|t| t.as_millis()).unwrap_or(0);
+    ///         Ok(text(format!("{} {clock}", String::from_utf8_lossy(&resolved.bytes))).cacheable())
+    ///     })
+    /// });
+    /// // The root's `urn:time:now` is live: the kernel's clock, uncacheable.
+    /// let kernel = Kernel::new(Arc::new(
+    ///     EndpointSpace::new()
+    ///         .bind(
+    ///             Exact::new("urn:time:now"),
+    ///             FnEndpoint::new("now", |inv| Ok(text(inv.now().unwrap().as_millis().to_string()))),
+    ///         )
+    ///         .bind_arc(Exact::new("urn:stamp"), Arc::new(stamp)),
+    /// ))
+    /// .with_clock(Arc::new(FixedClock::at(2_000)));
+    /// let cap = Capability::root();
+    /// let stamp = || Request::new(Verb::Source, Iri::parse("urn:stamp").unwrap());
+    ///
+    /// // The corridor pins BOTH: the door it binds, and the clock derived from it.
+    /// let at_six = || {
+    ///     Scope::empty().with_named_at(
+    ///         Iri::parse("urn:ctx:time:2026-09-25T18:00Z").unwrap(),
+    ///         Arc::new(EndpointSpace::new().bind(
+    ///             Exact::new("urn:time:now"),
+    ///             FnEndpoint::new("six", |_| Ok(text("1000".into()).cacheable())),
+    ///         )),
+    ///         Arc::new(FixedClock::at(1_000)),
+    ///     )
+    /// };
+    /// let live = block_on(kernel.issue(stamp(), &cap)).unwrap();
+    /// let pinned = block_on(kernel.issue_in(stamp(), &cap, at_six())).unwrap();
+    /// assert_eq!(live.bytes, b"2000 2000");
+    /// assert_eq!(pinned.bytes, b"1000 1000");
+    ///
+    /// // Pinning the context turns an uncacheable "now" into an immutable "then".
+    /// assert_eq!(live.expiry, Expiry::Always);
+    /// assert_eq!(pinned.expiry, Expiry::Never);
+    /// assert!(kernel.is_cached_in(&stamp(), &cap, &at_six()));
+    /// ```
+    pub fn with_named_at(self, name: Iri, space: Arc<dyn Space>, clock: Arc<dyn Clock>) -> Self {
+        self.edit(|chain| {
+            chain.injected.push(space);
+            chain.identities.push(CorridorIdentity::Named(name));
+            chain.clock = Some(clock);
+        })
+    }
+
+    /// The chain's clock — the one its innermost temporal corridor derived
+    /// ([`with_named_at`](Self::with_named_at)) — or `None` when no corridor in it
+    /// pinned time. Read by [`Invocation::now`](crate::Invocation::now) ahead of
+    /// the issuer's clock; never by the kernel for validity.
+    pub fn clock(&self) -> Option<&Arc<dyn Clock>> {
+        self.chain.as_ref().and_then(|chain| chain.clock.as_ref())
+    }
+
+    /// The chain's "now", per its [clock](Self::clock); `None` when it has none.
+    pub fn now(&self) -> Option<Time> {
+        self.clock().map(|clock| clock.now())
+    }
+
     /// Cut the root off the chain: a request resolved in the result reaches only
     /// the injected corridors, and anything else is
     /// [`Unresolved`](crate::Error::Unresolved). Idempotent.
@@ -187,6 +317,7 @@ impl Scope {
                 identities: Vec::new(),
                 severed: false,
                 fingerprint: 0,
+                clock: None,
             },
             Some(shared) => Arc::try_unwrap(shared).unwrap_or_else(|shared| (*shared).clone()),
         };
@@ -228,22 +359,83 @@ impl Scope {
         self.chain.as_ref().map_or(0, |chain| chain.fingerprint)
     }
 
-    /// Resolve `request` against the chain: each injected corridor innermost
-    /// first, then the root unless severed.
-    pub(crate) fn resolve_in(&self, request: &Request, root: &dyn Space) -> Resolution {
-        let Some(chain) = self.chain.as_ref() else {
-            return root.resolve(request, self);
+    /// Every space the chain consults, in the order it consults them: each
+    /// injected corridor innermost first, then `root` unless the chain is severed.
+    /// **The one walk** — resolution ([`resolve_in`](Self::resolve_in)) and
+    /// selection ([`view`](Self::view)) both take their order from here, so what
+    /// the manifold offers inside a chain is what resolution in that chain reaches.
+    pub(crate) fn consulted<'a>(
+        &'a self,
+        root: &'a Arc<dyn Space>,
+    ) -> impl Iterator<Item = &'a Arc<dyn Space>> + 'a {
+        let (corridors, severed) = match self.chain.as_ref() {
+            None => (&[][..], false),
+            Some(chain) => (chain.injected.as_slice(), chain.severed),
         };
-        for space in chain.injected.iter().rev() {
+        corridors.iter().rev().chain((!severed).then_some(root))
+    }
+
+    /// Resolve `request` against the chain: the first hit along
+    /// [`consulted`](Self::consulted), else a miss.
+    pub(crate) fn resolve_in(&self, request: &Request, root: &Arc<dyn Space>) -> Resolution {
+        // The empty chain is the hot path — every plain `issue` — and is one null
+        // check straight to the root; the walk below is the general case.
+        if self.chain.is_none() {
+            return root.resolve(request, self);
+        }
+        for space in self.consulted(root) {
             if let Resolution::Hit(resolved) = space.resolve(request, self) {
                 return Resolution::Hit(resolved);
             }
         }
-        if chain.severed {
-            Resolution::Miss
-        } else {
-            root.resolve(request, self)
+        Resolution::Miss
+    }
+
+    /// The chain as ONE enumerable space, for selection: `ahead` first (the
+    /// kernel's own operations, which no corridor can shadow), then everything
+    /// [`consulted`](Self::consulted). A pattern bound in more than one member is
+    /// listed once, as the member consulted first binds it — the manifold names
+    /// what resolution would reach, and a shadowed door is not reachable.
+    pub(crate) fn view(&self, ahead: Option<Arc<dyn Space>>, root: &Arc<dyn Space>) -> ChainView {
+        let mut spaces: Vec<Arc<dyn Space>> = ahead.into_iter().collect();
+        spaces.extend(self.consulted(root).cloned());
+        ChainView { spaces }
+    }
+}
+
+/// A resolution chain seen as one space — first hit wins, entries deduplicated
+/// by pattern, first binding wins — so the selection walks (`entries → Meta →
+/// describe`) can run over a chain exactly as they run over a root. Built by
+/// [`Scope::view`]; never bound in a tree.
+pub(crate) struct ChainView {
+    spaces: Vec<Arc<dyn Space>>,
+}
+
+impl Space for ChainView {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        for space in &self.spaces {
+            if let Resolution::Hit(resolved) = space.resolve(request, scope) {
+                return Resolution::Hit(resolved);
+            }
         }
+        Resolution::Miss
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        let mut entries = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut enumerable = false;
+        for space in &self.spaces {
+            if let Some(inner) = space.entries() {
+                enumerable = true;
+                entries.extend(
+                    inner
+                        .into_iter()
+                        .filter(|entry| seen.insert(entry.pattern.clone())),
+                );
+            }
+        }
+        enumerable.then_some(entries)
     }
 }
 
