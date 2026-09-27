@@ -304,6 +304,19 @@ pub const SCOPE_MISS_NOTE: &str = "scope-unresolved";
 /// "why is this unresolved" wants to know which.
 pub const LIMITED_NOTE: &str = "limited";
 
+/// The [`TraceEvent::notes`] key under which the kernel reports **which space
+/// answered** — paired with the identity the resolution reported
+/// ([`Resolved::answered_by`](crate::Resolved::answered_by)): the innermost space
+/// on the path that claims one, or the named corridor the hit came from — e.g.
+/// `("answered-by", "urn:example:space:personal")`. Present only when something on
+/// the path is named, so a kernel whose spaces claim no identity records events
+/// byte-identical to before. Every event of such a resolution carries it: the
+/// computed invocation, the cache hit, the denial, and a hit on a limiter (which
+/// names the limiter, when it is named). [`SCOPE_NOTE`] names the whole chain;
+/// this names the one member of it that answered, which is the datum a cache
+/// keyed on the corridors actually consulted would key on.
+pub const ANSWERED_NOTE: &str = "answered-by";
+
 /// The [`TraceEvent::notes`] key under which the kernel reports the **chain's
 /// clock** — the instant a temporal corridor's derived clock
 /// ([`Scope::with_named_at`]) read as the event was recorded, in milliseconds since
@@ -1355,6 +1368,7 @@ impl Kernel {
         parent: Option<u64>,
         lacking: &str,
         alias: Option<&AliasHop>,
+        answered: Option<&Iri>,
         scope: &Scope,
     ) {
         let Some(trace_scope) = trace else {
@@ -1366,7 +1380,7 @@ impl Kernel {
         // simply not holding. Carrying the hop on the denial event is what stops
         // that from being invisible.
         let mut notes = vec![(DENIED_NOTE.to_string(), lacking.to_string())];
-        notes.extend(alias_notes(alias));
+        notes.extend(provenance_notes(alias, answered));
         notes.extend(scope_notes(scope));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
@@ -1488,6 +1502,7 @@ impl Kernel {
         span: Option<u64>,
         parent: Option<u64>,
         alias: Option<&AliasHop>,
+        answered: Option<&Iri>,
         scope: &Scope,
     ) {
         let Some(trace_scope) = trace else {
@@ -1497,7 +1512,7 @@ impl Kernel {
             LIMITED_NOTE.to_string(),
             request.target.as_str().to_string(),
         )];
-        notes.extend(alias_notes(alias));
+        notes.extend(provenance_notes(alias, answered));
         notes.extend(scope_notes(scope));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
@@ -1807,9 +1822,14 @@ impl Kernel {
         // still reaches them. So the answer does not depend on the scope and the
         // key carries none (scope fingerprint 0): a confined endpoint reading the
         // catalog sees the same catalog as everyone else — a list of NAMES it may
-        // not be able to resolve, which is names and not content.
+        // not be able to resolve, which is names and not content. The one
+        // exception is the topology, whose SUBJECT is the chain: it is keyed by the
+        // chain's fingerprint, as any scoped resolution is.
         if let Some(op) = request.target.as_str().strip_prefix(KERNEL_NS) {
-            let key = CacheKey::new(request.id(), capability_key(capability));
+            let mut key = CacheKey::new(request.id(), capability_key(capability));
+            if crate::kernel_ops::depends_on_chain(op) {
+                key = key.in_scope(scope.fingerprint());
+            }
             let cacheable_verb = request.verb.is_cacheable();
             let started = self.now_stamp();
             if cacheable_verb {
@@ -1817,7 +1837,8 @@ impl Kernel {
                     return Ok(cached);
                 }
             }
-            let representation = self.issue_kernel(op, &request, capability, &trace, parent)?;
+            let representation =
+                self.issue_kernel(op, &request, capability, &trace, parent, &scope)?;
             let storable = cacheable_verb
                 && match representation.expiry {
                     Expiry::Always => false,
@@ -1825,13 +1846,23 @@ impl Kernel {
                     Expiry::At(_) => self.clock.is_some(),
                 };
             if storable {
-                self.cache.store(
+                let stored = self.cache.store(
                     key,
                     request.target.as_str().to_string(),
                     representation.clone(),
                     taken,
                     self.elapsed_since(started),
                 );
+                // A chain-keyed entry names its chain in the readout, as a scoped
+                // resolution's does; every other kernel operation is keyed with
+                // scope 0 and takes no lock here.
+                if stored && key.scope != 0 {
+                    self.scope_names
+                        .lock()
+                        .expect("scope names lock")
+                        .entry(key.scope)
+                        .or_insert_with(|| scope.to_string());
+                }
             }
             return Ok(representation);
         }
@@ -1907,6 +1938,10 @@ impl Kernel {
             }
         }
         let alias = alias.as_ref();
+        // Who answered, for the trace: the innermost named space on the path, or
+        // the named corridor the hit came from. Read once; it never changes below.
+        let answered = resolved.answered_by.clone();
+        let answered = answered.as_ref();
 
         // ★ THE LIMITER. A hit on ⊥ (`Endpoint::is_limiter`) is the paper's
         // Definition 7: the identifier is admitted by a door whose endpoint is the
@@ -1921,7 +1956,9 @@ impl Kernel {
         // nothing is looked up or stored, and `Meta` never reaches its arm
         // (describing a hole would reveal it). Only the trace may know.
         if resolved.endpoint.is_limiter() {
-            self.trace_limited(&trace, &request, capability, span, parent, alias, &scope);
+            self.trace_limited(
+                &trace, &request, capability, span, parent, alias, answered, &scope,
+            );
             return Err(Error::Unresolved(request.target.clone()));
         }
 
@@ -1951,7 +1988,7 @@ impl Kernel {
             .unsatisfied(&resolved.endpoint, &request, capability)
         {
             self.trace_denial(
-                &trace, &request, capability, span, parent, &lacking, alias, &scope,
+                &trace, &request, capability, span, parent, &lacking, alias, answered, &scope,
             );
             return Err(Error::Denied(
                 self.denial_message(&lacking, &request, capability, alias),
@@ -1981,7 +2018,7 @@ impl Kernel {
                     parent,
                     started,
                     true,
-                    alias_notes(alias),
+                    provenance_notes(alias, answered),
                     &scope,
                 );
                 self.record_resolution(&request, started, true);
@@ -2103,17 +2140,17 @@ impl Kernel {
                 threads.extend(incoming.threads);
             }
             trace_notes = invocation.take_trace_notes();
-            // The rewrite is provenance of the invocation, so it leads the endpoint's
-            // own notes rather than being appended after them.
-            let mut notes = alias_notes(alias);
+            // The rewrite and the answering space are provenance of the invocation,
+            // so they lead the endpoint's own notes rather than being appended after.
+            let mut notes = provenance_notes(alias, answered);
             notes.append(&mut trace_notes);
             trace_notes = notes;
             representation.with_expiry(effective).with_threads(threads)
         };
         if request.verb == Verb::Meta {
             // The Meta arm takes no invocation, so it never reached the note-merging
-            // above; the rewrite still has to show on the event.
-            trace_notes = alias_notes(alias);
+            // above; the rewrite and the answerer still have to show on the event.
+            trace_notes = provenance_notes(alias, answered);
         }
         // Computed (not served from cache) — record after the invocation completes.
         self.trace_record(
@@ -2259,6 +2296,7 @@ impl Kernel {
         capability: &Capability,
         trace: &Option<TraceScope>,
         parent: Option<u64>,
+        chain: &Scope,
     ) -> Result<Representation> {
         // The capability gate for these operations. A refusal is REPORTED, not just
         // returned — a denied `urn:kernel:cut` is the same kind of security fact as
@@ -2287,6 +2325,7 @@ impl Kernel {
                 span,
                 parent,
                 scope,
+                None,
                 None,
                 &Scope::empty(),
             );
@@ -2429,6 +2468,24 @@ impl Kernel {
                     body.push('\n');
                 }
                 Ok(kernel_text(body))
+            }
+            // ★ THE ARRANGEMENT AS A RESOURCE (the paper's §8.2). The chain this
+            // request is resolved in — corridors innermost first, then the root
+            // unless severed — as one Turtle graph over the topology vocabulary,
+            // every node an IRI. The kernel cannot see inside a `dyn Space`, so each
+            // space reports its own structure (`Space::topology`); one that says
+            // nothing is an `ik:OpaqueSpace`, which is where the graph honestly
+            // stops. Cacheable under `urn:kernel:bindings` like every face derived
+            // from the bindings, and — unlike every other kernel operation — keyed
+            // by the chain, because the chain is its subject.
+            ("topology", Verb::Source) => {
+                require_cap("urn:cap:kernel:inspect")?;
+                Ok(Representation::new(
+                    ReprType::new("text/turtle").with_param("charset", "utf-8"),
+                    chain.topology(&self.root).to_turtle().into_bytes(),
+                )
+                .cacheable()
+                .depends_on(BINDINGS_THREAD))
             }
             // Inspect the host scheduler (backend, threads, live task counts).
             ("scheduler", Verb::Source) => {
@@ -2877,6 +2934,21 @@ impl Kernel {
         })
     }
 
+    /// The arrangement this kernel resolves against, as a tree — the empty chain's
+    /// view: one [`Chain`](crate::SpaceKind::Chain) node whose only layer is the
+    /// root's own [`topology`](crate::Space::topology). What `urn:kernel:topology`
+    /// renders, before rendering.
+    pub fn topology(&self) -> crate::Topology {
+        self.topology_in(&Scope::empty())
+    }
+
+    /// [`topology`](Self::topology) for a chain: the corridors innermost first,
+    /// then the root unless the chain is severed — "what can I see from here", as
+    /// a tree. The empty chain gives [`topology`](Self::topology).
+    pub fn topology_in(&self, scope: &Scope) -> crate::Topology {
+        scope.topology(&self.root)
+    }
+
     /// The space every `entries → Meta → describe` walk runs over: the kernel's own
     /// operations composed in FRONT of the root space, mirroring the intercept order
     /// on the issue path (where the root cannot shadow `urn:kernel:*` either).
@@ -2948,6 +3020,15 @@ fn alias_notes(alias: Option<&AliasHop>) -> Vec<(String, String)> {
     alias
         .map(|hop| vec![(ALIAS_NOTE.to_string(), hop.to_string())])
         .unwrap_or_default()
+}
+
+/// The trace notes disclosing a resolution's provenance: the rewrite, if any, then
+/// the space that answered, if it is named. Empty for an un-aliased hit through
+/// anonymous spaces, so such an event is byte-identical to before.
+fn provenance_notes(alias: Option<&AliasHop>, answered: Option<&Iri>) -> Vec<(String, String)> {
+    let mut notes = alias_notes(alias);
+    notes.extend(answered.map(|space| (ANSWERED_NOTE.to_string(), space.as_str().to_string())));
+    notes
 }
 
 /// The trace notes disclosing the resolution chain — and, when the chain carries a
@@ -4267,13 +4348,14 @@ mod tests {
         // operations must appear there — and appear *filtered*. `list` mentioning
         // the kernel is the easy half; this is the half with teeth.
         let kernel = meta_kernel();
-        const INSPECT_ONLY: [&str; 6] = [
+        const INSPECT_ONLY: [&str; 7] = [
             "urn:kernel:aliases",
             "urn:kernel:cache",
             "urn:kernel:catalog",
             "urn:kernel:constraint",
             "urn:kernel:scheduler",
             "urn:kernel:threads",
+            "urn:kernel:topology",
         ];
         // Ungated by design: "what can I do?" must be answerable by any capability
         // about itself, and the pre-flight that checks a proposal is not itself

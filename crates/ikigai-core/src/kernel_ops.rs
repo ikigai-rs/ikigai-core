@@ -63,8 +63,18 @@ pub(crate) const OPS: &[&str] = &[
     "cut",
     "scheduler",
     "threads",
+    "topology",
     "validate",
 ];
+
+/// Whether `op`'s answer is a function of the resolution chain it is asked in.
+/// Every kernel operation is resolved ahead of the chain and answers the same in
+/// any chain — keyed with scope `0` — except the topology, whose subject IS the
+/// chain (corridors innermost first, then the root unless severed), so its entry
+/// is keyed by the chain's fingerprint like any scoped resolution.
+pub(crate) fn depends_on_chain(op: &str) -> bool {
+    op == "topology"
+}
 
 /// The self-description of one kernel operation, or `None` for a name the kernel
 /// does not serve.
@@ -78,6 +88,7 @@ pub(crate) fn description(op: &str) -> Option<Description> {
         "cut" => cut(),
         "scheduler" => scheduler(),
         "threads" => threads(),
+        "topology" => topology(),
         "validate" => validate(),
         _ => return None,
     })
@@ -186,6 +197,25 @@ fn catalog() -> Description {
              queryable about itself with SPARQL, and renderable to HTML by transreption. \
              Says what EXISTS, for a caller with inspect authority; `urn:kernel:actions` is \
              the capability-scoped answer to what you MAY DO.",
+        )
+        .verb(Verb::Source)
+        .verb(Verb::Meta)
+        .requires(CAP_INSPECT)
+        .output(TEXT_TURTLE)
+}
+
+/// The description of `urn:kernel:topology` — the arrangement as a resource.
+fn topology() -> Description {
+    Description::new("kernel-topology")
+        .title("Resolution topology")
+        .summary(
+            "The arrangement resolution walks, as one Turtle graph: the chain this request \
+             is resolved in (its corridors innermost first, then the root unless severed), \
+             each space as an ik:Fallback (ordered ik:layers), ik:Mount (ik:prefix, ik:space), \
+             ik:Limit (ik:family), ik:EndpointSpace (ik:pattern), ik:Alias (ik:rewrites), \
+             ik:Rewrite or ik:OpaqueSpace, named by its own IRI or skolemized. What the \
+             catalog lists flat, this states as structure — so whether a family is \
+             reachable without passing a limiter is a path query, not a request.",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)

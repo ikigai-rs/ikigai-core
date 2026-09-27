@@ -17,7 +17,8 @@ use crate::endpoint::{Endpoint, Invocation};
 use crate::error::Result;
 use crate::iri::Iri;
 use crate::repr::Representation;
-use crate::space::{Scope, Space};
+use crate::space::{check_claim, Scope, Space};
+use crate::topology::{SpaceKind, Topology};
 
 /// Run `inner` confined to `space`: its sub-requests resolve only against the
 /// corridors the host injected for the request and against `space`, and the
@@ -89,9 +90,24 @@ pub struct Confine {
 }
 
 impl Confine {
-    /// Confine `inner` to `space`, a corridor named `name`.
+    /// Confine `inner` to `space`, a corridor named `name`. A `space` that claims
+    /// its own identity ([`Space::id`]) is the corridor under that identity, and
+    /// `name` must agree with it — a different name is refused (a panic), for the
+    /// reason [`Scope::with_named`] gives.
     pub fn new(name: Iri, space: Arc<dyn Space>, inner: Arc<dyn Endpoint>) -> Self {
+        check_claim(&name, &space);
         Confine { name, space, inner }
+    }
+
+    /// The arrangement the inner endpoint's sub-requests see once confined, as a
+    /// tree: an `ik:Confine` node named `name`, enclosing the corridor's own
+    /// structure. Not reachable from `urn:kernel:topology` — a confinement is bound
+    /// at one door, inside an endpoint the space cannot see into — so a host
+    /// doctor asks the endpoint.
+    pub fn topology(&self) -> Topology {
+        Topology::new(SpaceKind::Confine)
+            .with_id(Some(self.name.clone()))
+            .child(self.space.topology())
     }
 
     /// The chain `inner` will run in when invoked from `outer`'s chain — for a

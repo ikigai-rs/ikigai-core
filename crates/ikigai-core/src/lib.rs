@@ -23,6 +23,11 @@
 //! root cut off ([`Confine`], [`Invocation::confine`]) inside which anything
 //! unbound is unresolvable rather than denied.
 //!
+//! A space may claim an identity (`.named(iri)`, [`Space::id`]) and reports its
+//! structure ([`Space::topology`], a [`Topology`] tree), so the arrangement itself
+//! is a resource: `urn:kernel:topology` renders the chain a request sees as a
+//! graph, and a hit reports which space answered ([`Resolved::answered_by`]).
+//!
 //! [`alias`] adds **logical rewrite** on that same composition primitive: a stable
 //! logical URI ([`Alias`] over an [`AliasTable`]) resolves to a different backing
 //! resource without the caller knowing — the mechanism that lets a namespace
@@ -87,6 +92,7 @@ mod repr;
 mod request;
 mod select;
 mod space;
+mod topology;
 mod verb;
 
 pub use alias::{
@@ -112,8 +118,8 @@ pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
-    ALIAS_MISS_NOTE, ALIAS_NOTE, BINDINGS_THREAD, DEFAULT_MAX_DEPTH, DENIED_NOTE, DEPTH_NOTE,
-    LIMITED_NOTE, META_LOSSY_ARG, SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE,
+    ALIAS_MISS_NOTE, ALIAS_NOTE, ANSWERED_NOTE, BINDINGS_THREAD, DEFAULT_MAX_DEPTH, DENIED_NOTE,
+    DEPTH_NOTE, LIMITED_NOTE, META_LOSSY_ARG, SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE,
 };
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
@@ -126,4 +132,5 @@ pub use select::{
 pub use space::{
     EndpointSpace, Fallback, Limit, Mount, Resolution, Resolved, Rewrite, Scope, Space, SpaceEntry,
 };
+pub use topology::{SpaceKind, Topology, TopologyRule};
 pub use verb::Verb;

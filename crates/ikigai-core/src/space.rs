@@ -9,6 +9,7 @@ use crate::iri::Iri;
 use crate::kernel::Clock;
 use crate::repr::{Representation, Time};
 use crate::request::Request;
+use crate::topology::{SpaceKind, Topology};
 
 /// The resolution chain a request is resolved in: the corridors a host injected
 /// ahead of the kernel's root space, and whether the root is in the chain at all.
@@ -146,33 +147,88 @@ enum CorridorIdentity {
 /// address would be served the first one's answers.
 static ANONYMOUS_CORRIDORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// The identity a corridor is injected under when an injector names it: the
+/// injector's `name`, which must agree with the identity the space claims for
+/// itself if it claims one. A disagreement is refused — see
+/// [`Scope::with_named`] for why neither name may quietly win.
+fn claim(name: Iri, space: &Arc<dyn Space>) -> CorridorIdentity {
+    check_claim(&name, space);
+    CorridorIdentity::Named(name)
+}
+
+/// Refuse a `name` for `space` that disagrees with the identity the space claims
+/// for itself. Shared by every site that names a corridor — injection,
+/// confinement, [`Confine::new`](crate::Confine::new).
+pub(crate) fn check_claim(name: &Iri, space: &Arc<dyn Space>) {
+    if let Some(own) = space.id() {
+        assert!(
+            own == *name,
+            "a self-named space is injected under its own identity: the space claims \
+             `{own}` and the injector named it `{name}` — inject it with `Scope::with` \
+             or name it as it names itself",
+        );
+    }
+}
+
 impl Scope {
     /// The empty chain: nothing injected, root present. Its fingerprint is `0`.
     pub fn empty() -> Self {
         Scope::default()
     }
 
-    /// Inject an **anonymous** corridor ahead of everything already injected
-    /// (innermost). Prefer [`with_named`](Self::with_named): an anonymous corridor
-    /// is fingerprinted by a fresh process-unique identity, so a request resolved
-    /// through it shares a cache entry only with requests carrying a *clone* of
-    /// this very scope — a corridor rebuilt per request never shares with the
-    /// last one. Sound, and useless for the case injection exists for.
+    /// Inject a corridor ahead of everything already injected (innermost), under
+    /// the identity the space itself claims ([`Space::id`]) — or **anonymously**
+    /// when it claims none. An anonymous corridor is fingerprinted by a fresh
+    /// process-unique identity, so a request resolved through it shares a cache
+    /// entry only with requests carrying a *clone* of this very scope — a corridor
+    /// rebuilt per request never shares with the last one. Sound, and useless for
+    /// the case injection exists for; name the space (`.named(iri)`) or use
+    /// [`with_named`](Self::with_named).
     pub fn with(self, space: Arc<dyn Space>) -> Self {
-        let id = ANONYMOUS_CORRIDORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let identity = match space.id() {
+            Some(id) => CorridorIdentity::Named(id),
+            None => CorridorIdentity::Anonymous(
+                ANONYMOUS_CORRIDORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ),
+        };
         self.edit(|chain| {
             chain.injected.push(space);
-            chain.identities.push(CorridorIdentity::Anonymous(id));
+            chain.identities.push(identity);
         })
     }
 
     /// Inject a **named** corridor ahead of everything already injected
     /// (innermost). The name is the corridor's identity for the cache — see the
     /// type-level note on what naming claims.
+    ///
+    /// # A self-named space is not renamed here
+    ///
+    /// A space that claims its own identity ([`Space::id`], set by `.named(iri)`)
+    /// is injected under that identity; `name` must agree with it, and a
+    /// different `name` is **refused** — this method panics. The alternative
+    /// readings are both the bug identity exists to close: taking the injector's
+    /// name over the space's puts one set of doors under two names (two cache
+    /// partitions for one corridor), and taking the space's over the injector's
+    /// silently drops whatever the injector's name carried (a temporal corridor
+    /// named for its instant, injected as one space named for its kind, would
+    /// serve every instant one cached answer). An injector holding a self-named
+    /// space uses [`with`](Self::with) and lets the space say who it is. Every
+    /// space this crate shipped before 0.1.78 claims no id, so nothing existing
+    /// reaches the refusal.
+    ///
+    /// ```should_panic
+    /// use std::sync::Arc;
+    /// use ikigai_core::{EndpointSpace, Iri, Scope};
+    ///
+    /// let space = Arc::new(EndpointSpace::new().named(Iri::parse("urn:example:space:a").unwrap()));
+    /// // Refused: the space says `urn:example:space:a`, the injector says otherwise.
+    /// let _ = Scope::empty().with_named(Iri::parse("urn:example:space:b").unwrap(), space);
+    /// ```
     pub fn with_named(self, name: Iri, space: Arc<dyn Space>) -> Self {
+        let identity = claim(name, &space);
         self.edit(|chain| {
             chain.injected.push(space);
-            chain.identities.push(CorridorIdentity::Named(name));
+            chain.identities.push(identity);
         })
     }
 
@@ -264,10 +320,14 @@ impl Scope {
     /// assert_eq!(pinned.expiry, Expiry::Never);
     /// assert!(kernel.is_cached_in(&stamp(), &cap, &at_six()));
     /// ```
+    ///
+    /// A self-named space is injected under its own identity and `name` must agree
+    /// with it, as for [`with_named`](Self::with_named).
     pub fn with_named_at(self, name: Iri, space: Arc<dyn Space>, clock: Arc<dyn Clock>) -> Self {
+        let identity = claim(name, &space);
         self.edit(|chain| {
             chain.injected.push(space);
-            chain.identities.push(CorridorIdentity::Named(name));
+            chain.identities.push(identity);
             chain.clock = Some(clock);
         })
     }
@@ -302,10 +362,14 @@ impl Scope {
     /// doors are exactly what confinement exists to remove. Relative to the chain
     /// it started in, nothing resolves differently except what the root would
     /// have answered.
+    ///
+    /// A self-named `space` is the corridor under its own identity and `name` must
+    /// agree with it, as for [`with_named`](Self::with_named).
     pub fn confined(self, name: Iri, space: Arc<dyn Space>) -> Self {
+        let identity = claim(name, &space);
         self.edit(|chain| {
             chain.injected.insert(0, space);
-            chain.identities.insert(0, CorridorIdentity::Named(name));
+            chain.identities.insert(0, identity);
             chain.severed = true;
         })
     }
@@ -377,19 +441,63 @@ impl Scope {
     }
 
     /// Resolve `request` against the chain: the first hit along
-    /// [`consulted`](Self::consulted), else a miss.
+    /// [`consulted`](Self::consulted), else a miss. A hit from a **named**
+    /// corridor whose space did not name an answerer itself is reported as
+    /// answered by the corridor ([`Resolved::answered_by`]): the corridor's name
+    /// is its identity in this chain, and it is what a cache keyed on the
+    /// corridors actually consulted would key on.
     pub(crate) fn resolve_in(&self, request: &Request, root: &Arc<dyn Space>) -> Resolution {
         // The empty chain is the hot path — every plain `issue` — and is one null
         // check straight to the root; the walk below is the general case.
-        if self.chain.is_none() {
+        let Some(chain) = self.chain.as_ref() else {
             return root.resolve(request, self);
-        }
-        for space in self.consulted(root) {
+        };
+        let corridors = chain.injected.iter().zip(chain.identities.iter()).rev();
+        for (space, identity) in corridors {
             if let Resolution::Hit(resolved) = space.resolve(request, self) {
-                return Resolution::Hit(resolved);
+                return Resolution::Hit(match identity {
+                    CorridorIdentity::Named(name) => resolved.with_answered_by(name.clone()),
+                    CorridorIdentity::Anonymous(_) => resolved,
+                });
             }
         }
-        Resolution::Miss
+        if chain.severed {
+            return Resolution::Miss;
+        }
+        root.resolve(request, self)
+    }
+
+    /// The arrangement this chain sees, as a tree: a [`Chain`](SpaceKind::Chain)
+    /// node whose layers are the injected corridors innermost first, then `root`
+    /// unless the chain is severed — the order [`consulted`](Self::consulted)
+    /// walks and the fingerprint hashes. A corridor injected under a name it did
+    /// not claim itself is reported under that name; an anonymous one is left for
+    /// the renderer to skolemize. The chain node is `urn:ikigai:chain:root` for
+    /// the empty chain and `urn:ikigai:chain:{fingerprint}` (sixteen hex digits, as
+    /// `urn:kernel:cache` prints it) otherwise, so two chains' graphs can share a
+    /// store without their entry points colliding.
+    pub(crate) fn topology(&self, root: &Arc<dyn Space>) -> Topology {
+        let id = match self.fingerprint() {
+            0 => "urn:ikigai:chain:root".to_string(),
+            fingerprint => format!("urn:ikigai:chain:{fingerprint:016x}"),
+        };
+        let mut node = Topology::new(SpaceKind::Chain {
+            severed: self.is_severed(),
+        })
+        .with_id(Iri::parse(id).ok());
+        if let Some(chain) = self.chain.as_ref() {
+            for (space, identity) in chain.injected.iter().zip(chain.identities.iter()).rev() {
+                let mut layer = space.topology();
+                if let (None, CorridorIdentity::Named(name)) = (&layer.id, identity) {
+                    layer.id = Some(name.clone());
+                }
+                node = node.child(layer);
+            }
+        }
+        if !self.is_severed() {
+            node = node.child(root.topology());
+        }
+        node
     }
 
     /// The chain as ONE enumerable space, for selection: `ahead` first (the
@@ -650,16 +758,55 @@ pub struct Resolved {
     /// assert_eq!(kernel.cache_len(), 1);
     /// ```
     pub canonical: Option<Iri>,
+    /// The identity of the space whose door matched — the **innermost** space on
+    /// the resolution path that claims one ([`Space::id`]) — or, when no space on
+    /// the path claims an identity, the name of the injected corridor the hit came
+    /// from ([`Scope::with_named`]); `None` when nothing on the path is named.
+    ///
+    /// Whoever has a name reports it, and an inner report is kept: a leaf sets it
+    /// when it has an id, and every combinator with an id fills it only if the
+    /// space it delegated to did not (the rule [`with_canonical`](Self::with_canonical)
+    /// uses, so a `Rewrite` under a named `Mount` reports the innermost named
+    /// answerer). Combinators without a name forward it unchanged, as
+    /// [`with_endpoint`](Self::with_endpoint) and [`Resolution::map_endpoint`] keep
+    /// it through decoration. The kernel discloses it on every traced event under
+    /// [`ANSWERED_NOTE`](crate::ANSWERED_NOTE).
+    ///
+    /// It is the datum a cache keyed on the corridors actually consulted (the
+    /// paper's §5.1 remedy for the whole-chain fingerprint) would key on. That
+    /// caching is **not built** — the fingerprint still covers the whole chain —
+    /// and this field is where it starts.
+    pub answered_by: Option<Iri>,
 }
 
 impl Resolved {
-    /// A resolution that did not rewrite the target.
+    /// A resolution that did not rewrite the target and names no answerer.
     pub fn new(endpoint: Arc<dyn Endpoint>, bindings: Bindings) -> Self {
         Resolved {
             endpoint,
             bindings,
             canonical: None,
+            answered_by: None,
         }
+    }
+
+    /// Report the space that answered (builder). An already-reported answerer is
+    /// *kept*: the innermost named space on the path is the one that answered.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{builtins, Bindings, Endpoint, Iri, Resolved};
+    ///
+    /// let endpoint: Arc<dyn Endpoint> = Arc::new(builtins::to_upper());
+    /// let inner = Resolved::new(endpoint, Bindings::default())
+    ///     .with_answered_by(Iri::parse("urn:example:space:leaf").unwrap());
+    /// // A named combinator enclosing it does not overwrite the leaf's report.
+    /// let outer = inner.with_answered_by(Iri::parse("urn:example:space:mount").unwrap());
+    /// assert_eq!(outer.answered_by.unwrap().as_str(), "urn:example:space:leaf");
+    /// ```
+    pub fn with_answered_by(mut self, space: Iri) -> Self {
+        self.answered_by.get_or_insert(space);
+        self
     }
 
     /// Report that this resolution rewrote the request's target to `canonical`
@@ -736,7 +883,7 @@ impl SpaceEntry {
 }
 
 /// A space maps requests to endpoints by resolution. Spaces compose via the
-/// [`Mount`], [`Fallback`], and [`Rewrite`] combinators.
+/// [`Mount`], [`Fallback`], [`Rewrite`] and [`Limit`] combinators.
 pub trait Space: Send + Sync {
     /// Resolve a request to an endpoint, or report a miss.
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution;
@@ -744,8 +891,40 @@ pub trait Space: Send + Sync {
     /// Enumerate this space's bindings, if it can. `None` means the space does
     /// not support enumeration (e.g. a rewrite or a remote space); `Some(vec![])`
     /// means it is enumerable but empty. The default is `None`.
+    ///
+    /// What is listed is what is **bound**, not what is reachable: a pattern list
+    /// cannot decide whether a template falls inside a limiter's family, so a
+    /// later member's pattern inside a limited family is still listed here. Every
+    /// face that computes reach (`urn:kernel:catalog`, `urn:kernel:actions`,
+    /// selection) probes each pattern through resolution and subtracts a hit on ⊥.
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
         None
+    }
+
+    /// The identity this space claims for itself, if any. The default is `None`:
+    /// a space is anonymous unless it says otherwise (`.named(iri)` on every core
+    /// combinator).
+    ///
+    /// **A name is a claim**: the same one [`Scope::with_named`] makes for a
+    /// corridor and [`Resolved::canonical`] makes for a rewritten name — *any
+    /// space named `n` holds the same doors as this one.* The cache partitions on
+    /// it, [`Resolved::answered_by`] reports it, and `urn:kernel:topology` names
+    /// the node by it. Name two different arrangements alike and one request is
+    /// served the other's answers; name one arrangement consistently and every
+    /// corridor built from it shares one cache entry and one node.
+    fn id(&self) -> Option<Iri> {
+        None
+    }
+
+    /// This space's structure as a tree, for `urn:kernel:topology`. The default
+    /// answers an [opaque](SpaceKind::Opaque) node carrying the space's
+    /// [`id`](Self::id): a space that does not say what it encloses is reported
+    /// as saying nothing, which is the honest answer — the graph states where
+    /// structural knowledge stops rather than implying the space is empty. Every
+    /// core combinator overrides it; an overlay that encloses one space should
+    /// forward it, as it forwards [`entries`](Self::entries).
+    fn topology(&self) -> Topology {
+        Topology::opaque(self.id())
     }
 }
 
@@ -777,6 +956,14 @@ impl<S: Space + ?Sized> Space for Arc<S> {
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
         (**self).entries()
     }
+
+    fn id(&self) -> Option<Iri> {
+        (**self).id()
+    }
+
+    fn topology(&self) -> Topology {
+        (**self).topology()
+    }
 }
 
 /// A leaf space: an ordered set of `(grammar, endpoint)` bindings. The first
@@ -784,6 +971,7 @@ impl<S: Space + ?Sized> Space for Arc<S> {
 #[derive(Default)]
 pub struct EndpointSpace {
     bindings: Vec<(Box<dyn Grammar>, Arc<dyn Endpoint>)>,
+    id: Option<Iri>,
 }
 
 impl EndpointSpace {
@@ -791,7 +979,56 @@ impl EndpointSpace {
     pub fn new() -> Self {
         EndpointSpace {
             bindings: Vec::new(),
+            id: None,
         }
+    }
+
+    /// Claim an identity for this space (builder): what [`Space::id`] answers,
+    /// what a hit through it reports as [`Resolved::answered_by`], what
+    /// [`Scope::with`] injects it under, and the IRI `urn:kernel:topology` names
+    /// its node by.
+    ///
+    /// **The name is a claim — same name ⇒ same doors.** It is the same claim
+    /// [`Scope::with_named`] makes for a corridor and [`Resolved::canonical`] for a
+    /// rewritten name: the cache partitions on it, so two spaces named alike must
+    /// hold the same doors, and one space named consistently shares one entry
+    /// however often it is rebuilt.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     Capability, EndpointSpace, Exact, FnEndpoint, Iri, Kernel, ReprType, Representation,
+    ///     Request, Scope, Space, Verb,
+    /// };
+    ///
+    /// let pinned = || {
+    ///     Arc::new(
+    ///         EndpointSpace::new()
+    ///             .bind(
+    ///                 Exact::new("urn:time:now"),
+    ///                 FnEndpoint::new("pinned", |_| {
+    ///                     Ok(Representation::new(ReprType::new("text/plain"), b"18:00Z".to_vec())
+    ///                         .cacheable())
+    ///                 }),
+    ///             )
+    ///             .named(Iri::parse("urn:example:ctx:time:2026-09-25T18:00Z").unwrap()),
+    ///     )
+    /// };
+    /// assert_eq!(pinned().id().unwrap().as_str(), "urn:example:ctx:time:2026-09-25T18:00Z");
+    ///
+    /// // The space says who it is, so `with` injects it under that name: two
+    /// // requests, two freshly built spaces, ONE cache entry.
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new()));
+    /// let cap = Capability::root();
+    /// let now = || Request::new(Verb::Source, Iri::parse("urn:time:now").unwrap());
+    /// block_on(kernel.issue_in(now(), &cap, Scope::empty().with(pinned()))).unwrap();
+    /// block_on(kernel.issue_in(now(), &cap, Scope::empty().with(pinned()))).unwrap();
+    /// assert_eq!(kernel.cache_len(), 1);
+    /// ```
+    pub fn named(mut self, id: Iri) -> Self {
+        self.id = Some(id);
+        self
     }
 
     /// Bind a grammar to an endpoint (builder style).
@@ -819,7 +1056,11 @@ impl Space for EndpointSpace {
     fn resolve(&self, request: &Request, _scope: &Scope) -> Resolution {
         for (grammar, endpoint) in &self.bindings {
             if let Some(bindings) = grammar.match_iri(&request.target) {
-                return Resolution::Hit(Resolved::new(Arc::clone(endpoint), bindings));
+                let resolved = Resolved::new(Arc::clone(endpoint), bindings);
+                return Resolution::Hit(match &self.id {
+                    Some(id) => resolved.with_answered_by(id.clone()),
+                    None => resolved,
+                });
             }
         }
         Resolution::Miss
@@ -833,6 +1074,21 @@ impl Space for EndpointSpace {
                 .collect(),
         )
     }
+
+    fn id(&self) -> Option<Iri> {
+        self.id.clone()
+    }
+
+    fn topology(&self) -> Topology {
+        Topology::new(SpaceKind::EndpointSpace {
+            patterns: self
+                .bindings
+                .iter()
+                .map(|(grammar, _)| grammar.pattern())
+                .collect(),
+        })
+        .with_id(self.id.clone())
+    }
 }
 
 /// Mount a space behind an IRI prefix; only requests whose target starts with
@@ -840,6 +1096,7 @@ impl Space for EndpointSpace {
 pub struct Mount {
     prefix: String,
     inner: Arc<dyn Space>,
+    id: Option<Iri>,
 }
 
 impl Mount {
@@ -848,14 +1105,22 @@ impl Mount {
         Mount {
             prefix: prefix.into(),
             inner,
+            id: None,
         }
+    }
+
+    /// Claim an identity for this mount (builder) — a claim, same name ⇒ same
+    /// doors; see [`EndpointSpace::named`].
+    pub fn named(mut self, id: Iri) -> Self {
+        self.id = Some(id);
+        self
     }
 }
 
 impl Space for Mount {
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
         if request.target.as_str().starts_with(&self.prefix) {
-            self.inner.resolve(request, scope)
+            answered(self.inner.resolve(request, scope), &self.id)
         } else {
             Resolution::Miss
         }
@@ -865,17 +1130,46 @@ impl Space for Mount {
         // The inner space's patterns are already full identifiers.
         self.inner.entries()
     }
+
+    fn id(&self) -> Option<Iri> {
+        self.id.clone()
+    }
+
+    fn topology(&self) -> Topology {
+        Topology::new(SpaceKind::Mount {
+            prefix: self.prefix.clone(),
+        })
+        .with_id(self.id.clone())
+        .child(self.inner.topology())
+    }
+}
+
+/// Fill a hit's [`answered_by`](Resolved::answered_by) with a combinator's own
+/// identity when the space it delegated to reported none; a miss passes through.
+pub(crate) fn answered(resolution: Resolution, id: &Option<Iri>) -> Resolution {
+    match (resolution, id) {
+        (Resolution::Hit(hit), Some(id)) => Resolution::Hit(hit.with_answered_by(id.clone())),
+        (other, _) => other,
+    }
 }
 
 /// Try each space in order; the first hit wins.
 pub struct Fallback {
     spaces: Vec<Arc<dyn Space>>,
+    id: Option<Iri>,
 }
 
 impl Fallback {
     /// A fallback over the given spaces, tried in order.
     pub fn new(spaces: Vec<Arc<dyn Space>>) -> Self {
-        Fallback { spaces }
+        Fallback { spaces, id: None }
+    }
+
+    /// Claim an identity for this fallback (builder) — a claim, same name ⇒ same
+    /// doors; see [`EndpointSpace::named`].
+    pub fn named(mut self, id: Iri) -> Self {
+        self.id = Some(id);
+        self
     }
 }
 
@@ -883,7 +1177,7 @@ impl Space for Fallback {
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
         for space in &self.spaces {
             if let Resolution::Hit(resolved) = space.resolve(request, scope) {
-                return Resolution::Hit(resolved);
+                return answered(Resolution::Hit(resolved), &self.id);
             }
         }
         Resolution::Miss
@@ -901,6 +1195,18 @@ impl Space for Fallback {
             }
         }
         enumerable.then_some(entries)
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.id.clone()
+    }
+
+    fn topology(&self) -> Topology {
+        let mut node = Topology::new(SpaceKind::Fallback).with_id(self.id.clone());
+        for space in &self.spaces {
+            node = node.child(space.topology());
+        }
+        node
     }
 }
 
@@ -1014,6 +1320,7 @@ pub struct Limit {
     family: Family,
     /// The distinguished endpoint, shared by every hit this limiter answers.
     bottom: Arc<dyn Endpoint>,
+    id: Option<Iri>,
 }
 
 impl Limit {
@@ -1023,6 +1330,7 @@ impl Limit {
         Limit {
             family: Family::Prefix(prefix.into()),
             bottom: Arc::new(Bottom),
+            id: None,
         }
     }
 
@@ -1033,6 +1341,24 @@ impl Limit {
         Limit {
             family: Family::Grammar(Box::new(grammar)),
             bottom: Arc::new(Bottom),
+            id: None,
+        }
+    }
+
+    /// Claim an identity for this limiter (builder) — a claim, same name ⇒ same
+    /// family; see [`EndpointSpace::named`]. A hit on ⊥ then reports the limiter
+    /// as its [`answered_by`](Resolved::answered_by), so a trace can say WHICH
+    /// limiter carved the name out.
+    pub fn named(mut self, id: Iri) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    /// The family as text: the prefix, or the grammar's pattern.
+    fn family(&self) -> String {
+        match &self.family {
+            Family::Prefix(prefix) => prefix.clone(),
+            Family::Grammar(grammar) => grammar.pattern(),
         }
     }
 
@@ -1047,7 +1373,10 @@ impl Limit {
 impl Space for Limit {
     fn resolve(&self, request: &Request, _scope: &Scope) -> Resolution {
         if self.admits(&request.target) {
-            Resolution::Hit(Resolved::new(Arc::clone(&self.bottom), Bindings::new()))
+            answered(
+                Resolution::Hit(Resolved::new(Arc::clone(&self.bottom), Bindings::new())),
+                &self.id,
+            )
         } else {
             Resolution::Miss
         }
@@ -1056,6 +1385,17 @@ impl Space for Limit {
     /// Enumerable, and empty: a limiter binds nothing a caller may reach.
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
         Some(Vec::new())
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.id.clone()
+    }
+
+    fn topology(&self) -> Topology {
+        Topology::new(SpaceKind::Limit {
+            family: self.family(),
+        })
+        .with_id(self.id.clone())
     }
 }
 
@@ -1095,6 +1435,7 @@ type RewriteRule = Box<dyn Fn(&Iri) -> Option<Iri> + Send + Sync>;
 pub struct Rewrite {
     rule: RewriteRule,
     inner: Arc<dyn Space>,
+    id: Option<Iri>,
 }
 
 impl Rewrite {
@@ -1106,13 +1447,21 @@ impl Rewrite {
         Rewrite {
             rule: Box::new(rule),
             inner,
+            id: None,
         }
+    }
+
+    /// Claim an identity for this rewrite (builder) — a claim, same name ⇒ same
+    /// doors; see [`EndpointSpace::named`].
+    pub fn named(mut self, id: Iri) -> Self {
+        self.id = Some(id);
+        self
     }
 }
 
 impl Space for Rewrite {
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
-        match (self.rule)(&request.target) {
+        let resolution = match (self.rule)(&request.target) {
             Some(new_target) => {
                 let mut rewritten = request.clone();
                 rewritten.target = new_target.clone();
@@ -1125,7 +1474,21 @@ impl Space for Rewrite {
                 }
             }
             None => self.inner.resolve(request, scope),
-        }
+        };
+        // The innermost named space answered; this one only fills an absence.
+        answered(resolution, &self.id)
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.id.clone()
+    }
+
+    /// The rule is a closure, so the table is opaque: the node says a rewrite
+    /// happens here and what it encloses, and nothing about τ.
+    fn topology(&self) -> Topology {
+        Topology::new(SpaceKind::Rewrite)
+            .with_id(self.id.clone())
+            .child(self.inner.topology())
     }
 }
 
