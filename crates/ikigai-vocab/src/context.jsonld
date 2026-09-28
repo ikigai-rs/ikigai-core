@@ -170,6 +170,7 @@
     },
     "modality": "ik:modality",
     "model": "ik:model",
+    "namespace": "ik:namespace",
     "oneOf": "ik:oneOf",
     "order": {
       "@id": "ik:order",
@@ -240,6 +241,7 @@
       "@type": "@id"
     },
     "ruleKind": "ik:ruleKind",
+    "seals": "ik:seals",
     "severed": {
       "@id": "ik:severed",
       "@type": "xsd:boolean"

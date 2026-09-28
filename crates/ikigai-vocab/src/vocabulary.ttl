@@ -260,6 +260,18 @@ ik:space a rdf:Property ;
     rdfs:label "space" ;
     rdfs:comment "The one space an ik:Mount, ik:Rewrite, ik:Alias, ik:Confine or ik:Level encloses." .
 
+ik:seals a rdf:Property ;
+    rdfs:domain ik:Level ;
+    rdfs:range xsd:string ;
+    rdfs:label "seals" ;
+    rdfs:comment "A prefix an ik:Level seals: a name under it is answered by that level or not at all — every other level skips it, and from the root it is answered only through that level; the host's injected corridors may still stand in for it. Sealed only inside the level's namespace (the prefix it is mounted under, or its ik:namespace), and never overlapping another owner's sealed prefix: core seals urn:kernel:, and the host seals its own." .
+
+ik:namespace a rdf:Property ;
+    rdfs:domain ik:Level ;
+    rdfs:range xsd:string ;
+    rdfs:label "namespace" ;
+    rdfs:comment "The namespace the host accepted for an ik:Level: the prefix it may seal under when it is not mounted under one. Changes nothing about resolution; the ik:Mount still guards the way in." .
+
 ik:prefix a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "prefix" ;

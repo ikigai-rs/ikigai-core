@@ -163,6 +163,84 @@ Pinned by `levels::an_endpoint_plans_through_the_transreptor_its_own_level_binds
 - `ik:Level` is a new class in `vocabulary.ttl`: **a semantic vocabulary change**, so the
   context is regenerated, and the `/ns` deploy after the vocab publish is a real change.
 
+## Sealed names
+
+**Brian, 2026-09-28:** a module must not be able to override core or security endpoints; and
+*"arbitrary modules should be able to introduce new sealed names that don't conflict with
+others."*
+
+**Why it is needed.** A `Mount` guard limits what ENTERS a module, not what a module binds.
+With levels a module could bind `urn:sign:trust-set` or `urn:secret:get`, and every sub-request
+resolved at its level would get the module's answer. That cannot raise authority (the fake
+runs under the same attenuated capability), outside callers never see it, and the level path
+in the key keeps it out of everyone else's cache — but it is a confused-deputy hole wherever
+TRUSTED code runs inside a module's level: an imported library, a runtime, a shared verifier
+resolving its trust set.
+
+**The table.** A kernel holds sealed prefixes, each with exactly ONE owner:
+
+| owner | seals | how |
+|---|---|---|
+| core | `urn:kernel:` | as always: the kernel answers its namespace ahead of every chain |
+| the host | its own list | `Kernel::with_sealed([...])`, at build |
+| a level | names in its own namespace | `Level::sealing([...])`; ikigai-module reads them from a manifest in phase 3 |
+
+`Kernel::sealed()` lists them; `Kernel::check_sealing(root, host)` is the fallible check.
+
+**At resolution** (`Scope::resolve_in`): a sealed name takes the ordinary walk with the levels
+that do not own it left out. A core- or host-sealed name skips every level: the host's injected
+corridors, then the root. A name sealed by level M skips every level but M: from inside module
+N it reaches M's real binding, never a copy in N; M's own sub-requests resolve it at M; from
+the root it is answered only through M. The host's **injected** corridors may still stand in
+for any sealed name — injection is already host authority (`Kernel::issue_in`). A **confined**
+corridor may not: a confinement is an endpoint's own choice, and a trusted verifier confined to
+a corridor holding a fake trust set is exactly the deputy the rule exists for. Inside a
+confinement a sealed name the host did not inject is therefore `Unresolved` — narrower than
+today's reach, in the safe direction, and only for a kernel that seals something.
+
+**At build** (`Kernel::new`, `Kernel::with_sealed`): the root's topology is walked, and three
+things are refused, naming what collided — a builder panics with the message,
+`check_sealing` returns it as a `SealError`:
+
+- **A door where the owner is not.** A door whose literal head is INSIDE a sealed family binds
+  the sealed name by name; held by anyone but its owner (a core or host seal inside any level;
+  a level's seal inside another level, or outside every level) it is refused outright, reachable
+  or not — a binding the seal makes dead is exactly the silent skip the rule refuses. A template
+  whose head the family EXTENDS (`urn:{ns}:{id}` against `urn:sign:`) binds nothing by name; it
+  is refused only where a request for a sealed name can reach it — from the root through every
+  mount above it, or through its owner's frame. Doors are bindings' patterns, alias rules'
+  logical names (a table rewriting a sealed name answers it as surely as a binding) and
+  limiters' families. Core's own seal needs no door check: no door can ever answer
+  `urn:kernel:*`.
+- **A seal outside the level's namespace.** Its namespace is the prefix it is mounted under
+  (the mounts between it and its enclosing level), or one the host accepted with
+  `Level::in_namespace`. A module that tries to seal `urn:sign:` is squatting — refused.
+- **An overlap.** A claim equal to, inside, or enclosing another owner's is refused, naming
+  both. Core and the host are checked first, so a module can never take one of theirs.
+
+**What the topology cannot show** — an opaque space or a closure `Rewrite` inside a level, a
+level hidden under an overlay that does not forward `Space::topology` (ledger
+[#546](http://localhost:1060/l/default/item/546)) — is checked on every resolution: a sealed
+name (the target, or a canonical the hit reported) found at a path whose innermost level is not
+its owner, and a hit through a sealing level the kernel never registered, are refused with an
+`Error::Endpoint` naming the name, the owner and the level, and traced under `SEALED_NOTE`.
+Never a silent skip.
+
+**What it costs.** Construction walks the topology only when there is something to check: a
+host seal, or a sealing `Level` anywhere in the process (a monotone flag set by
+`Level::sealing`), so a kernel built without either is built exactly as before. On resolution a
+kernel with only core's seal pays one `bool` read; with eight host seals a cache-hit read
+measured 306–314 ns against 307–321 ns without (noise), because the table is a short linear scan
+of prefixes, and a level-stack frame is skipped with one comparison.
+
+**Proposed default list for the cli** (Brian approves; a consumer change, not core's):
+`urn:cap:`, `urn:secret:`, `urn:sign:`, `urn:encrypt:`, `urn:passkey:`, `urn:clock:`,
+`urn:time:`, and `urn:iki:ledger:` for the ledger's write names — a seal is a prefix and says
+nothing about verbs, and the write names are templates in the middle
+(`urn:iki:ledger:{ledger}:append`), so the namespace is the one prefix that covers them; its
+reads should come from the real ledger too. None of these is bound inside a level today, so
+sealing them changes no answer; it closes the hole before the first module level exists.
+
 ## The read measurement
 
 Same instrument as `resolution-scope.md` and the formal document's §10: a scratch crate against

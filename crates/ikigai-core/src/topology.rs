@@ -87,7 +87,13 @@ pub enum SpaceKind {
     /// PUSHES, so reachability over a tree with levels in it follows those pushes.
     /// In a chain's `ik:layers` a level is a member of the resolved scope's level
     /// stack.
-    Level,
+    Level {
+        /// The prefixes the level seals, in declaration order (`ik:seals`).
+        seals: Vec<String>,
+        /// The namespace the host accepted for it (`ik:namespace`); `None` when it
+        /// seals under the prefix it is mounted under.
+        namespace: Option<String>,
+    },
     /// The resolution chain itself — the entry node `urn:kernel:topology` answers:
     /// its children are the corridors innermost first, then the root unless the
     /// chain is severed. Not a space; the arrangement seen from one request.
@@ -276,8 +282,14 @@ impl Topology {
                 let _ = write!(out, "\n<{me}> a ik:Confine");
                 write_space(out, &children);
             }
-            SpaceKind::Level => {
+            SpaceKind::Level { seals, namespace } => {
                 let _ = write!(out, "\n<{me}> a ik:Level");
+                for prefix in seals {
+                    let _ = write!(out, " ;\n    ik:seals \"{}\"", escape(prefix));
+                }
+                if let Some(namespace) = namespace {
+                    let _ = write!(out, " ;\n    ik:namespace \"{}\"", escape(namespace));
+                }
                 write_space(out, &children);
             }
             SpaceKind::Chain { severed } => {
