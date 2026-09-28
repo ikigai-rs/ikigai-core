@@ -9,6 +9,7 @@ use crate::iri::Iri;
 use crate::kernel::Clock;
 use crate::repr::{Representation, Time};
 use crate::request::Request;
+use crate::seal::{SealBreach, Seals};
 use crate::topology::{SpaceKind, Topology};
 
 /// The resolution chain a request is resolved in: the corridors a host injected
@@ -525,18 +526,38 @@ impl Scope {
     /// nested inside it), then the level that answered and every level outward of
     /// it — so the endpoint it found runs from its own level outward, as one found
     /// from the root through the same levels would.
-    pub(crate) fn resolve_in(&self, request: &Request, root: &Arc<dyn Space>) -> Resolution {
+    ///
+    /// **Sealed names** ([`Level::sealing`], [`Kernel::with_sealed`](crate::Kernel::with_sealed))
+    /// take the same walk with the levels that do not own them left out: the host's
+    /// corridors (host authority), then only the owning level's frame, then the
+    /// root — never a confined corridor, which is an endpoint's choice, not the
+    /// host's. A hit from a frame or the root is then checked against `seals` for
+    /// what the topology could not show; a breach is the error, never a skip.
+    pub(crate) fn resolve_in(
+        &self,
+        request: &Request,
+        root: &Arc<dyn Space>,
+        seals: &Seals,
+    ) -> std::result::Result<Resolution, SealBreach> {
         // The empty chain is the hot path — every plain `issue` — and is one null
         // check straight to the root; the walk below is the general case.
         let Some(chain) = self.chain.as_ref() else {
-            return root.resolve(request, self);
+            return admit(root.resolve(request, self), request, seals);
+        };
+        let sealed = if seals.is_trivial() {
+            None
+        } else {
+            seals.owner_of(request.target.as_str())
         };
         let (behind, host) = chain.injected.split_at(chain.confined);
         let (behind_ids, host_ids) = chain.identities.split_at(chain.confined);
         if let Some(hit) = self.corridor_hit(request, host, host_ids) {
-            return hit;
+            return Ok(hit);
         }
         for (at, level) in chain.levels.0.iter().enumerate() {
+            if sealed.is_some_and(|owner| !Seals::frame_admits(owner, &level.name)) {
+                continue;
+            }
             if let Resolution::Hit(mut resolved) = level.inner.resolve(request, self) {
                 if resolved.answered_by.is_none() {
                     resolved.answered_by = Some(level.name.clone());
@@ -545,20 +566,24 @@ impl Scope {
                     .levels
                     .0
                     .extend(chain.levels.0[at..].iter().cloned());
-                return Resolution::Hit(resolved);
+                return admit(Resolution::Hit(resolved), request, seals);
             }
         }
-        if let Some(hit) = self.corridor_hit(request, behind, behind_ids) {
-            return hit;
+        if sealed.is_none() {
+            if let Some(hit) = self.corridor_hit(request, behind, behind_ids) {
+                return Ok(hit);
+            }
         }
         if chain.severed {
-            return Resolution::Miss;
+            return Ok(Resolution::Miss);
         }
-        root.resolve(request, self)
+        admit(root.resolve(request, self), request, seals)
     }
 
     /// The first hit among `spaces` (outermost first, so walked in reverse), a
     /// named corridor filling [`Resolved::answered_by`] when its space named none.
+    /// Corridors answer sealed names too — this is only ever called for the host's
+    /// injected ones, or for confined ones when the name is not sealed.
     fn corridor_hit(
         &self,
         request: &Request,
@@ -629,6 +654,26 @@ impl Scope {
         let mut spaces: Vec<Arc<dyn Space>> = ahead.into_iter().collect();
         spaces.extend(self.consulted(root).cloned());
         ChainView { spaces }
+    }
+}
+
+/// Check a hit against the seal table: the target and any canonical the hit
+/// reported, against the path it was found at. A miss passes.
+#[inline]
+fn admit(
+    resolution: Resolution,
+    request: &Request,
+    seals: &Seals,
+) -> std::result::Result<Resolution, SealBreach> {
+    match &resolution {
+        Resolution::Hit(hit) if !(seals.is_trivial() && hit.levels.is_empty()) => {
+            seals.admit(
+                std::iter::once(&request.target).chain(hit.canonical.as_ref()),
+                &hit.levels,
+            )?;
+            Ok(resolution)
+        }
+        _ => Ok(resolution),
     }
 }
 
@@ -1623,14 +1668,23 @@ impl Endpoint for Bottom {
 pub(crate) struct LevelCore {
     name: Iri,
     inner: Arc<dyn Space>,
+    /// The prefixes this level seals ([`Level::sealing`]).
+    seals: Vec<String>,
+    /// The namespace the host accepted for it ([`Level::in_namespace`]); `None`
+    /// means the prefix it is mounted under.
+    namespace: Option<String>,
 }
 
 impl LevelCore {
-    /// The node a level renders as: `ik:Level`, named, enclosing its space.
+    /// The node a level renders as: `ik:Level`, named, enclosing its space, with
+    /// its seals and any accepted namespace.
     fn topology(&self) -> Topology {
-        Topology::new(SpaceKind::Level)
-            .with_id(Some(self.name.clone()))
-            .child(self.inner.topology())
+        Topology::new(SpaceKind::Level {
+            seals: self.seals.clone(),
+            namespace: self.namespace.clone(),
+        })
+        .with_id(Some(self.name.clone()))
+        .child(self.inner.topology())
     }
 }
 
@@ -1654,6 +1708,16 @@ impl LevelPath {
     /// Each level's name, innermost first.
     pub fn names(&self) -> impl Iterator<Item = &Iri> + '_ {
         self.0.iter().map(|level| &level.name)
+    }
+
+    /// The first level on the path that declares seals the kernel did not register
+    /// (`registered` answers for a name) — a level the kernel's topology walk could
+    /// not see. Free for a path with no sealing level on it.
+    pub(crate) fn unregistered_sealing(&self, registered: impl Fn(&Iri) -> bool) -> Option<&Iri> {
+        self.0
+            .iter()
+            .find(|level| !level.seals.is_empty() && !registered(&level.name))
+            .map(|level| &level.name)
     }
 
     /// The same levels, in the same order — by identity, not by name: two levels
@@ -1762,8 +1826,67 @@ impl Level {
     /// A level named `name` over `inner`.
     pub fn new(name: Iri, inner: Arc<dyn Space>) -> Self {
         Level {
-            core: Arc::new(LevelCore { name, inner }),
+            core: Arc::new(LevelCore {
+                name,
+                inner,
+                seals: Vec::new(),
+                namespace: None,
+            }),
         }
+    }
+
+    /// **Seal** names in this level's own namespace (builder): a name under any of
+    /// `prefixes` is answered by this level or not at all. Every OTHER level skips
+    /// it — a sub-request from inside module N for this level's sealed name reaches
+    /// this level's real binding, never a copy in N — and from the root it is
+    /// answered only through this level. The host's injected corridors can still
+    /// stand in for it, as for every sealed name (host authority).
+    ///
+    /// Two rules make a module's seals safe, both checked when the kernel is built
+    /// and refused there ([`SealError`](crate::SealError)), naming what collided:
+    ///
+    /// - **Only inside its own namespace** — the prefix it is mounted under (the
+    ///   `Mount` around it), or one the host accepted with
+    ///   [`in_namespace`](Self::in_namespace). A module that tries to seal
+    ///   `urn:sign:` is refused: sealing someone else's names would be squatting,
+    ///   the exact attack sealing exists to stop.
+    /// - **No overlaps.** Every sealed prefix has exactly one owner — core, the
+    ///   host, or one level. A claim equal to, inside, or enclosing another owner's
+    ///   is refused, naming both; core's and the host's are checked first, so a
+    ///   module can never take one of theirs.
+    ///
+    /// ```should_panic
+    /// use std::sync::Arc;
+    /// use ikigai_core::{EndpointSpace, Iri, Kernel, Level, Mount};
+    ///
+    /// // Mounted under `urn:mod:`, the module tries to seal the signing namespace.
+    /// let module = Level::new(Iri::parse("urn:example:level:mod").unwrap(), Arc::new(EndpointSpace::new()))
+    ///     .sealing(["urn:sign:"]);
+    /// let _ = Kernel::new(Arc::new(Mount::new("urn:mod:", Arc::new(module)))); // refused
+    /// ```
+    pub fn sealing<I, S>(mut self, prefixes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let core = Arc::get_mut(&mut self.core).expect("a level is configured before it is shared");
+        core.seals.extend(prefixes.into_iter().map(Into::into));
+        if !core.seals.is_empty() {
+            crate::seal::SEALING_LEVELS.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self
+    }
+
+    /// Accept `prefix` as this level's namespace (builder) — **the host's call**:
+    /// what the level may [seal](Self::sealing) when it is not mounted under the
+    /// prefix, or should seal under a narrower one. A module declares the
+    /// namespace it wants; the host that builds the tree grants it by calling this.
+    /// It changes nothing about resolution: the `Mount` still guards the way in.
+    pub fn in_namespace(mut self, prefix: impl Into<String>) -> Self {
+        Arc::get_mut(&mut self.core)
+            .expect("a level is configured before it is shared")
+            .namespace = Some(prefix.into());
+        self
     }
 
     /// The level's name.

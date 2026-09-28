@@ -60,6 +60,7 @@ use crate::iri::Iri;
 use crate::meta::MetaRenderer;
 use crate::repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 use crate::request::Request;
+use crate::seal::{SealError, SealOwner, Seals};
 use crate::select::{ActionMatch, TransreptionPolicy, TransreptionStep};
 use crate::space::{Fallback, LevelPath, Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
@@ -317,6 +318,15 @@ pub const LIMITED_NOTE: &str = "limited";
 /// keyed on the corridors actually consulted would key on.
 pub const ANSWERED_NOTE: &str = "answered-by";
 
+/// The [`TraceEvent::notes`] key marking a **sealed name answered where its owner
+/// is not** — paired with the refusal, naming the name, its owner and the level
+/// that answered. The seal check at build refuses everything the topology shows;
+/// this is the runtime half, for what it cannot (an opaque space or a closure
+/// rewrite inside a level, a level hidden under an overlay). The caller gets an
+/// [`Endpoint`](crate::Error::Endpoint) error carrying the same text: never a
+/// silent skip. Like a denial, the event names something that never ran.
+pub const SEALED_NOTE: &str = "sealed";
+
 /// The [`TraceEvent::notes`] key under which the kernel reports the **levels an
 /// endpoint was found in** — its found path ([`Resolved::levels`](crate::Resolved::levels)),
 /// innermost first, as [`LevelPath`](crate::LevelPath) renders it, e.g.
@@ -512,6 +522,12 @@ pub struct Kernel {
     /// identity — see [`FloorMemo`]. Consulted on every request (the floor runs
     /// before the cache lookup); cleared by a cut of [`BINDINGS_THREAD`].
     floors: FloorMemo,
+    /// The sealed prefixes and their owners — core's `urn:kernel:`, the host's
+    /// ([`with_sealed`](Self::with_sealed)), every level's in the root
+    /// ([`Level::sealing`](crate::Level::sealing)) — checked against the topology
+    /// when the kernel is built and consulted on resolution. With only core's claim
+    /// it is trivial and costs one `bool` read per resolution.
+    seals: Seals,
 }
 
 /// How many endpoints' floors the memo holds before it sweeps — dead entries first,
@@ -676,6 +692,7 @@ struct ResolutionSample {
 impl Kernel {
     /// A kernel over the given root space.
     pub fn new(root: Arc<dyn Space>) -> Self {
+        let seals = seals_for(&root, &[]);
         Kernel {
             root,
             cache: ReprCache::default(),
@@ -693,11 +710,13 @@ impl Kernel {
             max_depth: DEFAULT_MAX_DEPTH,
             floors: FloorMemo::default(),
             scope_names: Mutex::new(BTreeMap::new()),
+            seals,
         }
     }
 
     /// A kernel that answers `Meta` requests by rendering through `renderer`.
     pub fn with_meta_renderer(root: Arc<dyn Space>, renderer: Arc<dyn MetaRenderer>) -> Self {
+        let seals = seals_for(&root, &[]);
         Kernel {
             root,
             cache: ReprCache::default(),
@@ -715,7 +734,101 @@ impl Kernel {
             max_depth: DEFAULT_MAX_DEPTH,
             floors: FloorMemo::default(),
             scope_names: Mutex::new(BTreeMap::new()),
+            seals,
         }
+    }
+
+    /// **Seal** `prefixes` for the host (builder): a name under any of them is never
+    /// answered by a [`Level`](crate::Level). It skips every level on the way to the
+    /// root; the host's injected corridors may still stand in for it
+    /// ([`issue_in`](Self::issue_in) is host authority), a confined corridor may
+    /// not. Core seals `urn:kernel:` already, by answering it ahead of every chain.
+    ///
+    /// Checked against the root's topology here: a level whose doors can answer a
+    /// sealed name, or a level's own seal that overlaps one of these, is
+    /// **refused** — this builder panics, naming the level, the door and the prefix
+    /// (a builder has no error channel; [`check_sealing`](Self::check_sealing) is
+    /// the fallible form). A module that genuinely needs such a name asks the host
+    /// to bind it outside the level. What the topology cannot show (an opaque space
+    /// inside a level) is checked on every resolution and refused there.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     AsyncFnEndpoint, Capability, EndpointSpace, Exact, Fallback, FnEndpoint, Iri, Kernel,
+    ///     Level, Mount, ReprType, Representation, Request, Verb,
+    /// };
+    ///
+    /// fn text(s: &'static str) -> FnEndpoint {
+    ///     FnEndpoint::new(s, move |_| {
+    ///         Ok(Representation::new(ReprType::new("text/plain"), s.as_bytes().to_vec()))
+    ///     })
+    /// }
+    /// // A module whose verifier resolves the trust set by name, from inside its level.
+    /// let verify = AsyncFnEndpoint::new("verify", |inv| {
+    ///     Box::pin(async move { inv.source(&Iri::parse("urn:sign:trust-set").unwrap()).await })
+    /// });
+    /// let module = Arc::new(Mount::new(
+    ///     "urn:mod:",
+    ///     Arc::new(Level::new(
+    ///         Iri::parse("urn:example:level:mod").unwrap(),
+    ///         Arc::new(EndpointSpace::new().bind(Exact::new("urn:mod:verify"), verify)),
+    ///     )),
+    /// ));
+    /// let root = Arc::new(Fallback::new(vec![
+    ///     module,
+    ///     Arc::new(EndpointSpace::new().bind(Exact::new("urn:sign:trust-set"), text("the real one"))),
+    /// ]));
+    /// let kernel = Kernel::new(root).with_sealed(["urn:sign:"]);
+    /// let got = block_on(kernel.issue(
+    ///     Request::new(Verb::Source, Iri::parse("urn:mod:verify").unwrap()),
+    ///     &Capability::root(),
+    /// ))
+    /// .unwrap();
+    /// assert_eq!(got.bytes, b"the real one");
+    ///
+    /// // A module binding the sealed name is refused when the kernel is built.
+    /// let squatter = Arc::new(Mount::new("urn:mod:", Arc::new(Level::new(
+    ///     Iri::parse("urn:example:level:mod").unwrap(),
+    ///     Arc::new(EndpointSpace::new().bind(Exact::new("urn:sign:trust-set"), text("a fake"))),
+    /// ))));
+    /// let refused = Kernel::check_sealing(squatter.as_ref(), ["urn:sign:"]).unwrap_err();
+    /// assert!(refused.to_string().contains("`urn:sign:trust-set`"), "{refused}");
+    /// ```
+    pub fn with_sealed<I, S>(mut self, prefixes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut host: Vec<String> = self
+            .seals
+            .claims()
+            .iter()
+            .filter(|(_, owner)| *owner == SealOwner::Host)
+            .map(|(prefix, _)| prefix.clone())
+            .collect();
+        host.extend(prefixes.into_iter().map(Into::into));
+        self.seals = seals_for(&self.root, &host);
+        self
+    }
+
+    /// Check `root`'s arrangement against the seal rules, with `host` sealed
+    /// besides core — what [`Kernel::new`] and [`with_sealed`](Self::with_sealed)
+    /// refuse, as a value instead of a panic, so a host can report it.
+    pub fn check_sealing<I, S>(root: &dyn Space, host: I) -> std::result::Result<(), SealError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let host: Vec<String> = host.into_iter().map(Into::into).collect();
+        Seals::from_topology(&root.topology(), &host).map(|_| ())
+    }
+
+    /// Every sealed prefix and its owner, core's first, then the host's, then each
+    /// level's in the order the root's topology states them.
+    pub fn sealed(&self) -> Vec<(String, SealOwner)> {
+        self.seals.claims().to_vec()
     }
 
     /// Find a transreptor chain converting `from` → `to` among this kernel's mounted
@@ -1896,9 +2009,31 @@ impl Kernel {
         // miss, exactly as if nothing were bound. That "exactly" is the point of
         // confinement: the caller cannot tell a name outside the chain from a name
         // that does not exist, so there is no decision here to misconfigure.
-        let mut resolved = match scope.resolve_in(&request, &self.root) {
-            Resolution::Hit(resolved) => resolved,
-            Resolution::Miss => {
+        let mut resolved = match scope.resolve_in(&request, &self.root, &self.seals) {
+            Ok(Resolution::Hit(resolved)) => resolved,
+            // A sealed name answered where its owner is not — through something the
+            // build-time check could not see. Refused, and said so on the trace.
+            Err(breach) => {
+                let message = breach.message();
+                if let Some(recording) = trace.as_ref() {
+                    let mut notes = vec![(SEALED_NOTE.to_string(), message.clone())];
+                    notes.extend(alias_notes(alias.as_ref()));
+                    notes.extend(scope_notes(&scope));
+                    recording.record(TraceEvent {
+                        target: request.target.as_str().to_string(),
+                        thread: thread_label(),
+                        started: None,
+                        ended: None,
+                        cache_hit: false,
+                        span: span.unwrap_or(0),
+                        parent,
+                        capability: capability.scopes().map(|s| s.iter().cloned().collect()),
+                        notes,
+                    });
+                }
+                return Err(Error::Endpoint(message));
+            }
+            Ok(Resolution::Miss) => {
                 // A rewrite that lands on nothing is reported as a rewrite. The error
                 // names the CANONICAL target — the caller already knows what they
                 // typed, and the name they have never seen is the informative half
@@ -3091,6 +3226,13 @@ fn scope_notes(scope: &Scope) -> Vec<(String, String)> {
 
 /// The reserved kernel-behavior namespace prefix.
 pub(crate) const KERNEL_NS: &str = "urn:kernel:";
+
+/// The seal table for `root` with `host` sealed besides core, or a panic naming
+/// the refusal — the constructors and [`Kernel::with_sealed`] build here.
+fn seals_for(root: &Arc<dyn Space>, host: &[String]) -> Seals {
+    Seals::build(root.as_ref(), host)
+        .unwrap_or_else(|refused| panic!("the kernel's seals are refused: {refused}"))
+}
 
 /// Parse a `verb=` argument (case-insensitive verb name).
 fn parse_verb(name: &str) -> Result<Verb> {
