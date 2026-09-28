@@ -14,7 +14,9 @@
 //! as Turtle over the `ik:` vocabulary (`ik:Chain`, `ik:Fallback` with `ik:layers`,
 //! `ik:Mount` with `ik:prefix` and `ik:space`, `ik:Limit` with `ik:family`,
 //! `ik:EndpointSpace` with `ik:pattern`, `ik:Alias` with its `ik:rewrites`,
-//! `ik:Rewrite`, `ik:Confine`, `ik:OpaqueSpace`). Every node is an IRI: a space
+//! with `ik:prefix` and `ik:space`, `ik:Limit` with `ik:family`,
+//! `ik:EndpointSpace` with `ik:pattern`, `ik:Alias` with its `ik:rewrites`,
+//! `ik:Rewrite`, `ik:Confine`, `ik:Level` with `ik:space`, `ik:OpaqueSpace`).
 //! with an [`id`](crate::Space::id) is named by it, and an anonymous one is
 //! skolemized under `urn:ikigai:space:_:{n}` in render order — no blank nodes, so
 //! the graph diffs and every list cell can be addressed. Order is explicit where it
@@ -77,6 +79,15 @@ pub enum SpaceKind {
     /// A confinement: the corridor an endpoint's sub-requests are severed into.
     /// The node's one child is the enclosed space.
     Confine,
+    /// A level ([`Level`](crate::Level)): where an endpoint found inside it runs.
+    /// Always named (the node's id is the level's name); the node's one child is
+    /// the enclosed space. An endpoint found under it resolves its sub-requests at
+    /// this node — its enclosed space, not the path that led to it — then at each
+    /// enclosing level, then at the root: the one construct in the tree that
+    /// PUSHES, so reachability over a tree with levels in it follows those pushes.
+    /// In a chain's `ik:layers` a level is a member of the resolved scope's level
+    /// stack.
+    Level,
     /// The resolution chain itself — the entry node `urn:kernel:topology` answers:
     /// its children are the corridors innermost first, then the root unless the
     /// chain is severed. Not a space; the arrangement seen from one request.
@@ -263,6 +274,10 @@ impl Topology {
             }
             SpaceKind::Confine => {
                 let _ = write!(out, "\n<{me}> a ik:Confine");
+                write_space(out, &children);
+            }
+            SpaceKind::Level => {
+                let _ = write!(out, "\n<{me}> a ik:Level");
                 write_space(out, &children);
             }
             SpaceKind::Chain { severed } => {

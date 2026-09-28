@@ -61,7 +61,7 @@ use crate::meta::MetaRenderer;
 use crate::repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 use crate::request::Request;
 use crate::select::{ActionMatch, TransreptionPolicy, TransreptionStep};
-use crate::space::{Fallback, Resolution, Scope, Space, SpaceEntry};
+use crate::space::{Fallback, LevelPath, Resolution, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
 
 /// The kernel's source of "now". Injected (rather than read from the system
@@ -316,6 +316,18 @@ pub const LIMITED_NOTE: &str = "limited";
 /// this names the one member of it that answered, which is the datum a cache
 /// keyed on the corridors actually consulted would key on.
 pub const ANSWERED_NOTE: &str = "answered-by";
+
+/// The [`TraceEvent::notes`] key under which the kernel reports the **levels an
+/// endpoint was found in** — its found path ([`Resolved::levels`](crate::Resolved::levels)),
+/// innermost first, as [`LevelPath`](crate::LevelPath) renders it, e.g.
+/// `("level", "urn:example:level:inner urn:example:level:outer")`. Present only
+/// when a [`Level`](crate::Level) is on the path, so a kernel with none records
+/// events byte-identical to before levels existed. It sits beside
+/// [`ANSWERED_NOTE`] on every event that carries that one — the computed
+/// invocation, the cache hit, the denial, the limited miss — and says what
+/// `answered-by` cannot: not only which space held the door, but the scope the
+/// endpoint then RAN in, which is where its sub-requests resolve.
+pub const LEVEL_NOTE: &str = "level";
 
 /// The [`TraceEvent::notes`] key under which the kernel reports the **chain's
 /// clock** — the instant a temporal corridor's derived clock
@@ -1369,6 +1381,7 @@ impl Kernel {
         lacking: &str,
         alias: Option<&AliasHop>,
         answered: Option<&Iri>,
+        levels: &LevelPath,
         scope: &Scope,
     ) {
         let Some(trace_scope) = trace else {
@@ -1380,7 +1393,7 @@ impl Kernel {
         // simply not holding. Carrying the hop on the denial event is what stops
         // that from being invisible.
         let mut notes = vec![(DENIED_NOTE.to_string(), lacking.to_string())];
-        notes.extend(provenance_notes(trace, alias, answered));
+        notes.extend(provenance_notes(trace, alias, answered, levels));
         notes.extend(scope_notes(scope));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
@@ -1503,6 +1516,7 @@ impl Kernel {
         parent: Option<u64>,
         alias: Option<&AliasHop>,
         answered: Option<&Iri>,
+        levels: &LevelPath,
         scope: &Scope,
     ) {
         let Some(trace_scope) = trace else {
@@ -1512,7 +1526,7 @@ impl Kernel {
             LIMITED_NOTE.to_string(),
             request.target.as_str().to_string(),
         )];
-        notes.extend(provenance_notes(trace, alias, answered));
+        notes.extend(provenance_notes(trace, alias, answered, levels));
         notes.extend(scope_notes(scope));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
@@ -1943,6 +1957,10 @@ impl Kernel {
         // leaf already paid one `Iri` clone to report it, and a cache hit through
         // it must not pay a second (measured 2026-09-27, formalism §10).
         let answered = resolved.answered_by.as_ref();
+        // The levels the endpoint was found in, innermost first — empty unless a
+        // `Level` is on the path. Borrowed for the trace; the invocation below gets
+        // the resolved scope built from it.
+        let levels = resolved.levels();
 
         // ★ THE LIMITER. A hit on ⊥ (`Endpoint::is_limiter`) is the paper's
         // Definition 7: the identifier is admitted by a door whose endpoint is the
@@ -1958,7 +1976,7 @@ impl Kernel {
         // (describing a hole would reveal it). Only the trace may know.
         if resolved.endpoint.is_limiter() {
             self.trace_limited(
-                &trace, &request, capability, span, parent, alias, answered, &scope,
+                &trace, &request, capability, span, parent, alias, answered, levels, &scope,
             );
             return Err(Error::Unresolved(request.target.clone()));
         }
@@ -1989,7 +2007,8 @@ impl Kernel {
             .unsatisfied(&resolved.endpoint, &request, capability)
         {
             self.trace_denial(
-                &trace, &request, capability, span, parent, &lacking, alias, answered, &scope,
+                &trace, &request, capability, span, parent, &lacking, alias, answered, levels,
+                &scope,
             );
             return Err(Error::Denied(
                 self.denial_message(&lacking, &request, capability, alias),
@@ -2019,7 +2038,7 @@ impl Kernel {
                     parent,
                     started,
                     true,
-                    provenance_notes(&trace, alias, answered),
+                    provenance_notes(&trace, alias, answered, levels),
                     &scope,
                 );
                 self.record_resolution(&request, started, true);
@@ -2048,6 +2067,9 @@ impl Kernel {
                 Ok(repr) => repr.cacheable(),
                 // The renderer doesn't emit this type directly — transrept the canonical
                 // Turtle to it.
+                // The steps run in the RESOLVED scope — where the endpoint described
+                // was found — so a transreptor its own level binds is the one that
+                // converts its description (space-scoped transreptors).
                 Err(_) => {
                     self.transrept_meta(
                         &description,
@@ -2056,7 +2078,7 @@ impl Kernel {
                         capability,
                         span,
                         &trace,
-                        &scope,
+                        &scope.descend(levels.clone()),
                         depth,
                     )
                     .await?
@@ -2077,16 +2099,21 @@ impl Kernel {
                     let issuer: Arc<dyn Issuer> = kernel;
                     issuer
                 });
-            // …and the chain this request resolved in, so every sub-request the
-            // endpoint issues resolves in the same one. This is what makes a
-            // corridor hold "for the request and everything below it", and what
-            // keeps a confinement closed under the endpoint it was applied to.
+            // …and the RESOLVED scope: the chain this request resolved in, with its
+            // level stack replaced by the levels the endpoint was found in. Every
+            // sub-request the endpoint issues resolves there — the host's corridors
+            // first (so a corridor holds "for the request and everything below
+            // it"), then the endpoint's own level outward, then the root unless a
+            // confinement severed it (so a confinement stays closed under the
+            // endpoint it was applied to). An endpoint found in no level gets the
+            // chain the request resolved in, unchanged: `descend` of an empty path
+            // over a chain with no levels is that very chain.
             let invocation =
                 Invocation::with_issuer(&request, &resolved.bindings, capability, self)
                     .with_concurrency(self.spawner.clone(), issuer_arc)
                     .with_span(span)
                     .with_trace(trace.clone())
-                    .with_scope(scope.clone())
+                    .with_scope(scope.descend(levels.clone()))
                     .with_depth(depth);
             let representation = resolved.endpoint.invoke(&invocation).await?;
             // Effective expiry propagates from the dependencies: the result is no
@@ -2143,7 +2170,7 @@ impl Kernel {
             trace_notes = invocation.take_trace_notes();
             // The rewrite and the answering space are provenance of the invocation,
             // so they lead the endpoint's own notes rather than being appended after.
-            let mut notes = provenance_notes(&trace, alias, answered);
+            let mut notes = provenance_notes(&trace, alias, answered, levels);
             notes.append(&mut trace_notes);
             trace_notes = notes;
             representation.with_expiry(effective).with_threads(threads)
@@ -2151,7 +2178,7 @@ impl Kernel {
         if request.verb == Verb::Meta {
             // The Meta arm takes no invocation, so it never reached the note-merging
             // above; the rewrite and the answerer still have to show on the event.
-            trace_notes = provenance_notes(&trace, alias, answered);
+            trace_notes = provenance_notes(&trace, alias, answered, levels);
         }
         // Computed (not served from cache) — record after the invocation completes.
         self.trace_record(
@@ -2328,6 +2355,7 @@ impl Kernel {
                 scope,
                 None,
                 None,
+                &LevelPath::default(),
                 &Scope::empty(),
             );
             Err(Error::Denied(format!(
@@ -3034,12 +3062,16 @@ fn provenance_notes(
     trace: &Option<TraceScope>,
     alias: Option<&AliasHop>,
     answered: Option<&Iri>,
+    levels: &LevelPath,
 ) -> Vec<(String, String)> {
     if trace.is_none() {
         return Vec::new();
     }
     let mut notes = alias_notes(alias);
     notes.extend(answered.map(|space| (ANSWERED_NOTE.to_string(), space.as_str().to_string())));
+    if !levels.is_empty() {
+        notes.push((LEVEL_NOTE.to_string(), levels.to_string()));
+    }
     notes
 }
 
