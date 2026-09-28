@@ -1,8 +1,9 @@
 # The resolution context: levels, the resolved scope, and sealed names
 
-**Status:** phase 1 of ledger [#563](http://localhost:1060/l/default/item/563), landing as
-three PRs in this repository: `Level`, the found path and the resolved scope (the first);
-sealed names (the second); the pushdown gatekeeper walk and the formal document (the third).
+**Status:** phase 1 of ledger [#563](http://localhost:1060/l/default/item/563), built in
+three PRs in this repository: `Level`, the found path and the resolved scope (PR #132); sealed
+names (PR #133); the pushdown gatekeeper walk and the formal document (the third). Unreleased
+at merge: the hub runs the release preflight.
 Brian, 2026-09-27: *"I think the resolution context might be worth having."* The five design
 questions were decided 2026-09-28 (all as recommended, below), with one requirement added: a
 module must not be able to override core or security names — sealed names.
@@ -208,9 +209,11 @@ things are refused, naming what collided — a builder panics with the message,
   or not — a binding the seal makes dead is exactly the silent skip the rule refuses. A template
   whose head the family EXTENDS (`urn:{ns}:{id}` against `urn:sign:`) binds nothing by name; it
   is refused only where a request for a sealed name can reach it — from the root through every
-  mount above it, or through its owner's frame. Doors are bindings' patterns, alias rules'
-  logical names (a table rewriting a sealed name answers it as surely as a binding) and
-  limiters' families. Core's own seal needs no door check: no door can ever answer
+  mount above it, or through its owner's frame. Doors are bindings' patterns and alias rules'
+  logical names (a table rewriting a sealed name answers it as surely as a binding). A
+  limiter is a hole, not a door — it answers nothing, so it fakes nothing — and a host's
+  limiter over a module's sealed name is a gatekeeper; limiters are never counted, at build
+  or on resolution. Core's own seal needs no door check: no door can ever answer
   `urn:kernel:*`.
 - **A seal outside the level's namespace.** Its namespace is the prefix it is mounted under
   (the mounts between it and its enclosing level), or one the host accepted with
@@ -240,6 +243,56 @@ nothing about verbs, and the write names are templates in the middle
 (`urn:iki:ledger:{ledger}:append`), so the namespace is the one prefix that covers them; its
 reads should come from the real ledger too. None of these is bound inside a level today, so
 sealing them changes no answer; it closes the hole before the first module level exists.
+
+## The gatekeeper check follows the pushes
+
+Before levels the static tree contributed no pushes, and "is a door of the family reachable
+from the entry without a limiter over it ahead of it?" was a path query over
+`urn:kernel:topology` (formal document §1.1, R7.3). A `Level` is the one node that pushes: an
+endpoint found under it resolves at the level's own space, without the guard it was entered
+through. So the walk in `tests/topology.rs` now does two things:
+
+1. **The entry walk**, as before — `ik:Level` is transparent from outside — noting every level
+   ENTERED: one whose doors an outside request can reach, by any name.
+2. **The pushes**: each entered level's resolved-scope stack (the level, then its enclosing
+   levels) is walked again from the level itself, with no gate and only the walls the host's
+   corridors put ahead of everything. Pushes discover further entered levels; each stack is
+   pushed once. The stacks are the tree's own level paths, so the closure is bounded by the
+   level nesting. The root is not re-walked from a push: it is consulted after the frames,
+   behind at least the walls the entry walk met, so it can only reach less.
+
+A sealed family has exactly the reach it had without levels: its doors count only where its
+owner is (never inside a level for a host seal — the walk is told the host's seals, which are
+kernel configuration and not in the graph; only inside the sealing level for a level's seal,
+which `ik:seals` states). Doors met through a non-owner frame on the way to a nested owner are
+counted: an over-approximation, in the direction a gatekeeper check can afford.
+
+The SPARQL form stays a query for arrangements without levels, and says honestly where it
+stops: its second question gains a branch that reports any `ik:Level` on a reachable path, so
+"safe" is not available to the query for a tree with levels — the walk answers there. Run over
+four rendered graphs in an in-memory oxigraph store: the §12.5 arrangement `false`/`false`
+(safe), the open root `true`/`false`, a module whose level binds a personal door behind the
+root's limiter `false`/`true` (the walk: reachable, and the kernel serves it), a module with no
+door of the family `false`/`true` (the walk: unreachable). Without the new branch the third
+graph read `false`/`false` — the query would have called a leak safe.
+
+## What phase 2 should measure
+
+- **Fragmentation from whole-scope keying.** Every sub-request from inside a level is keyed by
+  its resolved scope, so two modules reading the same root resource share no entry. Count, on
+  a real host (gonk, the cli), distinct `urn:kernel:cache` rows per request id once modules are
+  levels, and the hit rate on root reads issued from inside levels versus from the root. That
+  number decides whether found-scope keying
+  ([#548](http://localhost:1060/l/default/item/548)) is worth its complexity.
+- **The descent cost on a hot composite.** ~170 ns per invocation inside a level (the table
+  below). If a profile shows it, memoize the resolved scope per (chain, found path) — the
+  inputs are two `Arc`s, so the memo key is cheap.
+- **Construction cost of the seal walk** on the largest real root (a module host with thousands
+  of bindings), once a sealing level exists in the process: `Kernel::new` walks the topology
+  then, and nothing measured it on a big tree.
+- **Thread invalidation across levels** ([#581](http://localhost:1060/l/default/item/581)):
+  a golden thread is a name, so a write through one level cuts a same-named resource another
+  level answers. Sound (over-invalidation) but unmeasured.
 
 ## The read measurement
 

@@ -666,7 +666,11 @@ fn admit(
     seals: &Seals,
 ) -> std::result::Result<Resolution, SealBreach> {
     match &resolution {
-        Resolution::Hit(hit) if !(seals.is_trivial() && hit.levels.is_empty()) => {
+        // A hit on ⊥ is a hole, not an answer: it can fake nothing, so a limiter
+        // over a sealed name (a host's gatekeeper, say) is never a breach.
+        Resolution::Hit(hit)
+            if !(seals.is_trivial() && hit.levels.is_empty()) && !hit.endpoint.is_limiter() =>
+        {
             seals.admit(
                 std::iter::once(&request.target).chain(hit.canonical.as_ref()),
                 &hit.levels,

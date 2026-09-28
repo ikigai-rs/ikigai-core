@@ -81,8 +81,7 @@ pub enum SealError {
     Binds {
         /// The level the door is in; `None` for a door outside every level.
         level: Option<Iri>,
-        /// The door: a binding's pattern, an alias rule's logical name, or a
-        /// limiter's family.
+        /// The door: a binding's pattern, or an alias rule's logical name.
         door: String,
         /// The sealed prefix it can answer names under.
         prefix: String,
@@ -408,7 +407,7 @@ struct FoundLevel {
 /// A door as the topology states it, with every route a request can reach it by.
 struct FoundDoor {
     text: String,
-    /// A prefix rule or a plain limiter family: every name under `text`.
+    /// A prefix rule: every name under `text`.
     prefix_like: bool,
     /// The levels enclosing it, innermost first, each with the gate from that level
     /// down — the route a frame of that level's stack walk takes.
@@ -539,9 +538,10 @@ impl Found {
                     self.door(pattern, false, levels, &root_gate);
                 }
             }
-            SpaceKind::Limit { family } => {
-                self.door(family, !family.contains('{'), levels, &root_gate)
-            }
+            // A limiter is a hole, not a door: it answers nothing, so it can fake
+            // nothing, and a host's limiter over a module's sealed name is a
+            // gatekeeper, not a squatter. Never counted.
+            SpaceKind::Limit { .. } => {}
             SpaceKind::Alias { rules } => {
                 for rule in rules {
                     self.door(

@@ -13,16 +13,19 @@
 //! an alias's visible rules are expanded, so a rule into the family behind the wall
 //! is reported as the leak it is; a closure rewrite behind the wall, an opaque
 //! space, and a template the prefix test cannot place are "unknown", never "no".
+//! And since levels (ledger #563) the walk PUSHES: an endpoint found inside a
+//! `Level` resolves from its own level outward, so a door behind a module's guard
+//! is reachable through the module's own endpoints, and the walk follows that.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 use ikigai_core::{
-    Alias, AliasTable, Capability, Confine, Description, EndpointSpace, Error, Exact, Fallback,
-    FnEndpoint, Iri, Kernel, Limit, MetaRenderer, Mount, ReprType, Representation, Request,
-    Resolution, Rewrite, Scope, Space, SpaceKind, TraceEvent, Tracer, UriTemplate, Verb,
-    ANSWERED_NOTE, BINDINGS_THREAD, DENIED_NOTE, LIMITED_NOTE,
+    Alias, AliasTable, AsyncFnEndpoint, Capability, Confine, Description, EndpointSpace, Error,
+    Exact, Fallback, FnEndpoint, Iri, Kernel, Level, Limit, MetaRenderer, Mount, ReprType,
+    Representation, Request, Resolution, Rewrite, Scope, Space, SpaceKind, TraceEvent, Tracer,
+    UriTemplate, Verb, ANSWERED_NOTE, BINDINGS_THREAD, DENIED_NOTE, LIMITED_NOTE,
 };
 use oxrdf::{NamedOrBlankNode, Term, Triple};
 
@@ -704,28 +707,58 @@ fn touches(a: &str, b: &str) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
-/// **Theorem 4(b) as a walk** — the formal document's §1.1: ikigai's tree contributes
-/// no pushes, so gatekeeper completeness over it is a path query, not a pushdown
-/// analysis. The walk follows the order the kernel consults the tree, because that
-/// order IS the rule: `Fallback` returns the first hit and a hit on ⊥ is a hit, so a
-/// plain limiter met earlier in pre-order — on a path that admits the name — ends
-/// resolution for every later door under its family, whichever list that door sits
-/// in. `walls` accumulates those families as the walk meets them, narrowed to the
-/// mount the limiter sits under (`gate`: a limiter stops only what its mount admits,
-/// and one under a mount that admits none of the family is dead). A limiter met
-/// inside a mapper (`Rewrite`, `Alias`) walls only the mapper's own subtree: the
-/// closure or the table may rename the family away before it, so exporting it would
-/// wall doors it never stops. `maybe` is set by a template family the check cannot
-/// place, after which a door found is at best "unknown".
+/// **Theorem 4(b) as a walk** — the formal document's §1.1 and R7.3. The walk
+/// follows the order the kernel consults the tree, because that order IS the rule:
+/// `Fallback` returns the first hit and a hit on ⊥ is a hit, so a plain limiter met
+/// earlier in pre-order — on a path that admits the name — ends resolution for every
+/// later door under its family, whichever list that door sits in. `walls`
+/// accumulates those families as the walk meets them, narrowed to the mount the
+/// limiter sits under (`gate`: a limiter stops only what its mount admits, and one
+/// under a mount that admits none of the family is dead). A limiter met inside a
+/// mapper (`Rewrite`, `Alias`) walls only the mapper's own subtree: the closure or
+/// the table may rename the family away before it, so exporting it would wall doors
+/// it never stops. `maybe` is set by a template family the check cannot place,
+/// after which a door found is at best "unknown".
+///
+/// **Levels push.** A tree without an `ik:Level` contributes no pushes, and the walk
+/// is the path query it always was. An endpoint found inside a level runs in its
+/// resolved scope — the host's corridors, then its level's space WITHOUT the guard it
+/// was entered through, then each enclosing level, then the root — so a level whose
+/// doors an outside request can reach is ENTERED (`entered`, with its enclosing
+/// levels), and every entered level is PUSHED: its space and its enclosing levels'
+/// spaces are walked again from the level itself, with no gate and only the walls
+/// the host's corridors put ahead of everything (`corridor_walls`). Pushes discover
+/// further entered levels; each stack is pushed once. The stacks are the tree's own
+/// level paths, so the closure is bounded by the level nesting. The root is not
+/// walked again from a push: it is consulted after the frames, behind at least the
+/// walls the entry walk met, so it can only reach less.
+///
+/// **Sealed families** have exactly today's reach: a family a host seals
+/// (`host_sealed`, from `Kernel::sealed()`) is never answered inside a level, and one
+/// a level seals (`ik:seals`) only inside that level — so a door of a sealed family
+/// counts only where its owner is. Doors met through a non-owner frame on the way to
+/// a nested owner are counted (an over-approximation, in the safe direction).
 ///
 /// The SPARQL form of the same question — two queries — is in
-/// `docs/formalism/README.md` (R7.3), with the two places it is coarser than this walk.
+/// `docs/formalism/README.md` (R7.3). It follows no pushes, and its second question
+/// says so: an `ik:Level` on a reachable path makes the first answer untrusted.
 #[derive(Default)]
 struct Walk {
     walls: Vec<String>,
     maybe: bool,
     reachable: bool,
     unknown: bool,
+    /// The levels enclosing the node being walked, innermost LAST.
+    stack: Vec<String>,
+    /// Every entered level's stack, innermost FIRST — the resolved scope's level
+    /// stack an endpoint found in it runs with.
+    entered: Vec<Vec<String>>,
+    /// The walls the chain's host corridors put ahead of the root, captured as the
+    /// entry walk passes them.
+    corridor_walls: Vec<String>,
+    /// Who seals the family: `Some(None)` the host, `Some(Some(level))` a level,
+    /// `None` nobody.
+    sealed: Option<Option<String>>,
 }
 
 impl Walk {
@@ -733,9 +766,21 @@ impl Walk {
         let p = |name: &str| format!("{IK}{name}");
         match g.kind(node).as_str() {
             "Chain" | "Fallback" => {
-                for layer in g.layers(node) {
-                    if g.kind(&layer) == "Limit" {
-                        for limited in g.strs(&layer, &p("family")) {
+                let chain = g.kind(node) == "Chain";
+                let layers = g.layers(node);
+                let root_at = (chain && g.strs(node, &p("severed")) != ["true"])
+                    .then(|| layers.len().saturating_sub(1));
+                let mut captured = false;
+                for (at, layer) in layers.iter().enumerate() {
+                    // The host's corridors come first in a chain, then (in a resolved
+                    // scope) its level stack, then the root: a push starts behind the
+                    // corridors' walls and nothing else.
+                    if chain && !captured && (Some(at) == root_at || g.kind(layer) == "Level") {
+                        self.corridor_walls = self.walls.clone();
+                        captured = true;
+                    }
+                    if g.kind(layer) == "Limit" {
+                        for limited in g.strs(layer, &p("family")) {
                             match limited.find('{') {
                                 // A plain family is a prefix (`Limit::new`): a wall over
                                 // everything under it that the mount above admits.
@@ -753,15 +798,19 @@ impl Walk {
                             }
                         }
                     } else {
-                        self.walk(g, &layer, family, gate);
+                        self.walk(g, layer, family, gate);
                     }
+                }
+                if chain && !captured {
+                    self.corridor_walls = self.walls.clone();
                 }
             }
             "Mount" => {
                 let prefix = g.strs(node, &p("prefix")).remove(0);
-                // The mount admits nothing of the family, or nothing the mount above
-                // it admits: nothing below it is reached.
-                if !touches(&prefix, family) || !touches(&prefix, gate) {
+                // The mount admits nothing the mount above it admits: nothing below
+                // it is reached. (Whether it admits the FAMILY is asked at each door,
+                // because a level below it may be entered by a name outside the family.)
+                if !touches(&prefix, gate) {
                     return;
                 }
                 let gate = if prefix.starts_with(gate) {
@@ -776,6 +825,13 @@ impl Walk {
                     let lit = door.split('{').next().unwrap_or(&door);
                     if !touches(lit, gate) {
                         continue; // the mount above never admits a name of this door
+                    }
+                    // Any door an outside name can reach enters the level it is in.
+                    if !self.walls.iter().any(|w| lit.starts_with(w)) {
+                        self.enter();
+                    }
+                    if !self.counts_here() {
+                        continue; // a sealed family is answered only where its owner is
                     }
                     match head(&door, family) {
                         Head::Inside if !self.walls.iter().any(|w| door.starts_with(w)) => {
@@ -792,6 +848,13 @@ impl Walk {
                     }
                 }
             }
+            // A level is transparent from outside; it is ENTERED when a door inside it
+            // is reached, and the push that entering implies is taken in `check_walk`.
+            "Level" => {
+                self.stack.push(node.to_string());
+                self.walk(g, &g.space(node), family, gate);
+                self.stack.pop();
+            }
             // τ is a closure. Behind a wall that touches the family it may map an
             // admitted name into the family — the §12.5 leak, invisible here — so the
             // walk cannot answer. Above every such wall it is walked through: τ can
@@ -799,6 +862,7 @@ impl Walk {
             "Rewrite" => {
                 if self.walls.iter().any(|w| touches(w, family)) {
                     self.unknown = true;
+                    self.enter(); // it may hold a door, and so enter its level
                 } else {
                     self.scoped(g, &g.space(node), family, gate);
                 }
@@ -834,20 +898,58 @@ impl Walk {
                     }
                     let mut followed = Walk {
                         maybe: self.maybe,
+                        stack: self.stack.clone(),
+                        sealed: self.sealed.clone(),
                         ..Walk::default()
                     };
                     followed.walk(g, &inner, &sub, "");
-                    self.reachable |= followed.reachable;
-                    self.unknown |= followed.unknown;
+                    self.absorb(followed);
                 }
                 self.scoped(g, &inner, family, gate);
             }
             // A limiter reached on its own admits nothing; an opaque space is exactly
-            // that — it may hold a door, or be a mapper, and the walk cannot see.
+            // that — it may hold a door, or be a mapper, and the walk cannot see. It
+            // may also enter the level it is in.
             "Limit" => {}
-            "OpaqueSpace" => self.unknown = true,
+            "OpaqueSpace" => {
+                self.unknown = true;
+                self.enter();
+            }
             "Confine" => self.walk(g, &g.space(node), family, gate),
             other => panic!("unknown node kind {other}"),
+        }
+    }
+
+    /// Record that the level being walked (if any) is entered.
+    fn enter(&mut self) {
+        if self.stack.is_empty() {
+            return;
+        }
+        let frames: Vec<String> = self.stack.iter().rev().cloned().collect();
+        if !self.entered.contains(&frames) {
+            self.entered.push(frames);
+        }
+    }
+
+    /// Whether a door of the family counts where the walk is: everywhere unless the
+    /// family is sealed; outside every level for a host seal; inside the owning
+    /// level for a level's.
+    fn counts_here(&self) -> bool {
+        match &self.sealed {
+            None => true,
+            Some(None) => self.stack.is_empty(),
+            Some(Some(owner)) => self.stack.last() == Some(owner),
+        }
+    }
+
+    /// Fold a sub-walk's findings into this one.
+    fn absorb(&mut self, other: Walk) {
+        self.reachable |= other.reachable;
+        self.unknown |= other.unknown;
+        for frames in other.entered {
+            if !self.entered.contains(&frames) {
+                self.entered.push(frames);
+            }
         }
     }
 
@@ -856,19 +958,77 @@ impl Walk {
         let mut inner = Walk {
             walls: self.walls.clone(),
             maybe: self.maybe,
+            stack: self.stack.clone(),
+            sealed: self.sealed.clone(),
             ..Walk::default()
         };
         inner.walk(g, node, family, gate);
-        self.reachable |= inner.reachable;
-        self.unknown |= inner.unknown;
+        self.absorb(inner);
     }
 }
 
-/// The first question: is any door of `family` reachable from `node` without a
-/// limiter over it standing ahead of it?
-fn reach(g: &Graph, node: &str, family: &str) -> Reach {
-    let mut walk = Walk::default();
+/// Who seals `family`, if anyone: the host (from `host_sealed`) or a level
+/// (`ik:seals` in the graph).
+fn sealer(g: &Graph, family: &str, host_sealed: &[&str]) -> Option<Option<String>> {
+    if host_sealed.iter().any(|p| family.starts_with(p)) {
+        return Some(None);
+    }
+    g.subjects()
+        .into_iter()
+        .filter(|s| {
+            g.objects(s, &format!("{RDF}type"))
+                .iter()
+                .any(|t| matches!(t, Term::NamedNode(n) if n.as_str() == format!("{IK}Level")))
+        })
+        .find(|level| {
+            g.strs(level, &format!("{IK}seals"))
+                .iter()
+                .any(|p| family.starts_with(p.as_str()))
+        })
+        .map(Some)
+}
+
+/// The entry walk from `node`, then the pushdown closure over every entered level.
+fn check_walk(g: &Graph, node: &str, family: &str, host_sealed: &[&str]) -> Walk {
+    let mut walk = Walk {
+        sealed: sealer(g, family, host_sealed),
+        ..Walk::default()
+    };
     walk.walk(g, node, family, "");
+    let mut pushed: BTreeSet<Vec<String>> = BTreeSet::new();
+    let mut at = 0;
+    while at < walk.entered.len() {
+        let frames = walk.entered[at].clone();
+        at += 1;
+        if !pushed.insert(frames.clone()) {
+            continue;
+        }
+        // The resolved scope: the frames innermost first, each walked as its own
+        // space, behind the host corridors' walls and whatever earlier frames wall.
+        let mut push = Walk {
+            walls: walk.corridor_walls.clone(),
+            maybe: walk.maybe,
+            sealed: walk.sealed.clone(),
+            ..Walk::default()
+        };
+        for (i, level) in frames.iter().enumerate() {
+            push.stack = frames[i..].iter().rev().cloned().collect();
+            push.walk(g, &g.space(level), family, "");
+        }
+        walk.absorb(push);
+    }
+    walk
+}
+
+/// The first question: is any door of `family` reachable from `node` without a
+/// limiter over it standing ahead of it — following every level's push?
+fn reach(g: &Graph, node: &str, family: &str) -> Reach {
+    reach_sealed(g, node, family, &[])
+}
+
+/// [`reach`] for a kernel that seals `host_sealed` (`Kernel::sealed()`).
+fn reach_sealed(g: &Graph, node: &str, family: &str, host_sealed: &[&str]) -> Reach {
+    let walk = check_walk(g, node, family, host_sealed);
     if walk.reachable {
         Reach::Reachable
     } else if walk.unknown {
@@ -882,9 +1042,7 @@ fn reach(g: &Graph, node: &str, family: &str) -> Reach {
 /// means the first answer is not to be trusted — the two-query protocol of R7.3,
 /// where "safe" is the first `Unreachable` (the ASK's `false`) AND this `false`.
 fn unanswered(g: &Graph, node: &str, family: &str) -> bool {
-    let mut walk = Walk::default();
-    walk.walk(g, node, family, "");
-    walk.unknown
+    check_walk(g, node, family, &[]).unknown
 }
 
 #[test]
@@ -1290,4 +1448,205 @@ fn a_limiter_walls_only_what_the_mount_above_it_admits() {
         Reach::Reachable
     );
     assert_eq!(check(narrow), (Reach::Reachable, false));
+}
+
+// ---- 5. Levels push, and the walk follows the pushes ----------------------------
+//
+// Ledger #563: an endpoint found inside a `Level` resolves its sub-requests at its
+// level first — the level's own space, without the guard it was entered through —
+// so reachability over a tree with levels in it follows those pushes. Each test
+// below states what the kernel does, then that the walk says the same.
+
+/// Sources `target` and answers with what came back, or the error as text.
+fn reader(id: &'static str, target: &'static str) -> AsyncFnEndpoint {
+    AsyncFnEndpoint::new(id, move |inv| {
+        Box::pin(async move {
+            match inv.source(&iri(target)).await {
+                Ok(inner) => Ok(text(&inner.bytes)),
+                Err(e) => Ok(text(format!("error: {e}").as_bytes())),
+            }
+        })
+    })
+}
+
+fn answer(kernel: &Kernel, target: &str) -> String {
+    match block_on(kernel.issue(source(target), &Capability::root())) {
+        Ok(r) => String::from_utf8_lossy(&r.bytes).into_owned(),
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+/// `Fallback([Limit("urn:personal:"), Mount("urn:mod:", Level(M, doors))])` — the
+/// gatekeeper at the root, and a module whose level binds a personal door beside
+/// its public one.
+fn module_behind_the_wall() -> Arc<dyn Space> {
+    served(Arc::new(Mount::new(
+        "urn:mod:",
+        Arc::new(Level::new(
+            iri("urn:example:level:mod"),
+            Arc::new(
+                EndpointSpace::new()
+                    .bind(
+                        Exact::new("urn:mod:public"),
+                        reader("public", "urn:personal:calendar"),
+                    )
+                    .bind(Exact::new("urn:personal:calendar"), door("calendar")),
+            ),
+        )),
+    )))
+}
+
+#[test]
+fn a_door_behind_a_modules_guard_is_reachable_through_the_modules_own_endpoint() {
+    // The kernel: from outside the personal door is limited; through the module's
+    // public endpoint, whose sub-request resolves at the module's level BEFORE the
+    // root (and its limiter) is consulted, it answers.
+    let kernel = kernel(module_behind_the_wall());
+    assert!(answer(&kernel, "urn:personal:calendar").starts_with("error: no endpoint"));
+    assert_eq!(answer(&kernel, "urn:mod:public"), "calendar");
+
+    // The walk: without the push it would say "unreachable" — the limiter stands
+    // ahead of the door in the root's list, and the mount admits none of the
+    // family. The module is ENTERED (its public door is reachable), the push walks
+    // its space from the level, and the door is there: REACHABLE.
+    let g = topology(&kernel, &Capability::root(), Scope::empty());
+    assert_eq!(g.kind("urn:example:level:mod"), "Level");
+    assert_eq!(
+        reach(&g, "urn:ikigai:chain:root", "urn:personal:"),
+        Reach::Reachable
+    );
+    // With no door of the module reachable from outside, nothing enters it.
+    let sealed_off: Arc<dyn Space> = served(Arc::new(Mount::new(
+        "urn:mod:",
+        Arc::new(Level::new(
+            iri("urn:example:level:mod"),
+            Arc::new(EndpointSpace::new().bind(Exact::new("urn:personal:calendar"), door("c"))),
+        )),
+    )));
+    assert_eq!(check(sealed_off), (Reach::Unreachable, false));
+}
+
+#[test]
+fn a_limiter_injected_as_a_host_corridor_still_walls_the_push() {
+    // The host's corridors come FIRST in a resolved scope: a limiter injected as one
+    // stops the module's sub-request before its level is consulted.
+    let kernel = kernel(module_behind_the_wall());
+    let walled = Scope::empty().with(Arc::new(
+        Limit::new("urn:personal:").named(iri("urn:example:space:gatekeeper")),
+    ));
+    let got = block_on(kernel.issue_in(
+        source("urn:mod:public"),
+        &Capability::root(),
+        walled.clone(),
+    ))
+    .unwrap();
+    assert!(
+        String::from_utf8_lossy(&got.bytes).starts_with("error: no endpoint"),
+        "{got:?}"
+    );
+    let entry = format!("urn:ikigai:chain:{:016x}", walled.fingerprint());
+    let g = topology(&kernel, &Capability::root(), walled);
+    assert_eq!(reach(&g, &entry, "urn:personal:"), Reach::Unreachable);
+}
+
+#[test]
+fn the_push_goes_outward_through_the_enclosing_levels_and_is_bounded_by_their_nesting() {
+    // Level O guards a personal door behind its own mount; level I, nested in O, has
+    // one public door. From outside the vault is limited and guarded twice over; an
+    // endpoint found in I resolves at I, then at O (without O's guard), and reaches it.
+    let inner = Arc::new(Mount::new(
+        "urn:o:in:",
+        Arc::new(Level::new(
+            iri("urn:example:level:inner"),
+            Arc::new(EndpointSpace::new().bind(
+                Exact::new("urn:o:in:door"),
+                reader("door", "urn:personal:vault"),
+            )),
+        )),
+    ));
+    let outer: Arc<dyn Space> = served(Arc::new(Mount::new(
+        "urn:o:",
+        Arc::new(Level::new(
+            iri("urn:example:level:outer"),
+            Arc::new(Fallback::new(vec![
+                inner,
+                Arc::new(
+                    EndpointSpace::new().bind(Exact::new("urn:personal:vault"), door("vault")),
+                ),
+            ])),
+        )),
+    )));
+    let kernel = kernel(Arc::clone(&outer));
+    assert!(answer(&kernel, "urn:personal:vault").starts_with("error: no endpoint"));
+    assert_eq!(answer(&kernel, "urn:o:in:door"), "vault");
+    assert_eq!(check(outer), (Reach::Reachable, false));
+}
+
+#[test]
+fn a_host_sealed_family_has_exactly_the_reach_it_had_without_levels() {
+    // A host that seals the family cannot build the arrangement above at all — a
+    // level binding a host-sealed name is refused at build …
+    let refused =
+        Kernel::check_sealing(module_behind_the_wall().as_ref(), ["urn:personal:"]).unwrap_err();
+    assert!(
+        refused.to_string().contains("urn:example:level:mod"),
+        "{refused}"
+    );
+    // … and the walk states the same rule on any graph: a door of a host-sealed
+    // family counts only outside every level, so no push can reach one — the reach
+    // a family had before levels existed. (The graph is the unsealed kernel's; the
+    // walk is told the host's seals, as a doctor reads them from `Kernel::sealed()`.)
+    let g = topology(
+        &kernel(module_behind_the_wall()),
+        &Capability::root(),
+        Scope::empty(),
+    );
+    assert_eq!(
+        reach_sealed(
+            &g,
+            "urn:ikigai:chain:root",
+            "urn:personal:",
+            &["urn:personal:"]
+        ),
+        Reach::Unreachable
+    );
+    assert_eq!(
+        reach_sealed(&g, "urn:ikigai:chain:root", "urn:personal:", &[]),
+        Reach::Reachable
+    );
+}
+
+#[test]
+fn a_modules_own_frame_reaches_its_sealed_name_behind_a_wall_over_it() {
+    // M seals its key, and the host walls the key at the root. Outside requests are
+    // limited; M's own endpoint resolves the key at M — the owner's frame — first.
+    let module: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(Limit::new("urn:mod:key")),
+        Arc::new(Mount::new(
+            "urn:mod:",
+            Arc::new(
+                Level::new(
+                    iri("urn:example:level:mod"),
+                    Arc::new(
+                        EndpointSpace::new()
+                            .bind(Exact::new("urn:mod:key"), door("key"))
+                            .bind(Exact::new("urn:mod:read"), reader("read", "urn:mod:key")),
+                    ),
+                )
+                .sealing(["urn:mod:key"]),
+            ),
+        )),
+    ]));
+    let kernel = kernel(Arc::clone(&module));
+    assert!(answer(&kernel, "urn:mod:key").starts_with("error: no endpoint"));
+    assert_eq!(answer(&kernel, "urn:mod:read"), "key");
+    let g = topology(&kernel, &Capability::root(), Scope::empty());
+    assert_eq!(
+        g.strs("urn:example:level:mod", &format!("{IK}seals")),
+        ["urn:mod:key"]
+    );
+    assert_eq!(
+        reach(&g, "urn:ikigai:chain:root", "urn:mod:key"),
+        Reach::Reachable
+    );
 }
