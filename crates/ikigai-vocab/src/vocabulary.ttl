@@ -236,6 +236,11 @@ ik:Confine a rdfs:Class ;
     rdfs:label "Confine" ;
     rdfs:comment "A confinement: the corridor an endpoint's sub-requests resolve in with the root cut off, enclosing the ik:space that is that corridor. Bound at one door inside an endpoint, so not reachable from the chain's graph — the endpoint reports it." .
 
+ik:Level a rdfs:Class ;
+    rdfs:subClassOf ik:Space ;
+    rdfs:label "Level" ;
+    rdfs:comment "A level: where an endpoint found inside it runs. Always named. An endpoint found under it resolves its sub-requests in its resolved scope — the host's injected corridors, then this level's ik:space (its own doors, without the guard it was entered through), then each enclosing ik:Level, then the root — so a module reaches its siblings by short name and its internals stay behind the ik:Mount that guards the way in. The one construct in the tree that pushes: reachability over a tree with levels follows those pushes. In an ik:Chain's layers a level is a member of the resolved scope's level stack." .
+
 ik:OpaqueSpace a rdfs:Class ;
     rdfs:subClassOf ik:Space ;
     rdfs:label "OpaqueSpace" ;
@@ -243,7 +248,7 @@ ik:OpaqueSpace a rdfs:Class ;
 
 ik:Chain a rdfs:Class ;
     rdfs:label "Chain" ;
-    rdfs:comment "The resolution chain a request is resolved in — the entry node of urn:kernel:topology. Its ik:layers list the injected corridors innermost first, then the root unless the chain is ik:severed. Named urn:ikigai:chain:root for the empty chain and urn:ikigai:chain:{fingerprint} (sixteen hex digits) otherwise, so two chains' graphs can share one store without their entry points colliding." .
+    rdfs:comment "The resolution chain a request is resolved in — the entry node of urn:kernel:topology. Its ik:layers list the injected corridors innermost first, then — for the resolved scope of an endpoint found inside an ik:Level — that level and each enclosing one, innermost first, then any confined corridor, then the root unless the chain is ik:severed. Named urn:ikigai:chain:root for the empty chain and urn:ikigai:chain:{fingerprint} (sixteen hex digits) otherwise, so two chains' graphs can share one store without their entry points colliding." .
 
 ik:layers a rdf:Property ;
     rdfs:range rdf:List ;
@@ -253,7 +258,7 @@ ik:layers a rdf:Property ;
 ik:space a rdf:Property ;
     rdfs:range ik:Space ;
     rdfs:label "space" ;
-    rdfs:comment "The one space an ik:Mount, ik:Rewrite, ik:Alias or ik:Confine encloses." .
+    rdfs:comment "The one space an ik:Mount, ik:Rewrite, ik:Alias, ik:Confine or ik:Level encloses." .
 
 ik:prefix a rdf:Property ;
     rdfs:range xsd:string ;

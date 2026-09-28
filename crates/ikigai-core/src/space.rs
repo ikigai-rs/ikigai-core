@@ -120,6 +120,18 @@ struct Chain {
     identities: Vec<CorridorIdentity>,
     /// `true` when the root has been cut off the chain.
     severed: bool,
+    /// How many of `injected`'s leading (outermost) entries were placed by
+    /// **confinement** ([`Scope::confined`]) rather than injected by a host. They sit
+    /// where the root was, so they are consulted AFTER the level stack; a host's
+    /// corridors are consulted before it. With no levels the two runs are adjacent
+    /// and the order is exactly the one this chain had before levels existed.
+    confined: usize,
+    /// The **level stack** — the levels the endpoint that issued this request was
+    /// found in, innermost first ([`Level`]). Empty for every chain a host builds;
+    /// non-empty only in a resolved scope the kernel derived for an endpoint found
+    /// inside a `Level` ([`Scope::descend`]). Consulted after the host's corridors
+    /// and before the confined ones and the root.
+    levels: LevelPath,
     /// The chain's fingerprint, computed once when the chain is built so reading
     /// it costs nothing on the issue path.
     fingerprint: u64,
@@ -365,13 +377,54 @@ impl Scope {
     ///
     /// A self-named `space` is the corridor under its own identity and `name` must
     /// agree with it, as for [`with_named`](Self::with_named).
+    ///
+    /// # Confinement leaves the level stack behind
+    ///
+    /// An endpoint found inside a [`Level`] runs in a chain that consults its level,
+    /// then each enclosing level, then the root ([`Level`] says why). The
+    /// levels are part of the ARRANGEMENT — the side of the chain the root stands
+    /// on — so confining cuts them off with the root: the confined chain is the
+    /// host's corridors, then `space`, and nothing else, exactly the chain a
+    /// confinement built before levels existed. "Confine to my own level" (a
+    /// module sandbox in one call) is a different operation and is not built.
     pub fn confined(self, name: Iri, space: Arc<dyn Space>) -> Self {
         let identity = claim(name, &space);
         self.edit(|chain| {
             chain.injected.insert(0, space);
             chain.identities.insert(0, identity);
+            chain.confined += 1;
+            chain.levels = LevelPath::default();
             chain.severed = true;
         })
+    }
+
+    /// The **resolved scope** an endpoint runs in once found along `path` — the
+    /// levels it was found in, innermost first ([`Resolved::levels`]): this chain's
+    /// host corridors, unchanged and whole; then `path`; then the confined
+    /// corridors and the root, as they were. Only the level stack changes on the
+    /// way down; everything a host or a confinement put on the chain is kept.
+    ///
+    /// An endpoint found outside every level gets this chain with its level stack
+    /// emptied — for a chain a host built, which has none, that is this very chain,
+    /// returned without an allocation. That is the backward-compatibility property:
+    /// a kernel with no `Level` in it hands every endpoint exactly the chain it
+    /// handed it before levels existed.
+    pub(crate) fn descend(&self, path: LevelPath) -> Scope {
+        let current = self.chain.as_ref().map(|chain| &chain.levels);
+        if current.map_or(path.is_empty(), |levels| levels.same_as(&path)) {
+            return self.clone();
+        }
+        self.clone().edit(|chain| chain.levels = path)
+    }
+
+    /// The level stack this chain consults after the host's corridors — the levels
+    /// the endpoint issuing a request in this chain was found in, innermost first.
+    /// Empty for every chain a host builds ([`Scope::empty`], injection,
+    /// confinement); what an endpoint inside a [`Level`] sees on
+    /// [`Invocation::scope`](crate::Invocation::scope).
+    pub fn levels(&self) -> &LevelPath {
+        static NONE: LevelPath = LevelPath(Vec::new());
+        self.chain.as_ref().map_or(&NONE, |chain| &chain.levels)
     }
 
     /// Apply a builder step: unshare (or start) the chain, edit it, refingerprint.
@@ -381,12 +434,20 @@ impl Scope {
                 injected: Vec::new(),
                 identities: Vec::new(),
                 severed: false,
+                confined: 0,
+                levels: LevelPath::default(),
                 fingerprint: 0,
                 clock: None,
             },
             Some(shared) => Arc::try_unwrap(shared).unwrap_or_else(|shared| (*shared).clone()),
         };
         step(&mut chain);
+        // A step that leaves nothing on the chain (a descent to the root from a
+        // level, in a chain no host touched) yields the null handle, so the empty
+        // chain keeps its one-null-check fast path however it was reached.
+        if chain.is_empty() {
+            return Scope::empty();
+        }
         chain.refingerprint();
         Scope {
             chain: Some(Arc::new(chain)),
@@ -429,15 +490,27 @@ impl Scope {
     /// **The one walk** — resolution ([`resolve_in`](Self::resolve_in)) and
     /// selection ([`view`](Self::view)) both take their order from here, so what
     /// the manifold offers inside a chain is what resolution in that chain reaches.
+    ///
+    /// With a level stack the walk is: the host's corridors innermost first, then
+    /// each level innermost first (its enclosed space — the level's own doors,
+    /// without the guard it was entered through), then the confined corridors,
+    /// then the root. With none it is exactly the walk it was before levels.
     pub(crate) fn consulted<'a>(
         &'a self,
         root: &'a Arc<dyn Space>,
     ) -> impl Iterator<Item = &'a Arc<dyn Space>> + 'a {
-        let (corridors, severed) = match self.chain.as_ref() {
-            None => (&[][..], false),
-            Some(chain) => (chain.injected.as_slice(), chain.severed),
+        let (behind, host, levels, severed) = match self.chain.as_ref() {
+            None => (&[][..], &[][..], &[][..], false),
+            Some(chain) => {
+                let (behind, host) = chain.injected.split_at(chain.confined);
+                (behind, host, chain.levels.0.as_slice(), chain.severed)
+            }
         };
-        corridors.iter().rev().chain((!severed).then_some(root))
+        host.iter()
+            .rev()
+            .chain(levels.iter().map(|level| &level.inner))
+            .chain(behind.iter().rev())
+            .chain((!severed).then_some(root))
     }
 
     /// Resolve `request` against the chain: the first hit along
@@ -446,25 +519,61 @@ impl Scope {
     /// answered by the corridor ([`Resolved::answered_by`]): the corridor's name
     /// is its identity in this chain, and it is what a cache keyed on the
     /// corridors actually consulted would key on.
+    ///
+    /// A hit from the level stack is a hit INSIDE that level: its found path
+    /// ([`Resolved::levels`]) is whatever the level's own space reported (levels
+    /// nested inside it), then the level that answered and every level outward of
+    /// it — so the endpoint it found runs from its own level outward, as one found
+    /// from the root through the same levels would.
     pub(crate) fn resolve_in(&self, request: &Request, root: &Arc<dyn Space>) -> Resolution {
         // The empty chain is the hot path — every plain `issue` — and is one null
         // check straight to the root; the walk below is the general case.
         let Some(chain) = self.chain.as_ref() else {
             return root.resolve(request, self);
         };
-        let corridors = chain.injected.iter().zip(chain.identities.iter()).rev();
-        for (space, identity) in corridors {
-            if let Resolution::Hit(resolved) = space.resolve(request, self) {
-                return Resolution::Hit(match identity {
-                    CorridorIdentity::Named(name) => resolved.with_answered_by(name.clone()),
-                    CorridorIdentity::Anonymous(_) => resolved,
-                });
+        let (behind, host) = chain.injected.split_at(chain.confined);
+        let (behind_ids, host_ids) = chain.identities.split_at(chain.confined);
+        if let Some(hit) = self.corridor_hit(request, host, host_ids) {
+            return hit;
+        }
+        for (at, level) in chain.levels.0.iter().enumerate() {
+            if let Resolution::Hit(mut resolved) = level.inner.resolve(request, self) {
+                if resolved.answered_by.is_none() {
+                    resolved.answered_by = Some(level.name.clone());
+                }
+                resolved
+                    .levels
+                    .0
+                    .extend(chain.levels.0[at..].iter().cloned());
+                return Resolution::Hit(resolved);
             }
+        }
+        if let Some(hit) = self.corridor_hit(request, behind, behind_ids) {
+            return hit;
         }
         if chain.severed {
             return Resolution::Miss;
         }
         root.resolve(request, self)
+    }
+
+    /// The first hit among `spaces` (outermost first, so walked in reverse), a
+    /// named corridor filling [`Resolved::answered_by`] when its space named none.
+    fn corridor_hit(
+        &self,
+        request: &Request,
+        spaces: &[Arc<dyn Space>],
+        identities: &[CorridorIdentity],
+    ) -> Option<Resolution> {
+        for (space, identity) in spaces.iter().zip(identities).rev() {
+            if let Resolution::Hit(resolved) = space.resolve(request, self) {
+                return Some(Resolution::Hit(match identity {
+                    CorridorIdentity::Named(name) => resolved.with_answered_by(name.clone()),
+                    CorridorIdentity::Anonymous(_) => resolved,
+                }));
+            }
+        }
+        None
     }
 
     /// The arrangement this chain sees, as a tree: a [`Chain`](SpaceKind::Chain)
@@ -486,12 +595,23 @@ impl Scope {
         })
         .with_id(Iri::parse(id).ok());
         if let Some(chain) = self.chain.as_ref() {
-            for (space, identity) in chain.injected.iter().zip(chain.identities.iter()).rev() {
+            let corridor = |space: &Arc<dyn Space>, identity: &CorridorIdentity| {
                 let mut layer = space.topology();
                 if let (None, CorridorIdentity::Named(name)) = (&layer.id, identity) {
                     layer.id = Some(name.clone());
                 }
-                node = node.child(layer);
+                layer
+            };
+            let (behind, host) = chain.injected.split_at(chain.confined);
+            let (behind_ids, host_ids) = chain.identities.split_at(chain.confined);
+            for (space, identity) in host.iter().zip(host_ids).rev() {
+                node = node.child(corridor(space, identity));
+            }
+            for level in &chain.levels.0 {
+                node = node.child(level.topology());
+            }
+            for (space, identity) in behind.iter().zip(behind_ids).rev() {
+                node = node.child(corridor(space, identity));
             }
         }
         if !self.is_severed() {
@@ -550,7 +670,7 @@ impl Space for ChainView {
 
 impl Chain {
     fn is_empty(&self) -> bool {
-        self.injected.is_empty() && !self.severed
+        self.injected.is_empty() && !self.severed && self.levels.is_empty()
     }
 
     fn refingerprint(&mut self) {
@@ -572,27 +692,50 @@ impl Chain {
                 }
             }
         }
+        // The level stack, only when there is one — so a chain without levels hashes
+        // exactly the bytes it hashed before levels existed, and every key built
+        // then is still the key. With one, the split between the host's corridors
+        // and the confined ones is part of the identity too: it decides whether a
+        // corridor is consulted before the levels or after them.
+        if !self.levels.is_empty() {
+            crate::hashing::feed_u8(&mut hasher, 3);
+            hasher.update(&(self.confined as u64).to_le_bytes());
+            for level in &self.levels.0 {
+                crate::hashing::feed_str(&mut hasher, level.name.as_str());
+            }
+        }
         let digest = hasher.finalize();
         self.fingerprint = u64::from_le_bytes(digest.as_bytes()[..8].try_into().expect("8 bytes"));
     }
 }
 
-/// The chain as text, innermost first, ending in `root` or `severed`: e.g.
-/// `urn:ctx:doc:7 root`, or `urn:ctx:doc:7 severed`. An anonymous corridor
-/// renders as `_:<n>` — a blank node, which is what a space without a name is.
-/// This is what the kernel puts on a trace event under
-/// [`SCOPE_NOTE`](crate::SCOPE_NOTE); the two terminal tokens carry no colon, so
-/// they can never be confused with a corridor's IRI.
+/// The chain as text, in the order it is consulted, ending in `root` or
+/// `severed`: e.g. `urn:ctx:doc:7 root`, or `urn:ctx:doc:7 severed`. An anonymous
+/// corridor renders as `_:<n>` — a blank node, which is what a space without a
+/// name is — and a level on the stack as `@` and its name
+/// (`urn:ctx:doc:7 @urn:example:level:m root`): `@` cannot begin an IRI, so a
+/// level can never be read as a corridor. This is what the kernel puts on a trace
+/// event under [`SCOPE_NOTE`](crate::SCOPE_NOTE); the two terminal tokens carry no
+/// colon, so they can never be confused with a corridor's IRI.
 impl std::fmt::Display for Scope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Some(chain) = self.chain.as_ref() else {
             return f.write_str("root");
         };
-        for identity in chain.identities.iter().rev() {
-            match identity {
-                CorridorIdentity::Named(name) => write!(f, "{} ", name.as_str())?,
-                CorridorIdentity::Anonymous(id) => write!(f, "_:{id} ")?,
-            }
+        let corridor = |f: &mut std::fmt::Formatter<'_>, identity: &CorridorIdentity| match identity
+        {
+            CorridorIdentity::Named(name) => write!(f, "{} ", name.as_str()),
+            CorridorIdentity::Anonymous(id) => write!(f, "_:{id} "),
+        };
+        let (behind, host) = chain.identities.split_at(chain.confined);
+        for identity in host.iter().rev() {
+            corridor(f, identity)?;
+        }
+        for level in &chain.levels.0 {
+            write!(f, "@{} ", level.name.as_str())?;
+        }
+        for identity in behind.iter().rev() {
+            corridor(f, identity)?;
         }
         f.write_str(if chain.severed { "severed" } else { "root" })
     }
@@ -646,29 +789,30 @@ impl Resolution {
 /// A successful resolution: the endpoint to invoke, its bindings, and — when the
 /// resolution **rewrote** the target — the name it actually resolved under.
 ///
-/// ## ★ [`Resolved::new`], or a struct literal? Both — the question is whether
-/// this site has a claim to make
+/// ## ★ Built with [`Resolved::new`] and the builders — a literal no longer compiles
 ///
-/// **[`Resolved::new`] where it does not.** A site that forwards, wraps, or is
-/// genuinely indifferent to the defaults has nothing to say about a field that
-/// does not exist yet, and should not be edited when one lands. That is the
-/// overwhelmingly common case and it stays the default advice. Better still, an
-/// overlay decorating a resolution it did not make should not build a `Resolved`
-/// at all: [`Resolution::map_endpoint`] and [`Resolved::with_endpoint`] keep
-/// everything the inner resolution reported, including its
-/// [`canonical`](Resolved::canonical).
+/// Since the found level path landed ([`levels`](Resolved::levels), ledger #563)
+/// `Resolved` has a **private** field, so a struct literal outside this crate is
+/// refused (E0451) — for this field and for every field after it. That was
+/// deliberate: the ecosystem was grepped first and no literal was left (the last
+/// ones moved to `Resolved::new` at 0.1.78), so closing the door cost no consumer a
+/// compile, and every field added from here on is additive. Matching one with
+/// `Resolved { endpoint, .. }` still works.
 ///
-/// **The struct literal — field spelled out, reason beside it — where a default
-/// IS a considered semantic claim.** Two live ones, both in `ikigai-cli`:
-/// `ikigai-module` originates the resolution and rewrites nothing, so
-/// `canonical: None` is a statement about the module boundary rather than an
-/// absence of thought; `MountedRemote` *does* rewrite (`urn:edge:foo` →
-/// `urn:foo`) and must still report `None`, because that rewrite crosses out of
-/// this kernel's namespace (see [`canonical`](Resolved::canonical)). At those
-/// sites the compile break on the next added field is the **point**: it forces a
-/// re-review of a claim that may not survive the type learning to say more.
+/// Take [`Resolved::new`] and say what the resolution claims with the builders
+/// ([`with_canonical`](Resolved::with_canonical),
+/// [`with_answered_by`](Resolved::with_answered_by),
+/// [`within`](Resolved::within)). A site where a default IS a considered semantic
+/// claim says so in a comment beside `Resolved::new` — `MountedRemote` in
+/// `ikigai-cli` rewrites (`urn:edge:foo` → `urn:foo`) and still reports no
+/// canonical, because that rewrite crosses out of this kernel's namespace (see
+/// [`canonical`](Resolved::canonical)), and it carries that argument in a comment.
+/// Better still, an overlay decorating a resolution it did not make should not
+/// build a `Resolved` at all: [`Resolution::map_endpoint`] and
+/// [`Resolved::with_endpoint`] keep everything the inner resolution reported —
+/// its canonical, its answerer and its level path.
 ///
-/// ## ★ The cost of the literal, which is bigger than an edit
+/// ## ★ The cost of the literal, which is why the door is closed
 ///
 /// [`SpaceEntry`] taught this repo the mechanical half of the lesson at 0.1.7 —
 /// the `ikigai-web-demo` manifest still carries the epitaph. The half nobody had
@@ -678,9 +822,9 @@ impl Resolution {
 /// `canonical` landed in 0.1.64, `ikigai-cli` was simultaneously 100% correct and
 /// 100% uncompilable, waiting on an unrelated crate's publish.
 ///
-/// So the literal is a standing tax on the whole ecosystem's release ORDER, not
-/// just on the file it appears in. Pay it where a forced re-review is genuinely
-/// wanted; take [`Resolved::new`] everywhere else.
+/// So the literal was a standing tax on the whole ecosystem's release ORDER, not
+/// just on the file it appeared in, and `canonical` (0.1.64) and `answered_by`
+/// (0.1.78) each paid it. The private field ends the series.
 pub struct Resolved {
     /// The resolved endpoint.
     pub endpoint: Arc<dyn Endpoint>,
@@ -777,17 +921,70 @@ pub struct Resolved {
     /// caching is **not built** — the fingerprint still covers the whole chain —
     /// and this field is where it starts.
     pub answered_by: Option<Iri>,
+    /// The levels this resolution was found in, innermost first — empty unless a
+    /// [`Level`] is on the path. Private so that adding it (and anything after it)
+    /// is not a flag day; read with [`levels`](Self::levels), extended with
+    /// [`within`](Self::within).
+    levels: LevelPath,
 }
 
 impl Resolved {
-    /// A resolution that did not rewrite the target and names no answerer.
+    /// A resolution that did not rewrite the target, names no answerer, and was
+    /// found in no level.
     pub fn new(endpoint: Arc<dyn Endpoint>, bindings: Bindings) -> Self {
         Resolved {
             endpoint,
             bindings,
             canonical: None,
             answered_by: None,
+            levels: LevelPath::default(),
         }
+    }
+
+    /// The **found path**: the levels this resolution was found in, innermost
+    /// first — the level whose space held the door, then each level enclosing it.
+    /// Empty (the overwhelmingly common case) when no [`Level`] is on the path.
+    ///
+    /// It is what the kernel hands the endpoint as its resolved scope: the host's
+    /// corridors, then these levels, then the root — so the endpoint's
+    /// sub-requests resolve from its own level outward. Levels report themselves
+    /// the way named spaces fill [`answered_by`](Self::answered_by): a `Level`
+    /// appends itself as the next-outer frame, anonymous combinators forward the
+    /// path untouched, and [`with_endpoint`](Self::with_endpoint) /
+    /// [`Resolution::map_endpoint`] keep it through decoration.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{
+    ///     builtins, EndpointSpace, Exact, Iri, Level, Mount, Request, Resolution, Scope, Space,
+    ///     Verb,
+    /// };
+    ///
+    /// let inner = Level::new(
+    ///     Iri::parse("urn:example:level:inner").unwrap(),
+    ///     Arc::new(EndpointSpace::new().bind(Exact::new("urn:m:x"), builtins::echo())),
+    /// );
+    /// let outer = Level::new(
+    ///     Iri::parse("urn:example:level:outer").unwrap(),
+    ///     Arc::new(Mount::new("urn:m:", Arc::new(inner))),
+    /// );
+    /// let request = Request::new(Verb::Source, Iri::parse("urn:m:x").unwrap());
+    /// let Resolution::Hit(hit) = outer.resolve(&request, &Scope::empty()) else { panic!() };
+    /// let path: Vec<&str> = hit.levels().names().map(|n| n.as_str()).collect();
+    /// assert_eq!(path, ["urn:example:level:inner", "urn:example:level:outer"]);
+    /// ```
+    pub fn levels(&self) -> &LevelPath {
+        &self.levels
+    }
+
+    /// Report that this resolution was found inside `level` (builder): the level
+    /// becomes the next-OUTER frame of the [found path](Self::levels), after every
+    /// level already reported. What [`Level`] itself calls on a hit; a space that
+    /// holds a `Level` and resolves through it by some route of its own calls it to
+    /// say the same thing.
+    pub fn within(mut self, level: &Level) -> Self {
+        self.levels.0.push(Arc::clone(&level.core));
+        self
     }
 
     /// Report the space that answered (builder). An already-reported answerer is
@@ -883,7 +1080,8 @@ impl SpaceEntry {
 }
 
 /// A space maps requests to endpoints by resolution. Spaces compose via the
-/// [`Mount`], [`Fallback`], [`Rewrite`] and [`Limit`] combinators.
+/// [`Mount`], [`Fallback`], [`Rewrite`] and [`Limit`] combinators; a [`Level`]
+/// marks where an endpoint found inside it runs.
 pub trait Space: Send + Sync {
     /// Resolve a request to an endpoint, or report a miss.
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution;
@@ -1417,6 +1615,186 @@ impl Endpoint for Bottom {
 
     fn is_limiter(&self) -> bool {
         true
+    }
+}
+
+/// What a [`Level`] shares with every found path and resolved scope that names it:
+/// one allocation per level, so reporting a level on a hit is a refcount bump.
+pub(crate) struct LevelCore {
+    name: Iri,
+    inner: Arc<dyn Space>,
+}
+
+impl LevelCore {
+    /// The node a level renders as: `ik:Level`, named, enclosing its space.
+    fn topology(&self) -> Topology {
+        Topology::new(SpaceKind::Level)
+            .with_id(Some(self.name.clone()))
+            .child(self.inner.topology())
+    }
+}
+
+/// A path of [`Level`]s, innermost first — the found path a resolution reports
+/// ([`Resolved::levels`]) and the level stack a chain consults
+/// ([`Scope::levels`]).
+#[derive(Clone, Default)]
+pub struct LevelPath(Vec<Arc<LevelCore>>);
+
+impl LevelPath {
+    /// Whether no level is on the path.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// How many levels are on the path.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Each level's name, innermost first.
+    pub fn names(&self) -> impl Iterator<Item = &Iri> + '_ {
+        self.0.iter().map(|level| &level.name)
+    }
+
+    /// The same levels, in the same order — by identity, not by name: two levels
+    /// named alike are the same claim, but only the same allocation is the same
+    /// level for certain, and the question asked here is "may the chain be reused".
+    fn same_as(&self, other: &LevelPath) -> bool {
+        self.0.len() == other.0.len() && self.0.iter().zip(&other.0).all(|(a, b)| Arc::ptr_eq(a, b))
+    }
+}
+
+impl std::fmt::Debug for LevelPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.names().map(Iri::as_str))
+            .finish()
+    }
+}
+
+/// The path as text: each level's name, innermost first, separated by spaces —
+/// what the kernel puts on a trace event under [`LEVEL_NOTE`](crate::LEVEL_NOTE).
+impl std::fmt::Display for LevelPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, name) in self.names().enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            f.write_str(name.as_str())?;
+        }
+        Ok(())
+    }
+}
+
+/// **A level: where an endpoint found inside it runs** (ledger #563). The paper's
+/// §3 and NetKernel keep a second scope beside the one a request resolves in — the
+/// scope the endpoint was FOUND in — and the endpoint's sub-requests resolve from
+/// its own level outward. A `Level` is that construct, explicit and opt-in:
+/// nothing changes in a kernel until a host wraps a space in one.
+///
+/// An endpoint found inside a level runs in its **resolved scope**: the corridors
+/// the host injected for the request, unchanged and whole (host-chosen context —
+/// a temporal corridor, a game, a principal — still stands in for any name); then
+/// the level it was found in and each enclosing level outward, each consulted as
+/// its own space, **without** the guard it was entered through; then the root,
+/// unless the chain is severed. An endpoint found outside every level gets exactly
+/// the chain it got before levels existed.
+///
+/// # Module-relative names and private internals
+///
+/// The shape is `Mount(prefix, Level(name, inner))`. A request from outside must
+/// pass the prefix guard; a sub-request from an endpoint inside the level resolves
+/// at the level itself, so a short internal name reaches its siblings without
+/// matching the prefix. The internals are invisible outside because the guard
+/// still stands between the outside and the level. Capabilities are unchanged:
+/// every sub-request still carries the attenuated capability, and the declared
+/// floor still applies.
+///
+/// ```
+/// use std::sync::Arc;
+/// use futures::executor::block_on;
+/// use ikigai_core::{
+///     AsyncFnEndpoint, Capability, EndpointSpace, Error, Exact, FnEndpoint, Iri, Kernel, Level,
+///     Mount, ReprType, Representation, Request, Verb,
+/// };
+///
+/// fn text(s: &str) -> Representation {
+///     Representation::new(ReprType::new("text/plain"), s.as_bytes().to_vec())
+/// }
+/// // The module's public door sources a PRIVATE name — one not under its prefix.
+/// let public = AsyncFnEndpoint::new("public", |inv| {
+///     Box::pin(async move { inv.source(&Iri::parse("urn:internal:helper").unwrap()).await })
+/// });
+/// let module = EndpointSpace::new()
+///     .bind(Exact::new("urn:mod:public"), public)
+///     .bind(Exact::new("urn:internal:helper"), FnEndpoint::new("helper", |_| Ok(text("private"))));
+/// let kernel = Kernel::new(Arc::new(Mount::new(
+///     "urn:mod:",
+///     Arc::new(Level::new(Iri::parse("urn:example:level:mod").unwrap(), Arc::new(module))),
+/// )));
+/// let cap = Capability::root();
+/// let get = |name: &str| Request::new(Verb::Source, Iri::parse(name).unwrap());
+///
+/// // Reachable from inside: the public door's sub-request resolves at its level.
+/// assert_eq!(block_on(kernel.issue(get("urn:mod:public"), &cap)).unwrap().bytes, b"private");
+/// // Unreachable from outside: the guard still stands between the caller and the level.
+/// let err = block_on(kernel.issue(get("urn:internal:helper"), &cap)).unwrap_err();
+/// assert!(matches!(err, Error::Unresolved(_)));
+/// ```
+///
+/// # A level is always named, and the name is a claim
+///
+/// The name enters the cache key: a sub-request issued from inside level L may
+/// resolve a short name differently from the same name issued from level M, so
+/// the chain's [fingerprint](Scope::fingerprint) covers the level stack by name.
+/// It is the claim every name makes here — *same name ⇒ same doors* — and it is
+/// the level's [`id`](Space::id), what a hit through it reports as
+/// [`answered_by`](Resolved::answered_by) when nothing inside named itself, and
+/// the IRI `urn:kernel:topology` names its `ik:Level` node by.
+///
+/// `Mount`, `Fallback`, `Rewrite`, `Alias` and `Limit` are not levels and keep
+/// their meaning; neither does naming a space make it one.
+pub struct Level {
+    core: Arc<LevelCore>,
+}
+
+impl Level {
+    /// A level named `name` over `inner`.
+    pub fn new(name: Iri, inner: Arc<dyn Space>) -> Self {
+        Level {
+            core: Arc::new(LevelCore { name, inner }),
+        }
+    }
+
+    /// The level's name.
+    pub fn name(&self) -> &Iri {
+        &self.core.name
+    }
+}
+
+impl Space for Level {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        match self.core.inner.resolve(request, scope) {
+            Resolution::Hit(mut hit) => {
+                if hit.answered_by.is_none() {
+                    hit.answered_by = Some(self.core.name.clone());
+                }
+                Resolution::Hit(hit.within(self))
+            }
+            Resolution::Miss => Resolution::Miss,
+        }
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        self.core.inner.entries()
+    }
+
+    fn id(&self) -> Option<Iri> {
+        Some(self.core.name.clone())
+    }
+
+    fn topology(&self) -> Topology {
+        self.core.topology()
     }
 }
 

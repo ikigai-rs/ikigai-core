@@ -19,6 +19,7 @@
     "File": "ik:File",
     "Finding": "ik:Finding",
     "Fork": "ik:Fork",
+    "Level": "ik:Level",
     "Limit": "ik:Limit",
     "LlmBackend": "ik:LlmBackend",
     "Mount": "ik:Mount",
