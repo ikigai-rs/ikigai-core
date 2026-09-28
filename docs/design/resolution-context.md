@@ -2,8 +2,8 @@
 
 **Status:** phase 1 of ledger [#563](http://localhost:1060/l/default/item/563), built in
 three PRs in this repository: `Level`, the found path and the resolved scope (PR #132); sealed
-names (PR #133); the pushdown gatekeeper walk and the formal document (the third). Unreleased
-at merge: the hub runs the release preflight.
+names (PR #133); the pushdown gatekeeper walk and the formal document (PR #134). Released in
+0.1.81.
 Brian, 2026-09-27: *"I think the resolution context might be worth having."* The five design
 questions were decided 2026-09-28 (all as recommended, below), with one requirement added: a
 module must not be able to override core or security names — sealed names.

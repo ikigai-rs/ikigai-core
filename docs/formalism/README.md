@@ -1628,7 +1628,7 @@ path raises it; it exists for endpoints. Until the wire gains a tag for it, a re
 it as `Endpoint` carrying the displayed text — the same degradation `DepthExceeded` has today.
 `vocabulary.ttl` names no error kinds, so only its `owl:versionInfo` moves.
 
-**The next release** (not bumped here; the hub runs the release preflight) carries levels, the
+**0.1.81** carries levels, the
 resolved scope and sealed names ([#563](http://localhost:1060/l/default/item/563), phase 1, three PRs). **Additive:** `Level`
 (`new`, `name`, `sealing`, `in_namespace`), `LevelPath`, `Resolved::levels` and
 `Resolved::within`, `Scope::levels`, `SealOwner` and `SealError` (`#[non_exhaustive]`),
