@@ -23,14 +23,18 @@
 //! is meaning: `ik:layers` is an `rdf:List` in the order resolution consults, which
 //! is the order the chain's fingerprint hashes.
 //!
-//! What this buys is the paper's Theorem 4(b) as a **query**. Gatekeeper
-//! completeness over the static tree is decidable by pushdown reachability over
-//! imports and ownership; ikigai's tree contributes no pushes (the formal
-//! document's §1.1), so over this graph it is a path query — "is any door of the
-//! personal family reachable from the entry without a limiter over that family
-//! standing ahead of it?" — that a host doctor runs before any request is made.
-//! `tests/topology.rs` runs exactly that walk over the rendered graph and the
-//! formal document carries it as SPARQL.
+//! What this buys is the paper's Theorem 4(b) as a **walk over this graph**.
+//! Gatekeeper completeness over the static tree is decidable by pushdown
+//! reachability over imports and ownership. A tree with no `ik:Level` in it
+//! contributes no pushes (the formal document's §1.1), so over its graph the check
+//! is a path query — "is any door of the personal family reachable from the entry
+//! without a limiter over that family standing ahead of it?" — that a host doctor
+//! runs before any request is made. An `ik:Level` is the one node that pushes: an
+//! endpoint found under it resolves its sub-requests at the level's own space,
+//! without the guard it was entered through, so reachability follows those pushes,
+//! bounded by the level nesting. `tests/topology.rs` runs that walk, pushes
+//! included, over the rendered graph; the formal document carries the level-free
+//! form as SPARQL, whose second question reports any level it cannot follow.
 
 use std::fmt::Write as _;
 use std::sync::Arc;

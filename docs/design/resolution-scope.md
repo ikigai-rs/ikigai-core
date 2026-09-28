@@ -9,7 +9,10 @@ Kernel::issue_in, Kernel::issue_with_incoming_in, Kernel::is_cached_in,
 Kernel::select_transreptor_in, Kernel::select_action_in, Kernel::select_actions_in,
 Issuer::issue_in_scope, Issuer::select_action_in, CacheKey::scope, CacheRow, SCOPE_NOTE,
 SCOPE_MISS_NOTE, SCOPE_CLOCK_NOTE}`.
-**Companions:** `docs/design/sub-request-authority.md` (the authority argument this reuses
+**Companions:** `docs/design/resolution-context.md` (levels: the resolved scope an endpoint
+found inside a `Level` runs in, and sealed names — ledger
+[#563](http://localhost:1060/l/default/item/563)),
+`docs/design/sub-request-authority.md` (the authority argument this reuses
 verbatim), `docs/design/cache-ejection.md` §2 (a fingerprint is not an identity),
 `docs/design/spaces-as-named-graphs.md` (where corridor identity goes next, ledger
 [#515](http://localhost:1060/l/default/item/515)), `docs/formalism/README.md` (the formal
