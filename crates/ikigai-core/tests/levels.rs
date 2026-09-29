@@ -183,6 +183,10 @@ fn a_kernel_without_a_level_is_byte_identical_in_answers_cache_keys_and_traces()
 /// Captured on main at 7774fc2 (0.1.80) — before `Level` existed — by running the
 /// workload above. Do not regenerate this to make a failing run pass: a difference
 /// IS the regression this test exists to catch.
+///
+/// One deliberate edit since, and only to the `urn:kernel:cache` block: ledger #612
+/// gave the readout a stale count in its header and a `live`/`cut`/`expired` column
+/// after each target. Every entry here is live and nothing else moved.
 const NO_LEVEL_GOLDEN: &str = r#"inner
 urn:mod:inner hit=false span=1 parent=Some(0) cap=None notes=[("answered-by", "urn:example:space:mod")]
 urn:mod:outer hit=false span=0 parent=None cap=None notes=[("answered-by", "urn:example:space:mod")]
@@ -204,15 +208,15 @@ outer: root 0000000000000000
 outer: urn:ctx:time:2026-09-28 root c96f742eeb49fb34
 confined: urn:ctx:c severed 1904a77fcaa47f66
 cache
-  entries  7 / 4096
+  entries  7 / 4096 (0 stale)
   size     32 B / 64.0 MB
-  urn:c:doc           text/plain                      3 B  1 thread    urn:ctx:c severed
-  urn:mod:inner       text/plain                      5 B  1 thread    root
-  urn:mod:inner       text/plain                      6 B  1 thread    urn:ctx:time:2026-09-28 root
-  urn:mod:outer       text/plain                      5 B  2 threads   root
-  urn:mod:outer       text/plain                      6 B  2 threads   urn:ctx:time:2026-09-28 root
-  urn:plain:confined  text/plain                      3 B  2 threads   root
-  urn:plain:leaf      text/plain                      4 B  1 thread    urn:ctx:time:2026-09-28 root
+  urn:c:doc           live     text/plain                      3 B  1 thread    urn:ctx:c severed
+  urn:mod:inner       live     text/plain                      5 B  1 thread    root
+  urn:mod:inner       live     text/plain                      6 B  1 thread    urn:ctx:time:2026-09-28 root
+  urn:mod:outer       live     text/plain                      5 B  2 threads   root
+  urn:mod:outer       live     text/plain                      6 B  2 threads   urn:ctx:time:2026-09-28 root
+  urn:plain:confined  live     text/plain                      3 B  2 threads   root
+  urn:plain:leaf      live     text/plain                      4 B  1 thread    urn:ctx:time:2026-09-28 root
 root 0000000000000000
 urn:ctx:time:2026-09-28 root c96f742eeb49fb34
 urn:ctx:time:2026-09-28 severed 4c49713390b16dad

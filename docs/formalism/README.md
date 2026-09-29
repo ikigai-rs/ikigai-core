@@ -696,6 +696,25 @@ note, so a cached read's events are unchanged; the kernel's own operations are n
     pin: `uncached::the_readout_names_the_chain_is_bounded_and_never_records_a_kernel_operation` (crates/ikigai-core/tests/uncached.rs)
     doctest: `UNCACHED_NOTE`
 
+**Proposition R4.7 (the readout and the probe say what would be served).** A cut is lazy: it
+bumps gen(T) and leaves every entry pinned to the old generation resident until a read finds ν
+false and evicts it. So what the cache HOLDS and what it would SERVE differ right after every
+write. `urn:kernel:cache` marks each row with ν as of the kernel's clock — `live`, `cut` (an
+edge's generation moved), or `expired` (a deadline passed, or there is no clock to say it has
+not) — and counts the stale rows in its header; it evicts nothing, so reading it cannot change
+what it reads (ledger #612). And `urn:kernel:cached target=<iri>` (capability
+`urn:cap:kernel:inspect`) answers ν for the key a read BY THE ASKER would use: the asker's
+capability fingerprint and the asker's chain, which for an endpoint's sub-request is the chain
+its other sub-requests run in. There is no argument naming another capability, so an asker learns
+whether its own read would hit and never whether someone else's would. It probes an argument-free
+request; a read with arguments is a different entry and is not addressable there.
+
+    pin: `kernel::tests::the_cache_readout_marks_what_an_edit_has_cut` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::an_endpoint_can_ask_whether_its_own_read_is_cached` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::the_probe_is_gated_and_refuses_what_is_never_cached` (crates/ikigai-core/src/kernel.rs)
+    pin: `cache::tests::the_rows_say_which_entries_a_cut_has_made_stale_without_evicting_them` (crates/ikigai-core/src/cache.rs)
+    doctest: `EntryState`
+
 **Across processes.** Generations are per-process counters; another instance's 6 is not this
 one's 6, so ν does not transfer and no cache import exists — the honest first tranche would
 admit only thread-free `Never` entries (`docs/design/cache-ejection.md` §1). Not built.
