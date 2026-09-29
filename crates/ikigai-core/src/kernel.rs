@@ -63,6 +63,7 @@ use crate::request::Request;
 use crate::seal::{SealError, SealOwner, Seals};
 use crate::select::{ActionMatch, TransreptionPolicy, TransreptionStep};
 use crate::space::{Fallback, LevelPath, Resolution, Scope, Space, SpaceEntry};
+use crate::uncached::{Declined, Uncached, UncachedLog};
 use crate::verb::Verb;
 
 /// The kernel's source of "now". Injected (rather than read from the system
@@ -339,6 +340,93 @@ pub const SEALED_NOTE: &str = "sealed";
 /// endpoint then RAN in, which is where its sub-requests resolve.
 pub const LEVEL_NOTE: &str = "level";
 
+/// The [`TraceEvent::notes`] key under which the kernel says **why a computed read
+/// was not cached** — on the event of every `Source`, `Exists` or `Meta` the kernel
+/// computed and did not store, e.g. `("uncached", "dependency urn:tags:overlay")`.
+/// The same reason is remembered, with no tracer installed, by `urn:kernel:uncached`.
+///
+/// Effective expiry propagates from dependencies, so an expensive cached composite
+/// that gains one uncacheable source becomes uncacheable itself, on every read, with
+/// identical types and every test still green — the cms-web books graph went from
+/// ~20 µs to ~1 s a read that way (2026-08-13). This note is what names the source.
+///
+/// The value is one or more clauses joined by `"; "`, in this order:
+///
+/// - `declared` — the endpoint's own answer was [`Expiry::Always`]: it declared no
+///   caching.
+/// - `dependency <iri>…` — sub-requests that answered `Always`, by the name the
+///   endpoint requested, each once, in the order first seen.
+/// - `denied <iri>…` — sub-requests refused on capability: a grant change has no
+///   thread, so a result built on a refusal is never cached.
+/// - `failed <iri>…` — sub-requests that failed with any other error but a miss (a
+///   miss hangs a thread instead, and does not make the result volatile).
+/// - `+<n> more` — the three lists above name at most eight sub-requests between
+///   them; this counts the rest, so a list that is not whole never reads as whole.
+/// - `upstream` — the piped input the stage folded in was `Always`.
+/// - `no-clock` — an [`Expiry::At`] deadline on a kernel with no clock, which could
+///   never tell when it expired.
+/// - `expired <ms>` — an `At` deadline already past on the kernel's clock when the
+///   result came back.
+/// - `cut-in-flight` — a golden thread it depends on was cut while it computed, so it
+///   was stale on arrival.
+/// - `policy` — the [`CachePolicy`] did not admit it.
+///
+/// Only the IMMEDIATE cause is named: a composite over a composite over a volatile
+/// source says `dependency <the middle one>`, and the middle one's own event (and
+/// its row in `urn:kernel:uncached`) says `dependency <the source>`. A kernel
+/// operation (`urn:kernel:*`) is never annotated — the live readouts are volatile by
+/// design, and reading `urn:kernel:uncached` must not record itself.
+///
+/// ```
+/// use std::sync::{Arc, Mutex};
+/// use futures::executor::block_on;
+/// use ikigai_core::{
+///     AsyncFnEndpoint, Capability, EndpointSpace, Exact, FnEndpoint, Iri, Kernel, ReprType,
+///     Representation, Request, TraceEvent, Tracer, Verb, UNCACHED_NOTE,
+/// };
+///
+/// fn text(body: &str) -> Representation {
+///     Representation::new(ReprType::new("text/plain"), body.as_bytes().to_vec())
+/// }
+/// struct Collect(Mutex<Vec<TraceEvent>>);
+/// impl Tracer for Collect {
+///     fn record(&self, event: TraceEvent) {
+///         self.0.lock().unwrap().push(event);
+///     }
+/// }
+///
+/// // The cms-web shape: an expensive composite that declares itself cacheable,
+/// // joined to one overlay that is live (it declares nothing, so `Always`).
+/// let kernel = Kernel::new(Arc::new(
+///     EndpointSpace::new()
+///         .bind(Exact::new("urn:tags:overlay"), FnEndpoint::new("overlay", |_| Ok(text("tags"))))
+///         .bind(
+///             Exact::new("urn:books:graph"),
+///             AsyncFnEndpoint::new("books", |inv| {
+///                 Box::pin(async move {
+///                     let tags = inv.source(&Iri::parse("urn:tags:overlay").unwrap()).await?;
+///                     Ok(text(&format!("books + {}", String::from_utf8_lossy(&tags.bytes)))
+///                         .cacheable())
+///                 })
+///             }),
+///         ),
+/// ));
+/// let collect = Arc::new(Collect(Mutex::new(Vec::new())));
+/// let books = Request::new(Verb::Source, Iri::parse("urn:books:graph").unwrap());
+/// block_on(kernel.issue_traced(books, &Capability::root(), collect.clone())).unwrap();
+///
+/// let why = |target: &str| {
+///     let events = collect.0.lock().unwrap();
+///     let event = events.iter().find(|e| e.target == target).unwrap();
+///     event.notes.iter().find(|(k, _)| k == UNCACHED_NOTE).map(|(_, v)| v.clone())
+/// };
+/// // The composite names the source that made it volatile…
+/// assert_eq!(why("urn:books:graph").as_deref(), Some("dependency urn:tags:overlay"));
+/// // …and the source says it declared no caching.
+/// assert_eq!(why("urn:tags:overlay").as_deref(), Some("declared"));
+/// ```
+pub const UNCACHED_NOTE: &str = "uncached";
+
 /// The [`TraceEvent::notes`] key under which the kernel reports the **chain's
 /// clock** — the instant a temporal corridor's derived clock
 /// ([`Scope::with_named_at`]) read as the event was recorded, in milliseconds since
@@ -497,6 +585,11 @@ pub struct Kernel {
     /// scoped result is stored — never on the empty-chain path — and pruned to the
     /// fingerprints still resident whenever the readout renders.
     scope_names: Mutex<BTreeMap<u64, String>>,
+    /// The last few resources computed and NOT cached, each with the reason — the
+    /// memory behind `urn:kernel:uncached`. Written only on the uncached path (a
+    /// result that is stored never takes this lock), bounded to
+    /// [`UNCACHED_LOG`](crate::uncached::UNCACHED_LOG) rows.
+    uncached: Mutex<UncachedLog>,
     /// Rolling window of the most recent resolutions (target, time, cache outcome),
     /// for `urn:kernel:constraint` — the kernel's throughput readout. Always-on like
     /// the cache; bounded to [`CONSTRAINT_WINDOW`]. `urn:kernel:*` introspection
@@ -710,6 +803,7 @@ impl Kernel {
             max_depth: DEFAULT_MAX_DEPTH,
             floors: FloorMemo::default(),
             scope_names: Mutex::new(BTreeMap::new()),
+            uncached: Mutex::new(UncachedLog::default()),
             seals,
         }
     }
@@ -734,6 +828,7 @@ impl Kernel {
             max_depth: DEFAULT_MAX_DEPTH,
             floors: FloorMemo::default(),
             scope_names: Mutex::new(BTreeMap::new()),
+            uncached: Mutex::new(UncachedLog::default()),
             seals,
         }
     }
@@ -2184,6 +2279,10 @@ impl Kernel {
         // Facts the endpoint attaches to its own span via `Invocation::trace_note`
         // (hoisted out of the invocation arm — the Meta arm has no invocation).
         let mut trace_notes = Vec::new();
+        // Why the result will not be cached, when it will not — named here, where
+        // the causes are still in hand, rather than reconstructed from an expiry that
+        // has already forgotten them (NetKernel News 2.47; `uncached.rs`).
+        let mut why = Uncached::default();
         let representation = if request.verb == Verb::Meta {
             // Selection-driven Meta: the renderer emits the endpoint's description in its
             // *canonical* serializations (Turtle, and JSON/text where the renderer supports
@@ -2251,6 +2350,7 @@ impl Kernel {
                     .with_scope(scope.descend(levels.clone()))
                     .with_depth(depth);
             let representation = resolved.endpoint.invoke(&invocation).await?;
+            let declared = representation.expiry;
             // Effective expiry propagates from the dependencies: the result is no
             // fresher than its most volatile part. The endpoint's own expiry is met
             // with the combined dependency expiry — `Always` if either is volatile,
@@ -2298,9 +2398,19 @@ impl Kernel {
             // …and from the pipe: an upstream stage's provenance folds in the same
             // way, so a transform over a piped input is no more cacheable than that
             // input, and inherits its threads.
+            let mut upstream = Expiry::Never;
             if let Some(incoming) = incoming {
+                upstream = incoming.expiry;
                 effective = effective.most_restrictive(incoming.expiry);
                 threads.extend(incoming.threads);
+            }
+            // Every cause of an `Always`, not the first: an endpoint that declared
+            // none AND joined a volatile source has two things to fix, and naming
+            // one hides the other until the first is fixed.
+            if effective == Expiry::Always {
+                why.declared = declared == Expiry::Always;
+                why.deps = invocation.take_volatile_dependencies();
+                why.upstream = upstream == Expiry::Always;
             }
             trace_notes = invocation.take_trace_notes();
             // The rewrite and the answering space are provenance of the invocation,
@@ -2315,6 +2425,73 @@ impl Kernel {
             // above; the rewrite and the answerer still have to show on the event.
             trace_notes = provenance_notes(&trace, alias, answered, levels);
         }
+
+        // Store an idempotent result unless it's volatile (`Always`). A time-based
+        // `At` deadline is only storable when a clock is present to later evaluate
+        // it — otherwise the kernel could never tell when it expired, so it declines
+        // — and only while it is still in the future on that clock: an entry already
+        // expired when it came back would be filed only to be evicted unread.
+        //
+        // Stored BEFORE the event is recorded, so the event can say whether it was:
+        // the verbs that store (`is_cacheable`) and the verbs that cut
+        // (`is_mutating`) are disjoint, so moving the store ahead of the cut below
+        // changes no request's outcome.
+        if cacheable_verb {
+            match representation.expiry {
+                Expiry::Always => {
+                    // The Meta arm, or any path the invocation arm did not name:
+                    // the answer itself was volatile.
+                    if why.is_empty() {
+                        why.declared = true;
+                    }
+                }
+                Expiry::Never => {}
+                Expiry::At(deadline) => match self.now_stamp() {
+                    None => why.declined = Some(Declined::NoClock),
+                    Some(now) if deadline <= now => {
+                        why.declined = Some(Declined::Expired(deadline));
+                    }
+                    Some(_) => {}
+                },
+            }
+            if why.is_empty() {
+                // The store may still decline: `taken` predates the invocation, so a
+                // cut that landed while it ran means this representation is already
+                // stale; and the policy may not admit it.
+                match self.cache.store_outcome(
+                    key,
+                    request.target.as_str().to_string(),
+                    representation.clone(),
+                    taken,
+                    self.elapsed_since(started),
+                ) {
+                    // Remember what the fingerprint meant, for the readout. Off the
+                    // empty-chain path entirely: a plain `issue` never takes this lock.
+                    Ok(()) if !scope.is_empty() => {
+                        self.scope_names
+                            .lock()
+                            .expect("scope names lock")
+                            .entry(key.scope)
+                            .or_insert_with(|| scope.to_string());
+                    }
+                    Ok(()) => {}
+                    Err(declined) => why.declined = Some(declined),
+                }
+            }
+            if !why.is_empty() {
+                if trace.is_some() {
+                    trace_notes.push((UNCACHED_NOTE.to_string(), why.to_string()));
+                }
+                self.uncached.lock().expect("uncached lock").record(
+                    id,
+                    key.scope,
+                    request.target.as_str(),
+                    || scope.to_string(),
+                    why,
+                );
+            }
+        }
+
         // Computed (not served from cache) — record after the invocation completes.
         self.trace_record(
             &trace,
@@ -2336,36 +2513,6 @@ impl Kernel {
         // thread on an out-of-band change.
         if request.verb.is_mutating() {
             self.cut(request.target.as_str());
-        }
-
-        // Store an idempotent result unless it's volatile (`Always`). A time-based
-        // `At` deadline is only storable when a clock is present to later evaluate
-        // it — otherwise the kernel could never tell when it expired, so it declines.
-        let storable = cacheable_verb
-            && match representation.expiry {
-                Expiry::Always => false,
-                Expiry::Never => true,
-                Expiry::At(_) => self.clock.is_some(),
-            };
-        if storable {
-            // The store may still decline: `taken` predates the invocation, so a cut
-            // that landed while it ran means this representation is already stale.
-            let stored = self.cache.store(
-                key,
-                request.target.as_str().to_string(),
-                representation.clone(),
-                taken,
-                self.elapsed_since(started),
-            );
-            // Remember what the fingerprint meant, for the readout. Off the
-            // empty-chain path entirely: a plain `issue` never takes this lock.
-            if stored && !scope.is_empty() {
-                self.scope_names
-                    .lock()
-                    .expect("scope names lock")
-                    .entry(key.scope)
-                    .or_insert_with(|| scope.to_string());
-            }
         }
         Ok(representation)
     }
@@ -2579,6 +2726,15 @@ impl Kernel {
                     ));
                 }
                 Ok(kernel_text(body))
+            }
+            // Why reads were not cached: the last few resources computed and not
+            // stored, each with the reason `UNCACHED_NOTE` puts on its event. Needs
+            // no tracer — "why is this slow" arrives unannounced.
+            ("uncached", Verb::Source) => {
+                require_cap("urn:cap:kernel:inspect")?;
+                Ok(kernel_text(
+                    self.uncached.lock().expect("uncached lock").render(),
+                ))
             }
             // Inspect the golden threads that have been cut, and how many times.
             ("threads", Verb::Source) => {
@@ -6371,11 +6527,14 @@ mod tests {
         .unwrap();
         let events = rec.0.lock().unwrap().clone();
         assert_eq!(events.len(), 1);
+        // The endpoint's own notes lead; the kernel's reason for not caching the
+        // answer (it declared none) follows them (`UNCACHED_NOTE`).
         assert_eq!(
             events[0].notes,
             vec![
                 ("model".to_string(), "llama3.2:3b".to_string()),
                 ("provider".to_string(), "ollama".to_string()),
+                (UNCACHED_NOTE.to_string(), "declared".to_string()),
             ]
         );
 

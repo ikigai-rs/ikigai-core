@@ -203,6 +203,39 @@ before its first consumer (ikigai-log T5) has used this seam risks the wrong sha
 Adding it later is additive and non-breaking. **This belongs in the T5 brief, where
 it changes a decision.**
 
+## Why a read was not cached — the event that names a missing cache entry
+
+**Status: built** (NetKernel News 2.47; formal document R4.6).
+
+Effective expiry propagates from dependencies, so an expensive cached composite that gains one
+uncacheable source becomes uncacheable itself, on every read, with identical types and every test
+green. cms-web's books graph went from ~20 µs to ~1 s a read that way (2026-08-13), and the field
+guide recorded that nothing catches it. The kernel now says why on the computed event:
+`(UNCACHED_NOTE, "<reason>")`, e.g. `("uncached", "dependency urn:tags:overlay")`. The grammar
+(`declared`, `dependency`/`denied`/`failed <iri>…`, `+<n> more`, `upstream`, `no-clock`,
+`expired <ms>`, `cut-in-flight`, `policy`, joined by `"; "`) is documented and doctested on the
+constant.
+
+Three decisions:
+
+- **Named where the causes are in hand.** An expiry is a lattice value and has forgotten who made
+  it `Always`, so the reason is gathered as the meet is taken: the invocation's dependency record,
+  which already took a lock per sub-request for the expiry, now also keeps the names of the
+  sub-requests that were `Always`, refused or failed (at most eight, the rest counted). The kernel
+  reads them only when the result is `Always`.
+- **No tracer required.** The same reason is kept for the last 64 resources computed and not
+  stored, with a count, and served as `urn:kernel:uncached` — the `urn:kernel:aliases` precedent:
+  the question arrives unannounced, and the tracer is opt-in. It is a SEPARATE operation rather
+  than a section of `urn:kernel:cache`, because consumers read that body line by line
+  (`ikigai-gonk`'s tests take the first word of every line after the header as a cached target)
+  and a second section would have been read as cached entries.
+- **A new note on existing events, stated.** Every uncacheable read's event now carries this note,
+  so a tracer that asserted exact notes on such an event sees one more (core's own
+  `trace_note_lands_on_the_endpoints_own_span` did). A stored or cache-hit read is unchanged.
+
+The store now declines an `At` result whose deadline has already passed on the kernel's clock,
+which validity would never have served: it was filed only to be evicted unread.
+
 ## Logistics & constitution
 
 - **Hub work, not a satellite repo:** the arc spans ikigai-core (`TraceEvent`) and

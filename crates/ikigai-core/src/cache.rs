@@ -54,6 +54,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::repr::{Expiry, Representation, Thread, Time};
 use crate::request::RequestId;
+use crate::uncached::Declined;
 
 /// How many recent cuts the race check remembers. A store whose snapshot predates
 /// the oldest retained cut is declined (see the module docs): the bound costs
@@ -496,6 +497,21 @@ impl ReprCache {
         taken: CutSnapshot,
         cost_millis: Option<u64>,
     ) -> bool {
+        self.store_outcome(key, target, representation, taken, cost_millis)
+            .is_ok()
+    }
+
+    /// [`store`](Self::store), saying WHICH of the two declines it was — the
+    /// kernel's answer to "why was this read not cached" needs the difference
+    /// (`crate::uncached`).
+    pub(crate) fn store_outcome(
+        &self,
+        key: CacheKey,
+        target: String,
+        representation: Representation,
+        taken: CutSnapshot,
+        cost_millis: Option<u64>,
+    ) -> Result<(), Declined> {
         let mut state = self.state.lock().expect("cache lock");
 
         // ★ THE RACE CHECK. The representation was built from state observed before
@@ -503,7 +519,7 @@ impl ReprCache {
         // back is already stale and must not be filed against the post-cut
         // generation. Declining is free — the next read recomputes.
         if state.cut_since(representation.threads(), taken) {
-            return false;
+            return Err(Declined::CutInFlight);
         }
 
         let edges: Vec<(Thread, u64)> = representation
@@ -522,7 +538,7 @@ impl ReprCache {
             last_used_tick: state.tick,
         };
         if !self.policy.admit(&entry.facts()) {
-            return false;
+            return Err(Declined::Policy);
         }
         let bytes = entry.bytes();
         if let Some(replaced) = state.entries.insert(key, entry) {
@@ -531,7 +547,7 @@ impl ReprCache {
         state.bytes += bytes;
         self.enforce_bound(&mut state);
         state.sweep_generations(self.policy.capacity().max_entries);
-        true
+        Ok(())
     }
 
     /// Cut a golden thread: bump its generation (invalidating every entry pinned to

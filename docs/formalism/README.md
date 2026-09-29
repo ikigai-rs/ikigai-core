@@ -654,6 +654,31 @@ cached `Never` before 0.1.73 is recomputed on every read after it. Measured in �
 of ~335 ns became a ~880 ns recompute for the smallest such composite — and stated here so the
 day a module adopts 0.1.73 is not the day it is discovered.
 
+**Proposition R4.6 (the kernel says why it did not store).** The two corollaries above have no
+type signal, so the kernel supplies a trace signal (NetKernel News 2.47). Every `Source`,
+`Exists` or `Meta` the kernel computes and does not store carries a reason on its event under
+`UNCACHED_NOTE`, and the last 64 such resources are remembered with it, with no tracer installed,
+by `urn:kernel:uncached` (capability `urn:cap:kernel:inspect`). The reason is every cause, not
+the first, in a fixed order: `declared` (the endpoint's own answer was `Always`); `dependency`,
+`denied`, `failed` (the sub-requests that made R4.3's meet `Always` and R4.5's failures, by the
+name the endpoint requested, at most eight named and the rest counted); `upstream` (a volatile
+piped input); and, when the expiry allowed storing, the store's decline — `no-clock`, `expired`
+(an `At` deadline already past on the kernel's clock, which R4.1's ν would never serve, so it is
+no longer filed), `cut-in-flight` (R4.2's race check), `policy`. Only the immediate cause is
+named; a chain of composites is read one row at a time. A result the kernel stores carries no
+note, so a cached read's events are unchanged; the kernel's own operations are never annotated.
+
+    pin: `uncached::a_cached_composite_joined_to_a_volatile_source_names_the_source` (crates/ikigai-core/tests/uncached.rs)
+    pin: `uncached::a_read_the_kernel_stores_carries_no_note_and_leaves_the_readout_empty` (crates/ikigai-core/tests/uncached.rs)
+    pin: `uncached::an_endpoint_that_declared_none_and_joined_a_volatile_source_is_told_both` (crates/ikigai-core/tests/uncached.rs)
+    pin: `uncached::a_refused_or_failed_dependency_is_named_and_a_miss_is_not` (crates/ikigai-core/tests/uncached.rs)
+    pin: `uncached::past_eight_names_the_rest_are_counted_not_dropped` (crates/ikigai-core/tests/uncached.rs)
+    pin: `uncached::a_volatile_piped_input_is_named_upstream` (crates/ikigai-core/tests/uncached.rs)
+    pin: `uncached::a_deadline_with_no_clock_or_already_past_is_named_and_a_future_one_is_stored` (crates/ikigai-core/tests/uncached.rs)
+    pin: `uncached::a_cut_while_computing_and_a_policy_refusal_are_named` (crates/ikigai-core/tests/uncached.rs)
+    pin: `uncached::the_readout_names_the_chain_is_bounded_and_never_records_a_kernel_operation` (crates/ikigai-core/tests/uncached.rs)
+    doctest: `UNCACHED_NOTE`
+
 **Across processes.** Generations are per-process counters; another instance's 6 is not this
 one's 6, so ν does not transfer and no cache import exists — the honest first tranche would
 admit only thread-free `Never` entries (`docs/design/cache-ejection.md` §1). Not built.
@@ -1457,6 +1482,7 @@ all three rungs of `now()` be set).
 | 314–320 ns → 312–317 ns; 962–1026 ns → 945–978 ns | cache-hit read, and an uncacheable composite sourcing a cached sibling, before / after levels ([#563](http://localhost:1060/l/default/item/563), PR 1) — no level in the kernel | 2026-09-28 | the same twenty-line bench (warmed, 200 000 issues × 3 rounds, release, `futures::block_on`, M-series laptop), main (an export of `7774fc2`) and branch interleaved three times, load 3.0–3.6. Nothing added is on the level-less path: `descend` of an empty path over a level-less chain returns the handle it already cloned. Not committed. |
 | 341–362 ns; 1117–1144 ns | the same two reads with the endpoints inside `Mount(Level(…))` | 2026-09-28 | same run. A hit through a level: +~30 ns (its name cloned into `answered_by`, one frame pushed). A composite that RUNS inside one: +~170 ns per invocation — `descend` builds the resolved scope (one `Arc`, one BLAKE3 over the level names) and the sub-request walks the level frame before the root. Memoizing the resolved scope per (chain, path) would take most of it back; not built. Not committed. |
 | 306–314 ns vs 307–328 ns | cache-hit read with eight host seals vs none ([#563](http://localhost:1060/l/default/item/563), PR 2) | 2026-09-28 | same bench, interleaved, load 3.3–3.6. Within noise: the seal table is a short scan of prefixes, taken only when a host or level sealed something; a kernel with only core's seal reads one `bool`. Not committed. |
+| 439–466 ns → 455–484 ns; ~1.6 µs → ~1.6 µs; ~310 ns → ~310 ns | an uncacheable read, an uncacheable composite (one cached and one volatile sub-request), and a cache-hit read, before / after R4.6 | 2026-09-29 | scratch crate over the public API, three endpoints, warmed, 200 000 / 100 000 / 500 000 issues × 5 rounds, release, `futures::block_on`, M-series laptop; main (an export of `9243f11`) and branch interleaved twice. The uncached path pays ~+15–25 ns (one lock on the log, one hash lookup, a structural compare); the composite is within noise; the hit path is untouched (nothing added there). Not committed. |
 | 64 | `DEFAULT_MAX_DEPTH`, the nesting budget | — | `kernel.rs`, a constant; `Kernel::with_max_depth` overrides it. NetKernel: 40 shipped, 32 default, for a counter that also pays for resolution hops. |
 | 8 | `DEFAULT_MAX_HOPS`, the alias chain cap | — | `alias.rs`, a constant. |
 | 4096 | `CUT_LOG`, cuts the race check remembers | — | `cache.rs`, a constant. |
