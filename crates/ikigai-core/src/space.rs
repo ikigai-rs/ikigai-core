@@ -358,6 +358,131 @@ impl Scope {
         self.clock().map(|clock| clock.now())
     }
 
+    /// **Stack** `inner` onto this chain: every corridor `inner` injected is pushed
+    /// innermost, in `inner`'s order and under `inner`'s identities, so the result is
+    /// the chain you would have built by applying to `self` the steps that built
+    /// `inner`. Two injectors compose — a host holding one chain (a game, a person's
+    /// overrides) and a line or a caller holding another (a temporal corridor) — and
+    /// neither has to know how the other's was built (ledger #582).
+    ///
+    /// One corridor at a time needs nothing new: [`with`](Self::with),
+    /// [`with_named`](Self::with_named) and [`with_named_at`](Self::with_named_at)
+    /// already push innermost onto a chain that is not empty. What they cannot do is
+    /// take a corridor out of a [`Scope`] someone else built — `spaces()` gives the
+    /// spaces but not the names they were injected under, and an anonymous corridor
+    /// re-injected with [`with`](Self::with) would be a NEW identity, so a chain
+    /// rebuilt from its parts would fingerprint differently from the original. `stack`
+    /// carries the identities across, so it is faithful where a rebuild cannot be.
+    ///
+    /// What carries across, exactly as the replay would leave it:
+    /// - **corridors and names** — `inner`'s injected corridors go innermost, ahead of
+    ///   everything `self` injected, so an `inner` corridor shadows a `self` corridor
+    ///   binding the same name (innermost wins, as for any push);
+    /// - **the clock** — `inner`'s, when it has one (it is the innermost temporal
+    ///   corridor), else `self`'s;
+    /// - **severed-ness** — severed if either is: cutting the root is not undone by
+    ///   stacking onto a chain that still has one;
+    /// - **confinement** — `inner`'s confined corridors go behind `self`'s, where the
+    ///   root was, and, as [`confined`](Self::confined) does, sever the chain and leave
+    ///   `self`'s level stack behind;
+    /// - **the level stack** — `self`'s, unchanged, unless `inner` carries one (only
+    ///   a resolved scope an endpoint saw on [`Invocation::scope`](crate::Invocation::scope)
+    ///   does, never a chain a host builds), which replaces it as the kernel's descent
+    ///   would.
+    ///
+    /// The [fingerprint](Self::fingerprint) is recomputed over the whole result: two
+    /// orders of the same two chains are two different chains, and a chain built by
+    /// stacking is equal — fingerprint, rendering, walk and clock — to the one built
+    /// with the same pushes at once. Stacking the empty chain (either side) changes
+    /// nothing.
+    ///
+    /// # Authority is unchanged
+    ///
+    /// A `Scope` is inert: it does nothing until a request is issued in it, and the
+    /// only ways to do that are [`Kernel::issue_in`](crate::Kernel::issue_in) and its
+    /// siblings, which need the `Kernel` — whoever holds that is the host. `stack`
+    /// builds a chain exactly as `with_named` does, so it grants nothing `with_named`
+    /// did not. An endpoint can call it (it can already call `with_named`), but it
+    /// cannot issue in the result: its invocation carries the chain it was given, and
+    /// the only chain-changing operation it reaches is
+    /// [`Invocation::confine`](crate::Invocation::confine), which only narrows.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     Capability, EndpointSpace, Exact, FixedClock, FnEndpoint, Iri, Kernel, ReprType,
+    ///     Representation, Request, Scope, Verb,
+    /// };
+    ///
+    /// let door = |name: &'static str, body: &'static str| {
+    ///     Arc::new(EndpointSpace::new().bind(
+    ///         Exact::new(name),
+    ///         FnEndpoint::new(body, move |_| {
+    ///             Ok(Representation::new(ReprType::new("text/plain"), body.as_bytes().to_vec())
+    ///                 .cacheable())
+    ///         }),
+    ///     ))
+    /// };
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new()));
+    /// let get = |target: &str, scope: Scope| {
+    ///     let request = Request::new(Verb::Source, Iri::parse(target).unwrap());
+    ///     block_on(kernel.issue_in(request, &Capability::root(), scope)).unwrap().bytes
+    /// };
+    ///
+    /// // The host's chain: one game.
+    /// let game = Scope::empty().with_named(
+    ///     Iri::parse("urn:ctx:game:7").unwrap(),
+    ///     door("urn:game:board", "x-o-x"),
+    /// );
+    /// // A line's chain, built by someone who never saw the game: one instant.
+    /// let as_of = Scope::empty().with_named_at(
+    ///     Iri::parse("urn:ctx:time:2026-09-25T18:00Z").unwrap(),
+    ///     door("urn:time:now", "18:00"),
+    ///     Arc::new(FixedClock::at(1_000)),
+    /// );
+    ///
+    /// // Stacked, both hold: the game's board AND the pinned instant, and the clock.
+    /// let both = game.clone().stack(&as_of);
+    /// assert_eq!(get("urn:game:board", both.clone()), b"x-o-x");
+    /// assert_eq!(get("urn:time:now", both.clone()), b"18:00");
+    /// assert_eq!(both.now().map(|t| t.as_millis()), Some(1_000));
+    /// assert_eq!(
+    ///     both.to_string(),
+    ///     "urn:ctx:time:2026-09-25T18:00Z urn:ctx:game:7 root",
+    /// );
+    /// ```
+    pub fn stack(self, inner: &Scope) -> Self {
+        let Some(other) = inner.chain.as_ref() else {
+            return self;
+        };
+        let (behind, host) = other.injected.split_at(other.confined);
+        let (behind_ids, host_ids) = other.identities.split_at(other.confined);
+        self.edit(|chain| {
+            // The host's pushes append after `self`'s injected corridors (the
+            // confined prefix is untouched by a push).
+            chain.injected.extend(host.iter().cloned());
+            chain.identities.extend(host_ids.iter().cloned());
+            // Confinements insert at the front, behind everything `self` confined —
+            // the placement `confined` gives each one, replayed as a block.
+            if !behind.is_empty() {
+                chain.injected.splice(0..0, behind.iter().cloned());
+                chain.identities.splice(0..0, behind_ids.iter().cloned());
+                chain.confined += behind.len();
+                chain.levels = LevelPath::default();
+            }
+            if !other.levels.is_empty() {
+                chain.levels = other.levels.clone();
+            }
+            if other.severed {
+                chain.severed = true;
+            }
+            if let Some(clock) = &other.clock {
+                chain.clock = Some(Arc::clone(clock));
+            }
+        })
+    }
+
     /// Cut the root off the chain: a request resolved in the result reaches only
     /// the injected corridors, and anything else is
     /// [`Unresolved`](crate::Error::Unresolved). Idempotent.
