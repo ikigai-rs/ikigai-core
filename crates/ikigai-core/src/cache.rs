@@ -209,6 +209,55 @@ pub struct CacheRow {
     /// The fingerprint of the resolution chain it was computed in
     /// ([`Scope::fingerprint`](crate::Scope::fingerprint)); `0` for the empty chain.
     pub scope: u64,
+    /// Whether the entry would be served right now — the same predicate serving and
+    /// [`ReprCache::probe`] use (ledger #612).
+    pub state: EntryState,
+}
+
+/// Whether a resident entry would be served, and if not, why not.
+///
+/// A cut is LAZY: it bumps a generation and leaves every entry pinned to the old
+/// one resident until a read finds it stale and evicts it. So "what the cache holds"
+/// and "what the cache would serve" differ right after every edit, and a readout that
+/// listed rows without saying which was which read like the edit had invalidated
+/// nothing (ledger #612). Stale rows are still worth listing — they occupy the bound
+/// until something reads them — so the readout marks them rather than hiding them.
+///
+/// ```
+/// use ikigai_core::EntryState;
+///
+/// assert_eq!(EntryState::Live.word(), "live");
+/// assert_eq!(EntryState::Cut.word(), "cut");
+/// assert_eq!(EntryState::Expired.word(), "expired");
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EntryState {
+    /// Every golden thread still stands at its pinned generation and any deadline is
+    /// still ahead: a read is served from this entry.
+    Live,
+    /// A thread it depends on was cut since it was stored: the next read evicts it
+    /// and recomputes.
+    Cut,
+    /// Its threads stand but its deadline has passed (or the kernel has no clock to
+    /// say it has not): the next read evicts it and recomputes.
+    Expired,
+}
+
+impl EntryState {
+    /// The word `urn:kernel:cache` prints for the state: `live`, `cut` or `expired`.
+    pub fn word(self) -> &'static str {
+        match self {
+            EntryState::Live => "live",
+            EntryState::Cut => "cut",
+            EntryState::Expired => "expired",
+        }
+    }
+
+    /// Whether a read would be served from the entry.
+    pub fn is_live(self) -> bool {
+        self == EntryState::Live
+    }
 }
 
 /// The ceiling a [`CachePolicy`] enforces: a count and a byte budget, both hard.
@@ -591,7 +640,19 @@ impl ReprCache {
     /// One row per entry for `urn:kernel:cache`, with the resolution chain each
     /// was computed in — as the key's scope fingerprint, which is all the cache
     /// holds; the kernel maps it back to a rendered chain for the readout.
+    ///
+    /// With no clock reading, so every entry with a deadline reads
+    /// [`Expired`](EntryState::Expired) — the conservative answer serving gives too.
+    /// [`rows_at`](Self::rows_at) takes the reading.
     pub fn rows_with_scope(&self) -> Vec<CacheRow> {
+        self.rows_at(None)
+    }
+
+    /// [`rows_with_scope`](Self::rows_with_scope), each row marked with whether it
+    /// would be served as of `now` ([`EntryState`]). Read-only, like
+    /// [`probe`](Self::probe): a stale row is reported, not evicted, so reading the
+    /// readout cannot change what it reads (ledger #612).
+    pub fn rows_at(&self, now: Option<Time>) -> Vec<CacheRow> {
         let state = self.state.lock().expect("cache lock");
         state
             .entries
@@ -602,6 +663,7 @@ impl ReprCache {
                 bytes: entry.bytes(),
                 threads: entry.edges.len(),
                 scope: key.scope,
+                state: state.state_of(entry, now),
             })
             .collect()
     }
@@ -669,15 +731,23 @@ impl CacheState {
     /// source of truth behind both [`ReprCache::get`] and [`ReprCache::probe`], so
     /// the serving path and the read-only probe can never disagree.
     fn is_valid(&self, entry: &CacheEntry, now: Option<Time>) -> bool {
+        self.state_of(entry, now).is_live()
+    }
+
+    /// [`is_valid`](Self::is_valid), saying which half failed — a cut edge is
+    /// reported ahead of a passed deadline, since the cut is the one an edit caused.
+    fn state_of(&self, entry: &CacheEntry, now: Option<Time>) -> EntryState {
         let edges_current = entry
             .edges
             .iter()
             .all(|(thread, generation)| self.generation_of(thread) == *generation);
-        let unexpired = match entry.representation.expiry {
-            Expiry::At(deadline) => now.is_some_and(|now| now < deadline),
-            _ => true,
-        };
-        edges_current && unexpired
+        if !edges_current {
+            return EntryState::Cut;
+        }
+        match entry.representation.expiry {
+            Expiry::At(deadline) if !now.is_some_and(|now| now < deadline) => EntryState::Expired,
+            _ => EntryState::Live,
+        }
     }
 
     /// Whether any of `threads` was cut after `taken` — or whether the log can no
@@ -932,6 +1002,48 @@ mod tests {
             0,
             "the serving path evicts what it found stale"
         );
+    }
+
+    #[test]
+    fn the_rows_say_which_entries_a_cut_has_made_stale_without_evicting_them() {
+        let cache = ReprCache::default();
+        assert!(cache.store(
+            key(1),
+            "urn:test:a".into(),
+            threaded(8, "urn:data:state"),
+            cache.snapshot(),
+            None
+        ));
+        assert!(cache.store(
+            key(2),
+            "urn:test:b".into(),
+            threaded(8, "urn:data:other"),
+            cache.snapshot(),
+            None
+        ));
+        let deadline = Representation::new(ReprType::new("text/plain"), b"x".to_vec())
+            .cacheable_until(Time::from_millis(100));
+        assert!(cache.store(
+            key(3),
+            "urn:test:c".into(),
+            deadline,
+            cache.snapshot(),
+            None
+        ));
+        cache.cut(Thread::new("urn:data:state"));
+        let mut rows = cache.rows_at(Some(Time::from_millis(100)));
+        rows.sort_by(|a, b| a.target.cmp(&b.target));
+        let states: Vec<(&str, EntryState)> =
+            rows.iter().map(|r| (r.target.as_str(), r.state)).collect();
+        assert_eq!(
+            states,
+            [
+                ("urn:test:a", EntryState::Cut),
+                ("urn:test:b", EntryState::Live),
+                ("urn:test:c", EntryState::Expired),
+            ]
+        );
+        assert_eq!(cache.len(), 3, "reading the rows evicts nothing");
     }
 
     #[test]

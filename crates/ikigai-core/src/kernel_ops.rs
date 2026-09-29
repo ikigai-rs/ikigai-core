@@ -58,6 +58,7 @@ pub(crate) const OPS: &[&str] = &[
     "actions",
     "aliases",
     "cache",
+    "cached",
     "catalog",
     "constraint",
     "cut",
@@ -84,6 +85,7 @@ pub(crate) fn description(op: &str) -> Option<Description> {
         "actions" => actions(),
         "aliases" => aliases(),
         "cache" => cache(),
+        "cached" => cached(),
         "catalog" => catalog(),
         "constraint" => constraint(),
         "cut" => cut(),
@@ -260,13 +262,42 @@ fn cache() -> Description {
     Description::new("kernel-cache")
         .title("Cache readout")
         .summary(
-            "What the representation cache holds: a count, then one line per entry — the IRI \
-             it was resolved from, its representation type and size, and how many golden \
-             threads it depends on (cut any of them and the entry recomputes).",
+            "What the representation cache holds: a count (and how many of those are stale), \
+             then one line per entry — the IRI it was resolved from, whether a read would be \
+             served from it (`live`) or it is resident but stale (`cut` by a golden thread, or \
+             `expired`), its representation type and size, how many golden threads it depends \
+             on (cut any of them and the entry recomputes), and the resolution chain it was \
+             computed in. A cut is lazy: a stale entry stays resident until a read evicts it, \
+             and this readout marks it rather than evicting it.",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)
         .requires(CAP_INSPECT)
+        .output(TEXT_PLAIN_UTF8)
+}
+
+/// The description of `urn:kernel:cached` — the read-only probe as a resource.
+fn cached() -> Description {
+    Description::new("kernel-cached")
+        .title("Is this name cached for me?")
+        .summary(
+            "Whether a read of `target` by the ASKER would be served from the cache right \
+             now — under the asker's own capability and in the asker's own resolution chain, \
+             the same key the read would use — without issuing it: `true` or `false`. \
+             Read-only: it resolves nothing, evicts nothing and counts no hit. Live, so never \
+             cached. Probes an argument-free request; a read with arguments is a different \
+             entry and is not addressable here.",
+        )
+        .verb(Verb::Source)
+        .verb(Verb::Meta)
+        .requires(CAP_INSPECT)
+        .input(ArgSpec::new("target").summary("the IRI whose cached read to probe"))
+        .input(
+            ArgSpec::new("verb")
+                .summary("the verb of the probed read")
+                .one_of(["source", "exists"])
+                .default_value("source"),
+        )
         .output(TEXT_PLAIN_UTF8)
 }
 

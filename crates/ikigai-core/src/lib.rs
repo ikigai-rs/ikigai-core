@@ -104,7 +104,7 @@ pub use alias::{
 pub use arg::ArgRef;
 pub use cache::{
     CacheBound, CacheEntry, CacheKey, CachePolicy, CacheRow, CostAware, CutSnapshot, EntryFacts,
-    Fifo, Lru, ReprCache,
+    EntryState, Fifo, Lru, ReprCache,
 };
 pub use capability::Capability;
 pub use confine::Confine;

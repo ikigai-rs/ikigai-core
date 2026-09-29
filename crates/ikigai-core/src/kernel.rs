@@ -2713,14 +2713,23 @@ impl Kernel {
                 Ok(kernel_text(format!("cut {thread}\n")))
             }
             // Inspect the cache: a count, then one line per entry — the IRI it was
-            // resolved from, its representation type and size, how many golden
-            // threads it depends on (cut any of them and this entry recomputes), and
-            // the resolution chain it was computed in (`root` for the empty chain,
-            // else the chain as `Scope` renders it, or its fingerprint if the name
-            // is no longer known).
+            // resolved from, whether a read would be served from it (`live`) or it
+            // is resident but stale (`cut`, `expired`), its representation type and
+            // size, how many golden threads it depends on (cut any of them and this
+            // entry recomputes), and the resolution chain it was computed in (`root`
+            // for the empty chain, else the chain as `Scope` renders it, or its
+            // fingerprint if the name is no longer known).
+            //
+            // ★ Stale rows are MARKED, not evicted (ledger #612). A cut is lazy, so
+            // right after an edit the cache still holds every entry the edit
+            // invalidated; a readout that did not say so read like the edit had cut
+            // nothing. Evicting them here would make it true, but a read of an
+            // introspection resource would then change what it describes — the
+            // observer effect `is_cached` is careful not to have — and a stale entry
+            // is a real fact until a read evicts it: it still occupies the bound.
             ("cache", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
-                let mut rows = self.cache.rows_with_scope();
+                let mut rows = self.cache.rows_at(self.now_stamp());
                 rows.sort_by(|a, b| (&a.target, a.scope).cmp(&(&b.target, b.scope)));
                 let names = {
                     let mut names = self.scope_names.lock().expect("scope names lock");
@@ -2728,8 +2737,9 @@ impl Kernel {
                     names.clone()
                 };
                 let bound = self.cache.bound();
+                let stale = rows.iter().filter(|row| !row.state.is_live()).count();
                 let mut body = format!(
-                    "cache\n  entries  {} / {}\n  size     {} / {}\n",
+                    "cache\n  entries  {} / {} ({stale} stale)\n  size     {} / {}\n",
                     rows.len(),
                     bound.max_entries,
                     human_size(self.cache.bytes()),
@@ -2756,11 +2766,50 @@ impl Kernel {
                             .unwrap_or_else(|| format!("{fingerprint:016x}")),
                     };
                     let (target, media) = (row.target, row.media_type);
+                    let state = row.state.word();
                     body.push_str(&format!(
-                        "  {target:<width$}  {media:<24}  {size:>9}  {deps:<10}  {scope}\n"
+                        "  {target:<width$}  {state:<7}  {media:<24}  {size:>9}  {deps:<10}  {scope}\n"
                     ));
                 }
                 Ok(kernel_text(body))
+            }
+            // ★ "Is this name cached, UNDER MY SCOPE?" — the probe as a resource
+            // (ledger #612), so a cache viewer can be a composition instead of page
+            // code. It answers for exactly the key a read by the ASKER would use:
+            // the asker's capability and the chain the asker resolves in, which for
+            // an endpoint's sub-request is the endpoint's own resolved chain — the
+            // one its other sub-requests run in. So an endpoint asking about a name
+            // it reads learns whether ITS read would hit, never whether someone
+            // else's would: the capability is in the key, and there is no argument
+            // to name another. Read-only (`is_cached_in`): it resolves nothing,
+            // evicts nothing, counts no hit. Live state, so `Always`, like every
+            // introspection answer — a composite over it is uncacheable, which is
+            // what a viewer wants.
+            ("cached", Verb::Source) => {
+                require_cap("urn:cap:kernel:inspect")?;
+                let target = kernel_arg(request, "target")
+                    .ok_or_else(|| Error::MissingArgument("target".to_string()))?;
+                let target = Iri::parse(target.trim()).map_err(|e| Error::InvalidArgument {
+                    name: "target".to_string(),
+                    detail: e.to_string(),
+                })?;
+                let verb = match kernel_arg(request, "verb") {
+                    None => Verb::Source,
+                    Some(name) => match parse_verb(name)? {
+                        verb @ (Verb::Source | Verb::Exists) => verb,
+                        other => {
+                            return Err(Error::InvalidArgument {
+                                name: "verb".to_string(),
+                                detail: format!(
+                                    "{other:?} is never cached; only source and exists are"
+                                ),
+                            })
+                        }
+                    },
+                };
+                let probed = Request::new(verb, target);
+                let cached = self.is_cached_in(&probed, capability, chain);
+                Ok(kernel_text(format!("{cached}\n")))
             }
             // Why reads were not cached: the last few resources computed and not
             // stored, each with the reason `UNCACHED_NOTE` puts on its event. Needs
@@ -4772,9 +4821,10 @@ mod tests {
         // operations must appear there — and appear *filtered*. `list` mentioning
         // the kernel is the easy half; this is the half with teeth.
         let kernel = meta_kernel();
-        const INSPECT_ONLY: [&str; 7] = [
+        const INSPECT_ONLY: [&str; 8] = [
             "urn:kernel:aliases",
             "urn:kernel:cache",
+            "urn:kernel:cached",
             "urn:kernel:catalog",
             "urn:kernel:constraint",
             "urn:kernel:scheduler",
@@ -5756,6 +5806,146 @@ mod tests {
         assert!(
             text.contains("1 thread"),
             "names the dependency count: {text}"
+        );
+    }
+
+    // --- ledger #612: live versus stale, and the probe as a resource -----------
+
+    /// A kernel with one cacheable, sinkable cell at `urn:data:x` — the shape the
+    /// tutorial's spreadsheet hit — and `viewer`, an endpoint that asks the kernel
+    /// whether ITS read of `urn:data:x` would be served from the cache.
+    fn probe_kernel() -> Kernel {
+        let viewer = crate::endpoint::AsyncFnEndpoint::new("viewer", |inv: &Invocation<'_>| {
+            Box::pin(async move {
+                let probe = Request::new(Verb::Source, iri("urn:kernel:cached"))
+                    .with_arg("target", ArgRef::Inline(b"urn:data:x".to_vec()));
+                let answer = inv.issue(probe).await?;
+                Ok(Representation::new(
+                    ReprType::new("text/plain"),
+                    answer.bytes,
+                ))
+            })
+        });
+        Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:data:x"),
+                    MaybeCell {
+                        value: Mutex::new(Some(b"5".to_vec())),
+                    },
+                )
+                .bind(Exact::new("urn:test:viewer"), viewer),
+        ))
+    }
+
+    fn readout(kernel: &Kernel) -> String {
+        let out = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:kernel:cache")),
+            &Capability::root(),
+        ))
+        .unwrap();
+        String::from_utf8(out.bytes).unwrap()
+    }
+
+    #[test]
+    fn the_cache_readout_marks_what_an_edit_has_cut() {
+        // The tutorial pinned the old behavior as
+        // `the_cache_readout_still_lists_what_an_edit_has_cut`: right after an edit
+        // the readout listed the invalidated entry exactly as before. It still lists
+        // it — the entry is resident until a read evicts it — and now says so.
+        let kernel = probe_kernel();
+        let cap = Capability::root();
+        let x = || Request::new(Verb::Source, iri("urn:data:x"));
+        block_on(kernel.issue(x(), &cap)).unwrap();
+        let before = readout(&kernel);
+        let row = |text: &str| {
+            text.lines()
+                .find(|l| l.split_whitespace().next() == Some("urn:data:x"))
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("no row for urn:data:x:\n{text}"))
+        };
+        assert_eq!(
+            row(&before).split_whitespace().nth(1),
+            Some("live"),
+            "{before}"
+        );
+        assert!(before.contains("entries  1 / 4096 (0 stale)"), "{before}");
+
+        block_on(kernel.issue(sink("urn:data:x", b"6"), &cap)).unwrap();
+        let after = readout(&kernel);
+        assert_eq!(
+            row(&after).split_whitespace().nth(1),
+            Some("cut"),
+            "{after}"
+        );
+        assert!(after.contains("entries  1 / 4096 (1 stale)"), "{after}");
+        assert_eq!(kernel.cache_len(), 1, "reading the readout evicted nothing");
+
+        // The next read evicts and recomputes; the row is live again.
+        block_on(kernel.issue(x(), &cap)).unwrap();
+        assert_eq!(
+            row(&readout(&kernel)).split_whitespace().nth(1),
+            Some("live")
+        );
+    }
+
+    #[test]
+    fn an_endpoint_can_ask_whether_its_own_read_is_cached() {
+        let kernel = probe_kernel();
+        let cap = Capability::scoped(["urn:cap:kernel:inspect"]);
+        let x = || Request::new(Verb::Source, iri("urn:data:x"));
+        let ask = || {
+            let out =
+                block_on(kernel.issue(Request::new(Verb::Source, iri("urn:test:viewer")), &cap))
+                    .unwrap();
+            String::from_utf8(out.bytes).unwrap()
+        };
+        assert_eq!(ask(), "false\n", "nothing read yet");
+
+        // Someone ELSE's read is not mine: the capability is in the key.
+        block_on(kernel.issue(x(), &Capability::root())).unwrap();
+        assert_eq!(
+            ask(),
+            "false\n",
+            "a root read does not answer for this capability"
+        );
+
+        block_on(kernel.issue(x(), &cap)).unwrap();
+        assert_eq!(ask(), "true\n");
+
+        // A write cuts it, and the probe knows before any read evicts it.
+        block_on(kernel.issue(sink("urn:data:x", b"7"), &cap)).unwrap();
+        assert_eq!(ask(), "false\n");
+        assert_eq!(kernel.cache_len(), 2, "the probe evicted nothing");
+    }
+
+    #[test]
+    fn the_probe_is_gated_and_refuses_what_is_never_cached() {
+        let kernel = probe_kernel();
+        let probe = |verb: Option<&str>| {
+            let mut request = Request::new(Verb::Source, iri("urn:kernel:cached"))
+                .with_arg("target", ArgRef::Inline(b"urn:data:x".to_vec()));
+            if let Some(verb) = verb {
+                request = request.with_arg("verb", ArgRef::Inline(verb.as_bytes().to_vec()));
+            }
+            request
+        };
+        let denied = block_on(kernel.issue(probe(None), &Capability::scoped(["urn:cap:other"])));
+        assert!(
+            matches!(&denied, Err(Error::Denied(m)) if m.contains("urn:cap:kernel:inspect")),
+            "{denied:?}"
+        );
+        let sink = block_on(kernel.issue(probe(Some("sink")), &Capability::root()));
+        assert!(
+            matches!(&sink, Err(Error::InvalidArgument { name, .. }) if name == "verb"),
+            "{sink:?}"
+        );
+        let exists = block_on(kernel.issue(probe(Some("exists")), &Capability::root())).unwrap();
+        assert_eq!(exists.bytes, b"false\n");
+        assert_eq!(
+            exists.expiry,
+            Expiry::Always,
+            "a probe answer is live state"
         );
     }
 
