@@ -57,6 +57,7 @@ use crate::describe::Description;
 use crate::endpoint::{Dependencies, Endpoint, Invocation, Issuer, Spawner};
 use crate::error::{Error, Result};
 use crate::iri::Iri;
+use crate::listen::{CutListener, Hearing, ListenSpec, Listeners, CAP_LISTEN};
 use crate::meta::MetaRenderer;
 use crate::repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 use crate::request::Request;
@@ -621,6 +622,9 @@ pub struct Kernel {
     /// when the kernel is built and consulted on resolution. With only core's claim
     /// it is trivial and costs one `bool` read per resolution.
     seals: Seals,
+    /// The registered cut listeners ([`listen`](Self::listen)). With none registered
+    /// a cut pays one atomic load for them.
+    listeners: Listeners,
 }
 
 /// How many endpoints' floors the memo holds before it sweeps — dead entries first,
@@ -805,6 +809,7 @@ impl Kernel {
             scope_names: Mutex::new(BTreeMap::new()),
             uncached: Mutex::new(UncachedLog::default()),
             seals,
+            listeners: Listeners::default(),
         }
     }
 
@@ -830,6 +835,7 @@ impl Kernel {
             scope_names: Mutex::new(BTreeMap::new()),
             uncached: Mutex::new(UncachedLog::default()),
             seals,
+            listeners: Listeners::default(),
         }
     }
 
@@ -2568,7 +2574,53 @@ impl Kernel {
         if thread.as_str() == BINDINGS_THREAD {
             self.floors.clear();
         }
-        self.cache.cut(thread);
+        if !self.listeners.interested(thread.as_str()) {
+            self.cache.cut(thread);
+            return;
+        }
+        // Someone listens: cut, and queue the event under the cache lock (so each
+        // listener hears concurrent cuts in sequence order), then wake the waiting
+        // hosts with every kernel lock released. Nothing is issued from here.
+        let listeners = &self.listeners;
+        let wakers = self.cache.cut_with(thread.clone(), |sequence, dependents| {
+            listeners.deliver(&thread, sequence, dependents)
+        });
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    /// Register a **cut listener**: from now on, every cut of a thread `spec` matches
+    /// is queued on the returned [`CutListener`] — the thread, its place in the cut
+    /// order, and the cached entries it invalidated — for the host to drain or await.
+    /// Dropping the listener unregisters it. See [`crate::listen`] for the delivery
+    /// shape and why it is a queue and not a callback.
+    ///
+    /// **Authority.** Requires [`CAP_LISTEN`] (`urn:cap:kernel:listen`), refused with
+    /// [`Error::Denied`] otherwise. The root authority hears every matching cut. Any
+    /// other hears a cut only when some entry computed under **that same capability**
+    /// depends on the thread — a name its own reads were already handed — and its
+    /// events list only those entries; so a listener learns only names it could read.
+    /// "The same capability" is the cache key's partition, the fingerprint of the
+    /// whole scope set: register with the capability the host's reads are issued
+    /// under (holding `urn:cap:kernel:listen` too), or the listener and the reads it
+    /// cares about sit in different partitions and it hears nothing.
+    ///
+    /// **What the host does with it** is its own decision: re-issue an invalidated
+    /// read under the registrant's capability, so the next reader is served from the
+    /// cache (recompute before the first reader), or push a notice to a page.
+    pub fn listen(&self, spec: ListenSpec, capability: &Capability) -> Result<CutListener> {
+        if !capability.allows(CAP_LISTEN) {
+            return Err(Error::Denied(format!(
+                "capability does not grant `{CAP_LISTEN}`"
+            )));
+        }
+        let hearing = if capability.is_root() {
+            Hearing::Everything
+        } else {
+            Hearing::OwnReads(capability_key(capability))
+        };
+        Ok(self.listeners.register(spec, hearing))
     }
 
     /// Tell the kernel **the set of bindings it resolves against has changed**: cut
