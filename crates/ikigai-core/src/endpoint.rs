@@ -15,6 +15,7 @@ use crate::repr::{Expiry, Representation, Thread, Time};
 use crate::request::Request;
 use crate::select::{ActionMatch, TransreptionPolicy, TransreptionStep};
 use crate::space::{Scope, Space};
+use crate::uncached::{DepKind, VolatileDeps};
 use crate::verb::Verb;
 
 /// Lets an endpoint issue sub-requests back through the kernel. Implemented by
@@ -370,10 +371,36 @@ struct Recorded {
     /// [`TraceEvent`](crate::TraceEvent) once the invocation completes. Only
     /// collected while tracing (no cost, no growth off the trace path).
     trace_notes: Mutex<Vec<(String, String)>>,
-    deps: Mutex<Vec<Expiry>>,
+    deps: Mutex<Deps>,
     /// Union of the golden threads of every sub-resource resolved during this
     /// invocation — so the kernel can propagate them onto the result.
     dep_threads: Mutex<BTreeSet<Thread>>,
+}
+
+/// What the sub-requests of one invocation did to its cacheability: the meet of
+/// their expiries, and — for the ones that made it `Always` — their names, so the
+/// kernel can say WHY a composite was not cached ([`crate::UNCACHED_NOTE`]). One
+/// lock for both, taken once per sub-request as the expiry alone always was.
+struct Deps {
+    expiry: Expiry,
+    volatile: VolatileDeps,
+}
+
+impl Default for Deps {
+    /// No dependencies impose no limit: `Never`, the meet's identity — not
+    /// `Expiry::default()`, which is `Always`.
+    fn default() -> Self {
+        Deps {
+            expiry: Expiry::Never,
+            volatile: VolatileDeps::default(),
+        }
+    }
+}
+
+impl Deps {
+    fn meet(&mut self, expiry: Expiry) {
+        self.expiry = self.expiry.most_restrictive(expiry);
+    }
 }
 
 impl Recorded {
@@ -407,10 +434,12 @@ impl Recorded {
     fn record(&self, requested: &Iri, result: &Result<Representation>) {
         match result {
             Ok(representation) => {
-                self.deps
-                    .lock()
-                    .expect("deps lock")
-                    .push(representation.expiry);
+                let mut deps = self.deps.lock().expect("deps lock");
+                deps.meet(representation.expiry);
+                if representation.expiry == Expiry::Always {
+                    deps.volatile.note(DepKind::Volatile, requested);
+                }
+                drop(deps);
                 // Inherit the sub-resource's golden threads so cutting any of them
                 // invalidates this (composite) result too.
                 self.dep_threads
@@ -430,8 +459,14 @@ impl Recorded {
                     .expect("dep threads lock")
                     .insert(Thread::from(requested.as_str()));
             }
-            Err(_) => {
-                self.deps.lock().expect("deps lock").push(Expiry::Always);
+            Err(error) => {
+                let kind = match error {
+                    Error::Denied(_) => DepKind::Denied,
+                    _ => DepKind::Failed,
+                };
+                let mut deps = self.deps.lock().expect("deps lock");
+                deps.meet(Expiry::Always);
+                deps.volatile.note(kind, requested);
             }
         }
     }
@@ -1227,10 +1262,16 @@ impl<'a> Invocation<'a> {
     /// `At` deadline among any time-bounded ones, else `Never` (no deps ⇒ `Never`,
     /// imposing no limit).
     pub(crate) fn dependency_expiry(&self) -> Expiry {
-        let deps = self.recorded.deps.lock().expect("deps lock");
-        deps.iter()
-            .copied()
-            .fold(Expiry::Never, Expiry::most_restrictive)
+        self.recorded.deps.lock().expect("deps lock").expiry
+    }
+
+    /// The sub-requests that made this invocation's dependencies `Always`, by the
+    /// name the endpoint requested — drained, like the trace notes, by the kernel
+    /// once the invocation completes and only when the result was not cached.
+    /// Empty exactly when [`dependency_expiry`](Self::dependency_expiry) is not
+    /// `Always`.
+    pub(crate) fn take_volatile_dependencies(&self) -> VolatileDeps {
+        std::mem::take(&mut self.recorded.deps.lock().expect("deps lock").volatile)
     }
 
     /// The union of golden threads of every dependency resolved during this

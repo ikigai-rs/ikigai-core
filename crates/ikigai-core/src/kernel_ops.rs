@@ -64,6 +64,7 @@ pub(crate) const OPS: &[&str] = &[
     "scheduler",
     "threads",
     "topology",
+    "uncached",
     "validate",
 ];
 
@@ -89,6 +90,7 @@ pub(crate) fn description(op: &str) -> Option<Description> {
         "scheduler" => scheduler(),
         "threads" => threads(),
         "topology" => topology(),
+        "uncached" => uncached(),
         "validate" => validate(),
         _ => return None,
     })
@@ -261,6 +263,24 @@ fn cache() -> Description {
             "What the representation cache holds: a count, then one line per entry — the IRI \
              it was resolved from, its representation type and size, and how many golden \
              threads it depends on (cut any of them and the entry recomputes).",
+        )
+        .verb(Verb::Source)
+        .verb(Verb::Meta)
+        .requires(CAP_INSPECT)
+        .output(TEXT_PLAIN_UTF8)
+}
+
+/// The description of `urn:kernel:uncached`.
+fn uncached() -> Description {
+    Description::new("kernel-uncached")
+        .title("Why reads were not cached")
+        .summary(
+            "The last few resources the kernel computed and did NOT cache, most recent first: \
+             the IRI, how many times it has been computed uncached, the reason (the endpoint \
+             declared no caching; a named dependency, refusal or failure made it volatile; a \
+             volatile piped input; a deadline with no clock or already past; a cut while it \
+             computed; the cache policy), and the chain it was computed in. Needs no tracer \
+             installed.",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)

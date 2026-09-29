@@ -222,6 +222,12 @@ fn after_qualifiers(line: &str) -> &str {
             "unsafe ",
         ] {
             if let Some(rest) = t.strip_prefix(q) {
+                // `const` qualifies a `const fn` and nothing else; before a name it
+                // IS the item keyword (`pub const NOTE: &str`), and stripping it
+                // would hide the constant from `declares_item`.
+                if q == "const " && !(rest.starts_with("fn ") || rest.starts_with("unsafe ")) {
+                    continue;
+                }
                 t = rest;
                 changed = true;
             }
@@ -532,6 +538,16 @@ impl Widget {
     pub fn build<T>(t: T) -> T { t }
 }
 
+/// ```
+/// let w = 4;
+/// ```
+pub const WIDGET_NOTE: &str = \"widget\";
+
+/// ```
+/// let v = 5;
+/// ```
+pub const fn width() -> u32 { 4 }
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -554,4 +570,7 @@ mod tests {
     assert!(doctest_exists(&sources, "Widget::build").is_ok());
     assert!(doctest_exists(&sources, "Widget::plain").is_err());
     assert!(doctest_exists(&sources, "Gadget").is_err());
+    // A constant is an item in its own right, and `const fn` is still a function.
+    assert!(doctest_exists(&sources, "WIDGET_NOTE").is_ok());
+    assert!(doctest_exists(&sources, "width").is_ok());
 }
