@@ -37,6 +37,10 @@
 //! golden-thread validity, its bound, and the [`CachePolicy`] a host installs to
 //! decide what is worth keeping.
 //!
+//! [`listen`] tells a host when a golden thread is cut and what the cut
+//! invalidated — a bounded queue the host drains or awaits ([`Kernel::listen`]),
+//! so it can recompute before the first reader or push a change to a page.
+//!
 //! Beside the resolution spine, [`config`] holds the config-home path algebra —
 //! pure path computation, no I/O — so hosts, modules and tools that do not depend
 //! on one another still agree on where configuration lives.
@@ -87,6 +91,7 @@ pub(crate) mod hashing;
 mod iri;
 mod kernel;
 mod kernel_ops;
+pub mod listen;
 mod meta;
 mod repr;
 mod request;
@@ -124,6 +129,9 @@ pub use kernel::{
     ALIAS_MISS_NOTE, ALIAS_NOTE, ANSWERED_NOTE, BINDINGS_THREAD, DEFAULT_MAX_DEPTH, DENIED_NOTE,
     DEPTH_NOTE, LEVEL_NOTE, LIMITED_NOTE, META_LOSSY_ARG, SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE,
     SCOPE_NOTE, SEALED_NOTE, UNCACHED_NOTE,
+};
+pub use listen::{
+    CutBatch, CutEvent, CutListener, ListenSpec, CAP_LISTEN, INVALIDATED_NAMED, LISTEN_CAPACITY,
 };
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};

@@ -604,17 +604,30 @@ impl ReprCache {
     /// result that predates it.
     pub fn cut(&self, thread: Thread) {
         let mut state = self.state.lock().expect("cache lock");
-        *state.generations.entry(thread.clone()).or_insert(0) += 1;
-        state.seq += 1;
-        let seq = state.seq;
-        if state.cuts.len() >= CUT_LOG {
-            if let Some((_, forgotten)) = state.cuts.pop_front() {
-                state.horizon = forgotten;
-            }
-        }
-        state.cuts.push_back((thread, seq));
+        let seq = state.record_cut(thread);
         // Published last: a snapshot that sees this value has seen the record above.
         self.cut_seq.store(seq, Ordering::Release);
+    }
+
+    /// [`cut`](Self::cut), and while the lock is still held, hand `observe` the cut's
+    /// sequence and every resident entry that depended on the thread — the kernel's
+    /// cut listeners (`crate::listen`). Observed under the lock so two concurrent cuts
+    /// reach every listener in sequence order; `observe` must therefore take no lock
+    /// the cache's own callers might hold, and must not call back into the kernel.
+    ///
+    /// Costs one pass over the resident entries' edges, which is why the kernel calls
+    /// it only when some listener's spec matches the thread.
+    pub(crate) fn cut_with<R>(
+        &self,
+        thread: Thread,
+        observe: impl FnOnce(u64, &[Dependent<'_>]) -> R,
+    ) -> R {
+        let mut state = self.state.lock().expect("cache lock");
+        let seq = state.record_cut(thread.clone());
+        self.cut_seq.store(seq, Ordering::Release);
+        // Judged against the generation BEFORE this cut: `record_cut` just moved it.
+        let dependents = state.dependents_before(&thread);
+        observe(seq, &dependents)
     }
 
     /// The number of entries currently held.
@@ -721,7 +734,60 @@ impl ReprCache {
     }
 }
 
+/// One resident entry that depended on a thread being cut, as the kernel's cut
+/// listeners see it (`crate::listen`). Borrowed from the entry: it lives only as
+/// long as the cut holds the cache lock, so building it allocates nothing.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Dependent<'a> {
+    /// The IRI the entry was resolved from.
+    pub(crate) target: &'a str,
+    /// The fingerprint of the capability it was computed under — the partition a
+    /// listener's authority is matched against.
+    pub(crate) capability: u64,
+    /// Whether THIS cut invalidated it: its edge on the thread was pinned at the
+    /// generation this cut moved, so it was stored since the thread's previous cut.
+    /// An entry stored before that previous cut is still a dependent (its reader was
+    /// handed the thread's name) but this cut changed nothing for it. Judged on the
+    /// cut thread's edge alone, deliberately: checking every other edge would cost a
+    /// generation lookup per edge per dependent under the lock, and an entry some
+    /// OTHER thread already made stale is listed as invalidated here, which only
+    /// ever over-reports something that needs recomputing anyway.
+    pub(crate) live: bool,
+}
+
 impl CacheState {
+    /// Bump `thread`'s generation and log the cut; returns its sequence.
+    fn record_cut(&mut self, thread: Thread) -> u64 {
+        *self.generations.entry(thread.clone()).or_insert(0) += 1;
+        self.seq += 1;
+        let seq = self.seq;
+        if self.cuts.len() >= CUT_LOG {
+            if let Some((_, forgotten)) = self.cuts.pop_front() {
+                self.horizon = forgotten;
+            }
+        }
+        self.cuts.push_back((thread, seq));
+        seq
+    }
+
+    /// Every resident entry with an edge on `thread`, judged against the generation
+    /// the thread held before the cut just recorded (`record_cut` bumped it by one): one
+    /// pass over the edges, one generation lookup in all, no allocation per entry.
+    fn dependents_before(&self, thread: &Thread) -> Vec<Dependent<'_>> {
+        let current = self.generation_of(thread).saturating_sub(1);
+        self.entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                let (_, pinned) = entry.edges.iter().find(|(t, _)| t == thread)?;
+                Some(Dependent {
+                    target: &entry.target,
+                    capability: key.capability,
+                    live: *pinned == current,
+                })
+            })
+            .collect()
+    }
+
     fn generation_of(&self, thread: &Thread) -> u64 {
         self.generations.get(thread).copied().unwrap_or(0)
     }

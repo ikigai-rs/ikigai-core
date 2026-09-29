@@ -715,6 +715,34 @@ request; a read with arguments is a different entry and is not addressable there
     pin: `cache::tests::the_rows_say_which_entries_a_cut_has_made_stale_without_evicting_them` (crates/ikigai-core/src/cache.rs)
     doctest: `EntryState`
 
+**Proposition R4.8 (a cut can be heard, and the kernel still issues nothing).** NetKernel's
+golden-thread listeners and recalculating golden thread (News 7.5, 7.6): a host registers a
+`ListenSpec` (threads by exact name or prefix) with `Kernel::listen`, and every later cut of a
+matching thread T appends a `CutEvent` (T, its place in R4.2's total order, and the targets of the
+resident entries whose edge on T was pinned at the generation the cut moved) to that listener's
+own bounded queue, which the host drains or awaits on a `Waker`. The kernel never spawns, awaits
+or issues from inside a cut; the event is queued under the cache lock, so every listener hears
+concurrent cuts in sequence order, and the waiting hosts are woken after every lock is released.
+Registering requires `urn:cap:kernel:listen`. Root hears every matching cut; any other authority
+hears T only when an entry computed under its own capability fingerprint depends on T — a name its
+reads were already handed on their representations' threads — and its events name only those
+entries, so a listener learns no name it could not read. A full queue does not queue the cut and
+counts it in `CutBatch::dropped` (the history is then a prefix, and the host resynchronizes); an
+event names at most 64 targets and counts the rest. Nothing is silently truncated. What the host
+does with an event is its own: re-issue an invalidated read under the registrant's capability so
+the next reader is served from the cache, or push a notice to a page. What it cannot learn: a
+result the kernel never stored (its derivation from T is not recorded anywhere), and a cut that
+began before `listen` returned.
+
+    pin: `listen::a_sink_is_heard_as_exactly_the_threads_it_cut` (crates/ikigai-core/tests/listen.rs)
+    pin: `listen::the_host_recomputes_before_the_first_reader` (crates/ikigai-core/tests/listen.rs)
+    pin: `listen::a_listener_learns_only_the_names_its_own_reads_rest_on` (crates/ikigai-core/tests/listen.rs)
+    pin: `listen::a_full_queue_counts_what_it_dropped_and_keeps_the_prefix` (crates/ikigai-core/tests/listen.rs)
+    pin: `listen::an_event_names_a_bounded_number_of_targets_and_counts_the_rest` (crates/ikigai-core/tests/listen.rs)
+    pin: `listen::a_waiting_host_is_woken_by_the_cut` (crates/ikigai-core/tests/listen.rs)
+    pin: `listen::the_same_cut_reaches_every_listener_in_one_order` (crates/ikigai-core/tests/listen.rs)
+    doctest: `ListenSpec`
+
 **Across processes.** Generations are per-process counters; another instance's 6 is not this
 one's 6, so ν does not transfer and no cache import exists — the honest first tranche would
 admit only thread-free `Never` entries (`docs/design/cache-ejection.md` §1). Not built.
@@ -1519,10 +1547,14 @@ all three rungs of `now()` be set).
 | 341–362 ns; 1117–1144 ns | the same two reads with the endpoints inside `Mount(Level(…))` | 2026-09-28 | same run. A hit through a level: +~30 ns (its name cloned into `answered_by`, one frame pushed). A composite that RUNS inside one: +~170 ns per invocation — `descend` builds the resolved scope (one `Arc`, one BLAKE3 over the level names) and the sub-request walks the level frame before the root. Memoizing the resolved scope per (chain, path) would take most of it back; not built. Not committed. |
 | 306–314 ns vs 307–328 ns | cache-hit read with eight host seals vs none ([#563](http://localhost:1060/l/default/item/563), PR 2) | 2026-09-28 | same bench, interleaved, load 3.3–3.6. Within noise: the seal table is a short scan of prefixes, taken only when a host or level sealed something; a kernel with only core's seal reads one `bool`. Not committed. |
 | 439–466 ns → 455–484 ns; ~1.6 µs → ~1.6 µs; ~310 ns → ~310 ns | an uncacheable read, an uncacheable composite (one cached and one volatile sub-request), and a cache-hit read, before / after R4.6 | 2026-09-29 | scratch crate over the public API, three endpoints, warmed, 200 000 / 100 000 / 500 000 issues × 5 rounds, release, `futures::block_on`, M-series laptop; main (an export of `9243f11`) and branch interleaved twice. The uncached path pays ~+15–25 ns (one lock on the log, one hash lookup, a structural compare); the composite is within noise; the hit path is untouched (nothing added there). Not committed. |
+| ~307 ns → ~307 ns; ~1.62 µs → ~1.62 µs | a composite cache hit, and a cut plus a recompute of a composite over one cached sub-request, before / after the invalidation arc (R4.5's carried dependencies, R4.7, R4.8) | 2026-09-29 | scratch crate over the public API, release, `futures::block_on`, best of 7 rounds of 200 000 / 50 000, M-series laptop, load 3.2–4.4; base an export of `9e834a5`, head the R4.8 branch, interleaved base / head / base (306.9–318.0 vs 304.6–316.9 ns; 1615.7–1687.5 vs 1613.3–1677.9 ns). Within noise: the success path of a sub-request gains an empty `Dependencies` (no allocation). Not committed. |
+| ~46–49 ns → ~48–51 ns; +2–5 ns | `Kernel::cut` with no listener, and with a listener whose spec does not match, at 0 and 4096 resident entries | 2026-09-29 | same run. With none registered a cut reads one atomic; with a non-matching one it takes a read lock and runs one prefix compare per listener, and never scans the cache. Not committed. |
+| ~16–18 µs; ~28 µs; ~100–108 µs | a MATCHED cut at 4096 resident entries: one dependent; 4096 dependents already stale; 4096 dependents it invalidates (all named-and-counted) | 2026-09-29 | same run (0 entries: ~130–210 ns). The cost is one pass over every resident entry's edges under the cache lock — no reverse index exists — plus, when many are invalidated, choosing the 64 named ones. A first cut cloned every dependent's target and sorted them all: 139 µs and 499 µs for the last two; borrowing the targets and keeping a bounded smallest-set took them to the figures here. Paid only when a listener's spec matches the thread. Not committed. |
 | 64 | `DEFAULT_MAX_DEPTH`, the nesting budget | — | `kernel.rs`, a constant; `Kernel::with_max_depth` overrides it. NetKernel: 40 shipped, 32 default, for a counter that also pays for resolution hops. |
 | 8 | `DEFAULT_MAX_HOPS`, the alias chain cap | — | `alias.rs`, a constant. |
 | 4096 | `CUT_LOG`, cuts the race check remembers | — | `cache.rs`, a constant. |
 | 4096 entries / 64 MiB | the default LRU bound | — | `cache.rs`, `CachePolicy` default. |
+| 256 events; 64 targets | `LISTEN_CAPACITY`, a cut listener's default queue; `INVALIDATED_NAMED`, targets one event names | — | `listen.rs`, constants; `ListenSpec::capacity` overrides the first. |
 
 Brian's instruction on the first two rows (2026-09-25): revisit once scope, limiter, depth
 bound, lossless flag and topology are in; re-measure, do not inherit. **All five are in as of

@@ -40,6 +40,12 @@ assert_eq!(rep.bytes, b"IKIGAI");
 - **Async kernel** — `Kernel::issue` resolves, invokes, and caches. Async but
   *executor-agnostic* (no runtime dependency), so the same core runs natively, in the
   browser via WebAssembly, or embedded.
+- **Golden threads you can watch** — a write cuts the threads its dependents hang
+  from; `urn:kernel:cache` marks which cached entries a cut has made stale,
+  `urn:kernel:cached` asks whether the asker's own read would hit, and
+  `Kernel::listen` hands a host a bounded queue of cuts (the thread and what it
+  invalidated), so it can recompute before the first reader or push a change to a
+  page. The kernel reports; it never issues a request from inside a cut.
 - **Capabilities & self-description** — an unforgeable capability handle, and a `Meta`
   verb routed to a pluggable `MetaRenderer` (one resource, many representations).
 - **Formal companion** — [`docs/formalism/README.md`](https://github.com/ikigai-rs/ikigai-core/blob/main/docs/formalism/README.md) maps the kernel onto Peter Rodgers' *Peter's Hotel* formalism, every theorem pinned to the test that holds its precondition.
