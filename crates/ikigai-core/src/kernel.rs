@@ -54,7 +54,7 @@ use crate::arg::ArgRef;
 use crate::cache::{CacheKey, CachePolicy, ReprCache};
 use crate::capability::Capability;
 use crate::describe::Description;
-use crate::endpoint::{Endpoint, Invocation, Issuer, Spawner};
+use crate::endpoint::{Dependencies, Endpoint, Invocation, Issuer, Spawner};
 use crate::error::{Error, Result};
 use crate::iri::Iri;
 use crate::meta::MetaRenderer;
@@ -1251,6 +1251,7 @@ impl Kernel {
                 trace.clone(),
                 scope.clone(),
                 depth + 1,
+                None,
             ))
             .await?;
         }
@@ -1793,8 +1794,17 @@ impl Kernel {
         // Top-level entry: no parent span (this is a trace root if one is recording
         // via the globally-installed tracer).
         let trace = self.global_scope();
-        self.issue_inner(request, capability, None, None, trace, Scope::empty(), 0)
-            .await
+        self.issue_inner(
+            request,
+            capability,
+            None,
+            None,
+            trace,
+            Scope::empty(),
+            0,
+            None,
+        )
+        .await
     }
 
     /// Issue a request in a **resolution chain** other than the plain root: the
@@ -1871,7 +1881,7 @@ impl Kernel {
         scope: Scope,
     ) -> Result<Representation> {
         let trace = self.global_scope();
-        self.issue_inner(request, capability, None, None, trace, scope, 0)
+        self.issue_inner(request, capability, None, None, trace, scope, 0, None)
             .await
     }
 
@@ -1904,6 +1914,7 @@ impl Kernel {
             Some(TraceScope::new(tracer)),
             Scope::empty(),
             0,
+            None,
         )
         .await
     }
@@ -1938,8 +1949,17 @@ impl Kernel {
         scope: Scope,
     ) -> Result<Representation> {
         let trace = self.global_scope();
-        self.issue_inner(request, capability, None, Some(incoming), trace, scope, 0)
-            .await
+        self.issue_inner(
+            request,
+            capability,
+            None,
+            Some(incoming),
+            trace,
+            scope,
+            0,
+            None,
+        )
+        .await
     }
 
     /// The resolution path, carrying the `parent` span of the invocation that issued
@@ -1960,6 +1980,7 @@ impl Kernel {
         trace: Option<TraceScope>,
         scope: Scope,
         depth: u32,
+        failed: Option<&mut Dependencies>,
     ) -> Result<Representation> {
         // ★ THE CUT SNAPSHOT, BEFORE ANYTHING ELSE. Everything this request is
         // about to observe is state as of *now*; a cut that lands after this point
@@ -2349,7 +2370,21 @@ impl Kernel {
                     .with_trace(trace.clone())
                     .with_scope(scope.descend(levels.clone()))
                     .with_depth(depth);
-            let representation = resolved.endpoint.invoke(&invocation).await?;
+            let representation = match resolved.endpoint.invoke(&invocation).await {
+                Ok(representation) => representation,
+                // ★ A FAILURE CARRIES ITS DEPENDENCIES (ledger #611). What this
+                // invocation read before it failed is handed back beside the error, so
+                // an issuing invocation that catches a `NotFound` and caches a fallback
+                // hangs it from those threads too — not only from this name, which no
+                // write cuts when the name is a composite. Only when asked: a host's own
+                // request has no invocation to fold them into.
+                Err(error) => {
+                    if let Some(failed) = failed {
+                        *failed = invocation.failure_dependencies(&request.target);
+                    }
+                    return Err(error);
+                }
+            };
             let declared = representation.expiry;
             // Effective expiry propagates from the dependencies: the result is no
             // fresher than its most volatile part. The endpoint's own expiry is met
@@ -3609,8 +3644,17 @@ impl Issuer for Kernel {
         // merits — no pipe upstream here. No depth threaded either: an external
         // wrapper on this seam restarts the count (see `Issuer::issue_at_depth`).
         let trace = self.global_scope();
-        self.issue_inner(request, capability, parent, None, trace, Scope::empty(), 0)
-            .await
+        self.issue_inner(
+            request,
+            capability,
+            parent,
+            None,
+            trace,
+            Scope::empty(),
+            0,
+            None,
+        )
+        .await
     }
 
     async fn issue_scoped(
@@ -3626,8 +3670,17 @@ impl Issuer for Kernel {
         // concurrent traced resolutions never bleed into each other's collectors.
         // (Compatibility path — no chain and no depth threaded; `issue_at_depth`
         // is the full seam and the one `Invocation` calls.)
-        self.issue_inner(request, capability, parent, None, trace, Scope::empty(), 0)
-            .await
+        self.issue_inner(
+            request,
+            capability,
+            parent,
+            None,
+            trace,
+            Scope::empty(),
+            0,
+            None,
+        )
+        .await
     }
 
     async fn issue_in_scope(
@@ -3643,7 +3696,7 @@ impl Issuer for Kernel {
         // entered it, an injected corridor is visible all the way down. Depth 0:
         // a caller on this seam did not say how deep it is, and the count restarts
         // here rather than guessing (see `Issuer::issue_at_depth`).
-        self.issue_inner(request, capability, parent, None, trace, scope, 0)
+        self.issue_inner(request, capability, parent, None, trace, scope, 0, None)
             .await
     }
 
@@ -3656,11 +3709,40 @@ impl Issuer for Kernel {
         scope: Scope,
         depth: u32,
     ) -> Result<Representation> {
-        // The full re-entrant seam, and the one `Invocation` calls: everything
-        // `issue_in_scope` carries plus the nesting depth the budget is checked
-        // against in `issue_inner`.
-        self.issue_inner(request, capability, parent, None, trace, scope, depth)
+        // Everything `issue_in_scope` carries plus the nesting depth the budget is
+        // checked against in `issue_inner`. (`issue_recording` below is the seam
+        // `Invocation` calls; this one is for an issuer that wraps the kernel.)
+        self.issue_inner(request, capability, parent, None, trace, scope, depth, None)
             .await
+    }
+
+    async fn issue_recording(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<TraceScope>,
+        scope: Scope,
+        depth: u32,
+    ) -> (Result<Representation>, Dependencies) {
+        // The full re-entrant seam, and the one `Invocation` calls: `issue_at_depth`
+        // plus what a FAILED resolution depended on, so the issuing invocation can
+        // hang a fallback from it (ledger #611). Empty on success and on a failure
+        // that never reached an endpoint.
+        let mut failed = Dependencies::none();
+        let result = self
+            .issue_inner(
+                request,
+                capability,
+                parent,
+                None,
+                trace,
+                scope,
+                depth,
+                Some(&mut failed),
+            )
+            .await;
+        (result, failed)
     }
 
     fn now(&self) -> Option<Time> {
@@ -7294,6 +7376,220 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
 
+    // --- ledger #611: a failed sub-request carries its own dependencies ---------
+
+    /// The tutorial spreadsheet's `formula:{ref}`, reduced: it reads the atom
+    /// `urn:data:optional` and propagates the atom's `NotFound` with `?`, and answers
+    /// a `NotFound` of its OWN when what the atom holds is not a formula (does not
+    /// start with `=`). Either way the `NotFound` a caller sees names the COMPOSITE,
+    /// while what would make it go away is a write to the atom.
+    fn formula_over_the_cell() -> crate::endpoint::AsyncFnEndpoint {
+        crate::endpoint::AsyncFnEndpoint::new("formula", |inv: &Invocation<'_>| {
+            Box::pin(async move {
+                let typed = inv.source(&iri("urn:data:optional")).await?;
+                if !typed.bytes.starts_with(b"=") {
+                    return Err(Error::NotFound("the cell holds no formula".to_string()));
+                }
+                Ok(Representation::new(ReprType::new("text/plain"), typed.bytes).cacheable())
+            })
+        })
+    }
+
+    /// The spreadsheet's shape: an atom, a composite over it, and a fallback over the
+    /// composite's `NotFound` — the fallback counting its runs.
+    fn sheet_kernel(runs: &Arc<AtomicU32>) -> Kernel {
+        Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:data:optional"),
+                    MaybeCell {
+                        value: Mutex::new(None),
+                    },
+                )
+                .bind(Exact::new("urn:test:formula"), formula_over_the_cell())
+                .bind(
+                    Exact::new("urn:test:fallback"),
+                    fallback_over(
+                        "urn:test:formula",
+                        |e| matches!(e, Error::NotFound(_)),
+                        Arc::clone(runs),
+                    ),
+                ),
+        ))
+    }
+
+    #[test]
+    fn a_fallback_over_a_composites_propagated_not_found_hangs_from_the_atom() {
+        // `formula` is NotFound BECAUSE the atom is: the error it returns is the
+        // atom's, propagated. Before ledger #611 the fallback hung from
+        // `urn:test:formula` alone — a thread no write cuts — and a Sink on the atom
+        // left it cached and wrong.
+        let runs = Arc::new(AtomicU32::new(0));
+        let kernel = sheet_kernel(&runs);
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        assert_eq!(
+            block_on(kernel.issue(req(), &cap)).unwrap().bytes,
+            b"fallback"
+        );
+        assert!(kernel.is_cached(&req(), &cap), "the fallback is cached");
+        let threads = block_on(kernel.issue(req(), &cap))
+            .unwrap()
+            .threads()
+            .clone();
+        assert!(
+            threads.contains(&Thread::from("urn:data:optional")),
+            "the fallback carries the atom's thread: {threads:?}"
+        );
+
+        block_on(kernel.issue(sink("urn:data:optional", b"=1+1"), &cap)).unwrap();
+        assert!(
+            !kernel.is_cached(&req(), &cap),
+            "writing the atom cut the fallback over the composite"
+        );
+        assert_eq!(block_on(kernel.issue(req(), &cap)).unwrap().bytes, b"=1+1");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_fallback_over_a_composites_own_not_found_hangs_from_what_it_read() {
+        // The other half: the atom answers, and `formula` refuses what it holds with
+        // a `NotFound` of its OWN. The atom's thread is on a SUCCESS this time — one
+        // the failed invocation recorded and, before ledger #611, dropped at `?`.
+        let runs = Arc::new(AtomicU32::new(0));
+        let kernel = sheet_kernel(&runs);
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        block_on(kernel.issue(sink("urn:data:optional", b"5"), &cap)).unwrap();
+        assert_eq!(
+            block_on(kernel.issue(req(), &cap)).unwrap().bytes,
+            b"fallback"
+        );
+        assert!(kernel.is_cached(&req(), &cap));
+
+        block_on(kernel.issue(sink("urn:data:optional", b"=A1*2"), &cap)).unwrap();
+        assert!(
+            !kernel.is_cached(&req(), &cap),
+            "typing a formula into the cell cut the fallback"
+        );
+        assert_eq!(block_on(kernel.issue(req(), &cap)).unwrap().bytes, b"=A1*2");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn an_atoms_own_not_found_is_still_a_dependency_under_its_name() {
+        // 0.1.73's rule (R4.5) is unchanged by ledger #611: a fallback over an
+        // ATOM's own NotFound hangs from the atom's name, and the failure adds no
+        // spurious edge beyond it — an atom reads nothing, so it carries only itself.
+        let runs = Arc::new(AtomicU32::new(0));
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:data:optional"),
+                    MaybeCell {
+                        value: Mutex::new(None),
+                    },
+                )
+                .bind(
+                    Exact::new("urn:test:fallback"),
+                    fallback_over(
+                        "urn:data:optional",
+                        |e| matches!(e, Error::NotFound(_)),
+                        Arc::clone(&runs),
+                    ),
+                ),
+        ));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        let fallback = block_on(kernel.issue(req(), &cap)).unwrap();
+        let threads: Vec<&str> = fallback.threads().iter().map(Thread::as_str).collect();
+        assert_eq!(threads, ["urn:data:optional", "urn:test:fallback"]);
+        block_on(kernel.issue(sink("urn:data:optional", b"here"), &cap)).unwrap();
+        assert!(!kernel.is_cached(&req(), &cap));
+    }
+
+    #[test]
+    fn a_failure_carries_the_canonical_name_under_an_alias() {
+        // R4.5's stated residue, closed: the fallback asks for the LOGICAL name, the
+        // write-cut fires on the canonical one. The failed resolution knows the
+        // canonical name and now hands it back, so the Sink reaches the fallback.
+        let runs = Arc::new(AtomicU32::new(0));
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:example:data:optional"),
+                    MaybeCell {
+                        value: Mutex::new(None),
+                    },
+                )
+                .bind(
+                    Exact::new("urn:test:fallback"),
+                    fallback_over(
+                        "urn:data:optional",
+                        |e| matches!(e, Error::NotFound(_)),
+                        Arc::clone(&runs),
+                    ),
+                ),
+        ))
+        .with_aliases(Arc::new(
+            crate::AliasTable::new().prefix("urn:data:", "urn:example:data:"),
+        ));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert!(kernel.is_cached(&req(), &cap));
+        block_on(kernel.issue(sink("urn:example:data:optional", b"here"), &cap)).unwrap();
+        assert!(
+            !kernel.is_cached(&req(), &cap),
+            "a write through the canonical name cuts a fallback that asked for the logical one"
+        );
+    }
+
+    #[test]
+    fn a_failure_built_on_a_volatile_read_makes_the_fallback_volatile() {
+        // A failure carries its expiry as well as its threads: the composite read
+        // something volatile before it failed, so what the fallback rests on can
+        // change with no cut at all, and the fallback must not be stored.
+        let runs = Arc::new(AtomicU32::new(0));
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:data:volatile"), leaf_volatile())
+                .bind(
+                    Exact::new("urn:test:composite"),
+                    crate::endpoint::AsyncFnEndpoint::new("composite", |inv: &Invocation<'_>| {
+                        Box::pin(async move {
+                            inv.source(&iri("urn:data:volatile")).await?;
+                            Err(Error::NotFound("nothing today".to_string()))
+                        })
+                    }),
+                )
+                .bind(
+                    Exact::new("urn:test:fallback"),
+                    fallback_over(
+                        "urn:test:composite",
+                        |e| matches!(e, Error::NotFound(_)),
+                        Arc::clone(&runs),
+                    ),
+                ),
+        ));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        block_on(kernel.issue(req(), &cap)).unwrap();
+        assert!(!kernel.is_cached(&req(), &cap));
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "recomputed on every read");
+    }
+
+    /// A leaf that answers `Always` — never cached, and makes whatever reads it volatile.
+    fn leaf_volatile() -> FnEndpoint {
+        FnEndpoint::new("volatile", |_inv: &Invocation<'_>| {
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                b"now".to_vec(),
+            ))
+        })
+    }
+
     #[test]
     fn a_composite_built_on_a_denial_is_not_cached() {
         // A grant change has no thread, so a result built on a refusal must not be
@@ -7532,6 +7828,55 @@ mod tests {
             "a Denied branch forbids caching"
         );
         assert!(!kernel.is_cached(&over_denied(), &narrow));
+    }
+
+    #[test]
+    fn a_fan_out_branch_over_a_composites_not_found_hangs_from_the_atom() {
+        // Ledger #611 on the spawned path: a branch's failure carries what it read
+        // across the spawn, exactly as a sequential `issue` does.
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:data:a"), leaf("a"))
+                .bind(
+                    Exact::new("urn:data:optional"),
+                    MaybeCell {
+                        value: Mutex::new(None),
+                    },
+                )
+                .bind(Exact::new("urn:test:formula"), formula_over_the_cell())
+                .bind(
+                    Exact::new("urn:test:gather"),
+                    crate::endpoint::AsyncFnEndpoint::new("gather", |inv: &Invocation<'_>| {
+                        Box::pin(async move {
+                            let kept: Vec<u8> = inv
+                                .fan_out(vec![
+                                    Request::new(Verb::Source, iri("urn:data:a")),
+                                    Request::new(Verb::Source, iri("urn:test:formula")),
+                                ])
+                                .await
+                                .into_iter()
+                                .filter_map(|r| r.ok())
+                                .flat_map(|r| r.bytes)
+                                .collect();
+                            Ok(Representation::new(ReprType::new("text/plain"), kept).cacheable())
+                        })
+                    }),
+                ),
+        ))
+        .into_scheduled(Arc::new(InlineSpawner));
+        let cap = Capability::root();
+        let gather = || Request::new(Verb::Source, iri("urn:test:gather"));
+        assert_eq!(block_on(kernel.issue(gather(), &cap)).unwrap().bytes, b"a");
+        assert!(kernel.is_cached(&gather(), &cap));
+        block_on(kernel.issue(sink("urn:data:optional", b"=b"), &cap)).unwrap();
+        assert!(
+            !kernel.is_cached(&gather(), &cap),
+            "the spawned branch carried the atom's thread home"
+        );
+        assert_eq!(
+            block_on(kernel.issue(gather(), &cap)).unwrap().bytes,
+            b"a=b"
+        );
     }
 
     // --- the nesting budget (#513) ---------------------------------------------

@@ -124,6 +124,40 @@ pub trait Issuer: Send + Sync {
             .await
     }
 
+    /// Like [`issue_at_depth`](Issuer::issue_at_depth), additionally returning the
+    /// [`Dependencies`] the sub-request's own resolution recorded **when it failed**.
+    /// This is the seam [`Invocation`] calls.
+    ///
+    /// A success needs no second channel: its expiry and golden threads travel on the
+    /// [`Representation`]. A failure has nowhere to put them, and before this seam
+    /// they were lost at the `?` that returned the error. That mattered for exactly
+    /// one shape: a composite whose `NotFound` came from something IT read. A caller
+    /// that caught that `NotFound` and cached a fallback hung it from the composite's
+    /// name alone, a thread nobody cuts, so a later write to the atom underneath left
+    /// the fallback cached and wrong (ledger #611). With the failure's own
+    /// dependencies carried back, the fallback hangs from the atom too.
+    ///
+    /// **The default carries nothing** and delegates to `issue_at_depth`, so every
+    /// issuer written before this method existed behaves exactly as it did: the
+    /// failure is recorded under the requested name only. The kernel overrides it. An
+    /// issuer that forwards over a wire (a module host bridge, a remote peer) keeps
+    /// the default until its protocol has a field for the set; the residue is the old
+    /// rule, which is the conservative-enough one it always was.
+    async fn issue_recording(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<crate::TraceScope>,
+        scope: Scope,
+        depth: u32,
+    ) -> (Result<Representation>, Dependencies) {
+        let result = self
+            .issue_at_depth(request, capability, parent, trace, scope, depth)
+            .await;
+        (result, Dependencies::none())
+    }
+
     /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s produced by *another*
     /// kernel — a remote one reached through a mounted `RemoteSpace` — into this
     /// issuer's trace, re-based under `parent` (the span of the invocation that
@@ -377,6 +411,52 @@ struct Recorded {
     dep_threads: Mutex<BTreeSet<Thread>>,
 }
 
+/// What a resolution depended on before it FAILED: the meet of its sub-requests'
+/// expiries and the union of their golden threads, plus the thread named after its
+/// own canonical target — the set a success carries on its [`Representation`], for
+/// the case that has no representation to carry it.
+///
+/// Returned beside the error by [`Issuer::issue_recording`], and folded by the
+/// issuing [`Invocation`] into its own dependency record, so a composite that
+/// catches a failed sub-request's `NotFound` and returns a fallback hangs from what
+/// the failure depended on as well as from the name it asked for (ledger #611).
+///
+/// ```
+/// use ikigai_core::{Dependencies, Expiry};
+///
+/// // What an issuer that cannot say reports: no edges, no limit.
+/// let none = Dependencies::none();
+/// assert!(none.threads.is_empty());
+/// assert_eq!(none.expiry, Expiry::Never);
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Dependencies {
+    /// The meet of the failed resolution's dependency expiries — `Never` when it
+    /// read nothing, `Always` when something it read was volatile or refused.
+    pub expiry: Expiry,
+    /// The golden threads it hung from before it failed.
+    pub threads: BTreeSet<Thread>,
+}
+
+impl Dependencies {
+    /// No dependencies: no edges and no limit ([`Expiry::Never`], the meet's
+    /// identity). What an issuer that cannot say reports.
+    pub fn none() -> Self {
+        Dependencies {
+            expiry: Expiry::Never,
+            threads: BTreeSet::new(),
+        }
+    }
+}
+
+impl Default for Dependencies {
+    /// [`Dependencies::none`] — not `Expiry::default()`, which is `Always`.
+    fn default() -> Self {
+        Dependencies::none()
+    }
+}
+
 /// What the sub-requests of one invocation did to its cacheability: the meet of
 /// their expiries, and — for the ones that made it `Always` — their names, so the
 /// kernel can say WHY a composite was not cached ([`crate::UNCACHED_NOTE`]). One
@@ -418,7 +498,19 @@ impl Recorded {
     ///   reports for `Unresolved` — canonical, after every rewrite the kernel applied
     ///   — and the name that was *requested* for `NotFound`, which carries no IRI of
     ///   its own; under an alias those can differ, and a `Sink` through the alias
-    ///   cuts the canonical one. Stated so it is not mistaken for closed.
+    ///   cuts the canonical one. The kernel closes that gap from the other side: a
+    ///   `NotFound` its own resolution returned carries the canonical name in
+    ///   `carried` (below).
+    ///
+    ///   **And the failure's own dependencies** (`carried`, from
+    ///   [`Issuer::issue_recording`]): the threads the failed resolution hung from
+    ///   before it failed, and the meet of their expiries. When the `NotFound` came
+    ///   from a COMPOSITE — `formula:{ref}` is `NotFound` because `input:{ref}` is, or
+    ///   because what `input:{ref}` holds is not a formula — the thread on the
+    ///   requested name alone is one no write cuts, and a fallback over it went
+    ///   silently stale when the atom underneath was written (ledger #611). An
+    ///   `Unresolved` the kernel returned itself never reached an endpoint, so it
+    ///   carries nothing; one an endpoint propagated carries what that endpoint read.
     /// - [`Error::Denied`]: [`Expiry::Always`]. A grant change has no thread, so a
     ///   result built on a refusal must not be cached at all.
     /// - Every other error (`Endpoint`, `Timeout`, `Unavailable`, `DepthExceeded`,
@@ -431,7 +523,7 @@ impl Recorded {
     ///   consulted, not the name that was requested (a move conflicts on the board's
     ///   cells, not on the move's own IRI), so a thread on `requested` is one no write
     ///   would ever cut.
-    fn record(&self, requested: &Iri, result: &Result<Representation>) {
+    fn record(&self, requested: &Iri, result: &Result<Representation>, carried: Dependencies) {
         match result {
             Ok(representation) => {
                 let mut deps = self.deps.lock().expect("deps lock");
@@ -448,16 +540,12 @@ impl Recorded {
                     .extend(representation.threads().iter().cloned());
             }
             Err(Error::Unresolved(canonical)) => {
-                self.dep_threads
-                    .lock()
-                    .expect("dep threads lock")
-                    .insert(Thread::from(canonical.as_str()));
+                let name = Thread::from(canonical.as_str());
+                self.record_miss(requested, name, carried);
             }
             Err(Error::NotFound(_)) => {
-                self.dep_threads
-                    .lock()
-                    .expect("dep threads lock")
-                    .insert(Thread::from(requested.as_str()));
+                let name = Thread::from(requested.as_str());
+                self.record_miss(requested, name, carried);
             }
             Err(error) => {
                 let kind = match error {
@@ -469,6 +557,22 @@ impl Recorded {
                 deps.volatile.note(kind, requested);
             }
         }
+    }
+
+    /// A miss (`Unresolved` / `NotFound`): an edge on the missing `name`, and
+    /// whatever the failed resolution itself depended on (`carried`) — its threads,
+    /// and its expiry met into this invocation's, as a success's would be.
+    fn record_miss(&self, requested: &Iri, name: Thread, carried: Dependencies) {
+        if carried.expiry != Expiry::Never {
+            let mut deps = self.deps.lock().expect("deps lock");
+            deps.meet(carried.expiry);
+            if carried.expiry == Expiry::Always {
+                deps.volatile.note(DepKind::Volatile, requested);
+            }
+        }
+        let mut threads = self.dep_threads.lock().expect("dep threads lock");
+        threads.insert(name);
+        threads.extend(carried.threads);
     }
 }
 
@@ -1008,8 +1112,8 @@ impl<'a> Invocation<'a> {
         // is moved into the issuer. One clone per sub-request, on the path whose
         // floor is a cache hit two orders of magnitude dearer.
         let requested = request.target.clone();
-        let result = issuer
-            .issue_at_depth(
+        let (result, carried) = issuer
+            .issue_recording(
                 request,
                 capability,
                 self.span,
@@ -1020,8 +1124,9 @@ impl<'a> Invocation<'a> {
             .await;
         // Recorded on BOTH branches — a failure is a dependency too (see
         // `Recorded::record`): the endpoint may catch it and return a cacheable
-        // fallback, and that fallback must hang from something.
-        self.recorded.record(&requested, &result);
+        // fallback, and that fallback must hang from something — from the name it
+        // asked for AND from what the failure itself read (`carried`).
+        self.recorded.record(&requested, &result, carried);
         result
     }
 
@@ -1118,7 +1223,8 @@ impl<'a> Invocation<'a> {
         // Spawn each sub-request into its own slot, then join (parking) on all.
         // The slot keeps the requested target beside the result, for the failure
         // record (`NotFound` carries no IRI of its own).
-        let slots: Vec<Arc<Mutex<Option<Result<Representation>>>>> = requests
+        type Slot = Arc<Mutex<Option<(Result<Representation>, Dependencies)>>>;
+        let slots: Vec<Slot> = requests
             .iter()
             .map(|_| Arc::new(Mutex::new(None)))
             .collect();
@@ -1145,10 +1251,10 @@ impl<'a> Invocation<'a> {
                 // this invocation, exactly as a sequential `issue` would be.
                 let depth = self.depth + 1;
                 spawner.spawn(Box::pin(async move {
-                    let result = issuer
-                        .issue_at_depth(request, &capability, parent, trace, scope, depth)
+                    let outcome = issuer
+                        .issue_recording(request, &capability, parent, trace, scope, depth)
                         .await;
-                    *slot.lock().expect("fan-out slot") = Some(result);
+                    *slot.lock().expect("fan-out slot") = Some(outcome);
                 }))
             })
             .collect();
@@ -1158,12 +1264,12 @@ impl<'a> Invocation<'a> {
         // too, by the same rules as `issue` (see `Recorded::record`).
         let mut results = Vec::with_capacity(slots.len());
         for (slot, requested) in slots.into_iter().zip(&targets) {
-            let result = slot
+            let (result, carried) = slot
                 .lock()
                 .expect("fan-out slot")
                 .take()
                 .expect("spawned fan-out task completed");
-            self.recorded.record(requested, &result);
+            self.recorded.record(requested, &result, carried);
             results.push(result);
         }
         results
@@ -1282,6 +1388,21 @@ impl<'a> Invocation<'a> {
             .lock()
             .expect("dep threads lock")
             .clone()
+    }
+
+    /// What this invocation depended on when its endpoint FAILED: everything its
+    /// sub-requests recorded, plus the thread named after `canonical` — the name the
+    /// kernel's write-cut fires on, which a caller holding only the requested (maybe
+    /// logical) name could not supply. Drained rather than cloned: the invocation is
+    /// over, and this is the last read of its record.
+    pub(crate) fn failure_dependencies(&self, canonical: &Iri) -> Dependencies {
+        let mut threads =
+            std::mem::take(&mut *self.recorded.dep_threads.lock().expect("dep threads lock"));
+        threads.insert(Thread::from(canonical.as_str()));
+        Dependencies {
+            expiry: self.dependency_expiry(),
+            threads,
+        }
     }
 }
 
