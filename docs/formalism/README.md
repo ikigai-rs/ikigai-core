@@ -635,10 +635,21 @@ these a thread looks right for, since a change of state is what clears it; it do
 because the state that refused is whatever the endpoint consulted, not the name that was
 requested, and a thread on the requested name is one no write would cut. `fan_out` applies the same rule per branch. The rule is conservative in the direction that
 is never wrong: a grant change has no thread, and the kernel cannot name what would make an
-`Endpoint` error go away, so it declines to cache rather than guess. The residue, stated: under
-an alias a `NotFound` records the *logical* name while the write-cut fires on the canonical one
-— a typed `NotFound` carrying its target would close it, and is a breaking change to a public
-variant.
+`Endpoint` error go away, so it declines to cache rather than guess.
+
+**A miss also carries what the failed resolution depended on** (ledger #611, after 0.1.81). The
+name alone is the right edge only when n is an ATOM. When n is a composite whose `NotFound` came
+from something it read (the tutorial spreadsheet's `formula:{ref}`, `NotFound` because
+`input:{ref}` is, or because what it holds is not a formula), the thread on n is one no write
+cuts, and a fallback over it went silently stale when the atom was written. So a failed
+resolution hands back, beside its error, the dependency set its own invocation recorded (the
+union of its sub-requests' threads and the meet of their expiries) plus the thread named after
+its canonical target (`Issuer::issue_recording`, `Dependencies`), and the issuing invocation folds
+them in exactly as it would a success's. That also closes the residue this proposition used to
+state: under an alias a `NotFound` recorded only the *logical* name while the write-cut fires on
+the canonical one; the carried set names the canonical one. What remains: an issuer that forwards
+over a wire or a module host bridge keeps `issue_recording`'s default, which carries nothing, so
+across those seams a miss is recorded under the requested name only, as before.
 
     pin: `kernel::tests::a_composite_over_an_unresolved_name_hangs_from_that_name` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::a_composite_over_a_not_found_name_recomputes_when_a_sink_creates_it` (crates/ikigai-core/src/kernel.rs)
@@ -647,6 +658,12 @@ variant.
     pin: `kernel::tests::a_composite_built_on_a_conflict_is_not_cached` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::a_conflict_is_never_stored_and_a_change_of_state_clears_it` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::fan_out_records_failed_branches_by_the_same_rules` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_fallback_over_a_composites_propagated_not_found_hangs_from_the_atom` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_fallback_over_a_composites_own_not_found_hangs_from_what_it_read` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::an_atoms_own_not_found_is_still_a_dependency_under_its_name` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_failure_carries_the_canonical_name_under_an_alias` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_failure_built_on_a_volatile_read_makes_the_fallback_volatile` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_fan_out_branch_over_a_composites_not_found_hangs_from_the_atom` (crates/ikigai-core/src/kernel.rs)
 
 *Corollary (the least cacheable dependency, again).* R4.5 is the corollary of R4.3 applied to
 failures, and it has the same shape of consequence: a composite that swallowed a denial and was
