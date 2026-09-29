@@ -1773,3 +1773,22 @@ corridor ([#581](http://localhost:1060/l/default/item/581)), `Kernel::is_cached`
 resolution ([#561](http://localhost:1060/l/default/item/561)), a scope operation that pushes a
 named corridor onto an existing scope ([#582](http://localhost:1060/l/default/item/582)) — phase
 2 — and "confine to my own level", deferred.
+
+**0.1.82** carries corridor stacking, the reasons a read was not cached, and invalidation you can
+trust and watch. **Additive:** `Scope::stack` (two injectors compose; associative, the empty chain an
+identity, R7.13, ledger [#582](http://localhost:1060/l/default/item/582)); `UNCACHED_NOTE` and
+`urn:kernel:uncached` (every read the kernel computes and does not store names why: `declared`,
+`dependency <iri>`, `denied`, `failed`, `expired`, `cut-in-flight`, `policy`, …; R4.6, NetKernel News
+2.47); `Issuer::issue_recording` and `Dependencies` (a failed sub-request carries its own dependency
+set, so a fallback over a composite's NotFound is cut when the atom changes; R4.5 amended, ledger
+[#611](http://localhost:1060/l/default/item/611)); `CacheRow.state` (`Live` / `Cut` / `Expired`) and
+`urn:kernel:cached target=` (ledger [#612](http://localhost:1060/l/default/item/612)); and
+`Kernel::listen` with `ListenSpec`, `CutListener`, `CutEvent` and `CutBatch` (cut listeners, R4.7–R4.8,
+NetKernel News 7.5 and 7.6: a bounded queue per listener, capability-filtered, never a callback).
+**What a consumer observes without code of its own changing:** every uncacheable read's trace event
+carries one more note (`uncached`); the `urn:kernel:cache` readout gains a state word per row and a
+`(N stale)` count, with the target still the first token; the cache declines to store an `At` result
+that has already expired. **Not built, on purpose:** early cutoff (ledger
+[#613](http://localhost:1060/l/default/item/613)), cut notices across a mount, and the failure
+dependency set across module and wire issuers (both need a wire decision). `vocabulary.ttl` gains no
+terms; only its `owl:versionInfo` moves.
