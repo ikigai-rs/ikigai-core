@@ -1226,6 +1226,30 @@ exactly the reach they had before levels existed (§1.1).
     doctest: `Kernel::with_sealed`
     doctest: `Level::sealing`
 
+**R7.13 (two injectors compose).** Ledger [#582](http://localhost:1060/l/default/item/582).
+`outer.stack(&inner)` is the chain built by applying to `outer` the steps that built `inner`:
+`inner`'s host corridors innermost under their own identities (an anonymous one keeps its
+number, which a rebuild could not); its clock if it has one; severed if either is; its confined
+corridors behind `outer`'s, severing and leaving `outer`'s level stack behind as `confined`
+does; `outer`'s level stack otherwise. The fingerprint is recomputed over the result (R7.2), so
+the two orders of a pair are two chains with two cache entries, and innermost wins in each. A
+stacked chain equals the one built by the same pushes at once — fingerprint, rendering, clock,
+answers, one shared entry — stacking is associative, and the empty chain is its identity on
+both sides. Authority is R7.5's, unchanged: `stack` builds what `with_named` builds, a chain
+does nothing until `Kernel::issue_in` issues in it, and an endpoint cannot issue in a chain it
+built. A corridor arriving by `stack` is a host corridor, so it stands in for a sealed name
+(R7.12) and ahead of the level stack (R7.11).
+
+    pin: `stack::two_corridors_stacked_in_either_order_innermost_wins_and_the_fingerprints_differ` (crates/ikigai-core/tests/stack.rs)
+    pin: `stack::a_chain_built_by_stacking_is_the_chain_built_by_the_same_pushes_at_once` (crates/ikigai-core/tests/stack.rs)
+    pin: `stack::stacking_the_empty_chain_on_either_side_changes_nothing` (crates/ikigai-core/tests/stack.rs)
+    pin: `stack::the_inner_clock_wins_and_an_inner_chain_without_one_keeps_the_outer_clock` (crates/ikigai-core/tests/stack.rs)
+    pin: `stack::severing_and_confinement_carry_across_as_the_replay_would_leave_them` (crates/ikigai-core/tests/stack.rs)
+    pin: `stack::stacked_corridors_stand_in_inside_a_level_and_the_level_stack_is_unaffected` (crates/ikigai-core/tests/stack.rs)
+    pin: `stack::stacking_onto_a_resolved_scope_keeps_its_level_stack` (crates/ikigai-core/tests/stack.rs)
+    pin: `stack::a_stacked_host_corridor_still_stands_in_for_a_sealed_name` (crates/ikigai-core/tests/stack.rs)
+    doctest: `Scope::stack`
+
 **The read measurement** (§10): injecting the chain into every issue cost 0–10 ns on a ~410 ns
 cache-hit read once the empty chain became a null handle; reaching the four faces and adding the
 chain clock cost nothing measurable on a ~305 ns read (0–10 ns under main).

@@ -355,6 +355,41 @@ confinement the manifold offers only what the chain resolves. Pinning the contex
 uncacheable "now" into an immutable "then" — the paper's §5.1 and the context-tourism
 direction, as one test.
 
+## Two injectors compose — `Scope::stack` (#582), after 0.1.81
+
+Found by the tutorial (`ikigai-tutorial` PR #41): the page runs each game through a resolver
+holding the game's chain, and the engine builds its own chain for an `as-of=` line. Each was
+right alone; together there was no way to put the instant inside the game. Pushing ONE
+corridor onto a non-empty chain was never the gap — `with`, `with_named` and `with_named_at`
+all push innermost onto whatever chain they are called on. The gap was a chain someone ELSE
+built: `spaces()` gives its corridors without the names they were injected under, and an
+anonymous corridor re-injected with `with` mints a new identity, so a chain rebuilt from its
+parts fingerprints differently from the original and can never be faithful.
+
+`outer.stack(&inner)` is the chain you get by applying to `outer` the steps that built
+`inner`: `inner`'s injected corridors go innermost under their own identities; its clock wins
+when it has one (it is the innermost temporal corridor); severed if either is; its confined
+corridors go behind `outer`'s and, as `confined` does, sever and drop `outer`'s level stack; a
+level stack on `inner` (only a resolved scope an endpoint saw can carry one) replaces
+`outer`'s, as the kernel's descent would. The fingerprint is recomputed over the whole result,
+so the two orders of one pair are two chains, and a stacked chain equals the one built by the
+same pushes at once — fingerprint, rendering, clock, answers and cache entry. Stacking is
+associative, and the empty chain is its identity on both sides.
+
+**Authority is unchanged (decision 3).** A `Scope` is inert until a request is issued in it,
+and issuing in one takes the `Kernel` (`issue_in` and its siblings). `stack` builds a chain
+exactly as `with_named` does, so it hands nothing to anyone `with_named` did not; an endpoint
+can call it and cannot use the result, because its invocation carries the chain it was given
+and its only chain-changing operation is `confine`.
+
+**What `ikigai-cli` needs: nothing in the engine.** The engine already hands its line's chain
+to `Resolver::issue_as_async_in` / `is_cached_in`; the resolver that HOLDS a chain is where the
+two meet, so it overrides those two to resolve in `self.scope.clone().stack(&line)`. The
+trait default still refuses a non-empty chain, which stays right for a wire resolver. What the
+engine would need only for legibility: its `trace` header names the line's chain, not the
+stacked one — a resolver hook reporting the chain it will actually resolve in would let it
+name the whole thing.
+
 ## Not built, on purpose
 
 Geographic / personal corridors, a context resource, the limiter (#511),
