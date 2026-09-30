@@ -13,7 +13,6 @@
 //! the test harness's larger one.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use futures::executor::block_on;
 use ikigai_core::{
@@ -203,6 +202,8 @@ fn build_counts_nodes_and_text_at_every_occurrence() {
 
 #[cfg(feature = "declare")]
 mod turtle {
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     const PREFIXES: &str = "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
