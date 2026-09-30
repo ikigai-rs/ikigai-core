@@ -386,6 +386,27 @@ impl std::error::Error for AliasParseError {}
 /// .unwrap();
 /// assert_eq!(table.rules().len(), 2);
 /// ```
+///
+/// **The table's order is precedence, and it is SORTED, not authored.** A name is
+/// rewritten by the FIRST rule in [`rules`](AliasTable::rules) that matches it, and
+/// every insertion re-sorts the rules most specific first: the longest `from` first;
+/// at equal length an exact rule before a prefix one; then by `from`. The sort is
+/// stable, so two rules with the same kind and `from` keep the order they were added
+/// in, and only the first can ever apply. Authored order therefore carries no
+/// meaning, and "table order" — here, in [`Topology`]'s
+/// `ik:rewrites`, and in a declaration's `{alias}:rule:{n}` numbering — always means
+/// this sorted order.
+///
+/// ```
+/// use ikigai_core::AliasTable;
+///
+/// // Authored broad first; the table puts the specific rule ahead of it anyway.
+/// let table = AliasTable::new()
+///     .prefix("urn:fn:", "urn:iki:fn:")
+///     .exact("urn:fn:toUpper", "urn:iki:fn:upper");
+/// let order: Vec<&str> = table.rules().iter().map(|rule| rule.from()).collect();
+/// assert_eq!(order, ["urn:fn:toUpper", "urn:fn:"]);
+/// ```
 #[derive(Debug)]
 pub struct AliasTable {
     rules: Vec<AliasRule>,
@@ -454,7 +475,8 @@ impl AliasTable {
         self.max_hops
     }
 
-    /// The rules, most specific first.
+    /// The rules in precedence order, most specific first — sorted on every
+    /// insertion, never as authored (see [`AliasTable`]).
     pub fn rules(&self) -> &[AliasRule] {
         &self.rules
     }
@@ -726,7 +748,9 @@ impl Space for Alias {
     }
 
     /// The table is data, so the node carries it: one `ik:RewriteRule` per rule,
-    /// in table order — the preimage a reachability query needs to see.
+    /// in table order — the SORTED precedence order (see [`AliasTable`]), the first
+    /// rule that matches a name applying — the preimage a reachability query needs
+    /// to see.
     fn topology(&self) -> Topology {
         Topology::new(SpaceKind::Alias {
             rules: self

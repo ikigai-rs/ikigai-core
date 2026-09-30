@@ -33,10 +33,12 @@ serde = { version = "1", features = ["derive"] }
 # Only under the `declare` feature: parse a declaration's Turtle
 # (`Topology::from_turtle`). The floor is the version this workspace's tests have
 # always parsed topology with. Runtime-free, and clean under WASI as they stand; in
-# the BROWSER (wasm32-unknown-unknown) oxrdf's `rand` needs getrandom's JS backend,
-# which a library can only half-enable: the feature is here (below), and the host
-# still sets `--cfg getrandom_backend="wasm_js"` in its rustflags — as every browser
-# host that uses ikigai-rdf already does (ikigai-web-demo, ikigai-linkeddata).
+# the BROWSER (wasm32-unknown-unknown) oxrdf's `rand` needs getrandom's JS backend.
+# Since getrandom 0.3.4 the `wasm_js` feature alone selects that backend, so enabling
+# it here (below) is the whole of it and a browser host needs no rustflags (verified in
+# a real browser by ikigai-diagram and the tutorial). Before 0.3.4 the host also had
+# to set `--cfg getrandom_backend="wasm_js"`, which is why the floor below is 0.3.4: a
+# lock pinned to 0.3.0–0.3.3 would still need the flag.
 oxttl = { version = "0.2.3", optional = true }
 oxrdf = { workspace = true, optional = true }
 
@@ -50,7 +52,7 @@ declare = ["dep:oxttl", "dep:oxrdf", "dep:getrandom"]
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 # Only under `declare`, only in the browser: see oxttl/oxrdf above.
-getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
+getrandom = { version = "0.3.4", features = ["wasm_js"], optional = true }
 
 [dev-dependencies]
 futures = "0.3" # block_on for async tests

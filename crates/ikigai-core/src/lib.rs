@@ -155,5 +155,5 @@ pub use space::{
     EndpointSpace, Fallback, Level, LevelPath, Limit, Mount, Resolution, Resolved, Rewrite, Scope,
     Space, SpaceEntry,
 };
-pub use topology::{Door, MatchKind, SpaceKind, Topology, TopologyRule};
+pub use topology::{Door, MatchKind, SpaceKind, Topology, TopologyRule, SKOLEM_PREFIX};
 pub use verb::Verb;

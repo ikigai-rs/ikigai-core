@@ -151,6 +151,40 @@ fn a_template_is_refused_only_where_a_request_for_the_sealed_name_can_reach_it()
 }
 
 #[test]
+fn an_exact_door_with_a_literal_brace_is_read_as_the_name_it_is_not_as_a_template() {
+    // `ik:matchKind` says how a pattern matches, and only a template's `{` opens an
+    // expansion (ledger #644). Read as text, `urn:{braced}` looked like a template
+    // whose head `urn:` could expand into `urn:sign:`, and was refused.
+    let door = |grammar: Box<dyn Fn(EndpointSpace) -> EndpointSpace>| {
+        let root = module(
+            "",
+            level("urn:example:level:mod", grammar(EndpointSpace::new())),
+        );
+        Kernel::check_sealing(root.as_ref(), ["urn:sign:"])
+    };
+    // The exact name `urn:{braced}` is one name, outside `urn:sign:`: allowed.
+    assert!(door(Box::new(
+        |space| space.bind(Exact::new("urn:{braced}"), constant("x", b"x"))
+    ))
+    .is_ok());
+    // The same text as a TEMPLATE can expand into the sealed family: refused.
+    assert!(matches!(
+        door(Box::new(|space| space.bind(
+            UriTemplate::parse("urn:{braced}").unwrap(),
+            constant("x", b"x")
+        ))),
+        Err(SealError::Binds { .. })
+    ));
+    // And an exact name inside the family is refused however it is spelled.
+    assert!(matches!(
+        door(Box::new(
+            |space| space.bind(Exact::new("urn:sign:{braced}"), constant("x", b"x"))
+        )),
+        Err(SealError::Binds { .. })
+    ));
+}
+
+#[test]
 fn a_sealed_name_requested_from_inside_a_level_skips_the_level_and_reaches_the_root() {
     // The module holds a copy the build check cannot see (an opaque space). Its own
     // sub-request for the sealed name skips its level and reaches the root's binding;

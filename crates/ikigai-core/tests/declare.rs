@@ -548,6 +548,32 @@ fn a_name_met_twice_is_one_space_and_two_arrangements_under_one_name_are_refused
         matches!(&err, DeclarationError::Malformed { node: Some(n), .. } if n == "urn:test:space:shared"),
         "{err:?}"
     );
+
+    // And never RENDERED as one (ledger #644): `to_turtle` writes a named node once,
+    // where it is first met, so the clash would read back as the first arrangement
+    // alone — a tree `build` accepts where the original is refused. The checked
+    // render refuses with build's own refusal, and so does `urn:kernel:topology`.
+    #[cfg(feature = "declare")]
+    {
+        let lossy = Topology::from_turtle(&clash.topology().to_turtle()).unwrap();
+        assert!(build(&lossy, &registry).is_ok(), "the lossy render builds");
+    }
+    assert_eq!(clash.topology().try_to_turtle().unwrap_err(), err);
+    assert_eq!(
+        twice.topology().try_to_turtle().unwrap(),
+        twice.topology().to_turtle()
+    );
+    let kernel = Kernel::new(Arc::new(clash));
+    let answer = block_on(kernel.issue(
+        Request::new(Verb::Source, iri("urn:kernel:topology")),
+        &Capability::root(),
+    ));
+    match answer {
+        Err(ikigai_core::Error::Conflict(message)) => {
+            assert!(message.contains("urn:test:space:shared"), "{message}")
+        }
+        other => panic!("rendered a clash: {:?}", other.map(|r| r.bytes)),
+    }
 }
 
 #[test]
