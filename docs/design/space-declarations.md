@@ -37,7 +37,7 @@ Every kind a declaration can state is rebuilt with its public constructor, keepi
 | a door's `ik:confinedTo` | the registered endpoint wrapped in `Confine`, named by the corridor's IRI, confined to the corridor built from the declaration |
 | `ik:Fallback` | its `ik:layers`, in order |
 | `ik:Mount` | its `ik:prefix` over its declared `ik:space` — a LOCAL mount |
-| `ik:Alias` | its rules (`ik:rewrites`) and its hop bound (`ik:maxHops`) |
+| `ik:Alias` | its rules (`ik:rewrites`) and its hop bound (`ik:maxHops`). The rules' order is precedence (the first that matches a name applies), and it is SORTED, not authored: `AliasTable` re-sorts on every insertion, longest `from` first, exact before prefix at equal length, then by `from`, stably. So `{alias}:rule:{n}` numbers a rule's place in that sorted order, and a declaration written in any other order builds, then renders its rules sorted |
 | `ik:Limit` | its `ik:family` as a prefix, an exact name, or a template, by its `ik:matchKind` |
 | `ik:Level` | its name, `ik:seals` and `ik:namespace`, over its `ik:space` |
 
@@ -54,13 +54,13 @@ that names the node's IRI exactly as the Turtle does (skolems included) and says
 |---|---|
 | `ik:OpaqueSpace` | a remote peer or a hand-written resolver: nothing to rebuild. Under an `ik:Mount` the error names the prefix and points at [#630](http://localhost:1060/l/default/item/630) (declared remote mounts) |
 | `ik:Rewrite` | its rule is a closure. The table-driven form is `ik:Alias` |
-| `ik:Chain` as the root | a declaration describes a space; the chain is per request. `urn:kernel:topology` answers a chain, so a host reading one back declares its root layer |
+| `ik:Chain` as the root | a declaration describes a space; the chain is per request. `urn:kernel:topology` answers a chain, so a host reading one back declares its root layer: `Kernel::root_topology()` is that layer, without unwrapping the chain by hand |
 | `ik:Confine` where a space belongs | a confinement lives at a door: declare it as the door's `ik:confinedTo` |
 | a door or family whose `ik:matchKind` is `custom` | a grammar written outside core is described by its pattern and not defined by it (browse's `RootRow` adds a binding its pattern does not show). Rebuilding it from the text would silently change what it answers |
 | a `prefix` door, a template that does not parse | a door is an exact name or a template |
 | an endpoint name the registry does not hold | a declaration binds only what the host registered: it arranges, it never mints |
 | two different endpoints under one name | refused by `Registry::register`. Names are not unique (`FnEndpoint::new("x", …)` is always `x`), and a registry that kept the first or the last would bind a door to whichever one it happened to keep |
-| two different arrangements under one name | same name, same doors: a declaration that breaks the claim is refused rather than built twice as two things |
+| two different arrangements under one name | same name, same doors: a declaration that breaks the claim is refused rather than built twice as two things. The renderer shares the check: `to_turtle` writes a named node once, so a clash would render as the first arrangement alone; `Topology::try_to_turtle` refuses it instead, and `urn:kernel:topology` answers `Error::Conflict` |
 | a seal the host, core or another level owns | `Kernel::check_sealing` runs on the built space, against the host's prefixes (`Registry::sealing`), so a declaration cannot seal its way into a name the host sealed, nor bind a level's door under one |
 | a declaration past a bound | deeper than `MAX_DECLARATION_DEPTH`, or more than `MAX_DECLARATION_NODES` nodes or `MAX_DECLARATION_TEXT` bytes of text once expanded: `DeclarationError::TooLarge`, naming the bound, its limit and the node. See [Bounds](#bounds) |
 
@@ -153,5 +153,7 @@ endpoint names this arc added).
 
 `declare` is runtime-free and builds for WASI as it stands. On `wasm32-unknown-unknown`, `oxrdf`'s
 `rand` needs getrandom's JS backend: core enables getrandom's `wasm_js` feature under `declare` on
-that target, and the host must still set `--cfg getrandom_backend="wasm_js"` in its rustflags, as
-every browser host that uses `ikigai-rdf` already does. With `declare` off, nothing changes.
+that target, and since getrandom 0.3.4 the feature alone selects the backend, so a browser host
+needs no rustflags (ikigai-diagram and the tutorial verified it in a real browser). Core's floor is
+0.3.4 for that reason; before it, the host also had to set `--cfg getrandom_backend="wasm_js"`, and
+a lock pinned to 0.3.0–0.3.3 still would. With `declare` off, nothing changes.

@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::alias::RuleKind;
 use crate::iri::Iri;
 use crate::space::LevelPath;
-use crate::topology::{SpaceKind, Topology};
+use crate::topology::{MatchKind, SpaceKind, Topology};
 
 /// Whether any [`Level`](crate::Level) in this process has declared a seal. A
 /// kernel whose root holds none has no level seals to discover, so construction
@@ -407,8 +407,11 @@ struct FoundLevel {
 /// A door as the topology states it, with every route a request can reach it by.
 struct FoundDoor {
     text: String,
-    /// A prefix rule: every name under `text`.
-    prefix_like: bool,
+    /// How `text` matches, as the topology states it (`ik:matchKind`; an alias rule's
+    /// kind). Only a template's pattern — or a grammar core does not know, read the
+    /// same way — has a `{` that opens an expansion: an exact name may carry a
+    /// literal brace.
+    kind: MatchKind,
     /// The levels enclosing it, innermost first, each with the gate from that level
     /// down — the route a frame of that level's stack walk takes.
     levels: Vec<(Iri, Option<String>)>,
@@ -417,12 +420,25 @@ struct FoundDoor {
 }
 
 impl FoundDoor {
+    /// The literal head of the pattern: for a template (or a grammar core does not
+    /// know, read conservatively as one), everything before the first expansion; for
+    /// an exact name or a prefix, all of it.
+    fn head(&self) -> &str {
+        match self.kind {
+            MatchKind::Template | MatchKind::Custom => {
+                self.text.split('{').next().unwrap_or(&self.text)
+            }
+            _ => &self.text,
+        }
+    }
+
     /// Whether this door can answer a name under `prefix`, by its literal head.
     fn may_match(&self, prefix: &str) -> bool {
-        match self.text.find('{') {
-            Some(at) => touches(&self.text[..at], prefix),
-            None if self.prefix_like => touches(&self.text, prefix),
-            None => self.text.starts_with(prefix),
+        let expands = self.head().len() < self.text.len();
+        match self.kind {
+            MatchKind::Prefix => touches(&self.text, prefix),
+            _ if expands => touches(self.head(), prefix),
+            _ => self.text.starts_with(prefix),
         }
     }
 
@@ -433,8 +449,7 @@ impl FoundDoor {
     /// Whether this door's literal head lies INSIDE `prefix` — it binds names of
     /// the sealed family by name, whatever expands after the head.
     fn inside(&self, prefix: &str) -> bool {
-        let head = self.text.split('{').next().unwrap_or(&self.text);
-        head.starts_with(prefix)
+        self.head().starts_with(prefix)
     }
 
     /// The refusal this door earns against one claim, if any.
@@ -538,7 +553,7 @@ impl Found {
             // sealed name (checked on resolution, as before it was rendered).
             SpaceKind::EndpointSpace { doors } => {
                 for door in doors {
-                    self.door(&door.pattern, false, levels, &root_gate);
+                    self.door(&door.pattern, door.kind, levels, &root_gate);
                 }
             }
             // A limiter is a hole, not a door: it answers nothing, so it can fake
@@ -547,12 +562,11 @@ impl Found {
             SpaceKind::Limit { .. } => {}
             SpaceKind::Alias { rules, .. } => {
                 for rule in rules {
-                    self.door(
-                        &rule.from,
-                        rule.kind == RuleKind::Prefix,
-                        levels,
-                        &root_gate,
-                    );
+                    let kind = match rule.kind {
+                        RuleKind::Exact => MatchKind::Exact,
+                        RuleKind::Prefix => MatchKind::Prefix,
+                    };
+                    self.door(&rule.from, kind, levels, &root_gate);
                 }
                 for child in &node.children {
                     self.walk(child, levels, root_gate.clone());
@@ -569,13 +583,13 @@ impl Found {
     fn door(
         &mut self,
         text: &str,
-        prefix_like: bool,
+        kind: MatchKind,
         levels: &[(Iri, Option<String>)],
         root_gate: &Option<String>,
     ) {
         self.doors.push(FoundDoor {
             text: text.to_string(),
-            prefix_like,
+            kind,
             levels: levels.iter().rev().cloned().collect(),
             root_gate: root_gate.clone(),
         });

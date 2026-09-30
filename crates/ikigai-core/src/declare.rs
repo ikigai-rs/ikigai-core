@@ -231,6 +231,47 @@ fn measure(tree: &Topology) -> Result<(), DeclarationError> {
     Ok(())
 }
 
+/// Check that every name in `tree` is one claim: each named node met again is EQUAL to
+/// where it was first met — same name, same doors. [`Topology::to_turtle`] renders a
+/// named node once, where it is first met, so a second, different node under the same
+/// name would be silently dropped and the Turtle would read back as another tree; and
+/// [`build`] shares a name as one space. Both refuse through this one check
+/// ([`Topology::try_to_turtle`] and `build`).
+///
+/// Walks with an explicit stack, and does not descend into a node met again (equal, it
+/// holds nothing its first occurrence did not). The comparison itself recurses, as
+/// `PartialEq` on a tree does, bounded by the tree's depth.
+pub(crate) fn claims(tree: &Topology) -> Result<(), DeclarationError> {
+    let mut first: BTreeMap<&str, &Topology> = BTreeMap::new();
+    let mut stack = vec![tree];
+    while let Some(node) = stack.pop() {
+        if let Some(id) = &node.id {
+            match first.get(id.as_str()) {
+                Some(earlier) if *earlier == node => continue,
+                Some(_) => return Err(claimed_twice(id.as_str())),
+                None => {
+                    first.insert(id.as_str(), node);
+                }
+            }
+        }
+        if let SpaceKind::EndpointSpace { doors } = &node.kind {
+            stack.extend(doors.iter().rev().filter_map(|d| d.confined.as_deref()));
+        }
+        stack.extend(node.children.iter().rev());
+    }
+    Ok(())
+}
+
+/// The refusal for two different nodes claiming the name `me`.
+fn claimed_twice(me: &str) -> DeclarationError {
+    DeclarationError::Malformed {
+        node: Some(me.to_string()),
+        reason: "two different arrangements claim this one name (a name is a claim: same \
+                 name, same doors)"
+            .into(),
+    }
+}
+
 /// The endpoints a declaration may bind, by name — the host's side of the contract.
 ///
 /// An endpoint is registered under its own [`name`](Endpoint::name), because that
@@ -555,6 +596,7 @@ pub fn build(
     registry: &Registry,
 ) -> Result<Arc<dyn Space>, DeclarationError> {
     measure(declaration)?;
+    claims(declaration)?;
     let mut builder = Builder {
         registry,
         skolem: 0,
@@ -645,12 +687,7 @@ impl Builder<'_> {
         match self.named.get(me) {
             None => Ok(None),
             Some((first, space)) if first == node => Ok(Some(Arc::clone(space))),
-            Some(_) => Err(DeclarationError::Malformed {
-                node: Some(me.to_string()),
-                reason: "two different arrangements claim this one name (a name is a \
-                         claim: same name, same doors)"
-                    .into(),
-            }),
+            Some(_) => Err(claimed_twice(me)),
         }
     }
 

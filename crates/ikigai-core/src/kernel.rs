@@ -2933,12 +2933,19 @@ impl Kernel {
             // nothing is an `ik:OpaqueSpace`, which is where the graph honestly
             // stops. Cacheable under `urn:kernel:bindings` like every face derived
             // from the bindings, and — unlike every other kernel operation — keyed
-            // by the chain, because the chain is its subject.
+            // by the chain, because the chain is its subject. An arrangement in which
+            // two different spaces claim one name cannot be rendered faithfully (the
+            // graph would state only the first), so it is refused as the conflict it
+            // is rather than rendered as a different arrangement.
             ("topology", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
+                let turtle = chain
+                    .topology(&self.root)
+                    .try_to_turtle()
+                    .map_err(|e| Error::Conflict(format!("urn:kernel:topology: {e}")))?;
                 Ok(Representation::new(
                     ReprType::new("text/turtle").with_param("charset", "utf-8"),
-                    chain.topology(&self.root).to_turtle().into_bytes(),
+                    turtle.into_bytes(),
                 )
                 .cacheable()
                 .depends_on(BINDINGS_THREAD))
@@ -3394,8 +3401,43 @@ impl Kernel {
     /// view: one [`Chain`](crate::SpaceKind::Chain) node whose only layer is the
     /// root's own [`topology`](crate::Space::topology). What `urn:kernel:topology`
     /// renders, before rendering.
+    ///
+    /// A chain is per request, not a space, so this is NOT a declaration:
+    /// [`build`](crate::build) refuses it. To compare a kernel with a declaration, or
+    /// to declare the kernel's arrangement, use [`root_topology`](Self::root_topology).
     pub fn topology(&self) -> crate::Topology {
         self.topology_in(&Scope::empty())
+    }
+
+    /// The root space's own arrangement, without the chain around it: the tree a
+    /// declaration of this kernel states, and the one [`build`](crate::build) takes —
+    /// the layer [`topology`](Self::topology) wraps in its `urn:ikigai:chain:root`
+    /// node. Before this, a host comparing a kernel with a declaration unwrapped the
+    /// chain by hand (`children[0]`, or `children.last()`), and the two spellings
+    /// agree only while the chain is empty.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{
+    ///     build, EndpointSpace, Exact, FnEndpoint, Kernel, Registry, ReprType, Representation,
+    /// };
+    ///
+    /// let hello = Arc::new(FnEndpoint::new("hello", |_| {
+    ///     Ok(Representation::new(ReprType::new("text/plain"), b"hi".to_vec()))
+    /// }));
+    /// let kernel = Kernel::new(Arc::new(
+    ///     EndpointSpace::new().bind_arc(Exact::new("urn:public:hello"), hello.clone()),
+    /// ));
+    /// assert_eq!(kernel.topology().children, vec![kernel.root_topology()]);
+    ///
+    /// // The root's arrangement is a declaration: it builds back to the same space.
+    /// let mut registry = Registry::new();
+    /// registry.register(hello).unwrap();
+    /// let declared = build(&kernel.root_topology(), &registry).unwrap();
+    /// assert_eq!(declared.topology(), kernel.root_topology());
+    /// ```
+    pub fn root_topology(&self) -> crate::Topology {
+        self.root.topology()
     }
 
     /// [`topology`](Self::topology) for a chain: the corridors innermost first,

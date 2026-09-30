@@ -51,12 +51,23 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use crate::alias::RuleKind;
+use crate::declare::DeclarationError;
 use crate::iri::Iri;
 use crate::space::Space;
 
 /// Where an anonymous node is skolemized: `{SKOLEM_PREFIX}{n}`, `n` in pre-order.
-/// A node under it is anonymous when a declaration is read back.
-pub(crate) const SKOLEM_PREFIX: &str = "urn:ikigai:space:_:";
+/// A node under it is anonymous when a declaration is read back, so a surface that
+/// writes a declaration names its anonymous nodes here and every other IRI is an
+/// identity the space claims.
+///
+/// ```
+/// use ikigai_core::{SpaceKind, Topology, SKOLEM_PREFIX};
+///
+/// let anonymous = Topology::new(SpaceKind::Fallback).to_turtle();
+/// assert!(anonymous.contains(&format!("<{SKOLEM_PREFIX}1> a ik:Fallback")));
+/// assert_eq!(SKOLEM_PREFIX, "urn:ikigai:space:_:");
+/// ```
+pub const SKOLEM_PREFIX: &str = "urn:ikigai:space:_:";
 
 /// What kind of space a [`Topology`] node describes, with the structure that kind
 /// carries. `#[non_exhaustive]`: a kind that does not exist yet (a remote that
@@ -88,7 +99,10 @@ pub enum SpaceKind {
     Rewrite,
     /// A table-driven rewrite; the node's one child is the enclosed space.
     Alias {
-        /// The table's rules, in table order.
+        /// The table's rules, in table order: SORTED, most specific first, which is
+        /// precedence — the first rule that matches a name applies
+        /// ([`AliasTable`](crate::AliasTable)). A table built from these rules in any
+        /// other order sorts them back.
         rules: Vec<TopologyRule>,
         /// How many rewrites one canonicalization follows before refusing
         /// ([`AliasTable::max_hops`](crate::AliasTable::max_hops)).
@@ -323,6 +337,11 @@ impl Topology {
     /// its cells under `{node}:doors:{i}` and each door an `ik:Door` at
     /// `{node}:door:{i}`; a door's confined corridor is skolemized after the node,
     /// in door order.
+    ///
+    /// ⚠ Because a named node is rendered once, a tree in which two DIFFERENT nodes
+    /// claim one name renders only the first, and the Turtle reads back as another
+    /// tree. [`try_to_turtle`](Self::try_to_turtle) refuses that tree instead; every
+    /// tree [`build`](crate::build) accepts renders faithfully here.
     pub fn to_turtle(&self) -> String {
         let mut out = String::from(
             "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
@@ -331,6 +350,38 @@ impl Topology {
         );
         self.render(&mut out, &mut Render::default());
         out
+    }
+
+    /// [`to_turtle`](Self::to_turtle), refusing a tree it cannot render faithfully:
+    /// one in which two DIFFERENT nodes claim one name. A name is a claim — same name,
+    /// same doors — and `to_turtle` renders a named node once, where it is first met,
+    /// so the second would be silently dropped; the Turtle would read back as another
+    /// tree, one [`build`](crate::build) accepts where the original is refused. The
+    /// refusal is the one `build` gives, from the same check:
+    /// [`DeclarationError::Malformed`] naming the node.
+    ///
+    /// ```
+    /// use ikigai_core::{DeclarationError, Door, Iri, MatchKind, SpaceKind, Topology};
+    ///
+    /// let leaf = |endpoint: &str| {
+    ///     Topology::new(SpaceKind::EndpointSpace {
+    ///         doors: vec![Door::new("urn:t:x", MatchKind::Exact, endpoint)],
+    ///     })
+    ///     .with_id(Some(Iri::parse("urn:t:shared").unwrap()))
+    /// };
+    /// // The same node under one name twice: one claim, rendered once.
+    /// let same = Topology::new(SpaceKind::Fallback).child(leaf("a")).child(leaf("a"));
+    /// assert_eq!(same.try_to_turtle().unwrap(), same.to_turtle());
+    /// // Two different nodes under one name: refused, not rendered as the first.
+    /// let clash = Topology::new(SpaceKind::Fallback).child(leaf("a")).child(leaf("b"));
+    /// assert!(matches!(
+    ///     clash.try_to_turtle(),
+    ///     Err(DeclarationError::Malformed { node: Some(ref n), .. }) if n == "urn:t:shared"
+    /// ));
+    /// ```
+    pub fn try_to_turtle(&self) -> Result<String, DeclarationError> {
+        crate::declare::claims(self)?;
+        Ok(self.to_turtle())
     }
 
     /// The IRI this node is rendered under, allocating a skolem for an anonymous one.
