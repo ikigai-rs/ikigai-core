@@ -1795,3 +1795,24 @@ that has already expired. **Not built, on purpose:** early cutoff (ledger
 [#613](http://localhost:1060/l/default/item/613)), cut notices across a mount, and the failure
 dependency set across module and wire issuers (both need a wire decision). `vocabulary.ttl` gains no
 terms; only its `owl:versionInfo` moves.
+
+**0.1.83** carries spaces as data, arc 1: the arrangement coming IN, the inverse of
+`urn:kernel:topology` (design: `docs/design/space-declarations.md`, ledger
+[#633](http://localhost:1060/l/default/item/633)). **Breaking (a `SpaceKind` field flag day, no known
+downstream Rust consumer):** `SpaceKind::EndpointSpace { doors: Vec<Door> }` replaces `{ patterns }`,
+`SpaceKind::Limit` gains `kind: MatchKind`, and `SpaceKind::Alias` gains `max_hops`. **Additive:**
+`Door` (`#[non_exhaustive]`), `MatchKind`, `Grammar::match_kind` and `Endpoint::confinement` (both
+defaulted, so an overlay that does not forward them reports `Custom` / unconfined); `Registry`,
+`build` and `DeclarationError` (pure, always on); and `Topology::from_turtle` behind the new `declare`
+feature (strict: a triple not reached from the one root, a blank node, a cycle or an unknown kind is
+refused, never skipped). The round trip `build(from_turtle(topology(K)))` is a fixpoint on every
+rebuildable kind. **Vocabulary:** `ik:Door`, `ik:doors`, `ik:endpointName`, `ik:matchKind`,
+`ik:confinedTo`, `ik:maxHops` (ledger [#608](http://localhost:1060/l/default/item/608): every door
+names the endpoint that answers it). **What a consumer observes without code of its own changing:**
+the topology Turtle gains the door nodes beside the flat `ik:pattern` it already carried, and a named
+space reached twice is rendered once, where it is first met (it was rendered at each occurrence, which
+numbered its anonymous children twice). **Not built, on purpose:** hot reload
+([#628](http://localhost:1060/l/default/item/628)), declared remote mounts
+([#630](http://localhost:1060/l/default/item/630)), factories
+([#631](http://localhost:1060/l/default/item/631)), corridor templates
+([#632](http://localhost:1060/l/default/item/632)).
