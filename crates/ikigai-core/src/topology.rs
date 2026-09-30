@@ -54,6 +54,10 @@ use crate::alias::RuleKind;
 use crate::iri::Iri;
 use crate::space::Space;
 
+/// Where an anonymous node is skolemized: `{SKOLEM_PREFIX}{n}`, `n` in pre-order.
+/// A node under it is anonymous when a declaration is read back.
+pub(crate) const SKOLEM_PREFIX: &str = "urn:ikigai:space:_:";
+
 /// What kind of space a [`Topology`] node describes, with the structure that kind
 /// carries. `#[non_exhaustive]`: a kind that does not exist yet (a remote that
 /// reports its transport, say) is additive.
@@ -307,8 +311,12 @@ impl Topology {
     ///
     /// Anonymous nodes are skolemized `urn:ikigai:space:_:{n}` in pre-order; a
     /// named node is its own IRI, so the same named space reached twice in a tree
-    /// (a shared `Arc` under two mounts) is one node with its triples stated
-    /// twice — set semantics make that harmless, and one IRI is the point.
+    /// (a shared `Arc` under two mounts, or one confinement at two doors) is ONE
+    /// node, rendered where it is first met and only referenced after that. A name
+    /// is a claim — same name, same doors — so the second occurrence has nothing
+    /// to add; and rendering it again would skolemize its anonymous descendants a
+    /// second time under new numbers, stating two different members for one list
+    /// cell of the named node (it did, before 0.1.83).
     /// `ik:layers` is written as explicit `rdf:first`/`rdf:rest` cells under
     /// `{node}:layer:{i}`, never as `( … )`: the collection syntax parses to
     /// blank nodes, and the house rule is none. `ik:doors` is written the same way,
@@ -321,18 +329,17 @@ impl Topology {
              @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
              @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n",
         );
-        let mut skolem = 0usize;
-        self.render(&mut out, &mut skolem);
+        self.render(&mut out, &mut Render::default());
         out
     }
 
     /// The IRI this node is rendered under, allocating a skolem for an anonymous one.
-    fn iri_for(&self, skolem: &mut usize) -> String {
+    fn iri_for(&self, state: &mut Render) -> String {
         match &self.id {
             Some(id) => id.as_str().to_string(),
             None => {
-                *skolem += 1;
-                format!("urn:ikigai:space:_:{skolem}")
+                state.skolem += 1;
+                format!("{SKOLEM_PREFIX}{}", state.skolem)
             }
         }
     }
@@ -341,13 +348,16 @@ impl Topology {
     /// IRI the node was rendered under, so a parent can point at it. The node
     /// takes its skolem before its children take theirs (pre-order), and its block
     /// is written ahead of theirs, so a reader meets a node before what it encloses.
-    fn render(&self, out: &mut String, skolem: &mut usize) -> String {
-        let me = self.iri_for(skolem);
+    fn render(&self, out: &mut String, state: &mut Render) -> String {
+        let me = self.iri_for(state);
+        if self.id.is_some() && !state.seen.insert(me.clone()) {
+            return me; // rendered where it was first met
+        }
         let mut below = String::new();
         let children: Vec<String> = self
             .children
             .iter()
-            .map(|child| child.render(&mut below, skolem))
+            .map(|child| child.render(&mut below, state))
             .collect();
         match &self.kind {
             SpaceKind::Opaque => {
@@ -361,7 +371,7 @@ impl Topology {
                     .map(|door| {
                         door.confined
                             .as_ref()
-                            .map(|corridor| corridor.render(&mut below, skolem))
+                            .map(|corridor| corridor.render(&mut below, state))
                     })
                     .collect();
                 let _ = write!(out, "\n<{me}> a ik:EndpointSpace");
@@ -454,6 +464,14 @@ impl Topology {
         out.push_str(&below);
         me
     }
+}
+
+/// What a render carries down the tree: the last skolem allocated, and the named
+/// nodes already written.
+#[derive(Default)]
+struct Render {
+    skolem: usize,
+    seen: std::collections::BTreeSet<String>,
 }
 
 /// `ik:space <child>` for a one-child node, or close the block for a node whose

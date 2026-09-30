@@ -27,6 +27,10 @@
 //! structure ([`Space::topology`], a [`Topology`] tree), so the arrangement itself
 //! is a resource: `urn:kernel:topology` renders the chain a request sees as a
 //! graph, and a hit reports which space answered ([`Resolved::answered_by`]).
+//! The same graph comes back IN as a **declaration**: [`build`] turns a
+//! [`Topology`] into a live space from a [`Registry`] of endpoints the host
+//! provides, and `Topology::from_turtle` (the `declare` feature) reads one — so
+//! the arrangement around the endpoints can be data rather than code.
 //!
 //! [`alias`] adds **logical rewrite** on that same composition primitive: a stable
 //! logical URI ([`Alias`] over an [`AliasTable`]) resolves to a different backing
@@ -83,6 +87,7 @@ mod capability;
 pub mod config;
 mod confine;
 mod content;
+mod declare;
 mod describe;
 mod endpoint;
 mod error;
@@ -114,6 +119,7 @@ pub use cache::{
 pub use capability::Capability;
 pub use confine::Confine;
 pub use content::{ContentId, ContentIdError};
+pub use declare::{build, DeclarationError, Registry};
 pub use describe::{ActionSpec, ArgSpec, Description, EndpointKind, InputSource, Transreption};
 #[cfg(not(target_family = "wasm"))]
 pub use endpoint::SyncIssuer;

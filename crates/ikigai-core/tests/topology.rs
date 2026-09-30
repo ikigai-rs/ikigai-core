@@ -1494,9 +1494,10 @@ fn a_template_family_on_a_limiter_may_wall_the_family_and_is_not_answered() {
 
 #[test]
 fn a_named_space_shared_behind_the_wall_and_beside_it_is_answered_per_path() {
-    // (g) One space, one IRI, stated twice: the topology renders it at each
-    // occurrence by design, and the walk answers per path in the order the kernel
-    // consults it. Beside the wall FIRST: the kernel serves the door and the walk
+    // (g) One space, one IRI, reached twice: the topology states it ONCE (since
+    // 0.1.83 — rendering it at each occurrence re-skolemized its anonymous
+    // descendants and gave one list cell two members), both paths point at it, and
+    // the walk answers per path in the order the kernel consults it. Beside the wall FIRST: the kernel serves the door and the walk
     // says REACHABLE. This is the shape the SPARQL form cannot answer: a property
     // path has no path identity, so its `NOT EXISTS` finds the guarded occurrence
     // and answers `false` — R7.3 states it as the query's limit.
@@ -1521,8 +1522,8 @@ fn a_named_space_shared_behind_the_wall_and_beside_it_is_answered_per_path() {
     assert_eq!(
         g.strs("urn:example:space:personal", &format!("{IK}pattern"))
             .len(),
-        2,
-        "the shared space is rendered at both occurrences"
+        1,
+        "the shared space is stated once, where it is first met"
     );
     assert_eq!(check(beside_first), (Reach::Reachable, false));
 
