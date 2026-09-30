@@ -10,7 +10,7 @@ use crate::kernel::Clock;
 use crate::repr::{Representation, Time};
 use crate::request::Request;
 use crate::seal::{SealBreach, Seals};
-use crate::topology::{SpaceKind, Topology};
+use crate::topology::{Door, MatchKind, SpaceKind, Topology};
 
 /// The resolution chain a request is resolved in: the corridors a host injected
 /// ahead of the kernel's root space, and whether the root is in the chain at all.
@@ -1453,10 +1453,16 @@ impl Space for EndpointSpace {
 
     fn topology(&self) -> Topology {
         Topology::new(SpaceKind::EndpointSpace {
-            patterns: self
+            doors: self
                 .bindings
                 .iter()
-                .map(|(grammar, _)| grammar.pattern())
+                .map(|(grammar, endpoint)| {
+                    let door = Door::new(grammar.pattern(), grammar.match_kind(), endpoint.name());
+                    match endpoint.confinement() {
+                        Some(corridor) => door.confined_to(corridor),
+                        None => door,
+                    }
+                })
                 .collect(),
         })
         .with_id(self.id.clone())
@@ -1766,6 +1772,10 @@ impl Space for Limit {
     fn topology(&self) -> Topology {
         Topology::new(SpaceKind::Limit {
             family: self.family(),
+            kind: match &self.family {
+                Family::Prefix(_) => MatchKind::Prefix,
+                Family::Grammar(grammar) => grammar.match_kind(),
+            },
         })
         .with_id(self.id.clone())
     }

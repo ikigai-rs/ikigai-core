@@ -533,16 +533,19 @@ impl Found {
                     *gate = was;
                 }
             }
-            SpaceKind::EndpointSpace { patterns } => {
-                for pattern in patterns {
-                    self.door(pattern, false, levels, &root_gate);
+            // A door's confined corridor is not walked: a confinement is an
+            // endpoint's choice, and a confined corridor never stands in for a
+            // sealed name (checked on resolution, as before it was rendered).
+            SpaceKind::EndpointSpace { doors } => {
+                for door in doors {
+                    self.door(&door.pattern, false, levels, &root_gate);
                 }
             }
             // A limiter is a hole, not a door: it answers nothing, so it can fake
             // nothing, and a host's limiter over a module's sealed name is a
             // gatekeeper, not a squatter. Never counted.
             SpaceKind::Limit { .. } => {}
-            SpaceKind::Alias { rules } => {
+            SpaceKind::Alias { rules, .. } => {
                 for rule in rules {
                     self.door(
                         &rule.from,

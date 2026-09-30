@@ -12,16 +12,27 @@
 //! `urn:kernel:topology` renders the tree the request's **chain** sees — each
 //! injected corridor innermost first, then the root unless the chain is severed —
 //! as Turtle over the `ik:` vocabulary (`ik:Chain`, `ik:Fallback` with `ik:layers`,
-//! `ik:Mount` with `ik:prefix` and `ik:space`, `ik:Limit` with `ik:family`,
-//! `ik:EndpointSpace` with `ik:pattern`, `ik:Alias` with its `ik:rewrites`,
-//! with `ik:prefix` and `ik:space`, `ik:Limit` with `ik:family`,
-//! `ik:EndpointSpace` with `ik:pattern`, `ik:Alias` with its `ik:rewrites`,
-//! `ik:Rewrite`, `ik:Confine`, `ik:Level` with `ik:space`, `ik:OpaqueSpace`).
-//! with an [`id`](crate::Space::id) is named by it, and an anonymous one is
+//! `ik:Mount` with `ik:prefix` and `ik:space`, `ik:Limit` with `ik:family` and
+//! `ik:matchKind`, `ik:EndpointSpace` with its `ik:pattern`s and its ordered
+//! `ik:doors`, `ik:Alias` with its `ik:rewrites` and `ik:maxHops`, `ik:Rewrite`,
+//! `ik:Confine`, `ik:Level` with `ik:space`, `ik:OpaqueSpace`). A node whose space
+//! claims an [`id`](crate::Space::id) is named by it, and an anonymous one is
 //! skolemized under `urn:ikigai:space:_:{n}` in render order — no blank nodes, so
 //! the graph diffs and every list cell can be addressed. Order is explicit where it
 //! is meaning: `ik:layers` is an `rdf:List` in the order resolution consults, which
-//! is the order the chain's fingerprint hashes.
+//! is the order the chain's fingerprint hashes, and `ik:doors` is one in the order a
+//! leaf tries its doors (first match wins).
+//!
+//! **Each door names the endpoint that answers it** (ledger #608): an `ik:Door`
+//! carries the door's pattern, how the pattern matches (`ik:matchKind`: an exact
+//! name, a URI template, or a grammar the graph cannot state), the endpoint's
+//! [`name`](crate::Endpoint::name) (`ik:endpointName`), and — when the endpoint is
+//! a [`Confine`](crate::Confine) — the corridor it confines its sub-requests to
+//! (`ik:confinedTo`). So the graph says what to BIND as well as where, which is
+//! what a declaration read back needs, and what tells a generic composer from
+//! bespoke code. Names are not guaranteed unique (every `FnEndpoint::new("x", …)`
+//! is named `x`): the topology renders what is there, and whoever rebuilds from it
+//! refuses the ambiguity.
 //!
 //! What this buys is the paper's Theorem 4(b) as a **walk over this graph**.
 //! Gatekeeper completeness over the static tree is decidable by pushdown
@@ -54,10 +65,11 @@ pub enum SpaceKind {
     /// `ik:OpaqueSpace`: the graph says where knowledge stops rather than
     /// implying the space is empty.
     Opaque,
-    /// A leaf: the patterns of its doors, in declaration order (first match wins).
+    /// A leaf: its doors, in declaration order (first match wins).
     EndpointSpace {
-        /// Each door's grammar pattern — an exact IRI, or a URI template.
-        patterns: Vec<String>,
+        /// Each door: its pattern, how the pattern matches, and the endpoint that
+        /// answers it.
+        doors: Vec<Door>,
     },
     /// An ordered first-hit list; the node's children are its layers in the order
     /// they are consulted.
@@ -74,11 +86,20 @@ pub enum SpaceKind {
     Alias {
         /// The table's rules, in table order.
         rules: Vec<TopologyRule>,
+        /// How many rewrites one canonicalization follows before refusing
+        /// ([`AliasTable::max_hops`](crate::AliasTable::max_hops)).
+        max_hops: usize,
     },
     /// A limiter over a family of identifiers — a hole, not a door.
     Limit {
         /// The family: a prefix, or a grammar's pattern.
         family: String,
+        /// Which of the two the family is: [`MatchKind::Prefix`] for
+        /// [`Limit::new`](crate::Limit::new), the grammar's own kind for
+        /// [`Limit::matching`](crate::Limit::matching). Without it `Limit::new("i")`
+        /// and `Limit::matching(Exact::new("i"))` render alike and wall different
+        /// names.
+        kind: MatchKind,
     },
     /// A confinement: the corridor an endpoint's sub-requests are severed into.
     /// The node's one child is the enclosed space.
@@ -127,6 +148,101 @@ impl TopologyRule {
             from: from.into(),
             to: to.into(),
         }
+    }
+}
+
+/// How a door's pattern, or a limiter's family, matches a name — `ik:matchKind`.
+///
+/// A pattern is text, and text alone cannot say how it matches: `urn:x:` is a
+/// prefix under [`Limit::new`](crate::Limit::new) and one exact name under
+/// [`Exact`](crate::Exact), and a grammar written outside core (one that adds a
+/// binding its pattern does not show, say) may match nothing like what its pattern
+/// reads as. So every door and every limiter states its kind, and a kind this crate
+/// cannot rebuild from text is [`Custom`](Self::Custom) — the honest answer, as
+/// [`Opaque`](SpaceKind::Opaque) is for a space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MatchKind {
+    /// The name must equal the pattern ([`Exact`](crate::Exact)).
+    Exact,
+    /// The pattern is a URI template, RFC 6570 level 1
+    /// ([`UriTemplate`](crate::UriTemplate)).
+    Template,
+    /// Every name under the pattern, as a prefix ([`Limit::new`](crate::Limit::new)).
+    Prefix,
+    /// A grammar core does not know: its pattern describes it, and does not define
+    /// it. The default [`Grammar::match_kind`](crate::Grammar::match_kind).
+    Custom,
+}
+
+impl MatchKind {
+    /// The literal this kind is written as in the graph: `exact`, `template`,
+    /// `prefix` or `custom`.
+    ///
+    /// ```
+    /// use ikigai_core::MatchKind;
+    /// assert_eq!(MatchKind::Template.keyword(), "template");
+    /// assert_eq!(MatchKind::from_keyword("prefix"), Some(MatchKind::Prefix));
+    /// assert_eq!(MatchKind::from_keyword("regex"), None);
+    /// ```
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            MatchKind::Exact => "exact",
+            MatchKind::Template => "template",
+            MatchKind::Prefix => "prefix",
+            MatchKind::Custom => "custom",
+        }
+    }
+
+    /// The kind a [`keyword`](Self::keyword) names, or `None` for any other text.
+    pub fn from_keyword(keyword: &str) -> Option<MatchKind> {
+        match keyword {
+            "exact" => Some(MatchKind::Exact),
+            "template" => Some(MatchKind::Template),
+            "prefix" => Some(MatchKind::Prefix),
+            "custom" => Some(MatchKind::Custom),
+            _ => None,
+        }
+    }
+}
+
+/// One door of an [`EndpointSpace`](SpaceKind::EndpointSpace): where a name comes
+/// in, how it is matched, and the endpoint that answers it — `ik:Door`.
+///
+/// `#[non_exhaustive]`: construct with [`new`](Self::new) and the builders, so a
+/// field added later is not a flag day for a consumer that builds doors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Door {
+    /// The grammar's pattern — an exact IRI, or a URI template (`ik:pattern`).
+    pub pattern: String,
+    /// How the pattern matches (`ik:matchKind`).
+    pub kind: MatchKind,
+    /// The bound endpoint's [`name`](crate::Endpoint::name) (`ik:endpointName`).
+    /// Not guaranteed unique: two endpoints may share a name.
+    pub endpoint: String,
+    /// When the endpoint is a [`Confine`](crate::Confine): the corridor its
+    /// sub-requests are confined to, named by the confinement's name
+    /// (`ik:confinedTo`).
+    pub confined: Option<Box<Topology>>,
+}
+
+impl Door {
+    /// A door: its pattern, how it matches, and the name of the endpoint it binds.
+    pub fn new(pattern: impl Into<String>, kind: MatchKind, endpoint: impl Into<String>) -> Self {
+        Door {
+            pattern: pattern.into(),
+            kind,
+            endpoint: endpoint.into(),
+            confined: None,
+        }
+    }
+
+    /// The corridor the door's endpoint confines its sub-requests to (builder).
+    /// The corridor's [`id`](Topology::id) is the confinement's name.
+    pub fn confined_to(mut self, corridor: Topology) -> Self {
+        self.confined = Some(Box::new(corridor));
+        self
     }
 }
 
@@ -195,7 +311,10 @@ impl Topology {
     /// twice — set semantics make that harmless, and one IRI is the point.
     /// `ik:layers` is written as explicit `rdf:first`/`rdf:rest` cells under
     /// `{node}:layer:{i}`, never as `( … )`: the collection syntax parses to
-    /// blank nodes, and the house rule is none.
+    /// blank nodes, and the house rule is none. `ik:doors` is written the same way,
+    /// its cells under `{node}:doors:{i}` and each door an `ik:Door` at
+    /// `{node}:door:{i}`; a door's confined corridor is skolemized after the node,
+    /// in door order.
     pub fn to_turtle(&self) -> String {
         let mut out = String::from(
             "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
@@ -234,16 +353,46 @@ impl Topology {
             SpaceKind::Opaque => {
                 let _ = write!(out, "\n<{me}> a ik:OpaqueSpace .\n");
             }
-            SpaceKind::EndpointSpace { patterns } => {
+            SpaceKind::EndpointSpace { doors } => {
+                // A door's corridor is rendered first, in door order (pre-order after
+                // the node), so the door's block can point at it.
+                let corridors: Vec<Option<String>> = doors
+                    .iter()
+                    .map(|door| {
+                        door.confined
+                            .as_ref()
+                            .map(|corridor| corridor.render(&mut below, skolem))
+                    })
+                    .collect();
                 let _ = write!(out, "\n<{me}> a ik:EndpointSpace");
-                for pattern in patterns {
-                    let _ = write!(out, " ;\n    ik:pattern \"{}\"", escape(pattern));
+                // The flat `ik:pattern` per door stays: it is the membership every
+                // reader since 0.1.78 queries, and `ik:doors` adds the order and the
+                // endpoint without taking it away.
+                for door in doors {
+                    let _ = write!(out, " ;\n    ik:pattern \"{}\"", escape(&door.pattern));
                 }
-                out.push_str(" .\n");
+                let cells: Vec<String> = (1..=doors.len())
+                    .map(|i| format!("{me}:door:{i}"))
+                    .collect();
+                write_list(out, &me, "doors", "doors", &cells);
+                for ((door, cell), corridor) in doors.iter().zip(&cells).zip(&corridors) {
+                    let _ = write!(
+                        out,
+                        "\n<{cell}> a ik:Door ;\n    ik:pattern \"{}\" ;\n    ik:matchKind \"{}\" ;\n    \
+                         ik:endpointName \"{}\"",
+                        escape(&door.pattern),
+                        door.kind.keyword(),
+                        escape(&door.endpoint)
+                    );
+                    if let Some(corridor) = corridor {
+                        let _ = write!(out, " ;\n    ik:confinedTo <{corridor}>");
+                    }
+                    out.push_str(" .\n");
+                }
             }
             SpaceKind::Fallback => {
                 let _ = write!(out, "\n<{me}> a ik:Fallback");
-                write_layers(out, &me, &children);
+                write_list(out, &me, "layers", "layer", &children);
             }
             SpaceKind::Mount { prefix } => {
                 let _ = write!(
@@ -257,8 +406,8 @@ impl Topology {
                 let _ = write!(out, "\n<{me}> a ik:Rewrite");
                 write_space(out, &children);
             }
-            SpaceKind::Alias { rules } => {
-                let _ = write!(out, "\n<{me}> a ik:Alias");
+            SpaceKind::Alias { rules, max_hops } => {
+                let _ = write!(out, "\n<{me}> a ik:Alias ;\n    ik:maxHops {max_hops}");
                 for i in 1..=rules.len() {
                     let _ = write!(out, " ;\n    ik:rewrites <{me}:rule:{i}>");
                 }
@@ -275,11 +424,12 @@ impl Topology {
                     );
                 }
             }
-            SpaceKind::Limit { family } => {
+            SpaceKind::Limit { family, kind } => {
                 let _ = write!(
                     out,
-                    "\n<{me}> a ik:Limit ;\n    ik:family \"{}\" .\n",
-                    escape(family)
+                    "\n<{me}> a ik:Limit ;\n    ik:family \"{}\" ;\n    ik:matchKind \"{}\" .\n",
+                    escape(family),
+                    kind.keyword()
                 );
             }
             SpaceKind::Confine => {
@@ -298,7 +448,7 @@ impl Topology {
             }
             SpaceKind::Chain { severed } => {
                 let _ = write!(out, "\n<{me}> a ik:Chain ;\n    ik:severed {severed}");
-                write_layers(out, &me, &children);
+                write_list(out, &me, "layers", "layer", &children);
             }
         }
         out.push_str(&below);
@@ -315,23 +465,24 @@ fn write_space(block: &mut String, children: &[String]) {
     block.push_str(" .\n");
 }
 
-/// `ik:layers` as explicit list cells: `<me:layer:1> rdf:first <a> ; rdf:rest
-/// <me:layer:2>` … ending in `rdf:nil`. An empty list is `rdf:nil` directly.
-fn write_layers(block: &mut String, me: &str, children: &[String]) {
-    if children.is_empty() {
-        block.push_str(" ;\n    ik:layers rdf:nil .\n");
+/// An ordered property (`ik:layers`, `ik:doors`) as explicit list cells:
+/// `<me:{cell}:1> rdf:first <a> ; rdf:rest <me:{cell}:2>` … ending in `rdf:nil`. An
+/// empty list is `rdf:nil` directly. Closes the node's block.
+fn write_list(block: &mut String, me: &str, property: &str, cell: &str, items: &[String]) {
+    if items.is_empty() {
+        let _ = write!(block, " ;\n    ik:{property} rdf:nil .\n");
         return;
     }
-    let _ = write!(block, " ;\n    ik:layers <{me}:layer:1> .\n");
-    for (i, child) in children.iter().enumerate() {
-        let next = if i + 1 == children.len() {
+    let _ = write!(block, " ;\n    ik:{property} <{me}:{cell}:1> .\n");
+    for (i, item) in items.iter().enumerate() {
+        let next = if i + 1 == items.len() {
             "rdf:nil".to_string()
         } else {
-            format!("<{me}:layer:{}>", i + 2)
+            format!("<{me}:{cell}:{}>", i + 2)
         };
         let _ = write!(
             block,
-            "<{me}:layer:{}> rdf:first <{child}> ;\n    rdf:rest {next} .\n",
+            "<{me}:{cell}:{}> rdf:first <{item}> ;\n    rdf:rest {next} .\n",
             i + 1
         );
     }

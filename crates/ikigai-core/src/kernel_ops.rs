@@ -216,8 +216,9 @@ fn topology() -> Description {
             "The arrangement resolution walks, as one Turtle graph: the chain this request \
              is resolved in (its corridors innermost first, then the root unless severed), \
              each space as an ik:Fallback (ordered ik:layers), ik:Mount (ik:prefix, ik:space), \
-             ik:Limit (ik:family), ik:EndpointSpace (ik:pattern), ik:Alias (ik:rewrites), \
-             ik:Rewrite or ik:OpaqueSpace, named by its own IRI or skolemized. What the \
+             ik:Limit (ik:family, ik:matchKind), ik:EndpointSpace (ik:pattern, and ordered \
+             ik:doors naming each door's endpoint), ik:Alias (ik:rewrites, ik:maxHops), \
+             ik:Level, ik:Rewrite or ik:OpaqueSpace, named by its own IRI or skolemized. What the \
              catalog lists flat, this states as structure — so whether a family is \
              reachable without passing a limiter is a path query, not a request.",
         )

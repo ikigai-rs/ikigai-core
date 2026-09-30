@@ -200,7 +200,11 @@ ik:Space a rdfs:Class ;
 ik:EndpointSpace a rdfs:Class ;
     rdfs:subClassOf ik:Space ;
     rdfs:label "EndpointSpace" ;
-    rdfs:comment "A leaf space: an ordered set of doors, each stated as an ik:pattern. First match wins, in the order the space enumerates them; the graph states membership, and each door's contract is in the catalog under the endpoint it binds." .
+    rdfs:comment "A leaf space: an ordered set of doors. Each door's pattern is stated flat as an ik:pattern (membership), and each door is an ik:Door in ik:doors (order, and the endpoint that answers it). First match wins, in ik:doors order; each door's contract is in the catalog under the endpoint it binds." .
+
+ik:Door a rdfs:Class ;
+    rdfs:label "Door" ;
+    rdfs:comment "One door of an ik:EndpointSpace: its ik:pattern, how that pattern matches (ik:matchKind), the name of the endpoint that answers it (ik:endpointName), and — when that endpoint confines its sub-requests — the corridor it confines them to (ik:confinedTo). Skolemized under its space as {space}:door:{n}, n its position in ik:doors. Not an ik:Space: a door is where a name comes in, not a place names are resolved." .
 
 ik:Fallback a rdfs:Class ;
     rdfs:subClassOf ik:Space ;
@@ -234,7 +238,7 @@ ik:Limit a rdfs:Class ;
 ik:Confine a rdfs:Class ;
     rdfs:subClassOf ik:Space ;
     rdfs:label "Confine" ;
-    rdfs:comment "A confinement: the corridor an endpoint's sub-requests resolve in with the root cut off, enclosing the ik:space that is that corridor. Bound at one door inside an endpoint, so not reachable from the chain's graph — the endpoint reports it." .
+    rdfs:comment "A confinement: the corridor an endpoint's sub-requests resolve in with the root cut off, enclosing the ik:space that is that corridor. Reported by the confining endpoint itself; in the chain's graph the same corridor appears as the ik:confinedTo of the ik:Door the confinement is bound at." .
 
 ik:Level a rdfs:Class ;
     rdfs:subClassOf ik:Space ;
@@ -280,7 +284,7 @@ ik:prefix a rdf:Property ;
 ik:family a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "family" ;
-    rdfs:comment "The family an ik:Limit carves out: a prefix (every identifier under it) or a grammar's pattern (an exact IRI, or a URI template such as urn:doc:{id}:secret)." .
+    rdfs:comment "The family an ik:Limit carves out: a prefix (every identifier under it) or a grammar's pattern (an exact IRI, or a URI template such as urn:doc:{id}:secret). Which of those it is, is the node's ik:matchKind." .
 
 ik:pattern a rdf:Property ;
     rdfs:range xsd:string ;
@@ -297,6 +301,34 @@ ik:rewrites a rdf:Property ;
     rdfs:range ik:RewriteRule ;
     rdfs:label "rewrites" ;
     rdfs:comment "Links an ik:Alias to one of its rules — one triple per rule; the order is the {n} in each rule's IRI." .
+
+ik:doors a rdf:Property ;
+    rdfs:range rdf:List ;
+    rdfs:label "doors" ;
+    rdfs:comment "The doors of an ik:EndpointSpace, as an rdf:List of ik:Door nodes in the order the space tries them: first match wins, so an earlier door shadows a later one whose pattern also matches. Written as addressable cells ({space}:doors:{n}) rather than a blank-node collection, as ik:layers is." .
+
+ik:endpointName a rdf:Property ;
+    rdfs:domain ik:Door ;
+    rdfs:range xsd:string ;
+    rdfs:label "endpointName" ;
+    rdfs:comment "The name of the endpoint an ik:Door binds — the short name the endpoint gives itself, which is what a declaration binds by (an endpoint registered under that name). A literal, not an IRI, and not guaranteed unique: two endpoints may share a name, and whoever rebuilds an arrangement from the graph must refuse that ambiguity rather than choose. Distinct from ik:endpoint, the resolvable IRI on an ik:ActionMatch." .
+
+ik:matchKind a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "matchKind" ;
+    rdfs:comment "How an ik:Door's ik:pattern, or an ik:Limit's ik:family, matches a name: \"exact\" (the whole name), \"template\" (a URI template, RFC 6570 level 1), \"prefix\" (every name under it; a limiter only), or \"custom\" (a grammar the graph describes but cannot define — its pattern is a description, and an arrangement cannot be rebuilt from it). No domain: it sits on doors and on limiters." .
+
+ik:confinedTo a rdf:Property ;
+    rdfs:domain ik:Door ;
+    rdfs:range ik:Space ;
+    rdfs:label "confinedTo" ;
+    rdfs:comment "The corridor an ik:Door's endpoint confines its sub-requests to: they resolve in the request's injected corridors and this space, with the root cut off. The space node is named by the confinement's name." .
+
+ik:maxHops a rdf:Property ;
+    rdfs:domain ik:Alias ;
+    rdfs:range xsd:integer ;
+    rdfs:label "maxHops" ;
+    rdfs:comment "How many rewrites one canonicalization through an ik:Alias table follows before it is refused — the bound on a chain of rules (a namespace migrated twice is two hops; a cycle is refused at the bound)." .
 
 ik:ruleKind a rdf:Property ;
     rdfs:domain ik:RewriteRule ;
