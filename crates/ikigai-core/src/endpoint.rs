@@ -1489,6 +1489,21 @@ pub trait Endpoint: Send + Sync {
     fn is_limiter(&self) -> bool {
         false
     }
+
+    /// The corridor this endpoint confines its sub-requests to, when it is a
+    /// [`Confine`](crate::Confine): the confined space's structure, named by the
+    /// confinement's name. `None` — the default — for every endpoint that runs in
+    /// the chain it was called in.
+    ///
+    /// A door reports it as `ik:confinedTo` in `urn:kernel:topology`, so the
+    /// corridor a door severs into is part of the arrangement's graph rather than
+    /// something only the endpoint knows. An overlay that wraps one endpoint (a
+    /// governor, a retry) should forward it, as it forwards
+    /// [`describe`](Self::describe); one that does not reports its door as
+    /// unconfined, which is the answer it gives about everything else too.
+    fn confinement(&self) -> Option<crate::topology::Topology> {
+        None
+    }
 }
 
 /// The boxed invocation function behind a [`FnEndpoint`].

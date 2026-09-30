@@ -201,3 +201,20 @@ cannot see into), and `ik:Space` as the superclass. §4's "which space would X r
 becomes a walk over `ik:layers`/`ik:space`; the paper's Theorem 4(b) check — reachable
 without passing a limiter? — is the SPARQL in `docs/formalism/README.md` R7.3 and the
 triple walk in `tests/topology.rs`.
+
+**Since 0.1.83 each door names its endpoint** (ledger
+[#608](http://localhost:1060/l/default/item/608)), so the graph can be read back as a
+declaration (ledger [#633](http://localhost:1060/l/default/item/633)). The flat `ik:pattern` per
+door stays on the leaf — every reader since 0.1.78 queries it — and beside it:
+
+| added | on | says |
+|---|---|---|
+| `ik:doors` | `ik:EndpointSpace` | the doors in the order the leaf tries them, as explicit list cells `{space}:doors:{n}` (first match wins, so order is meaning — the flat patterns never carried it) |
+| `ik:Door` at `{space}:door:{n}` | — | one door: `ik:pattern`, `ik:matchKind`, `ik:endpointName`, and `ik:confinedTo` when its endpoint is a `Confine` |
+| `ik:endpointName` | `ik:Door` | the endpoint's `name()` — a literal, NOT `ik:endpoint`, which carries `rdfs:domain ik:ActionMatch` and would type every door a selection result under RDFS entailment (the `ik:binds` mistake of §6's first table, avoided the same way) |
+| `ik:matchKind` | `ik:Door`, `ik:Limit` | `exact`, `template`, `prefix` (limiters) or `custom`. Text alone cannot say it: `Limit::new("i")` and `Limit::matching(Exact("i"))` render the same `ik:family`, and a grammar written outside core (`Grammar::match_kind` defaults to `custom`) is described by its pattern, not defined by it |
+| `ik:confinedTo` | `ik:Door` | the corridor a confined endpoint's sub-requests resolve in, named by the confinement — so a confinement is visible in the chain's graph, at the door it is bound to (`Endpoint::confinement`) |
+| `ik:maxHops` | `ik:Alias` | the table's hop bound, which changes what a long chain of rules answers |
+
+Names are not unique (`FnEndpoint::new("x", …)` is always `x`), and the graph renders what is
+there: the ambiguity is refused where an arrangement is rebuilt, not here.

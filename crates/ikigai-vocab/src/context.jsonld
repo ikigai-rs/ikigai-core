@@ -12,6 +12,7 @@
     "Confine": "ik:Confine",
     "CorsPolicy": "ik:CorsPolicy",
     "Directory": "ik:Directory",
+    "Door": "ik:Door",
     "Endpoint": "ik:Endpoint",
     "EndpointSpace": "ik:EndpointSpace",
     "Explanation": "ik:Explanation",
@@ -83,6 +84,10 @@
       "@id": "ik:class",
       "@type": "@id"
     },
+    "confinedTo": {
+      "@id": "ik:confinedTo",
+      "@type": "@id"
+    },
     "contentHash": "ik:contentHash",
     "context": {
       "@id": "ik:context",
@@ -118,6 +123,7 @@
       "@id": "ik:derivedAt",
       "@type": "xsd:dateTime"
     },
+    "doors": "ik:doors",
     "droppedItems": {
       "@id": "ik:droppedItems",
       "@type": "xsd:nonNegativeInteger"
@@ -126,6 +132,7 @@
       "@id": "ik:endpoint",
       "@type": "@id"
     },
+    "endpointName": "ik:endpointName",
     "entry": {
       "@id": "ik:entry",
       "@type": "@id"
@@ -164,6 +171,11 @@
       "@type": "@id"
     },
     "match": "ik:match",
+    "matchKind": "ik:matchKind",
+    "maxHops": {
+      "@id": "ik:maxHops",
+      "@type": "xsd:integer"
+    },
     "missingOptional": {
       "@id": "ik:missingOptional",
       "@type": "xsd:integer"

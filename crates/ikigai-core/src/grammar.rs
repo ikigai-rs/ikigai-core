@@ -4,6 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::iri::Iri;
+use crate::topology::MatchKind;
 
 /// Variables captured when a grammar matches an identifier.
 #[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -49,6 +50,17 @@ pub trait Grammar: Send + Sync {
     fn pattern(&self) -> String {
         "<opaque>".to_string()
     }
+
+    /// How [`pattern`](Self::pattern) matches, for `urn:kernel:topology`'s
+    /// `ik:matchKind`. The default is [`MatchKind::Custom`]: a grammar written
+    /// outside core is described by its pattern and not defined by it (it may add
+    /// a binding the pattern does not show, or match by rules no pattern states),
+    /// so the graph must not claim it can be rebuilt from the text. Core's
+    /// [`Exact`] and [`UriTemplate`] answer their own kinds; override it only for a
+    /// grammar that matches exactly as one of those would.
+    fn match_kind(&self) -> MatchKind {
+        MatchKind::Custom
+    }
 }
 
 /// Matches one exact identifier and captures no variables.
@@ -68,6 +80,10 @@ impl Grammar for Exact {
 
     fn pattern(&self) -> String {
         self.0.clone()
+    }
+
+    fn match_kind(&self) -> MatchKind {
+        MatchKind::Exact
     }
 }
 
@@ -199,6 +215,10 @@ impl Grammar for UriTemplate {
 
     fn pattern(&self) -> String {
         self.source.clone()
+    }
+
+    fn match_kind(&self) -> MatchKind {
+        MatchKind::Template
     }
 }
 

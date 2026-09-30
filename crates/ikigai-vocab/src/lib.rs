@@ -1211,6 +1211,14 @@ mod tests {
             "ruleKind",
             "logical",
             "canonical",
+            // 0.1.83 (ledger #608): each door names the endpoint that answers it,
+            // and the graph says how a pattern matches — enough to rebuild from.
+            "Door",
+            "doors",
+            "endpointName",
+            "matchKind",
+            "confinedTo",
+            "maxHops",
         ] {
             assert!(
                 subjects.contains(&format!("<{NS}{term}>")),
@@ -1221,7 +1229,18 @@ mod tests {
         // The shared structural properties carry no domain: `ik:layers` sits on a
         // chain and a fallback, `ik:space` on four kinds, `ik:pattern` on a leaf
         // today and on a remote that reports its published patterns tomorrow.
-        for term in ["layers", "space", "prefix", "family", "pattern", "rewrites"] {
+        // `ik:matchKind` sits on a door and on a limiter; `ik:doors` is an ordered
+        // list like `ik:layers`.
+        for term in [
+            "layers",
+            "space",
+            "prefix",
+            "family",
+            "pattern",
+            "rewrites",
+            "doors",
+            "matchKind",
+        ] {
             let block = VOCABULARY
                 .split("\n\n")
                 .find(|b| {

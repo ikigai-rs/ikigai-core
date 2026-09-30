@@ -454,10 +454,20 @@ impl Graph {
 
     /// The members of `s`'s `ik:layers`, in list order.
     fn layers(&self, s: &str) -> Vec<String> {
+        self.list(s, "layers")
+    }
+
+    /// The doors of a leaf, in the order it tries them (`ik:doors`).
+    fn doors(&self, s: &str) -> Vec<String> {
+        self.list(s, "doors")
+    }
+
+    /// An ordered property's members, walking its explicit list cells.
+    fn list(&self, s: &str, property: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut cell = self
-            .iri(s, &format!("{IK}layers"))
-            .unwrap_or_else(|| panic!("{s} has no layers"));
+            .iri(s, &format!("{IK}{property}"))
+            .unwrap_or_else(|| panic!("{s} has no {property}"));
         while cell != format!("{RDF}nil") {
             out.push(self.iri(&cell, &format!("{RDF}first")).expect("rdf:first"));
             cell = self.iri(&cell, &format!("{RDF}rest")).expect("rdf:rest");
@@ -552,6 +562,7 @@ fn the_topology_renders_the_chain_and_every_core_combinator_as_iris_with_ordered
         g.strs(&layers[0], &format!("{IK}family")),
         ["urn:doc:{id}:secret"]
     );
+    assert_eq!(g.strs(&layers[0], &format!("{IK}matchKind")), ["template"]);
     assert_eq!(g.kind(&layers[1]), "Mount");
     assert_eq!(
         g.strs(&layers[1], &format!("{IK}prefix")),
@@ -562,9 +573,43 @@ fn the_topology_renders_the_chain_and_every_core_combinator_as_iris_with_ordered
     let mut patterns = g.strs("urn:example:space:personal", &format!("{IK}pattern"));
     patterns.sort();
     assert_eq!(patterns, ["urn:personal:doc/{id}", "urn:personal:x"]);
+    // Each door names the endpoint that answers it, in the order the leaf tries
+    // them (ledger #608): the flat patterns say membership, `ik:doors` says order
+    // and what to bind.
+    let doors = g.doors("urn:example:space:personal");
+    assert_eq!(
+        doors,
+        [
+            "urn:example:space:personal:door:1",
+            "urn:example:space:personal:door:2"
+        ]
+    );
+    let described: Vec<(String, String, String)> = doors
+        .iter()
+        .map(|d| {
+            assert_eq!(g.kind(d), "Door");
+            (
+                g.strs(d, &format!("{IK}pattern")).remove(0),
+                g.strs(d, &format!("{IK}matchKind")).remove(0),
+                g.strs(d, &format!("{IK}endpointName")).remove(0),
+            )
+        })
+        .collect();
+    assert_eq!(
+        described,
+        [
+            ("urn:personal:x".into(), "exact".into(), "personal-x".into()),
+            (
+                "urn:personal:doc/{id}".into(),
+                "template".into(),
+                "personal-doc".into()
+            ),
+        ]
+    );
     // The alias carries its table; the rewrite encloses and says nothing of τ; the
     // foreign space is opaque — the graph says where knowledge stops.
     assert_eq!(g.kind(&layers[2]), "Alias");
+    assert_eq!(g.strs(&layers[2], &format!("{IK}maxHops")), ["8"]);
     let rules: Vec<String> = g
         .objects(&layers[2], &format!("{IK}rewrites"))
         .iter()
@@ -821,7 +866,12 @@ impl Walk {
                 self.walk(g, &g.space(node), family, &gate);
             }
             "EndpointSpace" => {
-                for door in g.strs(node, &p("pattern")) {
+                let doors: Vec<String> = g
+                    .doors(node)
+                    .iter()
+                    .map(|d| g.strs(d, &p("pattern")).remove(0))
+                    .collect();
+                for door in doors {
                     let lit = door.split('{').next().unwrap_or(&door);
                     if !touches(lit, gate) {
                         continue; // the mount above never admits a name of this door
@@ -1129,11 +1179,94 @@ fn a_confinement_reports_the_corridor_it_severs_into() {
     assert!(matches!(tree.kind, SpaceKind::Confine));
     assert_eq!(tree.id.as_ref().unwrap().as_str(), "urn:example:ctx:doc:1");
     assert!(
-        matches!(&tree.children[0].kind, SpaceKind::EndpointSpace { patterns } if patterns == &["urn:doc:1"])
+        matches!(&tree.children[0].kind, SpaceKind::EndpointSpace { doors }
+            if doors.len() == 1 && doors[0].pattern == "urn:doc:1" && doors[0].endpoint == "doc")
     );
     let g = Graph::parse(&tree.to_turtle());
     assert_eq!(g.kind("urn:example:ctx:doc:1"), "Confine");
     assert_eq!(g.kind(&g.space("urn:example:ctx:doc:1")), "EndpointSpace");
+}
+
+#[test]
+fn a_door_bound_to_a_confinement_reports_the_corridor_as_its_confined_to() {
+    // The same confinement, bound at a door of the root: the corridor is part of
+    // the chain's graph now, at the door it lives at, named by the confinement.
+    let corridor: Arc<dyn Space> =
+        Arc::new(EndpointSpace::new().bind(Exact::new("urn:doc:1"), door("doc")));
+    let root: Arc<dyn Space> = Arc::new(
+        EndpointSpace::new()
+            .bind(Exact::new("urn:open"), door("open"))
+            .bind_arc(
+                Exact::new("urn:extract"),
+                Arc::new(Confine::new(
+                    iri("urn:example:ctx:doc:1"),
+                    corridor,
+                    Arc::new(door("extract")),
+                )),
+            )
+            .named(iri("urn:example:space:root")),
+    );
+    let g = topology(&kernel(root), &Capability::root(), Scope::empty());
+    let doors = g.doors("urn:example:space:root");
+    assert_eq!(g.iri(&doors[0], &format!("{IK}confinedTo")), None);
+    assert_eq!(g.strs(&doors[1], &format!("{IK}endpointName")), ["extract"]);
+    let confined = g
+        .iri(&doors[1], &format!("{IK}confinedTo"))
+        .expect("the confined door names its corridor");
+    assert_eq!(confined, "urn:example:ctx:doc:1");
+    assert_eq!(g.kind(&confined), "EndpointSpace");
+    assert_eq!(g.strs(&confined, &format!("{IK}pattern")), ["urn:doc:1"]);
+    // The corridor is not a layer of anything: only the door reaches it.
+    assert_eq!(
+        g.layers("urn:ikigai:chain:root"),
+        ["urn:example:space:root"]
+    );
+}
+
+/// A grammar written outside core: it matches its pattern and binds more than the
+/// pattern shows, so the graph must not claim it can be rebuilt from the text.
+struct Tagged;
+impl ikigai_core::Grammar for Tagged {
+    fn match_iri(&self, iri: &Iri) -> Option<ikigai_core::Bindings> {
+        (iri.as_str() == "urn:tagged").then(|| {
+            let mut b = ikigai_core::Bindings::new();
+            b.insert("tag", "hidden");
+            b
+        })
+    }
+
+    fn pattern(&self) -> String {
+        "urn:tagged".into()
+    }
+}
+
+#[test]
+fn every_door_and_limiter_says_how_its_pattern_matches() {
+    let root: Arc<dyn Space> = Arc::new(
+        Fallback::new(vec![
+            Arc::new(Limit::new("urn:p:x")),
+            Arc::new(Limit::matching(Exact::new("urn:p:x"))),
+            Arc::new(
+                EndpointSpace::new()
+                    .bind(Tagged, door("tagged"))
+                    .named(iri("urn:example:space:leaf")),
+            ),
+        ])
+        .named(iri("urn:example:space:root")),
+    );
+    let g = topology(&kernel(root), &Capability::root(), Scope::empty());
+    let layers = g.layers("urn:example:space:root");
+    // The two limiters render the same family text; only the kind tells a prefix
+    // wall from a one-name wall.
+    // (`urn:p:xy` is walled by the first and not by the second.)
+    for (layer, kind) in layers.iter().zip(["prefix", "exact"]) {
+        assert_eq!(g.kind(layer), "Limit");
+        assert_eq!(g.strs(layer, &format!("{IK}family")), ["urn:p:x"]);
+        assert_eq!(g.strs(layer, &format!("{IK}matchKind")), [kind]);
+    }
+    let doors = g.doors("urn:example:space:leaf");
+    assert_eq!(g.strs(&doors[0], &format!("{IK}matchKind")), ["custom"]);
+    assert_eq!(g.strs(&doors[0], &format!("{IK}pattern")), ["urn:tagged"]);
 }
 
 // ---- 4. The check answers for a fragment, and says so --------------------------

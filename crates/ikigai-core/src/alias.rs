@@ -735,6 +735,7 @@ impl Space for Alias {
                 .iter()
                 .map(|rule| TopologyRule::new(rule.kind(), rule.from(), rule.to()))
                 .collect(),
+            max_hops: self.table.max_hops(),
         })
         .with_id(self.id.clone())
         .child(self.inner.topology())

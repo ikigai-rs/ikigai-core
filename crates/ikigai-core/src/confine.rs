@@ -101,9 +101,11 @@ impl Confine {
 
     /// The arrangement the inner endpoint's sub-requests see once confined, as a
     /// tree: an `ik:Confine` node named `name`, enclosing the corridor's own
-    /// structure. Not reachable from `urn:kernel:topology` — a confinement is bound
-    /// at one door, inside an endpoint the space cannot see into — so a host
-    /// doctor asks the endpoint.
+    /// structure. In `urn:kernel:topology` the same corridor appears at the door
+    /// the confinement is bound to, as that door's `ik:confinedTo` (the corridor
+    /// itself, named `name`, via [`Endpoint::confinement`]) — the door is where a
+    /// confinement lives, so the graph puts it there rather than inventing a space
+    /// node the chain never consults.
     pub fn topology(&self) -> Topology {
         Topology::new(SpaceKind::Confine)
             .with_id(Some(self.name.clone()))
@@ -132,5 +134,13 @@ impl Endpoint for Confine {
 
     fn describe(&self) -> Description {
         self.inner.describe()
+    }
+
+    /// The corridor, named by the confinement: what a door bound to this endpoint
+    /// reports as `ik:confinedTo`.
+    fn confinement(&self) -> Option<Topology> {
+        let mut corridor = self.space.topology();
+        corridor.id = Some(self.name.clone());
+        Some(corridor)
     }
 }
