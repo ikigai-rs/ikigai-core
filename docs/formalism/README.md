@@ -1816,3 +1816,19 @@ numbered its anonymous children twice). **Not built, on purpose:** hot reload
 ([#630](http://localhost:1060/l/default/item/630)), factories
 ([#631](http://localhost:1060/l/default/item/631)), corridor templates
 ([#632](http://localhost:1060/l/default/item/632)).
+
+**0.1.84** bounds declarations and closes the arrangement nits the s-expression surface found (ledgers
+[#643](http://localhost:1060/l/default/item/643), [#644](http://localhost:1060/l/default/item/644)).
+**Additive:** `MAX_DECLARATION_DEPTH` (48), `MAX_DECLARATION_NODES` (65,536) and `MAX_DECLARATION_TEXT`
+(16 MiB), `DeclarationBound`, and `DeclarationError::TooLarge { bound, limit, node }`: `from_turtle` checks
+depth before each descent and counts nodes and text as it produces them, and `build` measures a tree
+iteratively before building it, so a declaration past a bound is REFUSED rather than overflowing the
+stack or expanding exponentially (the parse and build frames were also made smaller: the tightest walk now
+survives 218 levels on a 1 MiB debug-build stack against a bound of 48). `Topology::try_to_turtle`,
+`Kernel::root_topology` (the root without its chain wrapper), and a public `SKOLEM_PREFIX`.
+**What a consumer observes without code of its own changing:** `urn:kernel:topology` answers
+`Conflict` for a kernel in which two different spaces claim one name, where it used to render only the
+first; `check_sealing` reads a door's match kind rather than splitting its pattern at `{`; the alias-rule
+order is documented as what it always was, sorted precedence (the vocabulary's `ik:Alias` comment still
+says "table order" and is corrected with the next vocabulary change); and the `getrandom` floor is 0.3.4,
+whose `wasm_js` feature needs no `--cfg` flag. No new vocabulary terms.
