@@ -119,7 +119,10 @@ pub use cache::{
 pub use capability::Capability;
 pub use confine::Confine;
 pub use content::{ContentId, ContentIdError};
-pub use declare::{build, DeclarationError, Registry};
+pub use declare::{
+    build, DeclarationBound, DeclarationError, Registry, MAX_DECLARATION_DEPTH,
+    MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
+};
 pub use describe::{ActionSpec, ArgSpec, Description, EndpointKind, InputSource, Transreption};
 #[cfg(not(target_family = "wasm"))]
 pub use endpoint::SyncIssuer;

@@ -33,12 +33,20 @@
 //! [`name`](Endpoint::name). The [`Registry`] refuses the second one registered
 //! under a name already taken, so a door can never bind "whichever `x` came first".
 //!
+//! **Bounded.** A declaration is operator input, so it is read and built within three
+//! bounds, each REFUSED with [`DeclarationError::TooLarge`] rather than crashed on or
+//! truncated: nesting depth ([`MAX_DECLARATION_DEPTH`]), nodes once every reference is
+//! expanded ([`MAX_DECLARATION_NODES`]), and the text those nodes carry
+//! ([`MAX_DECLARATION_TEXT`]). A named node is expanded at every place it is used —
+//! [`Topology`] is a value tree — so a few kilobytes of Turtle whose named nodes each
+//! reference the next several times would otherwise grow exponentially.
+//!
 //! The round trip is the acceptance test: for a kernel K,
 //! `build(from_turtle(K.topology().to_turtle()))` renders the same topology and answers
 //! every name K answers, the same way (`tests/declare.rs`). The design note is
 //! `docs/design/space-declarations.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -50,6 +58,178 @@ use crate::kernel::Kernel;
 use crate::seal::SealError;
 use crate::space::{EndpointSpace, Fallback, Level, Limit, Mount, Space};
 use crate::topology::{Door, MatchKind, SpaceKind, Topology, SKOLEM_PREFIX};
+
+/// **How deeply a declaration may nest spaces**: the root is depth 1, and each space
+/// it encloses — a layer, a mounted or aliased space, a level's space, a door's
+/// confined corridor — is one deeper. `Topology::from_turtle` and [`build`] refuse a
+/// deeper tree with [`DeclarationError::TooLarge`].
+///
+/// Chosen by measurement, for the smallest stack a host is likely to run on: every
+/// walk over a declaration recurses once per level (parsing it, building it, rendering
+/// it, comparing, cloning and dropping the tree, the built space's own
+/// [`topology`](Space::topology), and a request resolving through every level), and at
+/// this depth all of them together fit a **1 MiB** thread in a **debug** build — the
+/// wasm32 default, and a small worker thread — more than four times over. Measured
+/// 2026-09-30 (aarch64, debug, a chain of fallbacks and a chain of confined doors, the
+/// two costliest shapes): on 1 MiB, rendering overflows first, past 218 levels;
+/// parsing past 269; building past 323; everything else past 450. The same value
+/// ikigai-sexpr chose for the same reason, so a surface and core refuse alike.
+/// `tests/declare_bounds.rs` runs the whole pipeline at this depth on a 1 MiB thread.
+/// A real arrangement is a handful of levels deep.
+pub const MAX_DECLARATION_DEPTH: usize = 48;
+
+/// **How many nodes a declaration may hold once every reference is expanded**: each
+/// space, each door and each alias rule counts, and a named node counts again at every
+/// place it is used, because that is what the tree holds. `Topology::from_turtle`
+/// counts as it goes, so a document that expands exponentially is refused after this
+/// many nodes, not after the expansion; [`build`] counts the tree it is given the same
+/// way.
+pub const MAX_DECLARATION_NODES: usize = 65_536;
+
+/// **How much text a declaration may carry once expanded**, in bytes: every IRI a node
+/// claims and every pattern, endpoint name, prefix, family, rule, seal and namespace,
+/// counted at every place its node is used. The node bound alone would still let one
+/// large literal in a node referenced thousands of times expand to gigabytes.
+pub const MAX_DECLARATION_TEXT: usize = 16 * 1024 * 1024;
+
+/// Which bound a [`DeclarationError::TooLarge`] declaration exceeded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DeclarationBound {
+    /// Nesting depth, [`MAX_DECLARATION_DEPTH`].
+    Depth,
+    /// Expanded nodes, [`MAX_DECLARATION_NODES`].
+    Nodes,
+    /// Expanded text, [`MAX_DECLARATION_TEXT`].
+    Text,
+}
+
+impl DeclarationBound {
+    /// The limit this bound holds a declaration to.
+    pub fn limit(self) -> usize {
+        match self {
+            DeclarationBound::Depth => MAX_DECLARATION_DEPTH,
+            DeclarationBound::Nodes => MAX_DECLARATION_NODES,
+            DeclarationBound::Text => MAX_DECLARATION_TEXT,
+        }
+    }
+}
+
+impl fmt::Display for DeclarationBound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            DeclarationBound::Depth => "depth",
+            DeclarationBound::Nodes => "node",
+            DeclarationBound::Text => "text",
+        })
+    }
+}
+
+/// The running size of a declaration, charged one node at a time as it is read or
+/// measured — one accounting for `Topology::from_turtle` and [`build`], so a tree the
+/// parser produced is always one the builder accepts.
+#[derive(Default)]
+struct Budget {
+    nodes: usize,
+    text: usize,
+}
+
+impl Budget {
+    /// Charge `node`'s own share — itself, its doors and its rules, and the text they
+    /// carry; never its children or its doors' corridors, which are charged as nodes
+    /// of their own — refusing at `at` once a bound is passed.
+    fn charge(&mut self, node: &Topology, at: &str) -> Result<(), DeclarationError> {
+        let mut nodes = 1;
+        let mut text = node.id.as_ref().map_or(0, |id| id.as_str().len());
+        match &node.kind {
+            SpaceKind::EndpointSpace { doors } => {
+                nodes += doors.len();
+                text += doors
+                    .iter()
+                    .map(|d| d.pattern.len() + d.endpoint.len())
+                    .sum::<usize>();
+            }
+            SpaceKind::Alias { rules, .. } => {
+                nodes += rules.len();
+                text += rules
+                    .iter()
+                    .map(|r| r.from.len() + r.to.len())
+                    .sum::<usize>();
+            }
+            SpaceKind::Mount { prefix } => text += prefix.len(),
+            SpaceKind::Limit { family, .. } => text += family.len(),
+            SpaceKind::Level { seals, namespace } => {
+                text += seals.iter().map(String::len).sum::<usize>();
+                text += namespace.as_ref().map_or(0, String::len);
+            }
+            _ => {}
+        }
+        self.nodes = self.nodes.saturating_add(nodes);
+        self.text = self.text.saturating_add(text);
+        let bound = if self.nodes > MAX_DECLARATION_NODES {
+            DeclarationBound::Nodes
+        } else if self.text > MAX_DECLARATION_TEXT {
+            DeclarationBound::Text
+        } else {
+            return Ok(());
+        };
+        Err(too_large(bound, at))
+    }
+}
+
+/// The refusal for a declaration past `bound`, found at the node `at`.
+fn too_large(bound: DeclarationBound, at: &str) -> DeclarationError {
+    DeclarationError::TooLarge {
+        bound,
+        limit: bound.limit(),
+        node: at.to_string(),
+    }
+}
+
+/// Check `tree` against the three bounds WITHOUT recursing — an explicit stack, so a
+/// tree far deeper than the bound is refused rather than overflowing the check itself.
+/// Nodes are named as [`Topology::to_turtle`] names them: skolems in pre-order, and a
+/// named node met again (rendered once, where it is first met) standing for everything
+/// under it.
+fn measure(tree: &Topology) -> Result<(), DeclarationError> {
+    // (node, its depth, the named node met again that it lies under, if any)
+    let mut stack: Vec<(&Topology, usize, Option<String>)> = vec![(tree, 1, None)];
+    let mut skolem = 0;
+    let mut seen = BTreeSet::new();
+    let mut budget = Budget::default();
+    while let Some((node, depth, again)) = stack.pop() {
+        let (me, again) = match (again, &node.id) {
+            (Some(outer), _) => (outer.clone(), Some(outer)),
+            (None, Some(id)) => {
+                let me = id.as_str().to_string();
+                if seen.insert(me.clone()) {
+                    (me, None)
+                } else {
+                    (me.clone(), Some(me))
+                }
+            }
+            (None, None) => {
+                skolem += 1;
+                (format!("{SKOLEM_PREFIX}{skolem}"), None)
+            }
+        };
+        if depth > MAX_DECLARATION_DEPTH {
+            return Err(too_large(DeclarationBound::Depth, &me));
+        }
+        budget.charge(node, &me)?;
+        // Pushed in reverse, so they pop in render order: the children, then each
+        // door's corridor in door order.
+        if let SpaceKind::EndpointSpace { doors } = &node.kind {
+            for corridor in doors.iter().rev().filter_map(|d| d.confined.as_deref()) {
+                stack.push((corridor, depth + 1, again.clone()));
+            }
+        }
+        for child in node.children.iter().rev() {
+            stack.push((child, depth + 1, again.clone()));
+        }
+    }
+    Ok(())
+}
 
 /// The endpoints a declaration may bind, by name — the host's side of the contract.
 ///
@@ -219,6 +399,20 @@ pub enum DeclarationError {
     /// The built arrangement breaks the seal rules — the refusal
     /// [`Kernel::check_sealing`] gives.
     Sealing(SealError),
+    /// The declaration is past one of the bounds core reads and builds within:
+    /// deeper than [`MAX_DECLARATION_DEPTH`], or more nodes than
+    /// [`MAX_DECLARATION_NODES`] or more text than [`MAX_DECLARATION_TEXT`] once
+    /// every reference is expanded. Refused whole, never read or built partway.
+    TooLarge {
+        /// Which bound.
+        bound: DeclarationBound,
+        /// Its limit.
+        limit: usize,
+        /// The node the bound was passed at: for depth, the first node too deep;
+        /// for size, the node whose share passed it. Inside a named node met again,
+        /// that named node.
+        node: String,
+    },
 }
 
 impl fmt::Display for DeclarationError {
@@ -279,6 +473,25 @@ impl fmt::Display for DeclarationError {
                 reason,
             } => write!(f, "<{node}> matches `{pattern}`, which {reason}"),
             DeclarationError::Sealing(error) => write!(f, "the declared arrangement: {error}"),
+            DeclarationError::TooLarge {
+                bound: DeclarationBound::Depth,
+                limit,
+                node,
+            } => write!(
+                f,
+                "<{node}> nests deeper than {limit} spaces (MAX_DECLARATION_DEPTH): a \
+                 declaration past a bound is refused whole, never read partway"
+            ),
+            DeclarationError::TooLarge { bound, limit, node } => write!(
+                f,
+                "at <{node}> the declaration passes its {bound} bound of {limit} \
+                 (MAX_DECLARATION_{}), counting a named node at every place it is used: a \
+                 declaration past a bound is refused whole, never read partway",
+                match bound {
+                    DeclarationBound::Text => "TEXT, in bytes",
+                    _ => "NODES",
+                }
+            ),
         }
     }
 }
@@ -298,6 +511,16 @@ impl std::error::Error for DeclarationError {}
 /// skipped. The result is
 /// then checked with [`Kernel::check_sealing`] against the host's seals
 /// ([`Registry::sealing`]).
+///
+/// **Bounded like `Topology::from_turtle`.** `build` accepts any tree, not only a
+/// parsed one, so before it recurses it measures the tree without recursing and
+/// refuses one deeper than [`MAX_DECLARATION_DEPTH`], or larger than
+/// [`MAX_DECLARATION_NODES`] or [`MAX_DECLARATION_TEXT`] counting every occurrence
+/// ([`DeclarationError::TooLarge`]). The same accounting as the parser's, so every
+/// tree `from_turtle` returns passes it. What `build` returns therefore nests no
+/// deeper than the bound, and so does its [`topology`](Space::topology): every walk
+/// over it — rendering, sealing, resolving a request through every level — stays
+/// within the depth the bound was measured for.
 ///
 /// ```
 /// use std::sync::Arc;
@@ -331,6 +554,7 @@ pub fn build(
     declaration: &Topology,
     registry: &Registry,
 ) -> Result<Arc<dyn Space>, DeclarationError> {
+    measure(declaration)?;
     let mut builder = Builder {
         registry,
         skolem: 0,
@@ -367,51 +591,206 @@ impl Builder<'_> {
 
     /// Build one node. `mounted_at` is the prefix of the `ik:Mount` whose space this
     /// node is, if any — so an opaque space there can be named as the remote it is.
+    ///
+    /// ⚠ The only recursive frame of the build, kept small on purpose (as the
+    /// parser's is): what a node earns by itself is refused by
+    /// [`check`](Self::check), and the node is put together by
+    /// [`assemble`](Self::assemble), and neither is on the stack while this descends.
+    /// With the three in one function a level cost about 10 KB of a debug build's
+    /// stack (12 KB through a confined door).
     fn space(
         &mut self,
         node: &Topology,
         mounted_at: Option<&str>,
     ) -> Result<Arc<dyn Space>, DeclarationError> {
         let me = self.iri(node);
-        if node.id.is_some() {
-            if let Some((first, space)) = self.named.get(&me) {
-                if first == node {
-                    return Ok(Arc::clone(space));
-                }
-                return Err(DeclarationError::Malformed {
-                    node: Some(me),
-                    reason: "two different arrangements claim this one name (a name is a \
-                             claim: same name, same doors)"
-                        .into(),
+        if let Some(shared) = self.met_again(node, &me)? {
+            return Ok(shared);
+        }
+        self.check(node, &me, mounted_at)?;
+        let prefix = match &node.kind {
+            SpaceKind::Mount { prefix } => Some(prefix.as_str()),
+            _ => None,
+        };
+        let mut inner = Vec::with_capacity(node.children.len());
+        for child in &node.children {
+            inner.push(self.space(child, prefix)?);
+        }
+        let mut corridors = Vec::new();
+        if let SpaceKind::EndpointSpace { doors } = &node.kind {
+            for door in doors {
+                corridors.push(match &door.confined {
+                    Some(corridor) => Some(self.space(corridor, None)?),
+                    None => None,
                 });
             }
         }
-        let expect = |n: usize, kids: &[Topology]| {
-            if kids.len() == n {
+        let space = self.assemble(node, &me, inner, corridors)?;
+        if node.id.is_some() {
+            self.named.insert(me, (node.clone(), Arc::clone(&space)));
+        }
+        Ok(space)
+    }
+
+    /// The space already built under `node`'s name, when the name was met before
+    /// over the same arrangement; refused when it was met over a different one.
+    fn met_again(
+        &self,
+        node: &Topology,
+        me: &str,
+    ) -> Result<Option<Arc<dyn Space>>, DeclarationError> {
+        if node.id.is_none() {
+            return Ok(None);
+        }
+        match self.named.get(me) {
+            None => Ok(None),
+            Some((first, space)) if first == node => Ok(Some(Arc::clone(space))),
+            Some(_) => Err(DeclarationError::Malformed {
+                node: Some(me.to_string()),
+                reason: "two different arrangements claim this one name (a name is a \
+                         claim: same name, same doors)"
+                    .into(),
+            }),
+        }
+    }
+
+    /// Every refusal `node` earns by itself, before anything it encloses is built:
+    /// a kind that is not data, the wrong number of enclosed spaces, a hop bound of
+    /// zero, an unnamed level, and for each door (in order) an endpoint the host did
+    /// not register, an unnamed corridor, or a pattern core cannot rebuild.
+    fn check(
+        &self,
+        node: &Topology,
+        me: &str,
+        mounted_at: Option<&str>,
+    ) -> Result<(), DeclarationError> {
+        let encloses = |n: usize| {
+            if node.children.len() == n {
                 Ok(())
             } else {
                 Err(DeclarationError::Malformed {
-                    node: Some(me.clone()),
-                    reason: format!("encloses {} spaces, and this kind encloses {n}", kids.len()),
+                    node: Some(me.to_string()),
+                    reason: format!(
+                        "encloses {} spaces, and this kind encloses {n}",
+                        node.children.len()
+                    ),
                 })
             }
         };
-        let id = node.id.clone();
-        let space: Arc<dyn Space> = match &node.kind {
-            SpaceKind::Opaque => {
-                return Err(DeclarationError::Opaque {
-                    node: me,
-                    mounted_at: mounted_at.map(str::to_string),
-                })
-            }
-            SpaceKind::Rewrite => return Err(DeclarationError::Rewrite { node: me }),
-            SpaceKind::Chain { .. } => return Err(DeclarationError::Chain { node: me }),
-            SpaceKind::Confine => return Err(DeclarationError::Confine { node: me }),
+        match &node.kind {
+            SpaceKind::Opaque => Err(DeclarationError::Opaque {
+                node: me.to_string(),
+                mounted_at: mounted_at.map(str::to_string),
+            }),
+            SpaceKind::Rewrite => Err(DeclarationError::Rewrite {
+                node: me.to_string(),
+            }),
+            SpaceKind::Chain { .. } => Err(DeclarationError::Chain {
+                node: me.to_string(),
+            }),
+            SpaceKind::Confine => Err(DeclarationError::Confine {
+                node: me.to_string(),
+            }),
             SpaceKind::EndpointSpace { doors } => {
-                expect(0, &node.children)?;
-                let mut space = EndpointSpace::new();
+                encloses(0)?;
                 for (i, door) in doors.iter().enumerate() {
-                    space = self.door(space, &format!("{me}:door:{}", i + 1), door)?;
+                    self.check_door(&format!("{me}:door:{}", i + 1), door)?;
+                }
+                Ok(())
+            }
+            SpaceKind::Fallback => Ok(()),
+            SpaceKind::Mount { .. } => encloses(1),
+            SpaceKind::Alias { max_hops, .. } => {
+                encloses(1)?;
+                if *max_hops == 0 {
+                    return Err(DeclarationError::Malformed {
+                        node: Some(me.to_string()),
+                        reason: "an alias table follows at least one hop (ik:maxHops ≥ 1)".into(),
+                    });
+                }
+                Ok(())
+            }
+            SpaceKind::Limit { family, kind } => {
+                encloses(0)?;
+                match kind {
+                    MatchKind::Template => template(me, family).map(|_| ()),
+                    MatchKind::Custom => Err(custom(me, family)),
+                    _ => Ok(()),
+                }
+            }
+            SpaceKind::Level { .. } => {
+                encloses(1)?;
+                if node.id.is_none() {
+                    return Err(DeclarationError::Malformed {
+                        node: Some(me.to_string()),
+                        reason: "a level is always named".into(),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The refusals one door earns: its endpoint by name, its corridor's name, and
+    /// its grammar by kind.
+    fn check_door(&self, at: &str, door: &Door) -> Result<(), DeclarationError> {
+        if self.registry.get(&door.endpoint).is_none() {
+            return Err(DeclarationError::UnknownEndpoint {
+                door: at.to_string(),
+                id: door.endpoint.clone(),
+            });
+        }
+        if door.confined.as_ref().is_some_and(|c| c.id.is_none()) {
+            return Err(DeclarationError::Malformed {
+                node: Some(at.to_string()),
+                reason: "a confined corridor is named by its confinement".into(),
+            });
+        }
+        match door.kind {
+            MatchKind::Exact => Ok(()),
+            MatchKind::Template => template(at, &door.pattern).map(|_| ()),
+            MatchKind::Prefix => Err(DeclarationError::Pattern {
+                node: at.to_string(),
+                pattern: door.pattern.clone(),
+                reason: "is a prefix: a door is an exact name or a template, and a \
+                         prefix is a Mount's or a limiter's"
+                    .into(),
+            }),
+            MatchKind::Custom => Err(custom(at, &door.pattern)),
+        }
+    }
+
+    /// Put `node` together from what it encloses, already built: `inner` its
+    /// children in order, `corridors` each door's confined corridor. Everything
+    /// [`check`](Self::check) refuses has been refused.
+    fn assemble(
+        &self,
+        node: &Topology,
+        me: &str,
+        inner: Vec<Arc<dyn Space>>,
+        corridors: Vec<Option<Arc<dyn Space>>>,
+    ) -> Result<Arc<dyn Space>, DeclarationError> {
+        let id = node.id.clone();
+        let only = || Arc::clone(&inner[0]);
+        Ok(match &node.kind {
+            SpaceKind::EndpointSpace { doors } => {
+                let mut space = EndpointSpace::new();
+                for (i, (door, corridor)) in doors.iter().zip(corridors).enumerate() {
+                    let at = format!("{me}:door:{}", i + 1);
+                    let endpoint = self.endpoint(&at, door)?;
+                    let endpoint: Arc<dyn Endpoint> =
+                        match (corridor, door.confined.as_ref().and_then(|c| c.id.clone())) {
+                            (Some(corridor), Some(name)) => {
+                                Arc::new(Confine::new(name, corridor, endpoint))
+                            }
+                            _ => endpoint,
+                        };
+                    space = match door.kind {
+                        MatchKind::Template => {
+                            space.bind_arc(template(&at, &door.pattern)?, endpoint)
+                        }
+                        _ => space.bind_arc(Exact::new(door.pattern.clone()), endpoint),
+                    };
                 }
                 Arc::new(match id {
                     Some(id) => space.named(id),
@@ -419,33 +798,20 @@ impl Builder<'_> {
                 })
             }
             SpaceKind::Fallback => {
-                let mut layers = Vec::with_capacity(node.children.len());
-                for child in &node.children {
-                    layers.push(self.space(child, None)?);
-                }
-                let fallback = Fallback::new(layers);
+                let fallback = Fallback::new(inner);
                 Arc::new(match id {
                     Some(id) => fallback.named(id),
                     None => fallback,
                 })
             }
             SpaceKind::Mount { prefix } => {
-                expect(1, &node.children)?;
-                let inner = self.space(&node.children[0], Some(prefix))?;
-                let mount = Mount::new(prefix.clone(), inner);
+                let mount = Mount::new(prefix.clone(), only());
                 Arc::new(match id {
                     Some(id) => mount.named(id),
                     None => mount,
                 })
             }
             SpaceKind::Alias { rules, max_hops } => {
-                expect(1, &node.children)?;
-                if *max_hops == 0 {
-                    return Err(DeclarationError::Malformed {
-                        node: Some(me),
-                        reason: "an alias table follows at least one hop (ik:maxHops ≥ 1)".into(),
-                    });
-                }
                 let mut table = AliasTable::new().with_max_hops(*max_hops);
                 for rule in rules {
                     table = match rule.kind {
@@ -453,20 +819,17 @@ impl Builder<'_> {
                         RuleKind::Prefix => table.prefix(rule.from.clone(), rule.to.clone()),
                     };
                 }
-                let inner = self.space(&node.children[0], None)?;
-                let alias = Alias::new(Arc::new(table), inner);
+                let alias = Alias::new(Arc::new(table), only());
                 Arc::new(match id {
                     Some(id) => alias.named(id),
                     None => alias,
                 })
             }
             SpaceKind::Limit { family, kind } => {
-                expect(0, &node.children)?;
                 let limit = match kind {
-                    MatchKind::Prefix => Limit::new(family.clone()),
+                    MatchKind::Template => Limit::matching(template(me, family)?),
                     MatchKind::Exact => Limit::matching(Exact::new(family.clone())),
-                    MatchKind::Template => Limit::matching(template(&me, family)?),
-                    MatchKind::Custom => return Err(custom(&me, family)),
+                    _ => Limit::new(family.clone()),
                 };
                 Arc::new(match id {
                     Some(id) => limit.named(id),
@@ -474,15 +837,10 @@ impl Builder<'_> {
                 })
             }
             SpaceKind::Level { seals, namespace } => {
-                expect(1, &node.children)?;
                 let Some(name) = id else {
-                    return Err(DeclarationError::Malformed {
-                        node: Some(me),
-                        reason: "a level is always named".into(),
-                    });
+                    return Err(not_built(me));
                 };
-                let inner = self.space(&node.children[0], None)?;
-                let mut level = Level::new(name, inner);
+                let mut level = Level::new(name, only());
                 if !seals.is_empty() {
                     level = level.sealing(seals.iter().cloned());
                 }
@@ -491,53 +849,29 @@ impl Builder<'_> {
                 }
                 Arc::new(level)
             }
-        };
-        if node.id.is_some() {
-            self.named.insert(me, (node.clone(), Arc::clone(&space)));
-        }
-        Ok(space)
+            // Refused by `check`, before anything was built.
+            _ => return Err(not_built(me)),
+        })
     }
 
-    /// Bind one door onto `space`: its grammar by kind, its endpoint by name, and
-    /// its confinement when it declares one.
-    fn door(
-        &mut self,
-        space: EndpointSpace,
-        at: &str,
-        door: &Door,
-    ) -> Result<EndpointSpace, DeclarationError> {
-        let endpoint = self.registry.get(&door.endpoint).cloned().ok_or_else(|| {
+    /// The registered endpoint a door binds (checked present by
+    /// [`check_door`](Self::check_door)).
+    fn endpoint(&self, at: &str, door: &Door) -> Result<Arc<dyn Endpoint>, DeclarationError> {
+        self.registry.get(&door.endpoint).cloned().ok_or_else(|| {
             DeclarationError::UnknownEndpoint {
                 door: at.to_string(),
                 id: door.endpoint.clone(),
             }
-        })?;
-        let endpoint: Arc<dyn Endpoint> = match &door.confined {
-            None => endpoint,
-            Some(corridor) => {
-                let Some(name) = corridor.id.clone() else {
-                    return Err(DeclarationError::Malformed {
-                        node: Some(at.to_string()),
-                        reason: "a confined corridor is named by its confinement".into(),
-                    });
-                };
-                Arc::new(Confine::new(name, self.space(corridor, None)?, endpoint))
-            }
-        };
-        Ok(match door.kind {
-            MatchKind::Exact => space.bind_arc(Exact::new(door.pattern.clone()), endpoint),
-            MatchKind::Template => space.bind_arc(template(at, &door.pattern)?, endpoint),
-            MatchKind::Prefix => {
-                return Err(DeclarationError::Pattern {
-                    node: at.to_string(),
-                    pattern: door.pattern.clone(),
-                    reason: "is a prefix: a door is an exact name or a template, and a \
-                             prefix is a Mount's or a limiter's"
-                        .into(),
-                })
-            }
-            MatchKind::Custom => return Err(custom(at, &door.pattern)),
         })
+    }
+}
+
+/// What [`Builder::assemble`] answers for a node [`Builder::check`] should already
+/// have refused — never reached, and a refusal rather than a panic if it ever is.
+fn not_built(me: &str) -> DeclarationError {
+    DeclarationError::Malformed {
+        node: Some(me.to_string()),
+        reason: "not a node a declaration builds".into(),
     }
 }
 
@@ -569,7 +903,7 @@ mod turtle {
 
     use oxrdf::{NamedOrBlankNode, Term, Triple};
 
-    use super::DeclarationError;
+    use super::{too_large, Budget, DeclarationBound, DeclarationError, MAX_DECLARATION_DEPTH};
     use crate::alias::RuleKind;
     use crate::iri::Iri;
     use crate::topology::{Door, MatchKind, SpaceKind, Topology, TopologyRule, SKOLEM_PREFIX};
@@ -628,6 +962,38 @@ mod turtle {
         /// let odd = turtle.replace("ik:Mount", "ik:Tunnel");
         /// assert!(Topology::from_turtle(&odd).unwrap_err().to_string().contains("ik:Tunnel"));
         /// ```
+        ///
+        /// **Bounded, and a bound refuses.** A declaration is operator input, so the
+        /// parse holds it to [`MAX_DECLARATION_DEPTH`](crate::MAX_DECLARATION_DEPTH)
+        /// levels of nesting, checked before each descent so the parse itself cannot
+        /// overflow the stack, and to
+        /// [`MAX_DECLARATION_NODES`](crate::MAX_DECLARATION_NODES) nodes and
+        /// [`MAX_DECLARATION_TEXT`](crate::MAX_DECLARATION_TEXT) bytes of text counted
+        /// as they are produced, a named node at every place it is used — so a small
+        /// document that would expand exponentially is refused after the bound, not
+        /// after the expansion. Past any of them: [`DeclarationError::TooLarge`],
+        /// naming the bound, its limit and the node.
+        ///
+        /// ```
+        /// use ikigai_core::{DeclarationBound, DeclarationError, Topology, MAX_DECLARATION_DEPTH};
+        ///
+        /// // `n` mounts, each over the next, ending in an empty leaf.
+        /// let nested = |n: usize| {
+        ///     let mut t = String::from("@prefix ik: <https://ikigai-rs.dev/ns#> .\n");
+        ///     for i in 1..n {
+        ///         let next = i + 1;
+        ///         t += &format!("<urn:x:{i}> a ik:Mount ; ik:prefix \"urn:\" ; ik:space <urn:x:{next}> .\n");
+        ///     }
+        ///     t + &format!("<urn:x:{n}> a ik:EndpointSpace ; ik:doors <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> .\n")
+        /// };
+        /// assert!(Topology::from_turtle(&nested(MAX_DECLARATION_DEPTH)).is_ok());
+        /// let refused = Topology::from_turtle(&nested(MAX_DECLARATION_DEPTH + 1)).unwrap_err();
+        /// assert!(matches!(
+        ///     refused,
+        ///     DeclarationError::TooLarge { bound: DeclarationBound::Depth, limit: 48, ref node }
+        ///         if node == "urn:x:49"
+        /// ));
+        /// ```
         pub fn from_turtle(turtle: &str) -> Result<Topology, DeclarationError> {
             let mut graph = Graph::parse(turtle)?;
             let root = graph.root()?;
@@ -662,6 +1028,8 @@ mod turtle {
         triples: Vec<(String, String, Term)>,
         by_subject: BTreeMap<String, Vec<usize>>,
         used: Vec<bool>,
+        /// What the walk has produced so far, against the size bounds.
+        budget: Budget,
     }
 
     impl Graph {
@@ -708,6 +1076,7 @@ mod turtle {
                 triples,
                 by_subject,
                 used,
+                budget: Budget::default(),
             })
         }
 
@@ -905,33 +1274,78 @@ mod turtle {
                 .map_err(|e| malformed(s, format!("not an IRI a space can claim: {e}")))
         }
 
-        /// Parse the space node `s`, with `path` the nodes enclosing it (for cycles).
+        /// Parse the space node `s`, with `path` the nodes enclosing it (for cycles,
+        /// and for depth).
+        ///
+        /// ⚠ This is the ONLY recursive frame of the parse, and it is kept small on
+        /// purpose: everything a node states about itself is read by
+        /// [`shallow`](Self::shallow), whose frame is gone before the recursion
+        /// descends. Reading a node and descending in one function cost about 19 KB of
+        /// stack per level in a debug build (24 KB through a confined door), which put
+        /// 1 MiB's overflow near 41 levels, under [`MAX_DECLARATION_DEPTH`].
         fn node(&mut self, s: &str, path: &mut Vec<String>) -> Result<Topology, DeclarationError> {
             if path.iter().any(|p| p == s) {
                 return Err(malformed(s, "a cycle: the node encloses itself"));
             }
+            // `s` would be at depth `path.len() + 1`: refused BEFORE descending.
+            if path.len() >= MAX_DECLARATION_DEPTH {
+                return Err(too_large(DeclarationBound::Depth, s));
+            }
+            let Shallow {
+                mut tree,
+                children,
+                corridors,
+            } = self.shallow(s)?;
+            self.budget.charge(&tree, s)?;
             path.push(s.to_string());
-            let tree = self.node_inner(s, path);
+            let below = self.below(&mut tree, &children, &corridors, path);
             path.pop();
-            tree
+            below.map(|()| tree)
         }
 
-        fn node_inner(
+        /// Parse what `tree` encloses into it: its children, then each door's corridor
+        /// in door order.
+        fn below(
             &mut self,
-            s: &str,
+            tree: &mut Topology,
+            children: &[String],
+            corridors: &[(usize, String)],
             path: &mut Vec<String>,
-        ) -> Result<Topology, DeclarationError> {
+        ) -> Result<(), DeclarationError> {
+            for child in children {
+                let child = self.node(child, path)?;
+                tree.children.push(child);
+            }
+            for (door, corridor) in corridors {
+                let corridor = Box::new(self.node(corridor, path)?);
+                if let SpaceKind::EndpointSpace { doors } = &mut tree.kind {
+                    doors[*door].confined = Some(corridor);
+                }
+            }
+            Ok(())
+        }
+
+        /// Everything the node `s` states about itself, without descending: the node
+        /// with no children and its doors with no corridors, and the IRIs of what it
+        /// encloses. Refuses any triple about `s` (or one of its doors or rules) it does
+        /// not read.
+        fn shallow(&mut self, s: &str) -> Result<Shallow, DeclarationError> {
             let kind = self.kind(s, &SPACE_KINDS)?;
             let id = Self::id(s)?;
             let p = |local: &str| format!("{IK}{local}");
             let mut children = Vec::new();
+            let mut corridors = Vec::new();
             let kind = match kind.as_str() {
                 "OpaqueSpace" => SpaceKind::Opaque,
                 "EndpointSpace" => {
                     let flat: BTreeSet<String> = self.strs(s, &p("pattern"))?.into_iter().collect();
                     let mut doors = Vec::new();
-                    for door in self.list(s, "doors")? {
-                        doors.push(self.door(&door, path)?);
+                    for (i, door) in self.list(s, "doors")?.into_iter().enumerate() {
+                        let (door, corridor) = self.door(&door)?;
+                        if let Some(corridor) = corridor {
+                            corridors.push((i, corridor));
+                        }
+                        doors.push(door);
                     }
                     let listed: BTreeSet<String> =
                         doors.iter().map(|d| d.pattern.clone()).collect();
@@ -944,9 +1358,7 @@ mod turtle {
                     SpaceKind::EndpointSpace { doors }
                 }
                 "Fallback" => {
-                    for layer in self.list(s, "layers")? {
-                        children.push(self.node(&layer, path)?);
-                    }
+                    children = self.list(s, "layers")?;
                     SpaceKind::Fallback
                 }
                 "Chain" => {
@@ -962,9 +1374,7 @@ mod turtle {
                                 ))
                             }
                         };
-                    for layer in self.list(s, "layers")? {
-                        children.push(self.node(&layer, path)?);
-                    }
+                    children = self.list(s, "layers")?;
                     SpaceKind::Chain { severed }
                 }
                 "Mount" => SpaceKind::Mount {
@@ -983,7 +1393,7 @@ mod turtle {
                                 malformed(s, format!("ik:maxHops {hops} is not a positive count"))
                             })?;
                     let mut rules = Vec::new();
-                    let named: Vec<String> = self
+                    let named: BTreeSet<String> = self
                         .take(s, &p("rewrites"))
                         .into_iter()
                         .map(|t| Self::iri_of(s, &p("rewrites"), t))
@@ -1048,13 +1458,14 @@ mod turtle {
                     | SpaceKind::Confine
                     | SpaceKind::Level { .. }
             ) {
-                let inner = self.one_iri(s, &p("space"))?;
-                children.push(self.node(&inner, path)?);
+                children.push(self.one_iri(s, &p("space"))?);
             }
             self.no_more(s)?;
-            let mut tree = Topology::new(kind).with_id(id);
-            tree.children = children;
-            Ok(tree)
+            Ok(Shallow {
+                tree: Topology::new(kind).with_id(id),
+                children,
+                corridors,
+            })
         }
 
         fn match_kind(&mut self, s: &str) -> Result<MatchKind, DeclarationError> {
@@ -1067,24 +1478,36 @@ mod turtle {
             })
         }
 
-        fn door(&mut self, s: &str, path: &mut Vec<String>) -> Result<Door, DeclarationError> {
+        /// A door, and the IRI of the corridor it is confined to, if any.
+        fn door(&mut self, s: &str) -> Result<(Door, Option<String>), DeclarationError> {
             self.kind(s, &["Door"])?;
             let pattern = self.one_str(s, &format!("{IK}pattern"))?;
             let kind = self.match_kind(s)?;
             let endpoint = self.one_str(s, &format!("{IK}endpointName"))?;
-            let mut door = Door::new(pattern, kind, endpoint);
+            let door = Door::new(pattern, kind, endpoint);
+            let mut corridor = None;
             if let Some(term) = self.optional(s, &format!("{IK}confinedTo"))? {
-                let corridor = Self::iri_of(s, &format!("{IK}confinedTo"), term)?;
-                if corridor.starts_with(SKOLEM_PREFIX) {
+                let iri = Self::iri_of(s, &format!("{IK}confinedTo"), term)?;
+                if iri.starts_with(SKOLEM_PREFIX) {
                     return Err(malformed(
                         s,
                         "a confined corridor is named by its confinement, never a skolem",
                     ));
                 }
-                door = door.confined_to(self.node(&corridor, path)?);
+                corridor = Some(iri);
             }
             self.no_more(s)?;
-            Ok(door)
+            Ok((door, corridor))
         }
+    }
+
+    /// One node as [`Graph::shallow`] reads it: the node, with nothing it encloses
+    /// yet, and the IRIs of what it encloses.
+    struct Shallow {
+        tree: Topology,
+        /// Its children, in order.
+        children: Vec<String>,
+        /// Each confined door's corridor: the door's index, and the corridor's IRI.
+        corridors: Vec<(usize, String)>,
     }
 }

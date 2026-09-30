@@ -62,6 +62,7 @@ that names the node's IRI exactly as the Turtle does (skolems included) and says
 | two different endpoints under one name | refused by `Registry::register`. Names are not unique (`FnEndpoint::new("x", …)` is always `x`), and a registry that kept the first or the last would bind a door to whichever one it happened to keep |
 | two different arrangements under one name | same name, same doors: a declaration that breaks the claim is refused rather than built twice as two things |
 | a seal the host, core or another level owns | `Kernel::check_sealing` runs on the built space, against the host's prefixes (`Registry::sealing`), so a declaration cannot seal its way into a name the host sealed, nor bind a level's door under one |
+| a declaration past a bound | deeper than `MAX_DECLARATION_DEPTH`, or more than `MAX_DECLARATION_NODES` nodes or `MAX_DECLARATION_TEXT` bytes of text once expanded: `DeclarationError::TooLarge`, naming the bound, its limit and the node. See [Bounds](#bounds) |
 
 `Topology::from_turtle` is as strict about the document: every triple must belong to the one
 arrangement under the one root. A blank node, an unknown kind or property, a property missing or
@@ -70,6 +71,39 @@ stated twice, an ill-formed list cell, a cycle, a leaf whose flat `ik:pattern`s 
 node is refused too, today: to_turtle would drop it, and a surface that cannot carry something
 must say so rather than lose it. Admitting annotations is an additive relaxation if a surface
 wants them.
+
+## Bounds
+
+A declaration is operator input (`ikigai --arrangement` hands its Turtle straight to
+`from_turtle`), so core reads and builds it within three bounds, each a public constant and each
+REFUSED whole with `DeclarationError::TooLarge` — never a crash, never a truncation (ledger
+[#643](http://localhost:1060/l/default/item/643)):
+
+| bound | limit | why |
+|---|---|---|
+| `MAX_DECLARATION_DEPTH` | 48 | every walk over a declaration recurses once per level, and a stack overflow ABORTS the process |
+| `MAX_DECLARATION_NODES` | 65,536 | a named node is expanded at every place it is used (`Topology` is a value tree), so a few KB of Turtle whose named nodes each reference the next several times grows exponentially |
+| `MAX_DECLARATION_TEXT` | 16 MiB | the node bound alone still lets one large literal in a node used thousands of times expand to gigabytes |
+
+Depth counts the root as 1 and each enclosed space — a layer, a mounted, aliased or level's space, a
+door's confined corridor — as one deeper. Nodes are spaces, doors and alias rules; text is every IRI
+a node claims and every pattern, endpoint name, prefix, family, rule, seal and namespace. Both are
+counted at every occurrence. `from_turtle` checks depth before each descent and counts as it
+produces nodes, so an exponential document is refused after the bound, not after the expansion.
+`build` accepts any tree, so it measures the tree first, without recursing, with the same
+accounting: every tree `from_turtle` returns passes it, and every space `build` returns nests no
+deeper than the bound.
+
+The depth was chosen by measurement for a **1 MiB** stack in a **debug** build (wasm32's default,
+and a small worker thread). Measured 2026-09-30 on the two costliest shapes (a chain of fallbacks,
+a chain of confined doors): rendering overflows 1 MiB first, past 218 levels; parsing past 269;
+building past 323; cloning, comparing, dropping, `topology()`, the seal check and a request
+resolving through every level past 450. Getting there took slimming the two recursive walks
+declarations own: reading a node and descending in one function had cost about 19 KB a level
+(24 KB through a confined door) in the parser and about 10 KB in the builder, which put parsing's
+overflow near 41 levels. Each now keeps what a node states about itself in a frame that is gone
+before the walk descends. `tests/declare_bounds.rs` runs the whole pipeline at the bound on a
+1 MiB thread.
 
 ## The round trip is the acceptance test
 
