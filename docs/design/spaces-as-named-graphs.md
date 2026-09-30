@@ -204,7 +204,8 @@ triple walk in `tests/topology.rs`.
 
 **Since 0.1.83 each door names its endpoint** (ledger
 [#608](http://localhost:1060/l/default/item/608)), so the graph can be read back as a
-declaration (ledger [#633](http://localhost:1060/l/default/item/633)). The flat `ik:pattern` per
+declaration ([`space-declarations.md`](space-declarations.md), ledger
+[#633](http://localhost:1060/l/default/item/633)). The flat `ik:pattern` per
 door stays on the leaf — every reader since 0.1.78 queries it — and beside it:
 
 | added | on | says |

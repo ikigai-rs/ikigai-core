@@ -30,6 +30,27 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 futures-channel = { version = "0.3", default-features = false, features = ["alloc", "std"] }
 oxiri = "0.2"
 serde = { version = "1", features = ["derive"] }
+# Only under the `declare` feature: parse a declaration's Turtle
+# (`Topology::from_turtle`). The floor is the version this workspace's tests have
+# always parsed topology with. Runtime-free, and clean under WASI as they stand; in
+# the BROWSER (wasm32-unknown-unknown) oxrdf's `rand` needs getrandom's JS backend,
+# which a library can only half-enable: the feature is here (below), and the host
+# still sets `--cfg getrandom_backend="wasm_js"` in its rustflags — as every browser
+# host that uses ikigai-rdf already does (ikigai-web-demo, ikigai-linkeddata).
+oxttl = { version = "0.2.3", optional = true }
+oxrdf = { workspace = true, optional = true }
+
+[features]
+# Read a space declaration: `Topology::from_turtle`, the exact inverse of
+# `Topology::to_turtle`. Opt-in, so a host that never reads a declaration pays
+# nothing for an RDF parser. `build` and `Registry` need no parser and are always on.
+# ⚠ The tests behind this feature run only in a job that enables it: CI's
+# `features: "*"` (--all-features) is that job.
+declare = ["dep:oxttl", "dep:oxrdf", "dep:getrandom"]
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# Only under `declare`, only in the browser: see oxttl/oxrdf above.
+getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
 
 [dev-dependencies]
 futures = "0.3" # block_on for async tests
@@ -37,6 +58,7 @@ serde_json = "1"
 # Test-only: parse the Turtle `urn:kernel:topology` emits and walk it as triples, so
 # the §12.5 reachability check (`tests/topology.rs`) is a graph walk over what a
 # consumer would parse, not a substring match. The same pair ikigai-vocab's tests use;
-# neither enters the published library's dependency graph.
+# neither enters the published library's dependency graph unless the opt-in `declare`
+# feature asks for them (above).
 oxttl = "0.2"
 oxrdf.workspace = true
