@@ -11,6 +11,14 @@ jobs:
     with:
       features: "*"
       wasm-check: true
+      # The `declare` feature on wasm32 (ledger #650): `wasm-check` builds default features only, so
+      # nothing in CI compiled oxttl/oxrdf/getrandom for the browser, and the claim that getrandom
+      # >= 0.3.4's `wasm_js` feature needs no `--cfg getrandom_backend` flag went unchecked. This job
+      # lints core's lib on wasm32 with `declare` on and no RUSTFLAGS: if the claim stops holding, it
+      # goes red here rather than in a host.
+      wasm-lib: true
+      wasm-packages: ikigai-core
+      wasm-features: declare
 
   walkthrough:
     name: walkthrough anchors
