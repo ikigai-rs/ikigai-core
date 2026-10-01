@@ -21,6 +21,11 @@ use crate::verb::Verb;
 /// Lets an endpoint issue sub-requests back through the kernel. Implemented by
 /// the [`Kernel`](crate::Kernel); a detached [`Invocation`] has no issuer, so
 /// `source`/`issue` are unavailable when testing an endpoint in isolation.
+// clippy 1.99's `double_must_use` fires inside the code `#[async_trait]` GENERATES for an async trait
+// method: the macro marks the boxed-future return `#[must_use]`, and a pinned boxed `Future` is
+// already must-use. The attribute is the macro's, not ours, so the lint has nothing here to fix;
+// scoped to this trait (its generated methods) rather than the crate, so it covers nothing we write.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Issuer: Send + Sync {
     /// Resolve and evaluate a sub-request.
@@ -1457,6 +1462,11 @@ impl SyncIssuer {
 /// Endpoints are synchronous and free of ambient authority in M1: everything
 /// they may use arrives through the [`Invocation`]. (Async execution and
 /// sub-request issuing are introduced with the kernel.)
+// clippy 1.99's `double_must_use` fires inside the code `#[async_trait]` GENERATES for an async trait
+// method: the macro marks the boxed-future return `#[must_use]`, and a pinned boxed `Future` is
+// already must-use. The attribute is the macro's, not ours, so the lint has nothing here to fix;
+// scoped to this trait (its generated methods) rather than the crate, so it covers nothing we write.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Endpoint: Send + Sync {
     /// Produce a representation for the invocation.
