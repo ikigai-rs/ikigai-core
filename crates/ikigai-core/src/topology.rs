@@ -280,6 +280,32 @@ pub struct Topology {
     pub kind: SpaceKind,
     /// The spaces this node encloses, in the order they are consulted.
     pub children: Vec<Topology>,
+    /// Which [`Level`](crate::Level) OBJECT this node is, when it is one this process
+    /// built — not part of the arrangement as data (equality ignores it, and it is
+    /// never rendered), but what lets the seal table register a level by identity
+    /// rather than by its name, which anyone can build a `Level` under.
+    pub(crate) level: LevelMark,
+}
+
+/// The identity of the [`Level`](crate::Level) a [`Topology`] node was rendered from:
+/// its process-unique serial, or `None` for every other node and for a node built
+/// from data (a declaration, a remote's report). Compares equal to every other mark,
+/// so two arrangements that read alike are equal whichever objects built them.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LevelMark(pub(crate) Option<u64>);
+
+impl PartialEq for LevelMark {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for LevelMark {}
+
+impl std::fmt::Debug for LevelMark {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("..")
+    }
 }
 
 impl Topology {
@@ -289,6 +315,7 @@ impl Topology {
             id: None,
             kind,
             children: Vec::new(),
+            level: LevelMark::default(),
         }
     }
 
@@ -299,12 +326,20 @@ impl Topology {
             id,
             kind: SpaceKind::Opaque,
             children: Vec::new(),
+            level: LevelMark::default(),
         }
     }
 
     /// Name the node (builder).
     pub fn with_id(mut self, id: Option<Iri>) -> Self {
         self.id = id;
+        self
+    }
+
+    /// Mark the node as the level object with this serial (builder) — see
+    /// [`LevelMark`].
+    pub(crate) fn marked(mut self, serial: u64) -> Self {
+        self.level = LevelMark(Some(serial));
         self
     }
 

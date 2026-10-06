@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::alias::RuleKind;
 use crate::iri::Iri;
-use crate::space::LevelPath;
+use crate::space::{LevelCore, LevelPath};
 use crate::topology::{MatchKind, SpaceKind, Topology};
 
 /// Whether any [`Level`](crate::Level) in this process has declared a seal. A
@@ -198,6 +198,18 @@ impl SealBreach {
                 self.level.as_ref().map_or("?", Iri::as_str)
             );
         }
+        if self.owner == SealOwner::Core {
+            return format!(
+                "`{}` is in the kernel's own namespace and was answered by a space{} — core \
+                 answers `urn:kernel:` itself, ahead of every space, so the space rewrote a \
+                 name into it: refused",
+                self.name.as_str(),
+                self.level
+                    .as_ref()
+                    .map(|level| format!(" in level `{}`", level.as_str()))
+                    .unwrap_or_default()
+            );
+        }
         match &self.level {
             Some(level) => format!(
                 "sealed name `{}` (sealed by {}) was answered by level `{}`, which does not \
@@ -222,7 +234,13 @@ impl SealBreach {
 pub(crate) struct Seals {
     /// Core's claim first, then the host's, then each level's.
     claims: Vec<(String, SealOwner)>,
-    /// No host or level claims — the runtime checks have nothing to do.
+    /// Every level the topology showed, by name and IDENTITY ([`LevelCore::serial`]).
+    /// A level is registered as the object the host put in the tree, never by name:
+    /// `Level::new` is public, so a name is a claim anyone can build a level under,
+    /// and an opaque space wrapping its own `Level` named like an owner must not be
+    /// taken for that owner (ledger #750, D1).
+    levels: Vec<(Iri, u64)>,
+    /// No host or level claims — the runtime checks have nothing to do but core's.
     trivial: bool,
 }
 
@@ -230,6 +248,7 @@ impl Default for Seals {
     fn default() -> Self {
         Seals {
             claims: vec![(CORE_SEAL.to_string(), SealOwner::Core)],
+            levels: Vec::new(),
             trivial: true,
         }
     }
@@ -296,7 +315,19 @@ impl Seals {
             }
         }
         let trivial = claims.len() == 1;
-        Ok(Seals { claims, trivial })
+        let mut levels: Vec<(Iri, u64)> = Vec::new();
+        for level in &found.levels {
+            if let Some(serial) = level.serial {
+                if !levels.iter().any(|(_, s)| *s == serial) {
+                    levels.push((level.name.clone(), serial));
+                }
+            }
+        }
+        Ok(Seals {
+            claims,
+            levels,
+            trivial,
+        })
     }
 
     /// The owner of the sealed prefix `name` falls under, if any.
@@ -308,9 +339,15 @@ impl Seals {
     }
 
     /// Whether a sealed name owned by `owner` may be looked up in the level-stack
-    /// frame named `level`: only its owner's.
-    pub(crate) fn frame_admits(owner: &SealOwner, level: &Iri) -> bool {
-        matches!(owner, SealOwner::Level(name) if name == level)
+    /// frame `level`: only its owner's — the registered level object, not merely one
+    /// of the same name.
+    pub(crate) fn frame_admits(&self, owner: &SealOwner, level: &LevelCore) -> bool {
+        matches!(owner, SealOwner::Level(name) if self.is_owner(name, level))
+    }
+
+    /// Whether `level` is a level this kernel registered under `name`.
+    fn is_owner(&self, name: &Iri, level: &LevelCore) -> bool {
+        level.name() == name && self.registered(level.serial())
     }
 
     /// Whether this table has anything to enforce at runtime.
@@ -318,23 +355,23 @@ impl Seals {
         self.trivial
     }
 
-    /// Whether a level of this name registered seals.
-    fn registered(&self, level: &Iri) -> bool {
-        self.claims
-            .iter()
-            .any(|(_, owner)| matches!(owner, SealOwner::Level(name) if name == level))
+    /// Whether the level object with this serial is one the topology showed.
+    fn registered(&self, serial: u64) -> bool {
+        self.levels.iter().any(|(_, s)| *s == serial)
     }
 
     /// Check a hit found at `path` for `names` (the target, and a reported
-    /// canonical): a core- or host-sealed name must have been found outside every
-    /// level; a level's must have been found in that level itself; and every
-    /// sealing level on the path must be one this kernel registered.
+    /// canonical): a core-sealed name may never be answered by a space at all (the
+    /// kernel answers it ahead of every chain, so a space reaching it rewrote a name
+    /// into it); a host-sealed name must have been found outside every level; a
+    /// level's must have been found in that very level object; and every sealing
+    /// level on the path must be one this kernel registered.
     pub(crate) fn admit<'a>(
         &self,
         names: impl IntoIterator<Item = &'a Iri>,
         path: &LevelPath,
     ) -> Result<(), SealBreach> {
-        if let Some(hidden) = path.unregistered_sealing(|name| self.registered(name)) {
+        if let Some(hidden) = path.unregistered_sealing(|serial| self.registered(serial)) {
             return Err(SealBreach {
                 name: names
                     .into_iter()
@@ -346,25 +383,26 @@ impl Seals {
                 unregistered: true,
             });
         }
-        if self.trivial {
-            return Ok(());
-        }
+        // A trivial table holds only core's claim, which is checked all the same:
+        // the caller (`space::admit`) passes a trivial table here only for a hit
+        // that reported a canonical, and that is exactly the route into core's.
         for name in names {
             let Some(owner) = self.owner_of(name.as_str()) else {
                 continue;
             };
-            let innermost = path.names().next();
+            let innermost = path.innermost();
             let admitted = match owner {
-                // Answered by the kernel ahead of every chain; never reaches here.
-                SealOwner::Core => true,
+                // Core answers `urn:kernel:*` ahead of every chain, so no space ever
+                // legitimately answers one: a hit here is a rewrite into it.
+                SealOwner::Core => false,
                 SealOwner::Host => innermost.is_none(),
-                SealOwner::Level(owner) => innermost == Some(owner),
+                SealOwner::Level(owner) => innermost.is_some_and(|l| self.is_owner(owner, l)),
             };
             if !admitted {
                 return Err(SealBreach {
                     name: name.clone(),
                     owner: owner.clone(),
-                    level: innermost.cloned(),
+                    level: innermost.map(|l| l.name().clone()),
                     unregistered: false,
                 });
             }
@@ -398,6 +436,8 @@ fn narrow(gate: &Option<String>, prefix: &str) -> Option<String> {
 /// A level as the topology states it.
 struct FoundLevel {
     name: Iri,
+    /// The level object's identity, when this process built it.
+    serial: Option<u64>,
     seals: Vec<String>,
     /// What it may seal under: the prefix it accepted, else the mounts between it
     /// and its enclosing level (or the root). `Some("")` is no mount at all.
@@ -467,7 +507,12 @@ impl FoundDoor {
     fn breach(&self, prefix: &str, owner: &SealOwner) -> Option<SealError> {
         let innermost = self.levels.first().map(|(name, _)| name);
         let placed = match owner {
-            // The kernel answers `urn:kernel:*` ahead of everything: no door can.
+            // The kernel answers `urn:kernel:*` ahead of everything, so a door under
+            // it is dead by NAME and not refused here (a host may bind one, and
+            // refusing at build would panic a constructor over a harmless binding).
+            // The only live route to such a door is a rewrite INTO the namespace,
+            // which no topology shows and which is refused on resolution instead:
+            // `Seals::admit` and the kernel's canonical adoption.
             SealOwner::Core => true,
             // The host's own bindings sit outside every level.
             SealOwner::Host => innermost.is_none(),
@@ -526,6 +571,7 @@ impl Found {
                 let gate = levels.last().map_or(&root_gate, |(_, gate)| gate);
                 self.levels.push(FoundLevel {
                     name: name.clone(),
+                    serial: node.level.0,
                     seals: seals.clone(),
                     namespace: namespace.clone().or_else(|| gate.clone()),
                 });

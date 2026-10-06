@@ -680,7 +680,7 @@ impl Scope {
             return Ok(hit);
         }
         for (at, level) in chain.levels.0.iter().enumerate() {
-            if sealed.is_some_and(|owner| !Seals::frame_admits(owner, &level.name)) {
+            if sealed.is_some_and(|owner| !seals.frame_admits(owner, level)) {
                 continue;
             }
             if let Resolution::Hit(mut resolved) = level.inner.resolve(request, self) {
@@ -793,8 +793,11 @@ fn admit(
     match &resolution {
         // A hit on ⊥ is a hole, not an answer: it can fake nothing, so a limiter
         // over a sealed name (a host's gatekeeper, say) is never a breach.
+        // A reported canonical is checked whatever the table holds: core's seal
+        // (`urn:kernel:`) is never trivial for a name a space rewrote INTO it.
         Resolution::Hit(hit)
-            if !(seals.is_trivial() && hit.levels.is_empty()) && !hit.endpoint.is_limiter() =>
+            if !hit.endpoint.is_limiter()
+                && (hit.canonical.is_some() || !(seals.is_trivial() && hit.levels.is_empty())) =>
         {
             seals.admit(
                 std::iter::once(&request.target).chain(hit.canonical.as_ref()),
@@ -1806,6 +1809,11 @@ impl Endpoint for Bottom {
 /// one allocation per level, so reporting a level on a hit is a refcount bump.
 pub(crate) struct LevelCore {
     name: Iri,
+    /// Process-unique, assigned at [`Level::new`]: the level's identity, as opposed to
+    /// its name, which is a claim anyone can make. The seal table registers levels by
+    /// this ([`Seals`]), so a `Level` built elsewhere under a registered level's name
+    /// is not that level.
+    serial: u64,
     inner: Arc<dyn Space>,
     /// The prefixes this level seals ([`Level::sealing`]).
     seals: Vec<String>,
@@ -1823,9 +1831,23 @@ impl LevelCore {
             namespace: self.namespace.clone(),
         })
         .with_id(Some(self.name.clone()))
+        .marked(self.serial)
         .child(self.inner.topology())
     }
+
+    /// The level's name.
+    pub(crate) fn name(&self) -> &Iri {
+        &self.name
+    }
+
+    /// The level's identity — see [`serial`](Self#structfield.serial).
+    pub(crate) fn serial(&self) -> u64 {
+        self.serial
+    }
 }
+
+/// The next [`LevelCore::serial`]. Never reused within a process.
+static LEVEL_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// A path of [`Level`]s, innermost first — the found path a resolution reports
 /// ([`Resolved::levels`]) and the level stack a chain consults
@@ -1850,13 +1872,18 @@ impl LevelPath {
     }
 
     /// The first level on the path that declares seals the kernel did not register
-    /// (`registered` answers for a name) — a level the kernel's topology walk could
-    /// not see. Free for a path with no sealing level on it.
-    pub(crate) fn unregistered_sealing(&self, registered: impl Fn(&Iri) -> bool) -> Option<&Iri> {
+    /// (`registered` answers for a level's identity) — a level the kernel's topology
+    /// walk could not see. Free for a path with no sealing level on it.
+    pub(crate) fn unregistered_sealing(&self, registered: impl Fn(u64) -> bool) -> Option<&Iri> {
         self.0
             .iter()
-            .find(|level| !level.seals.is_empty() && !registered(&level.name))
+            .find(|level| !level.seals.is_empty() && !registered(level.serial))
             .map(|level| &level.name)
+    }
+
+    /// The innermost level on the path, if any.
+    pub(crate) fn innermost(&self) -> Option<&LevelCore> {
+        self.0.first().map(|level| level.as_ref())
     }
 
     /// The same levels, in the same order — by identity, not by name: two levels
@@ -1967,6 +1994,7 @@ impl Level {
         Level {
             core: Arc::new(LevelCore {
                 name,
+                serial: LEVEL_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 inner,
                 seals: Vec::new(),
                 namespace: None,
