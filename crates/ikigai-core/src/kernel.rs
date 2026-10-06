@@ -3996,23 +3996,28 @@ impl Issuer for Kernel {
         Kernel::select_action_in(self, present, scope)
     }
 
-    fn record_subtree(&self, parent: Option<u64>, spans: Vec<TraceEvent>) {
-        if !self.tracing.load(Ordering::Relaxed) || spans.is_empty() {
-            return;
-        }
-        let Some(tracer) = self.tracer.lock().expect("tracer lock").clone() else {
+    fn record_subtree(
+        &self,
+        parent: Option<u64>,
+        trace: Option<&TraceScope>,
+        spans: Vec<TraceEvent>,
+    ) {
+        // Into the forwarding resolution's OWN trace scope — the per-call collector
+        // under `issue_traced`, the global one only when that is what the
+        // resolution was traced into — never `self.tracer` directly (ledger #750).
+        let Some(trace) = trace else {
             return;
         };
-        // Re-base: give each incoming span a fresh local id (a remote kernel's ids
-        // must not collide with this kernel's), remap parent links within the
-        // subtree, and parent the subtree's roots (parent `None` on the remote)
-        // under `parent` — the local mount node that forwarded the request.
+        if spans.is_empty() {
+            return;
+        }
+        // Re-base: give each incoming span a fresh id from the scope's own counter
+        // (a remote kernel's ids must not collide with this trace's), remap parent
+        // links within the subtree, and parent the subtree's roots (parent `None`
+        // on the remote) under `parent` — the local mount node that forwarded it.
         let mut remap = std::collections::HashMap::new();
         for event in &spans {
-            remap.insert(
-                event.span,
-                self.span_counter.fetch_add(1, Ordering::Relaxed),
-            );
+            remap.insert(event.span, trace.next_span());
         }
         for event in spans {
             let span = remap[&event.span];
@@ -4020,7 +4025,7 @@ impl Issuer for Kernel {
                 Some(p) => remap.get(&p).copied().or(parent),
                 None => parent,
             };
-            tracer.record(TraceEvent {
+            trace.record(TraceEvent {
                 span,
                 parent,
                 ..event
@@ -7111,8 +7116,11 @@ mod tests {
             ev("urn:remote:root", 0, None),
             ev("urn:remote:child", 1, Some(0)),
         ];
-        // Forwarded from a local mount node whose span is 42.
-        Issuer::record_subtree(&kernel, Some(42), remote);
+        // Forwarded from a local mount node whose span is 42, in a resolution traced
+        // into the kernel's global tracer.
+        let scope = kernel.global_scope();
+        assert!(scope.is_some());
+        Issuer::record_subtree(&kernel, Some(42), scope.as_ref(), remote);
         kernel.clear_tracer();
 
         let events = recorder.0.lock().expect("recorder").clone();

@@ -164,13 +164,27 @@ pub trait Issuer: Send + Sync {
     }
 
     /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s produced by *another*
-    /// kernel — a remote one reached through a mounted `RemoteSpace` — into this
-    /// issuer's trace, re-based under `parent` (the span of the invocation that
-    /// forwarded the request). The default ignores them (a detached or remote issuer
-    /// has no trace to merge into); the kernel overrides it to re-map the span ids
-    /// and record. Reached by an endpoint through [`Invocation::record_subtree`].
-    fn record_subtree(&self, parent: Option<u64>, spans: Vec<crate::TraceEvent>) {
-        let _ = (parent, spans);
+    /// kernel — a remote one reached through a mounted `RemoteSpace` — into `trace`,
+    /// the [`TraceScope`](crate::TraceScope) of the resolution that forwarded the
+    /// request, re-based under `parent` (the span of the invocation that forwarded
+    /// it). The default ignores them (a detached or remote issuer has no trace to
+    /// merge into); the kernel overrides it to re-map the span ids and record.
+    /// Reached by an endpoint through [`Invocation::record_subtree`].
+    ///
+    /// **The subtree goes to `trace`, never to a tracer the issuer holds globally.**
+    /// A resolution traced per call ([`Kernel::issue_traced`](crate::Kernel::issue_traced),
+    /// what a wire server runs per connection) records into its own collector, and a
+    /// remote's spans are part of that resolution — sending them to the kernel's
+    /// global tracer instead would hand one tenant's remote execution to whatever
+    /// collector another tenant or the operator installed (ledger #750, B1). `None`
+    /// is "not being traced" and records nothing.
+    fn record_subtree(
+        &self,
+        parent: Option<u64>,
+        trace: Option<&crate::TraceScope>,
+        spans: Vec<crate::TraceEvent>,
+    ) {
+        let _ = (parent, trace, spans);
     }
 
     /// The current time per the issuer's injected [`Clock`](crate::Clock), or
@@ -994,11 +1008,12 @@ impl<'a> Invocation<'a> {
     /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s from another kernel into
     /// this invocation's trace, re-based under this node — so a resolution forwarded
     /// to a remote kernel (through a mounted `RemoteSpace`) shows the remote's
-    /// execution stitched under the mount, not collapsed into one node. A no-op off
-    /// the trace path or when detached.
+    /// execution stitched under the mount, not collapsed into one node. Recorded
+    /// into THIS resolution's trace — a per-call one stays per call. A no-op off the
+    /// trace path or when detached.
     pub fn record_subtree(&self, spans: Vec<crate::TraceEvent>) {
         if let Some(issuer) = self.issuer {
-            issuer.record_subtree(self.span, spans);
+            issuer.record_subtree(self.span, self.trace.as_ref(), spans);
         }
     }
 
