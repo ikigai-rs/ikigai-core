@@ -149,7 +149,8 @@ pub struct ActionSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<String>,
     /// The capability scopes invoking this verb requires (IRIs like
-    /// `urn:cap:personal:calendar:write`, or legacy descriptive labels).
+    /// `urn:cap:personal:calendar:write`) — enforced by the kernel before dispatch, and
+    /// REPLACING the description's flat `requires` for this verb.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
 }
@@ -237,12 +238,18 @@ pub struct Description {
     /// serialized output for plain endpoints, so existing JSON contracts are unchanged.
     #[serde(default, skip_serializing_if = "EndpointKind::is_endpoint")]
     pub kind: EndpointKind,
-    /// The capability scopes invoking this endpoint requires (descriptive labels, e.g.
-    /// `cap:net`, `cap:fs:read`) — what *authority* it demands, not a runtime
-    /// [`Capability`](crate::Capability). Lets a host project a capability-scoped catalog
-    /// (show an agent only what it may invoke) and lets a caller pre-check feasibility.
-    /// Empty for endpoints needing no special authority; omitted from serialized output when
-    /// empty, so existing JSON contracts are unchanged.
+    /// The capability scopes invoking this endpoint requires (IRIs such as
+    /// `urn:cap:net:*`, `urn:cap:fs:read`) — what *authority* it demands. **Enforced**:
+    /// the kernel refuses, before dispatch, a caller whose
+    /// [`Capability`](crate::Capability) does not satisfy them, on the same predicate
+    /// selection and `urn:kernel:validate` use — and the same declaration lets a host
+    /// project a capability-scoped catalog and a caller pre-check feasibility. Applies to
+    /// every verb this flat form stands for (each declared verb without its own
+    /// [`ActionSpec`]); declared with no verb at all, it applies to EVERY verb. A verb the
+    /// endpoint does not declare is not a way around it: see
+    /// [`Kernel`](crate::Kernel)'s capability floor. Empty for endpoints needing no special
+    /// authority; omitted from serialized output when empty, so existing JSON contracts are
+    /// unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
     /// Per-verb contracts, for endpoints whose verbs genuinely differ (a calendar's Source
@@ -374,8 +381,9 @@ impl Description {
     }
 
     /// Declare a capability scope this endpoint requires to be invoked (builder), e.g.
-    /// `cap:net`. Callable multiple times; descriptive only (drives capability-scoped
-    /// catalog projection and feasibility pre-checks), not runtime enforcement.
+    /// `urn:cap:net:*`. Callable multiple times. Enforced by the kernel before dispatch
+    /// (see the `requires` field), and it drives capability-scoped
+    /// catalog projection and feasibility pre-checks from the same declaration.
     pub fn requires(mut self, capability: impl Into<String>) -> Self {
         self.requires.push(capability.into());
         self

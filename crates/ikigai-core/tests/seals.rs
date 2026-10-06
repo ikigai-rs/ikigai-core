@@ -563,3 +563,78 @@ fn a_kernel_with_no_seals_beyond_cores_reports_just_that() {
         ]
     );
 }
+
+/// The owner level `urn:example:level:a` sealing `urn:a:`, behind an opaque
+/// third-party space ([`Hidden`]) that answers whatever `squatter_inner` does.
+fn squatted(squatter_inner: Arc<dyn Space>) -> Kernel {
+    let owner = level(
+        "urn:example:level:a",
+        EndpointSpace::new().bind(Exact::new("urn:a:secret"), constant("real", b"REAL")),
+    )
+    .sealing(["urn:a:"]);
+    Kernel::new(Arc::new(Fallback::new(vec![
+        Arc::new(Hidden(squatter_inner)),
+        Arc::new(Mount::new("urn:a:", Arc::new(owner))),
+    ])))
+}
+
+/// Ledger #750, D1: the runtime seal check identifies the owning level by the
+/// REGISTERED level object, not by its name. `Level::new` is public, so an opaque
+/// space that wraps its fake in a `Level` it built itself under the owner's name is
+/// not the owner, and is refused exactly as the bare squatter is.
+#[test]
+fn a_level_built_under_the_owners_name_is_not_the_owner() {
+    let cap = Capability::root();
+
+    // Control: the squatter answering directly is refused.
+    let plain = squatted(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:a:secret"), constant("fake", b"FAKE")),
+    ));
+    let refused = block_on(plain.issue(source("urn:a:secret"), &cap));
+    assert!(refused.is_err(), "control: {refused:?}");
+
+    // The same fake inside a Level that claims the owner's name.
+    let spoofed = squatted(Arc::new(level(
+        "urn:example:level:a",
+        EndpointSpace::new().bind(Exact::new("urn:a:secret"), constant("fake", b"FAKE")),
+    )));
+    let got = block_on(spoofed.issue(source("urn:a:secret"), &cap));
+    assert!(
+        matches!(&got, Err(Error::Endpoint(m)) if m.contains("urn:a:secret")),
+        "a sealed name was answered by a level claiming the owner's name: {:?}",
+        got.map(|r| String::from_utf8_lossy(&r.bytes).into_owned())
+    );
+
+    // And a spoof that ALSO declares the owner's seals is the unregistered level it
+    // is, not the owner.
+    let sealing_spoof = squatted(Arc::new(
+        level(
+            "urn:example:level:a",
+            EndpointSpace::new().bind(Exact::new("urn:a:secret"), constant("fake", b"FAKE")),
+        )
+        .sealing(["urn:a:"]),
+    ));
+    let got = block_on(sealing_spoof.issue(source("urn:a:secret"), &cap));
+    assert!(
+        got.is_err(),
+        "a sealing level the topology never showed was taken for the owner: {:?}",
+        got.map(|r| String::from_utf8_lossy(&r.bytes).into_owned())
+    );
+}
+
+/// The owner itself is still admitted — through its mount, from the root.
+#[test]
+fn the_registered_owner_still_answers_its_sealed_names() {
+    let kernel = Kernel::new(Arc::new(Mount::new(
+        "urn:a:",
+        Arc::new(
+            level(
+                "urn:example:level:a",
+                EndpointSpace::new().bind(Exact::new("urn:a:secret"), constant("real", b"REAL")),
+            )
+            .sealing(["urn:a:"]),
+        ),
+    )));
+    let got = block_on(kernel.issue(source("urn:a:secret"), &Capability::root())).unwrap();
+    assert_eq!(got.bytes, b"REAL");
+}

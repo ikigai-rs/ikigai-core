@@ -634,31 +634,88 @@ pub struct Kernel {
 const FLOOR_MEMO_BOUND: usize = 4096;
 
 /// What the capability floor checks: the `requires` an endpoint declares per verb,
-/// in [`Description::action_specs`] order — the only part of a description the floor
-/// reads. Extracted once per endpoint and memoized (see [`FloorMemo`]).
+/// in [`Description::action_specs`] order, and what that declaration implies for a
+/// verb it does NOT declare — the only part of a description the floor reads.
+/// Extracted once per endpoint and memoized (see [`FloorMemo`]).
+///
+/// **Declared = enforced, for every verb** (ledger #750, Brian 2026-10-05). An
+/// endpoint does not get to answer a verb it never declared with less authority
+/// than the verbs it did: `FnEndpoint` and the builtins do not dispatch on verb,
+/// so an `Exists` on an endpoint declaring a gated `Source` runs the same function
+/// and returns the same bytes. The rule, row by row:
+///
+/// | the request's verb | the endpoint declares | the floor |
+/// |---|---|---|
+/// | declared (flat or by its own [`ActionSpec`]) | — | exactly that verb's `requires` |
+/// | `Exists`, undeclared | `Source` | `Source`'s `requires` — a reader may ask whether |
+/// | `Exists`, undeclared | no `Source` | every `requires` it declares |
+/// | `Source`, `Sink`, `Delete`, undeclared | — | every `requires` it declares (a mutating verb forces a cut) |
+/// | `Meta` | — | none: the KERNEL answers it from the description; the endpoint is never entered |
+///
+/// "Every `requires` it declares" is the union over [`Description::action_specs`]; when
+/// that view is empty — a description that declares `requires` and no verb — it is
+/// the flat `requires` (and any `actions` not tied to a declared verb), which is
+/// therefore enforced on every verb rather than on none. An endpoint that declares
+/// no `requires` anywhere stays open on every verb, as before.
+///
+/// [`ActionSpec`]: crate::ActionSpec
 struct Floor {
-    requires: Vec<(Verb, Vec<String>)>,
+    /// Each declared verb with exactly its `requires`.
+    declared: Vec<(Verb, Vec<String>)>,
+    /// The union of every `requires` the endpoint declares, deduplicated in
+    /// declaration order — the floor of an undeclared verb.
+    every: Vec<String>,
 }
 
 impl Floor {
     fn of(description: &Description) -> Self {
-        Floor {
-            requires: description
-                .action_specs()
-                .into_iter()
-                .map(|spec| (spec.verb, spec.requires))
-                .collect(),
+        let declared: Vec<(Verb, Vec<String>)> = description
+            .action_specs()
+            .into_iter()
+            .map(|spec| (spec.verb, spec.requires))
+            .collect();
+        let mut every: Vec<String> = Vec::new();
+        let mut add = |scope: &String| {
+            if !every.contains(scope) {
+                every.push(scope.clone());
+            }
+        };
+        declared.iter().flat_map(|(_, r)| r).for_each(&mut add);
+        if declared.is_empty() {
+            description.requires.iter().for_each(&mut add);
+            description
+                .actions
+                .iter()
+                .flat_map(|a| &a.requires)
+                .for_each(&mut add);
+        }
+        Floor { declared, every }
+    }
+
+    /// The scopes a request with `verb` must hold — see the table on [`Floor`].
+    fn requirements(&self, verb: Verb) -> &[String] {
+        let own = |v: Verb| {
+            self.declared
+                .iter()
+                .find(|(declared, _)| *declared == v)
+                .map(|(_, requires)| requires.as_slice())
+        };
+        if let Some(requires) = own(verb) {
+            return requires;
+        }
+        match verb {
+            Verb::Meta => &[],
+            Verb::Exists => own(Verb::Source).unwrap_or(&self.every),
+            _ => &self.every,
         }
     }
 
-    /// The first scope declared for `request.verb` that `capability` does not satisfy —
+    /// The first scope `request.verb` requires that `capability` does not satisfy —
     /// on the same `cap_satisfies` predicate selection and `urn:kernel:validate` use, so
     /// what the manifold offers is exactly what the kernel admits. `None` ⇒ admitted.
     fn unsatisfied(&self, request: &Request, capability: &Capability) -> Option<String> {
-        self.requires
+        self.requirements(request.verb)
             .iter()
-            .filter(|(verb, _)| *verb == request.verb)
-            .flat_map(|(_, requires)| requires.iter())
             .find(|scope| !crate::select::cap_satisfies(capability, scope))
             .cloned()
     }
@@ -2196,6 +2253,27 @@ impl Kernel {
         // AFTER `self.root.resolve` (routing is the only thing that knows) and
         // BEFORE the declared-capability floor, so authority is still evaluated
         // against the BACKING name — decision 1. Nothing has been invoked yet.
+        //
+        // ★ And a reported canonical may never land in `urn:kernel:`. The kernel
+        // answers that namespace itself, ahead of every space — but that dispatch
+        // has already happened by now, so adopting such a name would let the space
+        // that rewrote it answer AS a kernel operation: its answer cached under the
+        // real operation's key (`urn:kernel:actions`, the agent's tool list), its
+        // Sink auto-cutting a kernel thread (`urn:kernel:bindings`) without
+        // `urn:cap:kernel:cut`. The kernel's own alias table may point a name at a
+        // kernel resource, because it rewrites BEFORE that dispatch; a space cannot.
+        // The seal check refuses this on most paths already (`Seals::admit`); this
+        // is the one that holds on every path, the host's corridors included.
+        if let Some(canonical) = resolved.canonical.as_ref() {
+            if canonical.as_str().starts_with(KERNEL_NS) {
+                return Err(Error::Endpoint(format!(
+                    "`{}` was rewritten by a space to `{}`, inside the kernel's own \
+                     namespace — `urn:kernel:` is answered only by the kernel: refused",
+                    request.target.as_str(),
+                    canonical.as_str()
+                )));
+            }
+        }
         if let Some(canonical) = resolved.canonical.take() {
             if canonical != request.target {
                 let previous = std::mem::replace(&mut request.target, canonical.clone());
@@ -2249,8 +2327,12 @@ impl Kernel {
         // are the coarse floor (parameterized families use the wildcard form,
         // `urn:cap:net:*`); a module's finer runtime gate (path/host ACL) remains
         // its ceiling on top. An endpoint declaring nothing is public, unchanged.
-        // (`Meta` is exempt by construction: `action_specs()` carries no Meta
-        // spec — self-description stays readable wherever the catalog offers it.)
+        // A verb the endpoint does NOT declare is not a way around its declaration:
+        // an undeclared `Exists` needs what `Source` needs, an undeclared mutating
+        // verb needs everything the endpoint declares (the table on `Floor`).
+        // (`Meta` is exempt: the kernel answers it from the description and never
+        // enters the endpoint — self-description stays readable wherever the
+        // catalog offers it.)
         // A denial is REPORTED before it is returned: enforcement happens before
         // dispatch, so the endpoint is never entered and no observer inside it can
         // ever see the refusal. This is the only point that holds it.
@@ -3500,18 +3582,6 @@ fn capability_key(capability: &Capability) -> u64 {
     u64::from_le_bytes(digest.as_bytes()[..8].try_into().expect("8-byte prefix"))
 }
 
-/// The kernel's baseline capability floor for a resolved endpoint: every scope the
-/// endpoint's description `requires` for the request's verb must be satisfied by
-/// the caller's capability (all of them — an action needing net AND a secret needs
-/// both). Predicate = [`cap_satisfies`](crate::select) — identical to selection
-/// and validation, so offer, preflight, and enforcement agree. A verb the
-/// description doesn't declare carries no spec and passes (dispatch behavior for
-/// undeclared verbs is unchanged).
-///
-/// Yields the first scope the caller lacks rather than the finished error, so the
-/// call site can REPORT the denial ([`Kernel::trace_denial`]) before returning it.
-/// `None` means the floor is met. Short-circuits on the first failure, as the
-/// error form did.
 /// The trace notes disclosing a logical rewrite: empty when the target was not
 /// aliased, so an un-aliased request's events are byte-identical to before.
 fn alias_notes(alias: Option<&AliasHop>) -> Vec<(String, String)> {
