@@ -584,7 +584,10 @@ pub struct Kernel {
     /// rather than print a hash. The cache itself keeps only the fingerprint (the
     /// key); this is the readout's memory of what it meant. Written only when a
     /// scoped result is stored — never on the empty-chain path — and pruned to the
-    /// fingerprints still resident whenever the readout renders.
+    /// fingerprints still resident whenever the readout renders AND whenever it
+    /// outgrows the cache ([`remember_scope`](Self::remember_scope)), so it is
+    /// bounded by the cache's bound, not by how many chains ever stored (ledger #750:
+    /// a host issuing in per-request corridors grew it without limit).
     scope_names: Mutex<BTreeMap<u64, String>>,
     /// The last few resources computed and NOT cached, each with the reason — the
     /// memory behind `urn:kernel:uncached`. Written only on the uncached path (a
@@ -626,6 +629,10 @@ pub struct Kernel {
     /// a cut pays one atomic load for them.
     listeners: Listeners,
 }
+
+/// How many scope names [`Kernel::remember_scope`] keeps beyond twice the cache's
+/// length before it prunes — so a nearly empty cache does not prune on every store.
+const SCOPE_NAMES_SLACK: usize = 16;
 
 /// How many endpoints' floors the memo holds before it sweeps — dead entries first,
 /// then everything. The cache's default entry bound, chosen for the same reason: a
@@ -1587,6 +1594,32 @@ impl Kernel {
             .map(|tracer| TraceScope::global(tracer, Arc::clone(&self.span_counter)))
     }
 
+    /// Remember what the scope fingerprint `fingerprint` meant, for the readout — and
+    /// keep that memory bounded by the cache it describes. Every resident entry has
+    /// one fingerprint, so the fingerprints worth naming are at most the cache's
+    /// length; once the memory holds twice that (plus [`SCOPE_NAMES_SLACK`]), it is
+    /// pruned to the fingerprints still resident. Amortized: a prune leaves at most
+    /// `cache.len()` names, so at least as many stores pass before the next.
+    fn remember_scope(&self, fingerprint: u64, scope: &Scope) {
+        let len = {
+            let mut names = self.scope_names.lock().expect("scope names lock");
+            names
+                .entry(fingerprint)
+                .or_insert_with(|| scope.to_string());
+            names.len()
+        };
+        // The cache's lock is taken outside the names lock: nowhere holds the two
+        // together, and this keeps it so. A store racing the prune at worst loses
+        // one name, which the readout then prints as the fingerprint.
+        if len > self.cache.len().saturating_mul(2) + SCOPE_NAMES_SLACK {
+            let resident = self.cache.resident_scopes();
+            self.scope_names
+                .lock()
+                .expect("scope names lock")
+                .retain(|fingerprint, _| resident.contains(fingerprint));
+        }
+    }
+
     /// Report one resolved invocation into its resolution's [`TraceScope`], if the
     /// resolution is being traced — tagged with its own `span` and its issuer's
     /// `parent` span, so the events form a tree.
@@ -2163,11 +2196,7 @@ impl Kernel {
                 // resolution's does; every other kernel operation is keyed with
                 // scope 0 and takes no lock here.
                 if stored && key.scope != 0 {
-                    self.scope_names
-                        .lock()
-                        .expect("scope names lock")
-                        .entry(key.scope)
-                        .or_insert_with(|| scope.to_string());
+                    self.remember_scope(key.scope, &scope);
                 }
             }
             return Ok(representation);
@@ -2590,13 +2619,7 @@ impl Kernel {
                 ) {
                     // Remember what the fingerprint meant, for the readout. Off the
                     // empty-chain path entirely: a plain `issue` never takes this lock.
-                    Ok(()) if !scope.is_empty() => {
-                        self.scope_names
-                            .lock()
-                            .expect("scope names lock")
-                            .entry(key.scope)
-                            .or_insert_with(|| scope.to_string());
-                    }
+                    Ok(()) if !scope.is_empty() => self.remember_scope(key.scope, &scope),
                     Ok(()) => {}
                     Err(declined) => why.declined = Some(declined),
                 }
@@ -7085,6 +7108,50 @@ mod tests {
         // A cleared tracer records nothing for subsequent resolutions.
         block_on(kernel.issue(parent(), &cap)).unwrap();
         assert_eq!(recorder.0.lock().expect("recorder").len(), 4);
+    }
+
+    /// Ledger #750, C1: the readout's memory of rendered chains is bounded by the
+    /// cache it describes. 2000 per-request corridors (a temporal corridor named for
+    /// its instant — what `with_named_at` exists for) against a cache of 8 used to
+    /// leave 2000 names behind, pruned only when someone read `urn:kernel:cache`.
+    #[test]
+    fn per_request_corridors_do_not_grow_the_scope_names_past_the_cache() {
+        use crate::cache::{CacheBound, Lru};
+        let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(
+            Exact::new("urn:doc:title"),
+            FnEndpoint::new("title", |_| {
+                Ok(Representation::new(ReprType::new("text/plain"), b"t".to_vec()).cacheable())
+            }),
+        )))
+        .with_cache_policy(Arc::new(Lru::with_bound(CacheBound::new(8, 1 << 20))));
+        let cap = Capability::root();
+        for i in 0..2000 {
+            let scope = Scope::empty().with_named(
+                Iri::parse(format!("urn:ctx:time:{i}")).unwrap(),
+                Arc::new(EndpointSpace::new()),
+            );
+            block_on(kernel.issue_in(
+                Request::new(Verb::Source, Iri::parse("urn:doc:title").unwrap()),
+                &cap,
+                scope,
+            ))
+            .unwrap();
+        }
+        let cached = kernel.cache_len();
+        let names = kernel.scope_names.lock().unwrap().len();
+        assert!(cached <= 8, "the cache is bounded: {cached}");
+        assert!(
+            names <= 2 * 8 + SCOPE_NAMES_SLACK,
+            "scope_names holds {names} entries for a cache of {cached}"
+        );
+        // And the readout still names every resident row's chain.
+        let readout = block_on(kernel.issue(
+            Request::new(Verb::Source, Iri::parse("urn:kernel:cache").unwrap()),
+            &cap,
+        ))
+        .unwrap();
+        let text = String::from_utf8(readout.bytes).unwrap();
+        assert!(text.contains("urn:ctx:time:1999"), "{text}");
     }
 
     #[test]
