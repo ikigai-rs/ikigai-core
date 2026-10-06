@@ -3688,7 +3688,9 @@ fn validate_against_spec(
     capability: &Capability,
 ) -> String {
     use crate::describe::InputSource;
-    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    // Every character Turtle's short string forbids raw — CR and LF too, which a
+    // message quoting caller input can carry (`args` splits on `&` and LF only).
+    let escape = crate::topology::escape_literal;
     let mut provided: Vec<(&str, &str)> = Vec::new();
     for pair in proposed.split(['&', '\n']) {
         let pair = pair.trim();

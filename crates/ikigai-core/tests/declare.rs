@@ -841,3 +841,55 @@ mod turtle {
         assert!(refused(&turtle).contains("positive"));
     }
 }
+
+/// Ledger #750, B2: a name the rendering would ALSO mint as a cell of another node —
+/// a Fallback `urn:t:f` whose layer is a space named `urn:t:f:layer:1` — is refused
+/// by `build` and by `try_to_turtle`, naming it. Its Turtle would state one IRI as
+/// both a space and a list cell, which `from_turtle` (rightly) refuses, so accepting
+/// it broke the promise that every tree `build` accepts renders faithfully.
+#[test]
+fn a_name_that_is_also_a_minted_cell_is_refused() {
+    let hello = says("hello");
+    let leaf = |name: &str| {
+        Topology::new(SpaceKind::EndpointSpace {
+            doors: vec![ikigai_core::Door::new("urn:t:x", MatchKind::Exact, "hello")],
+        })
+        .with_id(Some(iri(name)))
+    };
+    let colliding = [
+        // A Fallback's layer cell.
+        Topology::new(SpaceKind::Fallback)
+            .with_id(Some(iri("urn:t:f")))
+            .child(leaf("urn:t:f:layer:1")),
+        // A leaf's door cell, claimed by a sibling.
+        Topology::new(SpaceKind::Fallback)
+            .child(leaf("urn:t:leaf"))
+            .child(leaf("urn:t:leaf:door:1")),
+        // A leaf's doors-list cell.
+        Topology::new(SpaceKind::Fallback)
+            .child(leaf("urn:t:leaf"))
+            .child(leaf("urn:t:leaf:doors:1")),
+    ];
+    for tree in colliding {
+        let refused = build(&tree, &registry(&[&hello]));
+        assert!(
+            matches!(
+                &refused,
+                Err(DeclarationError::Malformed { node: Some(_), .. })
+            ),
+            "build accepted a colliding tree: {:?}",
+            refused.as_ref().err()
+        );
+        assert!(tree.try_to_turtle().is_err());
+    }
+    // A name merely LIKE a cell, under no node that mints it, is fine.
+    let fine = Topology::new(SpaceKind::Fallback)
+        .with_id(Some(iri("urn:t:f")))
+        .child(leaf("urn:t:f:layer:2"));
+    assert!(build(&fine, &registry(&[&hello])).is_ok());
+    #[cfg(feature = "declare")]
+    {
+        let turtle = fine.try_to_turtle().unwrap();
+        assert_eq!(Topology::from_turtle(&turtle).unwrap(), fine);
+    }
+}

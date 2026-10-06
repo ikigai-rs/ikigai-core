@@ -259,6 +259,18 @@ pub(crate) fn claims(tree: &Topology) -> Result<(), DeclarationError> {
         }
         stack.extend(node.children.iter().rev());
     }
+    // A name is also refused when the rendering would mint it as a CELL of another
+    // node — the Turtle would state it as a space and as a list cell, and read back
+    // as neither tree.
+    if let Some(name) = tree.cell_collision() {
+        return Err(DeclarationError::Malformed {
+            node: Some(name),
+            reason: "this name is also a cell the rendering mints under another node \
+                     (`<node>:layer:<n>`, `:doors:<n>`, `:door:<n>` or `:rule:<n>`); name the \
+                     space something else"
+                .into(),
+        });
+    }
     Ok(())
 }
 
