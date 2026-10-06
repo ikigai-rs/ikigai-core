@@ -50,7 +50,8 @@ const APP_DIR: &str = "ikigai";
 const DATA_DIR: &str = ".ikigai";
 
 /// The ikigai config home: `$XDG_CONFIG_HOME/ikigai`, or `$HOME/.config/ikigai` when
-/// `XDG_CONFIG_HOME` is unset. `None` when neither base directory is known.
+/// `XDG_CONFIG_HOME` is unset, empty or relative. `None` when neither base directory is
+/// known.
 ///
 /// `None` rather than a guess. A process with no `HOME` and no `XDG_CONFIG_HOME` has no
 /// config home, and the plausible-looking fallbacks are worse than nothing: a relative
@@ -71,13 +72,31 @@ pub fn config_home() -> Option<PathBuf> {
 /// the only way to TEST the rule — the environment is process-global, so `set_var` races
 /// the test harness's own threads.
 ///
-/// A set-but-EMPTY `xdg` counts as unset, per the XDG base directory specification, and a
-/// set-but-empty `home` counts as unset for the same reason it does there: joining onto it
-/// yields a relative `.config/ikigai`, which is the working-directory-relative config home
-/// this function exists to refuse.
+/// A set-but-EMPTY `xdg` counts as unset, per the XDG base directory specification, and so
+/// does a RELATIVE one — the specification again: "If an implementation encounters a
+/// relative path in any of these variables it should consider the path invalid and ignore
+/// it" (ledger #750, E3). A set-but-empty `home` counts as unset for the same reason:
+/// joining onto it yields a relative `.config/ikigai`, which is the
+/// working-directory-relative config home this function exists to refuse.
+///
+/// ```
+/// use std::ffi::OsString;
+/// use std::path::PathBuf;
+/// use ikigai_core::config::config_home_from;
+///
+/// let home = Some(OsString::from("/home/b"));
+/// assert_eq!(
+///     config_home_from(Some(OsString::from("relative/cfg")), home.clone()),
+///     Some(PathBuf::from("/home/b/.config/ikigai")),
+/// );
+/// assert_eq!(
+///     config_home_from(Some(OsString::from("/etc/xdg")), home),
+///     Some(PathBuf::from("/etc/xdg/ikigai")),
+/// );
+/// ```
 pub fn config_home_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    xdg.filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    xdg.map(PathBuf::from)
+        .filter(|base| base.is_absolute())
         .or_else(|| {
             home.filter(|value| !value.is_empty())
                 .map(|home| PathBuf::from(home).join(".config"))
@@ -216,6 +235,25 @@ mod tests {
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
+
+    /// Ledger #750, E3: a RELATIVE `XDG_CONFIG_HOME` is ignored, as the XDG base
+    /// directory specification says, rather than taken literally — a config home that
+    /// would move with the working directory.
+    #[test]
+    fn a_relative_xdg_config_home_is_ignored() {
+        let home = Some(OsString::from("/home/b"));
+        for relative in ["relative/cfg", "./cfg", "cfg", "../x"] {
+            assert_eq!(
+                config_home_from(Some(OsString::from(relative)), home.clone()),
+                Some(PathBuf::from("/home/b/.config/ikigai")),
+                "{relative}"
+            );
+        }
+        assert_eq!(
+            config_home_from(Some(OsString::from("relative/cfg")), None),
+            None
+        );
+    }
 
     /// `XDG_CONFIG_HOME` decides the config home when it is set — including with no `HOME`
     /// to fall back to. The spelling this replaces in `ikigai-cms-web` ignored the variable

@@ -419,6 +419,20 @@ impl Topology {
         Ok(self.to_turtle())
     }
 
+    /// A named node whose IRI is also a cell the rendering mints under another node
+    /// (`{node}:layer:{i}`, `{node}:doors:{i}`, `{node}:door:{i}`, `{node}:rule:{i}`),
+    /// if any — such a tree's Turtle states one IRI as both a space and a list cell,
+    /// and does not read back (ledger #750, B2). The first such name, in IRI order.
+    pub(crate) fn cell_collision(&self) -> Option<String> {
+        let mut state = Render {
+            cells: Some(std::collections::BTreeSet::new()),
+            ..Render::default()
+        };
+        self.render(&mut String::new(), &mut state);
+        let cells = state.cells.unwrap_or_default();
+        state.seen.into_iter().find(|name| cells.contains(name))
+    }
+
     /// The IRI this node is rendered under, allocating a skolem for an anonymous one.
     fn iri_for(&self, state: &mut Render) -> String {
         match &self.id {
@@ -445,6 +459,25 @@ impl Topology {
             .iter()
             .map(|child| child.render(&mut below, state))
             .collect();
+        if let Some(cells) = state.cells.as_mut() {
+            // Every IRI this node's block mints beside its own — kept in step with
+            // the arms below, which are the only places cells are named.
+            let n = match &self.kind {
+                SpaceKind::EndpointSpace { doors } => doors.len(),
+                SpaceKind::Alias { rules, .. } => rules.len(),
+                SpaceKind::Fallback | SpaceKind::Chain { .. } => children.len(),
+                _ => 0,
+            };
+            let words: &[&str] = match &self.kind {
+                SpaceKind::EndpointSpace { .. } => &["door", "doors"],
+                SpaceKind::Alias { .. } => &["rule"],
+                SpaceKind::Fallback | SpaceKind::Chain { .. } => &["layer"],
+                _ => &[],
+            };
+            for word in words {
+                cells.extend((1..=n).map(|i| format!("{me}:{word}:{i}")));
+            }
+        }
         match &self.kind {
             SpaceKind::Opaque => {
                 let _ = write!(out, "\n<{me}> a ik:OpaqueSpace .\n");
@@ -465,7 +498,11 @@ impl Topology {
                 // reader since 0.1.78 queries, and `ik:doors` adds the order and the
                 // endpoint without taking it away.
                 for door in doors {
-                    let _ = write!(out, " ;\n    ik:pattern \"{}\"", escape(&door.pattern));
+                    let _ = write!(
+                        out,
+                        " ;\n    ik:pattern \"{}\"",
+                        escape_literal(&door.pattern)
+                    );
                 }
                 let cells: Vec<String> = (1..=doors.len())
                     .map(|i| format!("{me}:door:{i}"))
@@ -476,9 +513,9 @@ impl Topology {
                         out,
                         "\n<{cell}> a ik:Door ;\n    ik:pattern \"{}\" ;\n    ik:matchKind \"{}\" ;\n    \
                          ik:endpointName \"{}\"",
-                        escape(&door.pattern),
+                        escape_literal(&door.pattern),
                         door.kind.keyword(),
-                        escape(&door.endpoint)
+                        escape_literal(&door.endpoint)
                     );
                     if let Some(corridor) = corridor {
                         let _ = write!(out, " ;\n    ik:confinedTo <{corridor}>");
@@ -494,7 +531,7 @@ impl Topology {
                 let _ = write!(
                     out,
                     "\n<{me}> a ik:Mount ;\n    ik:prefix \"{}\"",
-                    escape(prefix)
+                    escape_literal(prefix)
                 );
                 write_space(out, &children);
             }
@@ -515,8 +552,8 @@ impl Topology {
                          ik:logical \"{}\" ;\n    ik:canonical \"{}\" .\n",
                         i + 1,
                         rule.kind.keyword(),
-                        escape(&rule.from),
-                        escape(&rule.to)
+                        escape_literal(&rule.from),
+                        escape_literal(&rule.to)
                     );
                 }
             }
@@ -524,7 +561,7 @@ impl Topology {
                 let _ = write!(
                     out,
                     "\n<{me}> a ik:Limit ;\n    ik:family \"{}\" ;\n    ik:matchKind \"{}\" .\n",
-                    escape(family),
+                    escape_literal(family),
                     kind.keyword()
                 );
             }
@@ -535,10 +572,14 @@ impl Topology {
             SpaceKind::Level { seals, namespace } => {
                 let _ = write!(out, "\n<{me}> a ik:Level");
                 for prefix in seals {
-                    let _ = write!(out, " ;\n    ik:seals \"{}\"", escape(prefix));
+                    let _ = write!(out, " ;\n    ik:seals \"{}\"", escape_literal(prefix));
                 }
                 if let Some(namespace) = namespace {
-                    let _ = write!(out, " ;\n    ik:namespace \"{}\"", escape(namespace));
+                    let _ = write!(
+                        out,
+                        " ;\n    ik:namespace \"{}\"",
+                        escape_literal(namespace)
+                    );
                 }
                 write_space(out, &children);
             }
@@ -553,11 +594,12 @@ impl Topology {
 }
 
 /// What a render carries down the tree: the last skolem allocated, and the named
-/// nodes already written.
+/// nodes already written — and, on a checking pass only, every cell IRI minted.
 #[derive(Default)]
 struct Render {
     skolem: usize,
     seen: std::collections::BTreeSet<String>,
+    cells: Option<std::collections::BTreeSet<String>>,
 }
 
 /// `ik:space <child>` for a one-child node, or close the block for a node whose
@@ -592,8 +634,9 @@ fn write_list(block: &mut String, me: &str, property: &str, cell: &str, items: &
     }
 }
 
-/// Escape a literal for a Turtle `"…"` position.
-fn escape(s: &str) -> String {
+/// Escape a literal for a Turtle `"…"` position: every character the short string
+/// form forbids raw — `\`, `"`, LF and CR (`STRING_LITERAL_QUOTE`).
+pub(crate) fn escape_literal(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")

@@ -82,7 +82,10 @@ impl fmt::Display for ContentIdError {
 impl std::error::Error for ContentIdError {}
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    // Hex digits only: `u8::from_str_radix` also takes a leading `+`, so without
+    // this `b3:+f…` parsed to the same id as `b3:0f…` — two text forms, one id
+    // (ledger #750, E2).
+    if !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     (0..s.len())
@@ -94,6 +97,19 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ledger #750, E2: the text form is unique. `u8::from_str_radix` takes a leading
+    /// `+`, so `b3:+f…` parsed to the same id as `b3:0f…`; anything but hex digits is
+    /// refused now.
+    #[test]
+    fn a_sign_in_the_digest_is_not_hex() {
+        let canonical = format!("b3:0f{}", "00".repeat(31));
+        assert!(ContentId::parse(&canonical).is_ok());
+        for odd in ["+f", "-f", " f", "f "] {
+            let text = format!("b3:{odd}{}", "00".repeat(31));
+            assert!(ContentId::parse(&text).is_err(), "`{text}` parsed");
+        }
+    }
 
     #[test]
     fn deterministic_and_distinct() {

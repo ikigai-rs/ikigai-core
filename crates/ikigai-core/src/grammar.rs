@@ -90,8 +90,9 @@ impl Grammar for Exact {
 /// A constrained RFC 6570 URI template — Level 1 `{var}` expansion only.
 ///
 /// Matching is deterministic: literal text matches verbatim, each `{var}`
-/// captures the run up to the next literal (leftmost occurrence), and a final
-/// `{var}` captures the remainder. Captures must be non-empty, and adjacent
+/// captures the run up to the next literal — its leftmost occurrence that lets the
+/// rest of the template match, so a template matches every IRI it expands to —
+/// and a final `{var}` captures the remainder. Captures must be non-empty, and adjacent
 /// variables with no separating literal are rejected at construction as
 /// ambiguous. (Operators like `{+var}`, `{?q}`, `{/p}` are intentionally out of
 /// scope for now; `Grammar` lets richer grammars slot in beside this.)
@@ -172,39 +173,85 @@ impl UriTemplate {
     }
 
     fn match_str(&self, input: &str) -> Option<Bindings> {
+        let mut captures: Vec<(usize, usize)> = Vec::new();
+        let mut failed = std::collections::HashSet::new();
+        if !self.match_from(input, 0, 0, &mut captures, &mut failed) {
+            return None;
+        }
         let mut bindings = Bindings::new();
-        let mut pos = 0;
-        let mut i = 0;
-        while i < self.parts.len() {
-            match &self.parts[i] {
-                Part::Lit(lit) => {
-                    if input[pos..].starts_with(lit.as_str()) {
-                        pos += lit.len();
+        let names = self.parts.iter().filter_map(|part| match part {
+            Part::Var(name) => Some(name),
+            Part::Lit(_) => None,
+        });
+        for (name, (from, to)) in names.zip(captures) {
+            bindings.insert(name.clone(), input[from..to].to_string());
+        }
+        Some(bindings)
+    }
+
+    /// Match `self.parts[i..]` against `input[pos..]`, pushing each variable's
+    /// capture span. A variable followed by a literal tries that literal's
+    /// occurrences leftmost first and BACKTRACKS to the next when the rest does not
+    /// match — so the first answer is exactly the one leftmost-only matching gave
+    /// whenever that matched, and a value containing the next literal (`v1.json`
+    /// under `{name}.json`) still matches its own expansion (ledger #750, C3).
+    /// `failed` remembers `(i, pos)` pairs already shown not to match, which bounds
+    /// the search to parts × positions.
+    fn match_from(
+        &self,
+        input: &str,
+        i: usize,
+        pos: usize,
+        captures: &mut Vec<(usize, usize)>,
+        failed: &mut std::collections::HashSet<(usize, usize)>,
+    ) -> bool {
+        let Some(part) = self.parts.get(i) else {
+            return pos == input.len();
+        };
+        if failed.contains(&(i, pos)) {
+            return false;
+        }
+        let matched = match part {
+            Part::Lit(lit) => {
+                input[pos..].starts_with(lit.as_str())
+                    && self.match_from(input, i + 1, pos + lit.len(), captures, failed)
+            }
+            Part::Var(_) => match self.parts.get(i + 1) {
+                Some(Part::Lit(next)) => {
+                    // Every occurrence of the next literal — overlapping ones too —
+                    // after a non-empty capture, leftmost first.
+                    let mut found = false;
+                    let mut from = pos;
+                    while let Some(rel) = input[from..].find(next.as_str()) {
+                        let at = from + rel;
+                        if at > pos {
+                            captures.push((pos, at));
+                            if self.match_from(input, i + 1, at, captures, failed) {
+                                found = true;
+                                break;
+                            }
+                            captures.pop();
+                        }
+                        // Step one character past this occurrence's start.
+                        from = at + input[at..].chars().next().map_or(1, char::len_utf8);
+                    }
+                    found
+                }
+                // A final variable captures the (non-empty) remainder.
+                _ => {
+                    if pos == input.len() {
+                        false
                     } else {
-                        return None;
+                        captures.push((pos, input.len()));
+                        true
                     }
                 }
-                Part::Var(name) => match self.parts.get(i + 1) {
-                    Some(Part::Lit(next)) => {
-                        let idx = input[pos..].find(next.as_str())?;
-                        if idx == 0 {
-                            return None; // empty capture
-                        }
-                        bindings.insert(name.clone(), input[pos..pos + idx].to_string());
-                        pos += idx;
-                    }
-                    _ => {
-                        if pos == input.len() {
-                            return None; // empty capture
-                        }
-                        bindings.insert(name.clone(), input[pos..].to_string());
-                        pos = input.len();
-                    }
-                },
-            }
-            i += 1;
+            },
+        };
+        if !matched {
+            failed.insert((i, pos));
         }
-        (pos == input.len()).then_some(bindings)
+        matched
     }
 }
 
@@ -240,6 +287,58 @@ mod tests {
 
     fn iri(s: &str) -> Iri {
         Iri::parse(s).unwrap()
+    }
+
+    /// Ledger #750, C3: a template matches every IRI it expands to, even when a value
+    /// contains the literal that follows its variable — the matcher backtracks past
+    /// an occurrence that leaves the rest unmatched.
+    #[test]
+    fn a_template_matches_its_own_expansion() {
+        let cases: &[(&str, &[(&str, &str)])] = &[
+            ("urn:x:{name}.json", &[("name", "v1.json")]),
+            ("urn:x:{a}.{b}.json", &[("a", "1.2"), ("b", "3.json")]),
+            ("urn:x:{a}:{b}", &[("a", "p:q"), ("b", "r")]),
+            ("urn:x:{a}aa{b}", &[("a", "a"), ("b", "z")]),
+        ];
+        for (pattern, values) in cases {
+            let template = UriTemplate::parse(*pattern).unwrap();
+            let mut bindings = Bindings::new();
+            for (name, value) in *values {
+                bindings.insert(*name, *value);
+            }
+            let expanded = template.expand(&bindings).unwrap();
+            let matched = template
+                .match_iri(&iri(&expanded))
+                .unwrap_or_else(|| panic!("`{pattern}` did not match its expansion `{expanded}`"));
+            // Matching is leftmost-first, so a value holding the separator may split
+            // differently — but the split must re-expand to the same IRI.
+            assert_eq!(
+                template.expand(&matched).as_deref(),
+                Some(expanded.as_str())
+            );
+        }
+        // The case the audit reproduced matches with the original value.
+        let template = UriTemplate::parse("urn:x:{name}.json").unwrap();
+        let matched = template.match_iri(&iri("urn:x:v1.json.json")).unwrap();
+        assert_eq!(matched.get("name"), Some("v1.json"));
+    }
+
+    /// Backtracking keeps the leftmost answer wherever leftmost matching already
+    /// matched: the first variable takes the shortest run that lets the rest match.
+    #[test]
+    fn backtracking_keeps_the_leftmost_answer() {
+        let template = UriTemplate::parse("urn:x:{a}.{b}").unwrap();
+        let matched = template.match_iri(&iri("urn:x:1.2.3")).unwrap();
+        assert_eq!(matched.get("a"), Some("1"));
+        assert_eq!(matched.get("b"), Some("2.3"));
+        assert!(
+            template.match_iri(&iri("urn:x:.2")).is_none(),
+            "empty capture"
+        );
+        assert!(
+            template.match_iri(&iri("urn:x:12")).is_none(),
+            "no separator"
+        );
     }
 
     #[test]
