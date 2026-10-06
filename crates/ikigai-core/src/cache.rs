@@ -635,6 +635,13 @@ impl ReprCache {
         self.state.lock().expect("cache lock").entries.len()
     }
 
+    /// The scope fingerprints of the entries currently held — what the kernel's
+    /// memory of rendered chains may keep (`Kernel::scope_names`).
+    pub(crate) fn resident_scopes(&self) -> std::collections::HashSet<u64> {
+        let state = self.state.lock().expect("cache lock");
+        state.entries.keys().map(|key| key.scope).collect()
+    }
+
     /// Whether the cache is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
