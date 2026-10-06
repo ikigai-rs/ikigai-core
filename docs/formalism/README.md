@@ -1832,3 +1832,27 @@ first; `check_sealing` reads a door's match kind rather than splitting its patte
 order is documented as what it always was, sorted precedence (the vocabulary's `ik:Alias` comment still
 says "table order" and is corrected with the next vocabulary change); and the `getrandom` floor is 0.3.4,
 whose `wasm_js` feature needs no `--cfg` flag. No new vocabulary terms.
+
+**0.1.85** is THE AUDIT RELEASE (ledger [#750](http://localhost:1060/l/default/item/750): an unled audit of 0.1.84
+@fc3accc, 11 bugs reproduced, all fixed). **Security, and what a consumer observes:** the capability floor now covers
+EVERY verb an endpoint can be asked for, not only the verbs it declares: a declared verb is gated by its own requires;
+an undeclared Exists by the Source requires (or every declared requires when Source is not declared); an undeclared
+Source, Sink or Delete by every requires the endpoint declares; Meta is answered by the kernel and never enters the
+endpoint; an endpoint that declares no requires stays open. A requires declared with NO verb now applies to every verb
+(it was silently inert, while the catalog rendered it). ⚠ So a module whose endpoint ignores `request.verb` and was
+reachable through an undeclared verb under a narrowed capability is now refused there, which is the fix; and
+`ikigai-conformance`'s test that asserted the inert behavior fails until it is updated (ledger
+[#756](http://localhost:1060/l/default/item/756)). Nothing answers inside `urn:kernel:` any more except the kernel: a
+space or corridor rewrite whose canonical lands in that namespace is refused at canonical adoption and by the seals, so
+a module can neither answer `urn:kernel:actions` nor cut a kernel thread without `urn:cap:kernel:cut`. Seals identify a
+level by the REGISTERED level object, not its name, so a space wrapping a self-built `Level` under the owner's name is
+refused. **⚠ Breaking, one trait method:** `Issuer::record_subtree(&self, parent, trace: Option<&TraceScope>, spans)`
+gains the trace scope, so a remote subtree lands in the resolution's own per-call trace (`issue_traced`) and never in
+the process-global tracer (a cross-tenant trace leak); only `Kernel` overrides it in the ecosystem, and
+`Invocation::record_subtree(spans)` is unchanged. **Bounded:** `Kernel::scope_names` is pruned with the cache it
+describes (per-request corridors no longer grow it without bound). **Minors:** a declared name that is also a minted
+topology cell is refused at `build`/`try_to_turtle`; `urn:kernel:validate` escapes every character Turtle requires in
+`sh:resultMessage`; `UriTemplate` backtracks, so a template matches its own expansion (`urn:x:{name}.json` with
+`name=v1.json`); `ContentId::parse` rejects `+`; a relative `XDG_CONFIG_HOME` is ignored, as the XDG spec says; the
+`Description::requires` docs say "enforced". **Vocabulary:** no new terms; the `ik:Alias` comment now says sorted
+precedence (the correction 0.1.84 promised), so the deployed `/ns` should be refreshed with this release.

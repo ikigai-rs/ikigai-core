@@ -46,7 +46,7 @@
 <https://ikigai-rs.dev/ns#> a owl:Ontology ;
     rdfs:label "ikigai endpoint vocabulary" ;
     rdfs:comment "Self-description vocabulary for ikigai resource-oriented endpoints, and the process vocabulary that makes a plan (a DAG of requests) a resource in the same graph." ;
-    owl:versionInfo "0.1.84" .
+    owl:versionInfo "0.1.85" .
 
 #
 # Classes
@@ -224,7 +224,7 @@ ik:Rewrite a rdfs:Class ;
 ik:Alias a rdfs:Class ;
     rdfs:subClassOf ik:Space ;
     rdfs:label "Alias" ;
-    rdfs:comment "A table-driven rewrite over the enclosed ik:space: its rules are the node's ik:rewrites, each an ik:RewriteRule, in table order. A rewrite is reported as the resolution's canonical name, so the logical and backing names are one resource; the catalog lists the backing names only." .
+    rdfs:comment "A table-driven rewrite over the enclosed ik:space: its rules are the node's ik:rewrites, each an ik:RewriteRule, applied in sorted precedence (the most specific rule first), not in the order the table lists them. A rewrite is reported as the resolution's canonical name, so the logical and backing names are one resource; the catalog lists the backing names only." .
 
 ik:RewriteRule a rdfs:Class ;
     rdfs:label "RewriteRule" ;
