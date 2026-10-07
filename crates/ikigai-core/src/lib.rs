@@ -116,7 +116,7 @@ pub use cache::{
     CacheBound, CacheEntry, CacheKey, CachePolicy, CacheRow, CostAware, CutSnapshot, EntryFacts,
     EntryState, Fifo, Lru, ReprCache,
 };
-pub use capability::Capability;
+pub use capability::{is_deny_scope, Capability};
 pub use confine::Confine;
 pub use content::{ContentId, ContentIdError};
 pub use declare::{
