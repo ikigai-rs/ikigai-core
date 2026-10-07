@@ -1878,9 +1878,9 @@ topology cell is refused at `build`/`try_to_turtle`; `urn:kernel:validate` escap
 `Description::requires` docs say "enforced". **Vocabulary:** no new terms; the `ik:Alias` comment now says sorted
 precedence (the correction 0.1.84 promised), so the deployed `/ns` should be refreshed with this release.
 
-**Unreleased** (proposed as 0.1.86, a patch on the lockstep line like every release since 0.1.73, on the same
+**0.1.86** is a patch on the lockstep line like every release since 0.1.73, on the same
 argument: a `^0.1.x` pin is a ceiling, and a 0.2.0 would freeze all of the kernel's dependents out of a security fix
-until each re-pinned). **Security: exclusions are sticky** (ledger [#858](http://localhost:1060/l/default/item/858),
+until each re-pinned. **Security: exclusions are sticky** (ledger [#858](http://localhost:1060/l/default/item/858),
 found by audit round 3 in ikigai-fs). A deny-shaped scope, defined once as `is_deny_scope` (new, public), is never
 dropped by `Capability::attenuate` or `Capability::clamp`: grants only shrink, exclusions only accumulate, and a request
 or a carried capability can add one. Before this, `attenuate([read:<root>])` from `read:<root>` + `read:-<root>/secret`
