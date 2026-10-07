@@ -319,6 +319,27 @@ otherwise the intersection. There is no join, by construction: no operation wide
     pin: `capability::tests::attenuating_root_yields_exactly_the_requested_scopes` (crates/ikigai-core/src/capability.rs)
     pin: `capability::tests::clamp_bounds_a_carried_capability_to_the_ceiling` (crates/ikigai-core/src/capability.rs)
 
+**Refinement R2.1′ (exclusions are sticky).** S is not homogeneous. Modules spell an exclusion
+("everything under this allow except that") as a scope of its own, and resolve allow against
+exclusion by specificity: the scopes matching `urn:cap:<w>:-…` or `urn:cap:<w>:<w>:-…` for
+words w (`is_deny_scope`) form D ⊆ S, the rest are the grants G = S ∖ D. Under the plain
+intersection above, dropping an element of D is a narrowing of the SET and a WIDENING of what
+the holder reaches (ledger [#858](http://localhost:1060/l/default/item/858)), so the order the
+meet respects is not ⊆ on t but ⊆ on grants and ⊇ on exclusions:
+`Scoped(t) ⊓ s = Scoped((t ∩ s ∩ G) ∪ (t ∩ D) ∪ (s ∩ D))`, and clamp is the same meet with
+`Root` still the top. `Root ⊓ s = Scoped(s)` is unchanged. `allows` never answers yes for an
+element of D, so no `requires` can be met by one except at `Root`. Under any rule where a
+longer matching rule beats a shorter one and an exclusion wins a tie (ikigai-fs, ikigai-http),
+fewer grants and more exclusions can only reach less, which is what "never widens" was always
+meant to say.
+
+    pin: `capability::tests::attenuate_and_clamp_keep_a_held_exclusion` (crates/ikigai-core/src/capability.rs)
+    pin: `capability::tests::property_one_step_never_drops_an_exclusion_or_adds_a_grant` (crates/ikigai-core/src/capability.rs)
+    pin: `capability::tests::property_no_chain_drops_an_exclusion_or_adds_a_grant` (crates/ikigai-core/src/capability.rs)
+    pin: `capability::tests::property_a_narrowed_capability_reaches_nothing_its_parent_could_not` (crates/ikigai-core/src/capability.rs)
+    pin: `capability::tests::an_exclusion_is_never_granted_by_exact_match` (crates/ikigai-core/src/capability.rs)
+    doctest: `is_deny_scope`
+
 **Theorem R2.2 (authority is a descending chain).** Let a host issue a request under c₀. Every
 invocation in the tree of sub-requests it gives rise to runs under some cₖ with cₖ ≤ cₖ₋₁, and
 cₖ ∈ {cₖ₋₁, cₖ₋₁ ⊓ s} for a set s the issuing endpoint named.
@@ -1856,3 +1877,20 @@ topology cell is refused at `build`/`try_to_turtle`; `urn:kernel:validate` escap
 `name=v1.json`); `ContentId::parse` rejects `+`; a relative `XDG_CONFIG_HOME` is ignored, as the XDG spec says; the
 `Description::requires` docs say "enforced". **Vocabulary:** no new terms; the `ik:Alias` comment now says sorted
 precedence (the correction 0.1.84 promised), so the deployed `/ns` should be refreshed with this release.
+
+**Unreleased** (proposed as 0.1.86, a patch on the lockstep line like every release since 0.1.73, on the same
+argument: a `^0.1.x` pin is a ceiling, and a 0.2.0 would freeze all of the kernel's dependents out of a security fix
+until each re-pinned). **Security: exclusions are sticky** (ledger [#858](http://localhost:1060/l/default/item/858),
+found by audit round 3 in ikigai-fs). A deny-shaped scope, defined once as `is_deny_scope` (new, public), is never
+dropped by `Capability::attenuate` or `Capability::clamp`: grants only shrink, exclusions only accumulate, and a request
+or a carried capability can add one. Before this, `attenuate([read:<root>])` from `read:<root>` + `read:-<root>/secret`
+read the secret, and so did a peer clamped against a carried `{read:<root>}`; the same held for ikigai-http's
+`urn:cap:net:-…` host rules and the tenant rules ikigai-cli localizes. And `Capability::allows` now refuses a
+deny-shaped token even when it is held. **What a consumer observes:** a scope set after `attenuate`/`clamp` can now
+contain exclusions the request did not name; a test that pinned the old drop (ikigai-fs's
+`known_gap_858_a_dropped_deny_scope_widens_access`) fails against this release by design and is flipped then. ⚠ The
+positions `urn:cap:<word>:-…` and `urn:cap:<word>:<word>:-…` are RESERVED for exclusions: a grammar whose parameter
+sits there (`urn:cap:secret:read:<name>`, `urn:cap:name:admin:<prefix>`) must not let it begin with `-`, or the grant
+fails closed. The wildcard `…:*` requirement is still met by a holder of only an exclusion under it (the floor offers;
+the module refuses), as before and as now documented. **No type or wire change:** `Kind::Scoped(BTreeSet<String>)`
+serializes byte-for-byte as before (pinned). **Vocabulary:** nothing.

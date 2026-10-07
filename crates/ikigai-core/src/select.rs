@@ -514,6 +514,13 @@ pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch>
 /// they require, because authorization depends on the argument (which selection doesn't
 /// have yet). Offering-level semantics only — enforcement at invoke time still checks the
 /// exact target against the ACL.
+///
+/// "Any grant" is literally any HELD SCOPE under the prefix, exclusions included
+/// ([`crate::is_deny_scope`]): a holder of only `urn:cap:fs:read:-/secret` satisfies
+/// `urn:cap:fs:read:*` and is offered the action, which the module then refuses for every
+/// path (no allow covers it). Deliberate (ledger #858): the floor only over-offers to a
+/// holder who can reach nothing, and filtering exclusions out here would make the
+/// manifold's answer depend on a second reading of the grammar the module owns.
 pub(crate) fn cap_satisfies(capability: &crate::Capability, scope: &str) -> bool {
     match scope.strip_suffix('*') {
         Some(prefix) => match capability.scopes() {
