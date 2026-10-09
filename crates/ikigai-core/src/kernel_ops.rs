@@ -62,6 +62,7 @@ pub(crate) const OPS: &[&str] = &[
     "catalog",
     "constraint",
     "cut",
+    "explain",
     "scheduler",
     "threads",
     "topology",
@@ -75,7 +76,9 @@ pub(crate) const OPS: &[&str] = &[
 /// chain (corridors innermost first, then the root unless severed), so its entry
 /// is keyed by the chain's fingerprint like any scoped resolution.
 pub(crate) fn depends_on_chain(op: &str) -> bool {
-    op == "topology"
+    // The explanation walks the asker's chain too: what declines and what answers
+    // is a property of the chain the name would be resolved in.
+    op == "topology" || op == "explain"
 }
 
 /// The self-description of one kernel operation, or `None` for a name the kernel
@@ -89,6 +92,7 @@ pub(crate) fn description(op: &str) -> Option<Description> {
         "catalog" => catalog(),
         "constraint" => constraint(),
         "cut" => cut(),
+        "explain" => explain(),
         "scheduler" => scheduler(),
         "threads" => threads(),
         "topology" => topology(),
@@ -205,6 +209,51 @@ fn catalog() -> Description {
         .verb(Verb::Source)
         .verb(Verb::Meta)
         .requires(CAP_INSPECT)
+        .output(TEXT_TURTLE)
+}
+
+/// The description of `urn:kernel:explain` — a dry run of resolution.
+fn explain() -> Description {
+    Description::new("kernel-explain")
+        .title("Explain a resolution")
+        .summary(
+            "A dry run of resolving `target` with `verb`, in the asker's chain, without \
+             invoking anything: the kernel's own rewrites that would fire and onto what; each \
+             member of the chain in the order it is consulted, and whether it would answer, \
+             decline, limit the name or be passed by (a member that reports no structure is \
+             marked opaque — what happens inside it cannot be shown); the endpoint that would \
+             answer, its grammar bindings and the door it is bound at; the capability scopes \
+             its declaration requires for that verb, and which of them the capability lacks \
+             (the scopes a real request would be Denied for); and what decides cacheability. \
+             Answered for the asker's capability, or for `scopes`, attenuated from it and \
+             never wider. Says WHAT each space did, not why it declined. Cacheable under \
+             `urn:kernel:bindings`, per capability and chain.",
+        )
+        .verb(Verb::Source)
+        .verb(Verb::Meta)
+        .requires(CAP_INSPECT)
+        .input(ArgSpec::new("target").summary("the IRI whose resolution to explain"))
+        .input(
+            ArgSpec::new("verb")
+                .summary("the verb of the explained request")
+                .one_of(["source", "sink", "exists", "delete", "meta"])
+                .default_value("source"),
+        )
+        .input(
+            ArgSpec::new("scopes")
+                .summary(
+                    "answer for a capability attenuated from the asker's to these scopes \
+                     (comma- or space-separated); a scope the asker does not hold is refused",
+                )
+                .optional(),
+        )
+        .input(
+            ArgSpec::new("as")
+                .summary("response face")
+                .one_of(["text/plain", TEXT_TURTLE])
+                .default_value("text/plain"),
+        )
+        .output(TEXT_PLAIN_UTF8)
         .output(TEXT_TURTLE)
 }
 

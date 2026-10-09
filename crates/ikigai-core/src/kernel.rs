@@ -666,7 +666,7 @@ const FLOOR_MEMO_BOUND: usize = 4096;
 /// no `requires` anywhere stays open on every verb, as before.
 ///
 /// [`ActionSpec`]: crate::ActionSpec
-struct Floor {
+pub(crate) struct Floor {
     /// Each declared verb with exactly its `requires`.
     declared: Vec<(Verb, Vec<String>)>,
     /// The union of every `requires` the endpoint declares, deduplicated in
@@ -675,7 +675,7 @@ struct Floor {
 }
 
 impl Floor {
-    fn of(description: &Description) -> Self {
+    pub(crate) fn of(description: &Description) -> Self {
         let declared: Vec<(Verb, Vec<String>)> = description
             .action_specs()
             .into_iter()
@@ -700,7 +700,7 @@ impl Floor {
     }
 
     /// The scopes a request with `verb` must hold — see the table on [`Floor`].
-    fn requirements(&self, verb: Verb) -> &[String] {
+    pub(crate) fn requirements(&self, verb: Verb) -> &[String] {
         let own = |v: Verb| {
             self.declared
                 .iter()
@@ -3055,6 +3055,25 @@ impl Kernel {
                 .cacheable()
                 .depends_on(BINDINGS_THREAD))
             }
+            // ★ THE MODULE AUTHOR'S "WHY" (ledger #906): a dry run of resolving one
+            // name in the asker's chain — the rewrites that would fire, what each
+            // member of the chain does with the name, the endpoint and bindings that
+            // would answer, and whether this capability would be refused for it.
+            // Invokes nothing (`crate::explain`). Like the topology it walks, a face
+            // derived from the bindings — cacheable under `urn:kernel:bindings` — and
+            // keyed by the chain as well as the capability, because the chain is part
+            // of its subject.
+            ("explain", Verb::Source) => {
+                require_cap("urn:cap:kernel:inspect")?;
+                crate::explain::explain(crate::explain::Ask {
+                    request,
+                    capability,
+                    chain,
+                    root: &self.root,
+                    seals: &self.seals,
+                    aliases: self.aliases.as_deref(),
+                })
+            }
             // Inspect the host scheduler (backend, threads, live task counts).
             ("scheduler", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
@@ -3586,7 +3605,7 @@ impl Kernel {
 /// partitions cached representations BY AUTHORITY — an engineered collision would
 /// serve one authority's cached result to another. Recomputed per request; the cache
 /// holds the `u64`, never the capability.
-fn capability_key(capability: &Capability) -> u64 {
+pub(crate) fn capability_key(capability: &Capability) -> u64 {
     let mut hasher = blake3::Hasher::new();
     match capability.scopes() {
         // Root authority — a fixed namespace distinct from any scoped set.
@@ -3662,7 +3681,7 @@ fn seals_for(root: &Arc<dyn Space>, host: &[String]) -> Seals {
 }
 
 /// Parse a `verb=` argument (case-insensitive verb name).
-fn parse_verb(name: &str) -> Result<Verb> {
+pub(crate) fn parse_verb(name: &str) -> Result<Verb> {
     match name.to_ascii_lowercase().as_str() {
         "source" => Ok(Verb::Source),
         "sink" => Ok(Verb::Sink),

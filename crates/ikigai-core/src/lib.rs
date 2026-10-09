@@ -91,6 +91,7 @@ mod declare;
 mod describe;
 mod endpoint;
 mod error;
+mod explain;
 mod grammar;
 pub(crate) mod hashing;
 mod iri;

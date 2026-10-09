@@ -10,9 +10,11 @@
     "Binding": "ik:Binding",
     "Chain": "ik:Chain",
     "Confine": "ik:Confine",
+    "Consultation": "ik:Consultation",
     "CorsPolicy": "ik:CorsPolicy",
     "Directory": "ik:Directory",
     "Door": "ik:Door",
+    "DryRun": "ik:DryRun",
     "Endpoint": "ik:Endpoint",
     "EndpointSpace": "ik:EndpointSpace",
     "Explanation": "ik:Explanation",
@@ -55,6 +57,10 @@
       "@id": "ik:annotates",
       "@type": "@id"
     },
+    "answer": {
+      "@id": "ik:answer",
+      "@type": "@id"
+    },
     "app": "ik:app",
     "appLayer": {
       "@id": "ik:appLayer",
@@ -62,6 +68,10 @@
     },
     "argument": {
       "@id": "ik:argument",
+      "@type": "@id"
+    },
+    "asked": {
+      "@id": "ik:asked",
       "@type": "@id"
     },
     "batchAt": {
@@ -72,6 +82,11 @@
       "@id": "ik:bind",
       "@type": "@id"
     },
+    "binding": {
+      "@id": "ik:binding",
+      "@type": "@id"
+    },
+    "bindingValue": "ik:bindingValue",
     "binds": "ik:binds",
     "byteSize": {
       "@id": "ik:byteSize",
@@ -80,12 +95,20 @@
     "calendar": "ik:calendar",
     "canonical": "ik:canonical",
     "cap": "ik:cap",
+    "chain": {
+      "@id": "ik:chain",
+      "@type": "@id"
+    },
     "class": {
       "@id": "ik:class",
       "@type": "@id"
     },
     "confinedTo": {
       "@id": "ik:confinedTo",
+      "@type": "@id"
+    },
+    "consulted": {
+      "@id": "ik:consulted",
       "@type": "@id"
     },
     "contentHash": "ik:contentHash",
@@ -160,6 +183,14 @@
       "@id": "ik:jsonMode",
       "@type": "xsd:boolean"
     },
+    "lacks": {
+      "@id": "ik:lacks",
+      "@type": "@id"
+    },
+    "layer": {
+      "@id": "ik:layer",
+      "@type": "@id"
+    },
     "layers": "ik:layers",
     "logical": "ik:logical",
     "lossless": {
@@ -184,6 +215,10 @@
     "model": "ik:model",
     "namespace": "ik:namespace",
     "oneOf": "ik:oneOf",
+    "opaque": {
+      "@id": "ik:opaque",
+      "@type": "xsd:boolean"
+    },
     "order": {
       "@id": "ik:order",
       "@type": "xsd:integer"
@@ -232,6 +267,10 @@
       "@id": "ik:requires",
       "@type": "@id"
     },
+    "resolvedAs": {
+      "@id": "ik:resolvedAs",
+      "@type": "@id"
+    },
     "resolves": {
       "@id": "ik:resolves",
       "@type": "@id"
@@ -246,6 +285,10 @@
     },
     "rewrites": {
       "@id": "ik:rewrites",
+      "@type": "@id"
+    },
+    "rewrote": {
+      "@id": "ik:rewrote",
       "@type": "@id"
     },
     "routesTo": {

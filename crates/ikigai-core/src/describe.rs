@@ -431,6 +431,61 @@ impl Description {
             .collect()
     }
 
+    /// The capability scopes a request with `verb` must hold to pass the kernel's
+    /// declared-capability floor — the floor the kernel itself enforces before
+    /// dispatch, read from this description: the verb's own `requires` when it is
+    /// declared; for an undeclared `Exists`, what `Source` requires (or, with no
+    /// `Source` either, everything declared); for any other undeclared verb, every
+    /// scope declared anywhere; for `Meta`, nothing (the kernel answers it from the
+    /// description and never enters the endpoint). Deduplicated, in declaration
+    /// order. The same table, row for row, the kernel's floor applies (ledger #750).
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, Description, Verb};
+    ///
+    /// let calendar = Description::new("calendar")
+    ///     .action(ActionSpec::new(Verb::Source).requires("urn:cap:personal:calendar:read"))
+    ///     .action(ActionSpec::new(Verb::Sink).requires("urn:cap:personal:calendar:write"));
+    /// assert_eq!(calendar.required_scopes(Verb::Sink), ["urn:cap:personal:calendar:write"]);
+    /// // An undeclared Exists asks what a reader holds; Meta is never gated.
+    /// assert_eq!(calendar.required_scopes(Verb::Exists), ["urn:cap:personal:calendar:read"]);
+    /// assert!(calendar.required_scopes(Verb::Meta).is_empty());
+    /// // An undeclared mutating verb needs everything the endpoint declares.
+    /// assert_eq!(calendar.required_scopes(Verb::Delete).len(), 2);
+    /// ```
+    pub fn required_scopes(&self, verb: Verb) -> Vec<String> {
+        crate::kernel::Floor::of(self).requirements(verb).to_vec()
+    }
+
+    /// The scopes in [`required_scopes`](Self::required_scopes) that `capability` does
+    /// NOT satisfy — empty exactly when the kernel's floor would admit the request.
+    /// Satisfaction is the one predicate the floor, `urn:kernel:actions` and
+    /// `urn:kernel:validate` share: a plain scope must be held exactly, and a `…:*`
+    /// family scope is satisfied by holding ANY grant under its prefix. So a module
+    /// asserting "the grant list I publish satisfies what I declare" asks it here,
+    /// rather than keeping a private copy of the predicate (ledger #14).
+    ///
+    /// ```
+    /// use ikigai_core::{Capability, Description, Verb};
+    ///
+    /// let fetch = Description::new("fetch")
+    ///     .verb(Verb::Source)
+    ///     .requires("urn:cap:net:*")
+    ///     .requires("urn:cap:fetch:read");
+    /// let holder = Capability::scoped(["urn:cap:net:example.com"]);
+    /// // The family scope is satisfied by a grant under it; the plain one is missing.
+    /// assert_eq!(fetch.unsatisfied_scopes(Verb::Source, &holder), ["urn:cap:fetch:read"]);
+    /// assert!(fetch.unsatisfied_scopes(Verb::Source, &Capability::root()).is_empty());
+    /// ```
+    pub fn unsatisfied_scopes(&self, verb: Verb, capability: &crate::Capability) -> Vec<String> {
+        crate::kernel::Floor::of(self)
+            .requirements(verb)
+            .iter()
+            .filter(|scope| !crate::select::cap_satisfies(capability, scope))
+            .cloned()
+            .collect()
+    }
+
     /// Mark this endpoint a **transreptor** that converts representations from any of `from`
     /// to any of `to` (media-type strings) — builder. Sets [`EndpointKind::Transreptor`].
     /// The conversion is declared **lossless** (a transreption in the formal sense: the
