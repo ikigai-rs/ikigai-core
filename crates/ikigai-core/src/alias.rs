@@ -242,7 +242,7 @@ impl AliasRule {
     }
 
     /// Apply this rule to `target`, or `None` if it does not match.
-    fn apply(&self, target: &str) -> Option<String> {
+    pub(crate) fn apply(&self, target: &str) -> Option<String> {
         match self.kind {
             RuleKind::Exact => (target == self.from).then(|| self.to.clone()),
             RuleKind::Prefix => target
@@ -494,6 +494,20 @@ impl AliasTable {
     /// on the path everything takes, or they only count the paths someone
     /// remembered to instrument.
     pub fn canonicalize(&self, target: &Iri) -> Canonical {
+        self.walk(target, true)
+    }
+
+    /// [`canonicalize`](Self::canonicalize) WITHOUT touching a counter: what the
+    /// table would do with `target`, asked by an observer. `urn:kernel:explain` is
+    /// that observer — a dry run of resolution must not count as a resolution, or
+    /// asking why a name misses would itself move the `unresolved` count an operator
+    /// reads at `urn:kernel:aliases`.
+    pub(crate) fn preview(&self, target: &Iri) -> Canonical {
+        self.walk(target, false)
+    }
+
+    /// The walk both faces share; `record` says whether it bumps the counters.
+    fn walk(&self, target: &Iri, record: bool) -> Canonical {
         // The reserved namespace is not aliasable; see `KERNEL_NS`.
         if target.as_str().starts_with(KERNEL_NS) {
             return Canonical::Direct;
@@ -507,8 +521,10 @@ impl AliasTable {
                 return if applied.is_empty() {
                     Canonical::Direct
                 } else {
-                    for &index in &applied {
-                        self.rules[index].hops.fetch_add(1, Ordering::Relaxed);
+                    if record {
+                        for &index in &applied {
+                            self.rules[index].hops.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     Canonical::Aliased(AliasHop {
                         logical: target.clone(),
@@ -524,11 +540,12 @@ impl AliasTable {
                     format!("rewrite produced `{next}`, which is not a valid IRI"),
                     trail,
                     applied,
+                    record,
                 );
             };
             if trail.iter().any(|seen| seen == next_iri.as_str()) {
                 trail.push(next_iri.as_str().to_string());
-                return self.refuse(target, "alias cycle".to_string(), trail, applied);
+                return self.refuse(target, "alias cycle".to_string(), trail, applied, record);
             }
             trail.push(next_iri.as_str().to_string());
             current = next_iri;
@@ -538,6 +555,7 @@ impl AliasTable {
             format!("alias chain exceeded {} hops", self.max_hops),
             trail,
             applied,
+            record,
         )
     }
 
@@ -555,9 +573,12 @@ impl AliasTable {
         reason: String,
         trail: Vec<String>,
         rules: Vec<usize>,
+        record: bool,
     ) -> Canonical {
-        for &index in &rules {
-            self.rules[index].refused.fetch_add(1, Ordering::Relaxed);
+        if record {
+            for &index in &rules {
+                self.rules[index].refused.fetch_add(1, Ordering::Relaxed);
+            }
         }
         Canonical::Refused(AliasRefusal {
             logical: logical.clone(),

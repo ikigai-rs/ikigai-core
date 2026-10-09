@@ -1116,6 +1116,50 @@ mod tests {
         }
     }
 
+    /// Every `ik:` term `urn:kernel:explain`'s Turtle face emits (ledger #906), over
+    /// PARSED subjects as the two tests above ask it. The face lives in `ikigai-core`,
+    /// which cannot see this file, so the list is the other half of the face's own
+    /// test (`the_turtle_face_parses_and_joins_the_topology_and_the_catalog`): delete
+    /// a term here and this says which face it leaves emitting an undefined term.
+    #[test]
+    fn the_terms_the_explain_face_emits_are_defined() {
+        let subjects: std::collections::BTreeSet<String> = oxttl::TurtleParser::new()
+            .for_reader(VOCABULARY.as_bytes())
+            .map(|t| t.expect("valid turtle").subject.to_string())
+            .collect();
+        for term in [
+            // Its own.
+            "DryRun",
+            "Consultation",
+            "asked",
+            "resolvedAs",
+            "chain",
+            "consulted",
+            "layer",
+            "opaque",
+            "answer",
+            "binding",
+            "bindingValue",
+            "lacks",
+            "rewrote",
+            // Reused, unchanged.
+            "verb",
+            "outcome",
+            "requires",
+            "RewriteRule",
+            "ruleKind",
+            "logical",
+            "canonical",
+            "Binding",
+            "var",
+        ] {
+            assert!(
+                subjects.contains(&format!("<{NS}{term}>")),
+                "ik:{term} is emitted by urn:kernel:explain's Turtle face"
+            );
+        }
+    }
+
     /// ⚠ The finding family's domains, pinned OFF — the axiom this neighborhood has
     /// already paid for twice.
     ///

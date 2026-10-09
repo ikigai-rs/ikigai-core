@@ -29,6 +29,13 @@ assert_eq!(rep.bytes, b"IKIGAI");
   resource**: `urn:kernel:topology` renders the chain a request is resolved in as a graph
   (every node an IRI, order explicit), so "is this family reachable without passing the
   limiter?" is a query, and a resolution reports which space answered.
+- **"Why did my endpoint not get called?"** — `urn:kernel:explain target=<iri>` is a dry
+  run of resolving one name in the asker's chain, invoking nothing: the rewrites that
+  would fire, what each member of the chain does with the name (answered, declined,
+  limited, shadowed, or opaque where it reports no structure), the endpoint, door and
+  grammar bindings that would answer, and every capability scope the asker (or a
+  narrower `scopes=`) would be refused for. `Description::unsatisfied_scopes` asks the
+  same floor question of one contract.
 - **Logical rewrite** — an `AliasTable` maps stable logical URIs onto different
   backing resources (`urn:fn:` → `urn:iki:fn:`, `urn:log:config` →
   `file:/logConfig.yaml`), installed as the `Alias` overlay via

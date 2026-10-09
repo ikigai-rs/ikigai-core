@@ -228,7 +228,7 @@ ik:Alias a rdfs:Class ;
 
 ik:RewriteRule a rdfs:Class ;
     rdfs:label "RewriteRule" ;
-    rdfs:comment "One rule of an ik:Alias table: ik:ruleKind (exact or prefix), ik:logical (the name or prefix it matches) and ik:canonical (what it rewrites to). Skolemized under the alias node as {alias}:rule:{n}, n its position in the table." .
+    rdfs:comment "One rule of an ik:Alias table: ik:ruleKind (exact or prefix), ik:logical (the name or prefix it matches) and ik:canonical (what it rewrites to). Skolemized under the alias node as {alias}:rule:{n}, n its position in the table — or, for a rule of the kernel's own table that an ik:DryRun would fire, under the run as {run}:rule:{n}, n the order it fires in." .
 
 ik:Limit a rdfs:Class ;
     rdfs:subClassOf ik:Space ;
@@ -347,6 +347,90 @@ ik:canonical a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "canonical" ;
     rdfs:comment "The backing name or prefix an ik:RewriteRule rewrites to — what the resolution reports as its canonical name, under which the logical and backing names share one cache entry and one golden thread." .
+
+# ---- explanation (urn:kernel:explain — a dry run of resolution) --------------
+# The module author's "why did my endpoint not get called?" as a graph: one
+# ik:DryRun per (name, verb, chain, capability), skolemized under
+# urn:ikigai:explain:{hex}, with its ik:Consultation nodes, its fired rules and its
+# bindings under it ({run}:consulted:{n}, {run}:rule:{n}, {run}:binding:{var}). It
+# JOINS the two graphs it explains rather than restating them: ik:chain names the
+# ik:Chain node of urn:kernel:topology, each consultation's ik:layer is that chain's
+# own list cell, and ik:answer is the endpoint's node in urn:kernel:catalog — so the
+# union of the three is the picture a visualizer draws. Every ik:outcome is an IRI
+# under urn:ikigai:explain:outcome: — on a consultation: answered, declined, limited,
+# skipped (a sealed name its frame does not own), shadowed (not consulted, and it
+# WOULD have answered) or unreached; on the run: answered, limited, unresolved,
+# refused or kernel (answered by the kernel itself, ahead of every space).
+
+ik:DryRun a rdfs:Class ;
+    rdfs:label "DryRun" ;
+    rdfs:comment "One dry run of resolution (urn:kernel:explain): what resolving ik:asked with ik:verb in ik:chain would do, for one capability, without invoking anything — the rewrites that would fire (ik:rewrote), each member of the chain consulted (ik:consulted), how it ends (ik:outcome), the endpoint that would answer (ik:answer) and its grammar bindings (ik:binding), the capability scopes the endpoint requires for that verb (ik:requires) and those the capability lacks (ik:lacks: the scopes a real request would be Denied for). States WHAT each member did, never why it declined." .
+
+ik:Consultation a rdfs:Class ;
+    rdfs:label "Consultation" ;
+    rdfs:comment "What one member of the chain did in an ik:DryRun: the member is the ik:layer cell it occupies in the chain's topology, and the ik:outcome is what it did with the name. ik:opaque true marks a member that reports no structure, where the dry run can say whether it answered and nothing about what is inside it. Skolemized under its run as {run}:consulted:{n}, n its position in the order the chain is consulted (the same n as the cell's)." .
+
+ik:asked a rdf:Property ;
+    rdfs:domain ik:DryRun ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "asked" ;
+    rdfs:comment "The name an ik:DryRun was asked about, as the caller wrote it — before any rewrite (ik:resolvedAs is the name after them)." .
+
+ik:resolvedAs a rdf:Property ;
+    rdfs:domain ik:DryRun ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "resolvedAs" ;
+    rdfs:comment "The name an ik:DryRun's request would be resolved under after a rewrite: the kernel's own table (the rules in ik:rewrote), or a space that reported the name it actually resolved. Absent when nothing rewrote it. The cache entry and the golden thread are this name's, not ik:asked's." .
+
+ik:chain a rdf:Property ;
+    rdfs:range ik:Chain ;
+    rdfs:label "chain" ;
+    rdfs:comment "The resolution chain the subject was resolved, or would be resolved, in — the ik:Chain node of urn:kernel:topology (urn:ikigai:chain:root for the empty chain), so a graph naming it joins the arrangement it happened in." .
+
+ik:consulted a rdf:Property ;
+    rdfs:domain ik:DryRun ;
+    rdfs:range ik:Consultation ;
+    rdfs:label "consulted" ;
+    rdfs:comment "One member of the chain as an ik:DryRun saw it — one triple per member, every member of the chain, including those after the one that answered (ik:outcome shadowed or unreached). The order is the {n} in each consultation's IRI." .
+
+ik:layer a rdf:Property ;
+    rdfs:domain ik:Consultation ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "layer" ;
+    rdfs:comment "The list cell ({chain}:layer:{n}) the consulted member occupies in its ik:Chain's ik:layers, in the topology graph: its rdf:first is the space. Points at the cell rather than the space because an anonymous space's skolem is minted by the topology's rendering, while the cell's name follows from the chain alone." .
+
+ik:opaque a rdf:Property ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "opaque" ;
+    rdfs:comment "Whether the subject reports no structure of its own (an ik:OpaqueSpace): true where an explanation can say whether a space answered and cannot say what is inside it." .
+
+ik:answer a rdf:Property ;
+    rdfs:domain ik:DryRun ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "answer" ;
+    rdfs:comment "The endpoint that would answer an ik:DryRun's request, as its node in urn:kernel:catalog (urn:ikigai:endpoint:{id}), where its whole contract is. Absent when nothing would answer." .
+
+ik:binding a rdf:Property ;
+    rdfs:range ik:Binding ;
+    rdfs:label "binding" ;
+    rdfs:comment "A variable the resolving grammar captured from the name (a {var} of a URI template), as an ik:Binding with ik:var and ik:bindingValue. Skolemized under the subject as {subject}:binding:{var}." .
+
+ik:bindingValue a rdf:Property ;
+    rdfs:domain ik:Binding ;
+    rdfs:range xsd:string ;
+    rdfs:label "bindingValue" ;
+    rdfs:comment "The value a grammar captured for an ik:Binding's ik:var." .
+
+ik:lacks a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "lacks" ;
+    rdfs:comment "A capability scope the subject requires (one of its ik:requires) that the capability it was asked for does not satisfy — on an ik:DryRun, a scope a real request would be Denied for before the endpoint is entered. Every lacking scope is listed, where a refusal names only the first. Satisfaction is the kernel's own predicate: a plain scope held exactly, a wildcard scope by any grant under its prefix." .
+
+ik:rewrote a rdf:Property ;
+    rdfs:domain ik:DryRun ;
+    rdfs:range ik:RewriteRule ;
+    rdfs:label "rewrote" ;
+    rdfs:comment "A rule of the kernel's own rewrite table that an ik:DryRun's name would fire, as an ik:RewriteRule under the run ({run}:rule:{n}, n the order the rules fire in). The rules come from the table urn:kernel:aliases serves; asking fires none of them for real, so its counters do not move." .
 
 # ---- events (the calendar/agenda event graph) --------------------------------
 # Events themselves are typed with the iCalendar vocabulary
@@ -497,7 +581,7 @@ ik:bind a rdf:Property ;
 
 ik:Binding a rdfs:Class ;
     rdfs:label "Binding" ;
-    rdfs:comment "A template-variable binding: ik:var names the {var} it fills, ik:from names its source." .
+    rdfs:comment "A template-variable binding: ik:var names the {var} it fills. On a route (ik:bind), ik:from names where its value comes from; captured by a grammar (ik:binding, on an ik:DryRun), ik:bindingValue is the value it captured." .
 
 ik:var a rdf:Property ;
     rdfs:domain ik:Binding ;

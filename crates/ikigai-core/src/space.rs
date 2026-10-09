@@ -664,10 +664,32 @@ impl Scope {
         root: &Arc<dyn Space>,
         seals: &Seals,
     ) -> std::result::Result<Resolution, SealBreach> {
+        self.resolve_observed(request, root, seals, |_, _| {})
+    }
+
+    /// [`resolve_in`](Self::resolve_in), telling `observe` what the walk did with
+    /// each member it reached: its position in [`consulted`](Self::consulted) order
+    /// and whether it hit, missed, or was skipped (a sealed name the member's frame
+    /// does not own). **One walk, two readers**: resolution passes an observer that
+    /// does nothing — monomorphized away, so the hot path is the walk it always was —
+    /// and `urn:kernel:explain` passes one that records, so a dry run reports the
+    /// walk resolution actually takes rather than a second copy of it that could
+    /// drift. A member the walk never reached (anything after the first hit, or a
+    /// confined corridor a sealed name passes by) is never reported.
+    #[inline]
+    pub(crate) fn resolve_observed(
+        &self,
+        request: &Request,
+        root: &Arc<dyn Space>,
+        seals: &Seals,
+        mut observe: impl FnMut(usize, Consulted),
+    ) -> std::result::Result<Resolution, SealBreach> {
         // The empty chain is the hot path — every plain `issue` — and is one null
         // check straight to the root; the walk below is the general case.
         let Some(chain) = self.chain.as_ref() else {
-            return admit(root.resolve(request, self), request, seals);
+            let resolution = root.resolve(request, self);
+            observe(0, Consulted::of(&resolution));
+            return admit(resolution, request, seals);
         };
         let sealed = if seals.is_trivial() {
             None
@@ -676,14 +698,18 @@ impl Scope {
         };
         let (behind, host) = chain.injected.split_at(chain.confined);
         let (behind_ids, host_ids) = chain.identities.split_at(chain.confined);
-        if let Some(hit) = self.corridor_hit(request, host, host_ids) {
+        if let Some(hit) = self.corridor_hit(request, host, host_ids, 0, &mut observe) {
             return Ok(hit);
         }
+        let after_host = host.len();
         for (at, level) in chain.levels.0.iter().enumerate() {
             if sealed.is_some_and(|owner| !seals.frame_admits(owner, level)) {
+                observe(after_host + at, Consulted::Skipped);
                 continue;
             }
-            if let Resolution::Hit(mut resolved) = level.inner.resolve(request, self) {
+            let resolution = level.inner.resolve(request, self);
+            observe(after_host + at, Consulted::of(&resolution));
+            if let Resolution::Hit(mut resolved) = resolution {
                 if resolved.answered_by.is_none() {
                     resolved.answered_by = Some(level.name.clone());
                 }
@@ -694,29 +720,43 @@ impl Scope {
                 return admit(Resolution::Hit(resolved), request, seals);
             }
         }
+        let after_levels = after_host + chain.levels.0.len();
         if sealed.is_none() {
-            if let Some(hit) = self.corridor_hit(request, behind, behind_ids) {
+            if let Some(hit) =
+                self.corridor_hit(request, behind, behind_ids, after_levels, &mut observe)
+            {
                 return Ok(hit);
+            }
+        } else {
+            for at in 0..behind.len() {
+                observe(after_levels + at, Consulted::Skipped);
             }
         }
         if chain.severed {
             return Ok(Resolution::Miss);
         }
-        admit(root.resolve(request, self), request, seals)
+        let resolution = root.resolve(request, self);
+        observe(after_levels + behind.len(), Consulted::of(&resolution));
+        admit(resolution, request, seals)
     }
 
     /// The first hit among `spaces` (outermost first, so walked in reverse), a
     /// named corridor filling [`Resolved::answered_by`] when its space named none.
     /// Corridors answer sealed names too — this is only ever called for the host's
-    /// injected ones, or for confined ones when the name is not sealed.
+    /// injected ones, or for confined ones when the name is not sealed. `offset` is
+    /// the position in [`consulted`](Self::consulted) order of the innermost of them.
     fn corridor_hit(
         &self,
         request: &Request,
         spaces: &[Arc<dyn Space>],
         identities: &[CorridorIdentity],
+        offset: usize,
+        observe: &mut impl FnMut(usize, Consulted),
     ) -> Option<Resolution> {
-        for (space, identity) in spaces.iter().zip(identities).rev() {
-            if let Resolution::Hit(resolved) = space.resolve(request, self) {
+        for (at, (space, identity)) in spaces.iter().zip(identities).rev().enumerate() {
+            let resolution = space.resolve(request, self);
+            observe(offset + at, Consulted::of(&resolution));
+            if let Resolution::Hit(resolved) = resolution {
                 return Some(Resolution::Hit(match identity {
                     CorridorIdentity::Named(name) => resolved.with_answered_by(name.clone()),
                     CorridorIdentity::Anonymous(_) => resolved,
@@ -724,6 +764,54 @@ impl Scope {
             }
         }
         None
+    }
+
+    /// Every member of the chain, in [`consulted`](Self::consulted) order, with the
+    /// name a reader knows it by — a named corridor's name, `_:{n}` for an anonymous
+    /// one (as the chain's [`Display`](std::fmt::Display) writes it), `@{name}` for a
+    /// level, `root` for the root — and the identity it claims in the chain's
+    /// topology (its own [`Space::id`], else the name it was injected under). The
+    /// positions are the ones [`resolve_observed`](Self::resolve_observed) reports
+    /// and the `{chain}:layer:{n}` cells of [`topology`](Self::topology) (one-based
+    /// there), so the three line up; `chain_members_follow_the_consulted_order` pins it.
+    pub(crate) fn members(&self, root: &Arc<dyn Space>) -> Vec<ChainMember> {
+        let mut members = Vec::new();
+        let corridor = |space: &Arc<dyn Space>, identity: &CorridorIdentity| {
+            let (label, named) = match identity {
+                CorridorIdentity::Named(name) => (name.as_str().to_string(), Some(name.clone())),
+                CorridorIdentity::Anonymous(id) => (format!("_:{id}"), None),
+            };
+            ChainMember {
+                space: Arc::clone(space),
+                label,
+                id: space.id().or(named),
+            }
+        };
+        if let Some(chain) = self.chain.as_ref() {
+            let (behind, host) = chain.injected.split_at(chain.confined);
+            let (behind_ids, host_ids) = chain.identities.split_at(chain.confined);
+            for (space, identity) in host.iter().zip(host_ids).rev() {
+                members.push(corridor(space, identity));
+            }
+            for level in &chain.levels.0 {
+                members.push(ChainMember {
+                    space: Arc::clone(&level.inner),
+                    label: format!("@{}", level.name.as_str()),
+                    id: Some(level.name.clone()),
+                });
+            }
+            for (space, identity) in behind.iter().zip(behind_ids).rev() {
+                members.push(corridor(space, identity));
+            }
+        }
+        if !self.is_severed() {
+            members.push(ChainMember {
+                space: Arc::clone(root),
+                label: "root".to_string(),
+                id: root.id(),
+            });
+        }
+        members
     }
 
     /// The arrangement this chain sees, as a tree: a [`Chain`](SpaceKind::Chain)
@@ -780,6 +868,38 @@ impl Scope {
         spaces.extend(self.consulted(root).cloned());
         ChainView { spaces }
     }
+}
+
+/// What [`Scope::resolve_observed`] did with one member of the chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Consulted {
+    /// The member resolved the name (possibly to ⊥ — a limiter is a hit).
+    Hit,
+    /// The member declined it.
+    Miss,
+    /// The name is sealed and this member's frame does not own it, so the walk
+    /// passed it by without asking.
+    Skipped,
+}
+
+impl Consulted {
+    fn of(resolution: &Resolution) -> Self {
+        match resolution {
+            Resolution::Hit(_) => Consulted::Hit,
+            Resolution::Miss => Consulted::Miss,
+        }
+    }
+}
+
+/// One member of a chain as [`Scope::members`] lists it.
+pub(crate) struct ChainMember {
+    /// The member space.
+    pub(crate) space: Arc<dyn Space>,
+    /// The name a reader knows it by in this chain (`root`, a corridor's name,
+    /// `_:{n}`, `@{level}`).
+    pub(crate) label: String,
+    /// The identity its topology node carries, if any.
+    pub(crate) id: Option<Iri>,
 }
 
 /// Check a hit against the seal table: the target and any canonical the hit
@@ -2250,6 +2370,65 @@ mod tests {
 
     fn source(target: &str) -> Request {
         Request::new(crate::Verb::Source, Iri::parse(target).unwrap())
+    }
+
+    /// `Scope::members`, `Scope::consulted` and the positions `resolve_observed`
+    /// reports are three statements of one order — the one `urn:kernel:explain`
+    /// relies on to say which member did what, and the order of the topology's
+    /// `{chain}:layer:{n}` cells. Pinned on a chain with host corridors and the
+    /// root, and on a confined chain, where the root is gone.
+    #[test]
+    fn chain_members_follow_the_consulted_order() {
+        let leaf = |name: &str| -> Arc<dyn Space> {
+            Arc::new(EndpointSpace::new().bind(Exact::new(name), builtins::to_upper()))
+        };
+        let root = leaf("urn:t:root");
+        let named = Iri::parse("urn:ctx:a").unwrap();
+        let scope = Scope::empty()
+            .with_named(named.clone(), leaf("urn:t:a"))
+            .with(leaf("urn:t:b"));
+        let same_order = |scope: &Scope| {
+            let members = scope.members(&root);
+            let consulted: Vec<_> = scope.consulted(&root).collect();
+            assert_eq!(members.len(), consulted.len());
+            for (member, space) in members.iter().zip(consulted) {
+                assert!(Arc::ptr_eq(&member.space, space), "{}", member.label);
+            }
+            members
+        };
+        let members = same_order(&scope);
+        let labels: Vec<&str> = members.iter().map(|m| m.label.as_str()).collect();
+        assert!(labels[0].starts_with("_:"), "{labels:?}");
+        assert_eq!(&labels[1..], ["urn:ctx:a", "root"]);
+        assert_eq!(members[1].id.as_ref(), Some(&named));
+
+        // A name only the root binds: every member ahead of it reported as a miss,
+        // at the position `members` lists it.
+        let mut seen = Vec::new();
+        let hit =
+            scope.resolve_observed(&source("urn:t:root"), &root, &Seals::default(), |at, c| {
+                seen.push((at, c))
+            });
+        assert!(matches!(hit, Ok(Resolution::Hit(_))));
+        assert_eq!(
+            seen,
+            [
+                (0, Consulted::Miss),
+                (1, Consulted::Miss),
+                (2, Consulted::Hit)
+            ]
+        );
+        // A hit stops the walk: nothing after it is reported.
+        let mut seen = Vec::new();
+        let _ = scope.resolve_observed(&source("urn:t:b"), &root, &Seals::default(), |at, c| {
+            seen.push((at, c))
+        });
+        assert_eq!(seen, [(0, Consulted::Hit)]);
+
+        // Confined: the root is cut off, and members says so by not listing it.
+        let confined = scope.confined(Iri::parse("urn:ctx:c").unwrap(), leaf("urn:t:c"));
+        let members = same_order(&confined);
+        assert!(members.iter().all(|m| m.label != "root"));
     }
 
     #[test]
