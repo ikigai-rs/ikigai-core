@@ -1894,3 +1894,18 @@ sits there (`urn:cap:secret:read:<name>`, `urn:cap:name:admin:<prefix>`) must no
 fails closed. The wildcard `…:*` requirement is still met by a holder of only an exclusion under it (the floor offers;
 the module refuses), as before and as now documented. **No type or wire change:** `Kind::Scoped(BTreeSet<String>)`
 serializes byte-for-byte as before (pinned). **Vocabulary:** nothing.
+
+**0.1.87** is a patch on the lockstep line (same argument as 0.1.86: a `^0.1.x` pin is a ceiling). **Additive: the
+module author's "why"** (ledger [#906](http://localhost:1060/l/default/item/906), [#907](http://localhost:1060/l/default/item/907),
+[#14](http://localhost:1060/l/default/item/14)). `urn:kernel:explain target= verb= scopes=` is a DRY RUN of resolution:
+one walk shared with real resolution (`Scope::resolve_observed`), reporting per chain member answered / declined /
+opaque / **shadowed**, the alias rules that fired (`AliasTable::preview`, which moves no counters), the endpoint, its
+door and grammar bindings, and its declared `requires` against the caller's capability; it never invokes, and it is
+cached under `urn:kernel:bindings`. `scopes=` answers for an attenuated capability and refuses a wider one (`as=` keeps
+its content-negotiation meaning). `urn:kernel:dependents thread=` lists the live cached entries a cut would recompute,
+and `urn:kernel:cache`, `threads` and `dependents` gain Turtle faces that join the topology and explain graphs.
+`Description::required_scopes(verb)` and `unsatisfied_scopes(verb, &Capability)` expose the kernel's own floor.
+**Vocabulary: new terms** (`ik:DryRun`, `ik:Consultation`, `ik:asked`, `ik:resolvedAs`, `ik:chain`, `ik:consulted`,
+`ik:layer`, `ik:opaque`, `ik:answer`, `ik:binding`, `ik:bindingValue`, `ik:lacks`, `ik:rewrote`, `ik:CacheEntry`,
+`ik:GoldenThread`, `ik:resolvedFrom`, `ik:entryState`, `ik:mediaType`, `ik:sizeBytes`, `ik:hangsFrom`, `ik:threadName`,
+`ik:cutCount`), so the deployed `/ns` must be refreshed with this release.
