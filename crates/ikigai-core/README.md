@@ -49,7 +49,10 @@ assert_eq!(rep.bytes, b"IKIGAI");
   browser via WebAssembly, or embedded.
 - **Golden threads you can watch** — a write cuts the threads its dependents hang
   from; `urn:kernel:cache` marks which cached entries a cut has made stale,
-  `urn:kernel:cached` asks whether the asker's own read would hit, and
+  `urn:kernel:cached` asks whether the asker's own read would hit,
+  `urn:kernel:dependents thread=<name>` lists what a cut of one thread would recompute
+  (and `as=text/turtle` states the cache, its threads and a thread's dependents as one
+  joinable graph), and
   `Kernel::listen` hands a host a bounded queue of cuts (the thread and what it
   invalidated), so it can recompute before the first reader or push a change to a
   page. The kernel reports; it never issues a request from inside a cut.

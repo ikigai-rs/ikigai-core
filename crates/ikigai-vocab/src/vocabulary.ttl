@@ -432,6 +432,64 @@ ik:rewrote a rdf:Property ;
     rdfs:label "rewrote" ;
     rdfs:comment "A rule of the kernel's own rewrite table that an ik:DryRun's name would fire, as an ik:RewriteRule under the run ({run}:rule:{n}, n the order the rules fire in). The rules come from the table urn:kernel:aliases serves; asking fires none of them for real, so its counters do not move." .
 
+# ---- the cache as a graph (urn:kernel:cache, urn:kernel:threads, urn:kernel:dependents)
+# The representation cache and its golden threads as a graph, so a visualizer can
+# draw "cut this and these recompute" and a query can ask it. An entry is
+# skolemized from its cache key as urn:ikigai:cache:entry:{hex} — the same IRI in
+# every face for as long as it is resident — and a thread from its name as
+# urn:ikigai:thread:{name}. An entry names the ik:Chain it was computed in, the
+# node urn:kernel:topology uses, so the cache graph joins the arrangement. The
+# capability an entry was computed under is deliberately not stated (the key holds
+# only a fingerprint of it, and the IRI is derived from the key).
+
+ik:CacheEntry a rdfs:Class ;
+    rdfs:label "CacheEntry" ;
+    rdfs:comment "One resident entry of a kernel's representation cache: the name it was resolved from (ik:resolvedFrom), whether a read would be served from it (ik:entryState), its representation's media type and size (ik:mediaType, ik:sizeBytes), the chain it was computed in (ik:chain), and every golden thread it hangs from (ik:hangsFrom) — cut any of them and the next read recomputes it." .
+
+ik:GoldenThread a rdfs:Class ;
+    rdfs:label "GoldenThread" ;
+    rdfs:comment "A golden thread: a name cached representations hang from, so that cutting it — a write to the resource it names, a filesystem watcher, urn:kernel:cut — makes every entry hanging from it stale at once. Named urn:ikigai:thread:{name}; ik:threadName carries the name itself and ik:cutCount how often it has been cut." .
+
+ik:resolvedFrom a rdf:Property ;
+    rdfs:domain ik:CacheEntry ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "resolvedFrom" ;
+    rdfs:comment "The name an ik:CacheEntry was resolved from — the canonical target, after every rewrite, which is also the name of the golden thread a write to it cuts." .
+
+ik:entryState a rdf:Property ;
+    rdfs:domain ik:CacheEntry ;
+    rdfs:range xsd:string ;
+    rdfs:label "entryState" ;
+    rdfs:comment "Whether a read would be served from an ik:CacheEntry right now: \"live\"; \"cut\" (a thread it hangs from was cut since it was stored); or \"expired\" (its deadline passed). A cut is lazy, so a stale entry stays resident until a read evicts it, and the graph states it rather than hiding it." .
+
+ik:mediaType a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "mediaType" ;
+    rdfs:comment "The media type of the representation the subject holds (on an ik:CacheEntry, the cached representation's). Distinct from ik:output, which is a media type an endpoint CAN produce." .
+
+ik:sizeBytes a rdf:Property ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "sizeBytes" ;
+    rdfs:comment "The size in bytes of the representation the subject holds — what it occupies of a cache's byte bound. Distinct from ik:byteSize, which is a file's size on disk." .
+
+ik:hangsFrom a rdf:Property ;
+    rdfs:domain ik:CacheEntry ;
+    rdfs:range ik:GoldenThread ;
+    rdfs:label "hangsFrom" ;
+    rdfs:comment "A golden thread an ik:CacheEntry depends on: its own target's, the ones it declared, and every one a resource it read hangs from. Cutting any of them makes the entry stale. Multi-valued." .
+
+ik:threadName a rdf:Property ;
+    rdfs:domain ik:GoldenThread ;
+    rdfs:range xsd:string ;
+    rdfs:label "threadName" ;
+    rdfs:comment "The name of an ik:GoldenThread, exactly as urn:kernel:cut and urn:kernel:dependents take it — usually a resource's IRI, or urn:kernel:bindings." .
+
+ik:cutCount a rdf:Property ;
+    rdfs:domain ik:GoldenThread ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "cutCount" ;
+    rdfs:comment "How many times an ik:GoldenThread has been cut, as the kernel tracks it — its current generation. A thread no resident entry hangs from may be forgotten and start again from zero, so this is the tracked count, not the lifetime one." .
+
 # ---- events (the calendar/agenda event graph) --------------------------------
 # Events themselves are typed with the iCalendar vocabulary
 # (http://www.w3.org/2002/12/cal/ical# — ical:Vevent, ical:uid, ical:summary,

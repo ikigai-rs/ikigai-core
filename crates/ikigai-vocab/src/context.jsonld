@@ -8,6 +8,7 @@
     "Alias": "ik:Alias",
     "Argument": "ik:Argument",
     "Binding": "ik:Binding",
+    "CacheEntry": "ik:CacheEntry",
     "Chain": "ik:Chain",
     "Confine": "ik:Confine",
     "Consultation": "ik:Consultation",
@@ -22,6 +23,7 @@
     "File": "ik:File",
     "Finding": "ik:Finding",
     "Fork": "ik:Fork",
+    "GoldenThread": "ik:GoldenThread",
     "Level": "ik:Level",
     "Limit": "ik:Limit",
     "LlmBackend": "ik:LlmBackend",
@@ -141,6 +143,10 @@
     "corsOrigin": "ik:corsOrigin",
     "cost": "ik:cost",
     "csp": "ik:csp",
+    "cutCount": {
+      "@id": "ik:cutCount",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "default": "ik:default",
     "derivedAt": {
       "@id": "ik:derivedAt",
@@ -160,6 +166,7 @@
       "@id": "ik:entry",
       "@type": "@id"
     },
+    "entryState": "ik:entryState",
     "explanation": "ik:explanation",
     "family": "ik:family",
     "fileName": "ik:fileName",
@@ -172,6 +179,10 @@
       "@type": "@id"
     },
     "from": "ik:from",
+    "hangsFrom": {
+      "@id": "ik:hangsFrom",
+      "@type": "@id"
+    },
     "id": "ik:id",
     "input": {
       "@id": "ik:input",
@@ -207,6 +218,7 @@
       "@id": "ik:maxHops",
       "@type": "xsd:integer"
     },
+    "mediaType": "ik:mediaType",
     "missingOptional": {
       "@id": "ik:missingOptional",
       "@type": "xsd:integer"
@@ -271,6 +283,10 @@
       "@id": "ik:resolvedAs",
       "@type": "@id"
     },
+    "resolvedFrom": {
+      "@id": "ik:resolvedFrom",
+      "@type": "@id"
+    },
     "resolves": {
       "@id": "ik:resolves",
       "@type": "@id"
@@ -313,6 +329,10 @@
       "@id": "ik:sharedLayer",
       "@type": "@id"
     },
+    "sizeBytes": {
+      "@id": "ik:sizeBytes",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "source": "ik:source",
     "space": {
       "@id": "ik:space",
@@ -335,6 +355,7 @@
     },
     "themeDark": "ik:themeDark",
     "themeLight": "ik:themeLight",
+    "threadName": "ik:threadName",
     "title": "ik:title",
     "tools": {
       "@id": "ik:tools",

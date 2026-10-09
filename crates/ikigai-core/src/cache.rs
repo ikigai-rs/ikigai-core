@@ -688,6 +688,54 @@ impl ReprCache {
             .collect()
     }
 
+    /// Every resident entry with its key and the NAMES of the golden threads it hangs
+    /// from, marked as of `now` — what the graph faces of `urn:kernel:cache` and
+    /// `urn:kernel:dependents` read. Read-only, like [`rows_at`](Self::rows_at).
+    pub(crate) fn edges_at(&self, now: Option<Time>) -> Vec<EntryEdges> {
+        let state = self.state.lock().expect("cache lock");
+        state
+            .entries
+            .iter()
+            .map(|(key, entry)| EntryEdges {
+                key: *key,
+                row: CacheRow {
+                    target: entry.target.clone(),
+                    media_type: entry.representation.repr_type.media_type.clone(),
+                    bytes: entry.bytes(),
+                    threads: entry.edges.len(),
+                    scope: key.scope,
+                    state: state.state_of(entry, now),
+                },
+                threads: entry
+                    .edges
+                    .iter()
+                    .map(|(thread, _)| thread.as_str().to_string())
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// What a cut of `thread` would recompute, as of `now`: every resident entry
+    /// that hangs from it AND would be served right now. A live entry's every edge
+    /// stands at its pinned generation, so its edge on `thread` is current and a cut
+    /// makes it stale; an entry already stale (cut by another thread, or expired) is
+    /// recomputed on its next read whatever happens to `thread`, so a cut changes
+    /// nothing for it and it is not listed. Read-only.
+    pub(crate) fn dependents_at(&self, thread: &Thread, now: Option<Time>) -> Vec<EntryEdges> {
+        self.edges_at(now)
+            .into_iter()
+            .filter(|entry| {
+                entry.row.state.is_live() && entry.threads.iter().any(|t| t == thread.as_str())
+            })
+            .collect()
+    }
+
+    /// How many times `thread` has been cut, as tracked (`0` for a thread never cut,
+    /// or one swept because nothing pinned it — see `sweep_generations`).
+    pub(crate) fn generation(&self, thread: &Thread) -> u64 {
+        self.state.lock().expect("cache lock").generation_of(thread)
+    }
+
     /// One row per entry for `urn:kernel:cache`: the IRI it was resolved from, its
     /// media type, its size in bytes, and how many golden threads it depends on.
     /// [`rows_with_scope`](Self::rows_with_scope) adds the chain.
@@ -739,6 +787,18 @@ impl ReprCache {
             }
         }
     }
+}
+
+/// One resident entry with its key and its golden threads by name — the graph
+/// faces' view ([`ReprCache::edges_at`]).
+#[derive(Clone, Debug)]
+pub(crate) struct EntryEdges {
+    /// The entry's key: what it is stored under.
+    pub(crate) key: CacheKey,
+    /// The facts the text readout prints.
+    pub(crate) row: CacheRow,
+    /// The threads it hangs from, by name.
+    pub(crate) threads: Vec<String>,
 }
 
 /// One resident entry that depended on a thread being cut, as the kernel's cut

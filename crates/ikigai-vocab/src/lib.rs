@@ -1160,6 +1160,35 @@ mod tests {
         }
     }
 
+    /// Every `ik:` term the cache's graph faces emit — `urn:kernel:cache`,
+    /// `urn:kernel:threads` and `urn:kernel:dependents` as `text/turtle` (ledger #907)
+    /// — asked the same way as the explain face's, and for the same reason: the faces
+    /// live in `ikigai-core`, and this is the half that can see the vocabulary.
+    #[test]
+    fn the_terms_the_cache_graph_emits_are_defined() {
+        let subjects: std::collections::BTreeSet<String> = oxttl::TurtleParser::new()
+            .for_reader(VOCABULARY.as_bytes())
+            .map(|t| t.expect("valid turtle").subject.to_string())
+            .collect();
+        for term in [
+            "CacheEntry",
+            "GoldenThread",
+            "resolvedFrom",
+            "entryState",
+            "mediaType",
+            "sizeBytes",
+            "hangsFrom",
+            "threadName",
+            "cutCount",
+            "chain",
+        ] {
+            assert!(
+                subjects.contains(&format!("<{NS}{term}>")),
+                "ik:{term} is emitted by the cache's Turtle faces"
+            );
+        }
+    }
+
     /// ⚠ The finding family's domains, pinned OFF — the axiom this neighborhood has
     /// already paid for twice.
     ///
