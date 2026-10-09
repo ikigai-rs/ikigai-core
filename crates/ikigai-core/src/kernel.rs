@@ -2886,6 +2886,16 @@ impl Kernel {
             // is a real fact until a read evicts it: it still occupies the bound.
             ("cache", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
+                // The graph face (ledger #907): the same entries, each hanging from
+                // its threads by name, for a reader that joins it with the topology
+                // or draws it (`crate::cache_graph`).
+                if kernel_face(request)? {
+                    let entries = self.cache.edges_at(self.now_stamp());
+                    let turtle = crate::cache_graph::cache_turtle(entries, |thread| {
+                        self.cache.generation(&Thread::from(thread))
+                    });
+                    return Ok(kernel_turtle(turtle));
+                }
                 let mut rows = self.cache.rows_at(self.now_stamp());
                 rows.sort_by(|a, b| (&a.target, a.scope).cmp(&(&b.target, b.scope)));
                 let names = {
@@ -2980,6 +2990,10 @@ impl Kernel {
             // Inspect the golden threads that have been cut, and how many times.
             ("threads", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
+                if kernel_face(request)? {
+                    let turtle = crate::cache_graph::threads_turtle(self.cache.generation_rows());
+                    return Ok(kernel_turtle(turtle));
+                }
                 let mut rows = self.cache.generation_rows();
                 let mut body = String::from("threads (cut generations)\n");
                 if rows.is_empty() {
@@ -3054,6 +3068,37 @@ impl Kernel {
                 )
                 .cacheable()
                 .depends_on(BINDINGS_THREAD))
+            }
+            // ★ WHAT A CUT WOULD RECOMPUTE (ledger #907): the live cached entries
+            // hanging from one golden thread — read-only, like `cached`: it evicts
+            // nothing and counts no hit, so asking does not change the answer. Live
+            // state, so `Always`, like every introspection answer.
+            ("dependents", Verb::Source) => {
+                require_cap("urn:cap:kernel:inspect")?;
+                let thread = kernel_arg(request, "thread")
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .ok_or_else(|| Error::MissingArgument("thread".to_string()))?;
+                let name = Thread::from(thread);
+                let cuts = self.cache.generation(&name);
+                let entries = self.cache.dependents_at(&name, self.now_stamp());
+                if kernel_face(request)? {
+                    let turtle = crate::cache_graph::dependents_turtle(thread, cuts, entries);
+                    return Ok(kernel_turtle(turtle));
+                }
+                let names = self.scope_names.lock().expect("scope names lock").clone();
+                Ok(kernel_text(crate::cache_graph::dependents_text(
+                    thread,
+                    cuts,
+                    entries,
+                    |scope| match scope {
+                        0 => "root".to_string(),
+                        fingerprint => names
+                            .get(&fingerprint)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{fingerprint:016x}")),
+                    },
+                )))
             }
             // ★ THE MODULE AUTHOR'S "WHY" (ledger #906): a dry run of resolving one
             // name in the asker's chain — the rewrites that would fire, what each
@@ -3827,6 +3872,32 @@ fn kernel_arg<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
     }
 }
 
+/// Whether a live introspection operation was asked for its Turtle face
+/// (`as=text/turtle`); `as=text/plain` or no `as` is the text face, and any other
+/// value is refused rather than answered in a face nobody asked for.
+fn kernel_face(request: &Request) -> Result<bool> {
+    match kernel_arg(request, "as").map(str::trim) {
+        None | Some("text/plain") => Ok(false),
+        Some("text/turtle") => Ok(true),
+        Some(other) => Err(Error::InvalidArgument {
+            name: "as".to_string(),
+            detail: format!(
+                "`{other}` is not a face of `{}` (text/plain, text/turtle)",
+                request.target.as_str()
+            ),
+        }),
+    }
+}
+
+/// A `text/turtle` representation of live kernel state (uncacheable by default,
+/// like [`kernel_text`]).
+fn kernel_turtle(body: String) -> Representation {
+    Representation::new(
+        ReprType::new("text/turtle").with_param("charset", "utf-8"),
+        body.into_bytes(),
+    )
+}
+
 /// A `text/plain` representation of live kernel state (uncacheable by default).
 fn kernel_text(body: String) -> Representation {
     Representation::new(
@@ -3836,7 +3907,7 @@ fn kernel_text(body: String) -> Representation {
 }
 
 /// A short human-readable byte size (`512 B`, `1.5 KB`, `2.0 MB`) for the cache readout.
-fn human_size(n: usize) -> String {
+pub(crate) fn human_size(n: usize) -> String {
     if n < 1024 {
         format!("{n} B")
     } else if n < 1024 * 1024 {

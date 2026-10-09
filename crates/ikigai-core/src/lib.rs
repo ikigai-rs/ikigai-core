@@ -83,6 +83,7 @@ pub mod alias;
 mod arg;
 pub mod builtins;
 pub mod cache;
+mod cache_graph;
 mod capability;
 pub mod config;
 mod confine;

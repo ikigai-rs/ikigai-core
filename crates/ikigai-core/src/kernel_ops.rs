@@ -62,6 +62,7 @@ pub(crate) const OPS: &[&str] = &[
     "catalog",
     "constraint",
     "cut",
+    "dependents",
     "explain",
     "scheduler",
     "threads",
@@ -92,6 +93,7 @@ pub(crate) fn description(op: &str) -> Option<Description> {
         "catalog" => catalog(),
         "constraint" => constraint(),
         "cut" => cut(),
+        "dependents" => dependents(),
         "explain" => explain(),
         "scheduler" => scheduler(),
         "threads" => threads(),
@@ -212,6 +214,38 @@ fn catalog() -> Description {
         .output(TEXT_TURTLE)
 }
 
+/// The description of `urn:kernel:dependents` — what a cut would recompute.
+fn dependents() -> Description {
+    Description::new("kernel-dependents")
+        .title("What a cut would recompute")
+        .summary(
+            "The cached entries hanging from one golden thread that a read would be served \
+             from right now — exactly what cutting it would make stale, so the next read of \
+             each recomputes it. One line per entry, as `urn:kernel:cache` prints it, after \
+             how many times the thread has been cut. An entry already stale (cut by another \
+             thread, or expired) is not listed: it recomputes whatever happens to this one. \
+             Read-only — it evicts nothing and counts no hit — and live, so never cached.",
+        )
+        .verb(Verb::Source)
+        .verb(Verb::Meta)
+        .requires(CAP_INSPECT)
+        .input(ArgSpec::new("thread").summary(
+            "the golden thread, by name: a resource's IRI (every cacheable read hangs from \
+             its own target), or `urn:kernel:bindings`",
+        ))
+        .input(face())
+        .output(TEXT_PLAIN_UTF8)
+        .output(TEXT_TURTLE)
+}
+
+/// The `as` input of an operation with a text face and a Turtle face.
+fn face() -> ArgSpec {
+    ArgSpec::new("as")
+        .summary("response face")
+        .one_of(["text/plain", TEXT_TURTLE])
+        .default_value("text/plain")
+}
+
 /// The description of `urn:kernel:explain` — a dry run of resolution.
 fn explain() -> Description {
     Description::new("kernel-explain")
@@ -247,12 +281,7 @@ fn explain() -> Description {
                 )
                 .optional(),
         )
-        .input(
-            ArgSpec::new("as")
-                .summary("response face")
-                .one_of(["text/plain", TEXT_TURTLE])
-                .default_value("text/plain"),
-        )
+        .input(face())
         .output(TEXT_PLAIN_UTF8)
         .output(TEXT_TURTLE)
 }
@@ -318,12 +347,16 @@ fn cache() -> Description {
              `expired`), its representation type and size, how many golden threads it depends \
              on (cut any of them and the entry recomputes), and the resolution chain it was \
              computed in. A cut is lazy: a stale entry stays resident until a read evicts it, \
-             and this readout marks it rather than evicting it.",
+             and this readout marks it rather than evicting it. The Turtle face states the \
+             same entries as ik:CacheEntry nodes, each hanging from its ik:GoldenThread \
+             nodes by name and naming the ik:Chain it was computed in.",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)
         .requires(CAP_INSPECT)
+        .input(face())
         .output(TEXT_PLAIN_UTF8)
+        .output(TEXT_TURTLE)
 }
 
 /// The description of `urn:kernel:cached` — the read-only probe as a resource.
@@ -376,12 +409,15 @@ fn threads() -> Description {
         .summary(
             "The golden threads that have been cut and their current generations — a cached \
              representation is valid only while every thread it depends on still stands at \
-             the generation it was stored under.",
+             the generation it was stored under. The Turtle face states each as an \
+             ik:GoldenThread with its ik:cutCount.",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)
         .requires(CAP_INSPECT)
+        .input(face())
         .output(TEXT_PLAIN_UTF8)
+        .output(TEXT_TURTLE)
 }
 
 /// The description of `urn:kernel:aliases`.
