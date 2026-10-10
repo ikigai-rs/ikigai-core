@@ -310,8 +310,8 @@ pub fn to_turtle(description: &Description) -> String {
         predicates.push(format!("ik:lossless {}", t.lossless));
     }
     // Flat inputs: skolemized under the endpoint (stable IRIs — catalogs SPARQL and
-    // diff cleanly; no blank nodes). Actions synthesized from the flat form REFERENCE
-    // these same nodes, so the spec body is stated once.
+    // diff cleanly; no blank nodes). The endpoint-level view; each action states its
+    // own inputs again under its content-addressed contract node, below.
     let mut extra_nodes: Vec<String> = Vec::new();
     for input in &description.inputs {
         let node_iri = format!(
@@ -326,9 +326,17 @@ pub fn to_turtle(description: &Description) -> String {
     // non-Meta verb, normalized from either authoring form (explicit ActionSpec
     // wins; flat fields synthesize the rest), so catalog consumers never know
     // which form authored an endpoint.
+    //
+    // The node is CONTENT-ADDRESSED (`ActionSpec::contract_iri`,
+    // `urn:ikigai:contract:{id}:{verb}:b3:{hex}`), and so is everything hung off it:
+    // its inputs live under its own IRI, never the endpoint's. An id is not unique in
+    // a kernel — a mounted peer's copy, a second door — so a catalog holds every copy's
+    // description at once; identical contracts then share one node and different ones
+    // never merge (ledger #948). The endpoint node is the id's, shared by every copy,
+    // and points at each contract by ik:action.
     for action in description.action_specs() {
         let verb = verb_name(action.verb);
-        let action_iri = format!("{endpoint_iri}:action:{}", verb.to_lowercase());
+        let action_iri = action.contract_iri(&description.id);
         predicates.push(format!("ik:action <{action_iri}>"));
         let mut preds: Vec<String> =
             vec!["a ik:Action".to_string(), format!("ik:verb {}", lit(verb))];
@@ -341,17 +349,10 @@ pub fn to_turtle(description: &Description) -> String {
         for cap in &action.requires {
             preds.push(format!("ik:requires {}", cap_term(cap)));
         }
-        let synthesized = !description.actions.iter().any(|a| a.verb == action.verb);
         for input in &action.inputs {
             let name = ikigai_core::escape_iri_fragment(&input.name);
-            let node_iri = if synthesized {
-                // the flat input node already emitted above — reference it
-                format!("{endpoint_iri}:input:{name}")
-            } else {
-                let scoped = format!("{action_iri}:input:{name}");
-                extra_nodes.push(format!("<{scoped}> {} .", input_predicates(input)));
-                scoped
-            };
+            let node_iri = format!("{action_iri}:input:{name}");
+            extra_nodes.push(format!("<{node_iri}> {} .", input_predicates(input)));
             preds.push(format!("ik:input <{node_iri}>"));
         }
         extra_nodes.push(format!("<{action_iri}> {} .", preds.join(" ;\n    ")));
@@ -538,12 +539,14 @@ mod tests {
                     .input(ArgSpec::new("alert").optional()),
             );
         let ttl = to_turtle(&d);
-        // skolemized action nodes, typed and linked
-        assert!(ttl.contains("ik:action <urn:ikigai:endpoint:personal-calendar:action:source>"));
-        assert!(
-            ttl.contains("<urn:ikigai:endpoint:personal-calendar:action:sink> a ik:Action"),
-            "{ttl}"
-        );
+        let specs = d.action_specs();
+        let source = specs[0].contract_iri("personal-calendar");
+        let sink = specs[1].contract_iri("personal-calendar");
+        assert!(source.starts_with("urn:ikigai:contract:personal-calendar:source:b3:"));
+        assert!(sink.starts_with("urn:ikigai:contract:personal-calendar:sink:b3:"));
+        // content-addressed action nodes, typed and linked
+        assert!(ttl.contains(&format!("ik:action <{source}>")), "{ttl}");
+        assert!(ttl.contains(&format!("<{sink}> a ik:Action")), "{ttl}");
         // capability IRIs are resources, not literals
         assert!(
             ttl.contains("ik:requires <urn:cap:personal:calendar:write>"),
@@ -554,13 +557,14 @@ mod tests {
             "cap IRIs must not be literals: {ttl}"
         );
         // action-scoped skolemized inputs with datatype
-        assert!(ttl.contains(
-            "<urn:ikigai:endpoint:personal-calendar:action:sink:input:start> ik:inputName \"start\""
-        ));
+        assert!(
+            ttl.contains(&format!("<{sink}:input:start> ik:inputName \"start\"")),
+            "{ttl}"
+        );
         assert!(ttl.contains("ik:class <http://www.w3.org/2001/XMLSchema#dateTime>"));
         // the Sink action does not carry the Source's args or cap
         let sink = ttl
-            .split("action:sink> ")
+            .split(&format!("<{sink}> "))
             .nth(1)
             .unwrap()
             .split(" .")
@@ -575,20 +579,27 @@ mod tests {
     #[test]
     fn a_single_verb_endpoint_synthesizes_its_action_from_flat_fields() {
         // The 93% case: flat authoring IS the action spec — one ik:Action node,
-        // referencing the endpoint-level input nodes (no duplicated bodies).
+        // synthesized from the flat fields. Its inputs live under its own
+        // content-addressed IRI, beside the endpoint-level view of the same inputs: a
+        // contract node must carry its whole contract, or two copies of an id with
+        // different inputs would merge at a shared input node (ledger #948).
         let d = Description::new("toUpper")
             .verb(Verb::Source)
             .input(ArgSpec::new("in").summary("the string"))
             .output("text/plain");
         let ttl = to_turtle(&d);
-        assert!(ttl.contains("<urn:ikigai:endpoint:toUpper:action:source> a ik:Action"));
-        // the synthesized action references the endpoint-level input node
+        let contract = d.action_specs()[0].contract_iri("toUpper");
+        assert!(ttl.contains(&format!("<{contract}> a ik:Action")), "{ttl}");
         assert!(
             ttl.contains("ik:input <urn:ikigai:endpoint:toUpper:input:in>"),
             "{ttl}"
         );
-        // the input body is stated exactly once
-        assert_eq!(ttl.matches("ik:inputName \"in\"").count(), 1, "{ttl}");
+        assert!(
+            ttl.contains(&format!("ik:input <{contract}:input:in>")),
+            "{ttl}"
+        );
+        // the input body is stated once per view: the endpoint's and the contract's
+        assert_eq!(ttl.matches("ik:inputName \"in\"").count(), 2, "{ttl}");
         // Meta is never a selectable action
         assert!(!ttl.contains("action:meta"), "{ttl}");
     }
@@ -621,8 +632,9 @@ mod tests {
             ttl.contains("ik:class <https://schema.org/Person>"),
             "{ttl}"
         );
-        // The untyped input has no ik:class.
-        assert_eq!(ttl.matches("ik:class").count(), 1, "{ttl}");
+        // The untyped input has no ik:class: one class per view of the typed input (the
+        // endpoint's and its contract's).
+        assert_eq!(ttl.matches("ik:class").count(), 2, "{ttl}");
         // No `requires` triple when none declared.
         assert!(!to_turtle(&sample()).contains("ik:requires"));
     }
@@ -690,7 +702,7 @@ mod tests {
                 "{ttl}"
             );
             assert!(
-                ttl.contains(&format!("<urn:ikigai:endpoint:{id}:action:source>")),
+                ttl.contains(&format!("<urn:ikigai:contract:{id}:source:b3:")),
                 "{ttl}"
             );
             assert!(
@@ -725,7 +737,8 @@ mod tests {
         for t in &triples {
             let s = t.subject.to_string();
             assert!(
-                s.starts_with("<urn:ikigai:endpoint:evil%3E"),
+                s.starts_with("<urn:ikigai:endpoint:evil%3E")
+                    || s.starts_with("<urn:ikigai:contract:evil%3E"),
                 "injected subject {s}"
             );
             let o = t.object.to_string();

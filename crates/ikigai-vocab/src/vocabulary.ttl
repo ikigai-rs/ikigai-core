@@ -79,13 +79,13 @@ ik:title a rdf:Property ;
 
 ik:Action a rdfs:Class ;
     rdfs:label "Action" ;
-    rdfs:comment "One verb's contract on an endpoint — the (endpoint, verb) pair is the unit of selection. Carries its own ik:verb, ik:input set, ik:output set, and ik:requires capability scopes. Normalized from the endpoint description: single-verb endpoints' flat declarations synthesize one, per-verb declarations author them explicitly." .
+    rdfs:comment "One verb's contract on an endpoint — the (endpoint, verb) pair is the unit of selection. Carries its own ik:verb, ik:input set, ik:output set, and ik:requires capability scopes. Normalized from the endpoint description: single-verb endpoints' flat declarations synthesize one, per-verb declarations author them explicitly. CONTENT-ADDRESSED: its IRI is urn:ikigai:contract:{id}:{verb}:b3:{hex}, the BLAKE3 digest of a canonical, declaration-order-free form of the endpoint id, the verb and every triple on the node and its input nodes (which live under the contract's own IRI). Identical contracts are one node; different ones never merge, though an endpoint id is not unique in a kernel (a mounted peer's copy, a second door). Before ikigai-vocab 0.1.91 the node was urn:ikigai:endpoint:{id}:action:{verb}, which every copy of an id shared." .
 
 ik:action a rdf:Property ;
     rdfs:domain ik:Endpoint ;
     rdfs:range ik:Action ;
     rdfs:label "action" ;
-    rdfs:comment "Links an endpoint to one of its per-verb contracts." .
+    rdfs:comment "Links an endpoint to one of its per-verb contracts. The endpoint node is its id's, so where several copies of an id are bound (a mount, a second door) it links to each distinct contract. Not for an ik:ActionMatch, whose contract is ik:contract: this property's domain would type a match as an ik:Endpoint." .
 
 ik:summary a rdf:Property ;
     rdfs:range xsd:string ;
@@ -147,7 +147,13 @@ ik:class a rdf:Property ;
 
 ik:ActionMatch a rdfs:Class ;
     rdfs:label "ActionMatch" ;
-    rdfs:comment "One result of an action selection (urn:kernel:actions): the subject is the matched ik:Action node, joining the selection back to the full contract in the catalog graph. The selection is a resource — cacheable per capability, auditable, SPARQL-able." .
+    rdfs:comment "One result of an action selection (urn:kernel:actions): one door and verb the asking capability may invoke. Its subject is its own, urn:ikigai:match:{verb}:{door pattern} (the pattern percent-encoded, % included), so a mounted copy of an endpoint and a second door to it are separate matches; ik:contract joins it to the full contract in the catalog graph. The selection is a resource — cacheable per capability, auditable, SPARQL-able." .
+
+ik:contract a rdf:Property ;
+    rdfs:domain ik:ActionMatch ;
+    rdfs:range ik:Action ;
+    rdfs:label "contract" ;
+    rdfs:comment "The contract an ik:ActionMatch satisfies: the content-addressed ik:Action node in the catalog graph (urn:ikigai:contract:{id}:{verb}:b3:{hex}). Two matches serving identical contracts share it; a copy with a different contract has its own. Distinct from ik:action, which links an ik:Endpoint to its contracts and whose domain would type a match as an endpoint." .
 
 ik:endpoint a rdf:Property ;
     rdfs:domain ik:ActionMatch ;

@@ -96,6 +96,7 @@ mod capability;
 pub mod config;
 mod confine;
 mod content;
+mod contract;
 mod declare;
 mod describe;
 mod endpoint;
@@ -129,6 +130,7 @@ pub use cache::{
 pub use capability::{is_deny_scope, Capability};
 pub use confine::Confine;
 pub use content::{ContentId, ContentIdError};
+pub use contract::{match_iri, parse_contract_iri, parse_match_iri, CONTRACT_PREFIX, MATCH_PREFIX};
 pub use declare::{
     build, DeclarationBound, DeclarationError, Registry, MAX_DECLARATION_DEPTH,
     MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,

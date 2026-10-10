@@ -120,6 +120,10 @@
       "@id": "ik:context",
       "@type": "xsd:integer"
     },
+    "contract": {
+      "@id": "ik:contract",
+      "@type": "@id"
+    },
     "contrastMin": {
       "@id": "ik:contrastMin",
       "@type": "xsd:decimal"

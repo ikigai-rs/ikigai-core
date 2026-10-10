@@ -372,9 +372,16 @@ fn template_drivable(action: &crate::describe::ActionSpec, vars: &[String]) -> b
     })
 }
 
-/// One selected action — an (endpoint, verb) pair whose contract the query satisfied: its
+/// One selected action — a (door, verb) pair whose contract the query satisfied: its
 /// required capability scopes are allowed, its verb/output fit the asked-for shape, and its
 /// required typed inputs are satisfiable by the present RDF classes.
+///
+/// A match has two identities (ledger #948): its own, [`match_iri`](Self::match_iri) —
+/// one per door and verb, the subject of its row in `urn:kernel:actions` — and its
+/// contract's, [`action`](Self::action), which is content-addressed, so two doors
+/// serving identical contracts share it and a mounted copy with a different contract
+/// does not. Neither is named after the endpoint's id alone: an id is not unique in a
+/// kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionMatch {
     /// The bound pattern — what you invoke. For an exact grammar this is the endpoint's
@@ -383,17 +390,46 @@ pub struct ActionMatch {
     /// concrete IRI.
     pub endpoint: String,
     /// The endpoint's description id (the catalog subject is `urn:ikigai:endpoint:{id}`).
+    /// Not unique: a mounted copy and a second door carry the same id.
     pub id: String,
     /// The matched verb.
     pub verb: Verb,
-    /// The action node's catalog IRI (`urn:ikigai:endpoint:{id}:action:{verb}`) — joins
-    /// this match to the full contract in the catalog graph.
+    /// The contract's content-addressed IRI
+    /// ([`ActionSpec::contract_iri`](crate::ActionSpec::contract_iri),
+    /// `urn:ikigai:contract:{id}:{verb}:b3:{hex}`) — joins this match to the full
+    /// contract in the catalog graph, where the manifold says `ik:contract`. Until core
+    /// 0.1.91 this was `urn:ikigai:endpoint:{id}:action:{verb}`, which every copy of an id
+    /// shared.
     pub action: String,
     /// The capability scopes the action requires (all satisfied by the query's capability).
     pub requires: Vec<String>,
     /// How many *optional typed* inputs the present classes could not fill — the v1
     /// ranking: fewer = a better-fitted match.
     pub missing_optional: usize,
+}
+
+impl ActionMatch {
+    /// This match's own IRI, one per door and verb:
+    /// `urn:ikigai:match:{verb}:{pattern}` (see [`crate::match_iri`]). The subject of
+    /// its `ik:ActionMatch` row in `urn:kernel:actions`, and accepted by
+    /// `urn:kernel:validate`'s `action=`.
+    ///
+    /// ```
+    /// use ikigai_core::{ActionMatch, ActionSpec, Verb};
+    ///
+    /// let m = ActionMatch {
+    ///     endpoint: "urn:file:{path}".to_string(),
+    ///     id: "file".to_string(),
+    ///     verb: Verb::Source,
+    ///     action: ActionSpec::new(Verb::Source).contract_iri("file"),
+    ///     requires: Vec::new(),
+    ///     missing_optional: 0,
+    /// };
+    /// assert_eq!(m.match_iri(), "urn:ikigai:match:source:urn:file:%7Bpath%7D");
+    /// ```
+    pub fn match_iri(&self) -> String {
+        crate::contract::match_iri(self.verb, &self.endpoint)
+    }
 }
 
 /// A selection query — every axis optional, so the degenerate query lists the caller's
@@ -443,6 +479,7 @@ pub fn select_action(root: &dyn Space, present: &[&str]) -> Vec<ActionMatch> {
 /// determinism).
 pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch> {
     let mut matches = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for entry in root.entries().unwrap_or_default() {
         let Some(described) = describe_entry(root, &entry) else {
             continue;
@@ -486,12 +523,17 @@ pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch>
                         .is_some_and(|c| !query.present.contains(&c))
                 })
                 .count();
-            let verb_name = format!("{:?}", action.verb).to_lowercase();
+            // One match per door and verb: a pattern two members both enumerate is
+            // served by the first, which is the one described, so a second row would
+            // repeat it under the same match IRI.
+            if !seen.insert((entry.pattern.clone(), action.verb as u8)) {
+                continue;
+            }
             matches.push(ActionMatch {
                 endpoint: entry.pattern.clone(),
                 id: description.id.clone(),
                 verb: action.verb,
-                action: format!("urn:ikigai:endpoint:{}:action:{verb_name}", description.id),
+                action: action.contract_iri(&description.id),
                 requires: action.requires.clone(),
                 missing_optional,
             });
@@ -893,7 +935,15 @@ mod tests {
         assert_eq!(m[0].endpoint, "urn:file:{path}");
         assert_eq!(m[0].id, "file");
         assert_eq!(m[0].verb, Verb::Source);
-        assert_eq!(m[0].action, "urn:ikigai:endpoint:file:action:source");
+        assert!(
+            m[0].action
+                .starts_with("urn:ikigai:contract:file:source:b3:"),
+            "{m:?}"
+        );
+        assert_eq!(
+            m[0].match_iri(),
+            "urn:ikigai:match:source:urn:file:%7Bpath%7D"
+        );
 
         // Under a capability with no fs grant, the manifold simply lacks it.
         let denied = crate::Capability::scoped(["urn:cap:unrelated"]);
@@ -1112,9 +1162,11 @@ mod tests {
             .find(|m| m.endpoint == "urn:t:pr:{n}:explain")
             .expect("the explain row is offered");
         assert_eq!(explain.id, "pr-explain");
-        assert_eq!(
-            explain.action,
-            "urn:ikigai:endpoint:pr-explain:action:source"
+        assert!(
+            explain
+                .action
+                .starts_with("urn:ikigai:contract:pr-explain:source:b3:"),
+            "{explain:?}"
         );
     }
 
