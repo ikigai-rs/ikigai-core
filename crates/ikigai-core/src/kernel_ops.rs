@@ -175,7 +175,12 @@ fn validate() -> Description {
         .verb(Verb::Meta)
         .input(
             ArgSpec::new("action")
-                .summary("the catalog action IRI (urn:ikigai:endpoint:<id>:action:<verb>)")
+                .summary(
+                    "the action: a match IRI from urn:kernel:actions \
+                     (urn:ikigai:match:<verb>:<door>), a contract IRI \
+                     (urn:ikigai:contract:<id>:<verb>:b3:<hex>), or the older catalog \
+                     action IRI (urn:ikigai:endpoint:<id>:action:<verb>)",
+                )
                 .optional(),
         )
         .input(

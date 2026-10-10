@@ -1167,20 +1167,90 @@ impl Kernel {
             .map(|resolved| resolved.endpoint.describe())
     }
 
-    /// Find a bound endpoint's description by its `Description::id` (the catalog
-    /// subject identity) — the reverse of the entries → describe walk. Covers
-    /// template-bound entries too (via [`crate::select::describe_entry`]'s probe), so
-    /// `urn:kernel:validate` can pre-flight a template action's catalog IRI.
-    fn description_for_id(&self, id: &str) -> Result<Option<Description>> {
+    /// Every bound door whose endpoint's `Description::id` is `id`, with its pattern and
+    /// description — the reverse of the entries → describe walk. Covers template-bound
+    /// entries too (via [`crate::select::describe_entry`]'s probe), so
+    /// `urn:kernel:validate` can pre-flight a template action. Several, not one: an id
+    /// is not unique in a kernel (a mounted copy, a second door; ledger #948).
+    fn descriptions_for_id(&self, id: &str) -> Vec<(String, Description)> {
         let space = self.described();
-        for entry in space.entries().unwrap_or_default() {
-            if let Some(described) = crate::select::describe_entry(&space, &entry) {
-                if described.description.id == id {
-                    return Ok(Some(described.description));
-                }
-            }
+        space
+            .entries()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| {
+                let described = crate::select::describe_entry(&space, &entry)?;
+                (described.description.id == id).then_some((entry.pattern, described.description))
+            })
+            .collect()
+    }
+
+    /// The description and verb `urn:kernel:validate`'s `action=` names, in any of the
+    /// three spellings it accepts: a match IRI (`urn:ikigai:match:{verb}:{pattern}`,
+    /// the subject the manifold hands out — that door's contract), a contract IRI
+    /// (`urn:ikigai:contract:{id}:{verb}:b3:{hex}` — exactly that contract), or the
+    /// pre-0.1.91 `urn:ikigai:endpoint:{id}:action:{verb}`, still accepted while every
+    /// door carrying that id agrees on the verb's contract, and refused as ambiguous,
+    /// naming the match IRIs to use instead, when they do not.
+    fn validate_target(&self, action: &str) -> Result<(Description, Verb)> {
+        if let Some((verb, pattern)) = crate::contract::parse_match_iri(action) {
+            let description = self.describe_pattern(&pattern).ok_or_else(|| {
+                Error::Endpoint(format!("validate: no door `{pattern}` (from `{action}`)"))
+            })?;
+            return Ok((description, verb));
         }
-        Ok(None)
+        if let Some((id, verb, _)) = crate::contract::parse_contract_iri(action) {
+            return self
+                .descriptions_for_id(&id)
+                .into_iter()
+                .map(|(_, description)| description)
+                .find(|description| {
+                    description
+                        .action_specs()
+                        .iter()
+                        .any(|spec| spec.verb == verb && spec.contract_iri(&id) == action)
+                })
+                .map(|description| (description, verb))
+                .ok_or_else(|| {
+                    Error::Endpoint(format!("validate: no bound endpoint carries `{action}`"))
+                });
+        }
+        let rest = action.strip_prefix("urn:ikigai:endpoint:").ok_or_else(|| {
+            Error::Endpoint(format!(
+                "validate: action must be a match IRI (urn:ikigai:match:<verb>:<door>), a \
+                 contract IRI (urn:ikigai:contract:<id>:<verb>:b3:<hex>) or a catalog action \
+                 IRI (urn:ikigai:endpoint:<id>:action:<verb>), not `{action}`"
+            ))
+        })?;
+        let (id, verb_name) = rest.split_once(":action:").ok_or_else(|| {
+            Error::Endpoint(format!("validate: `{action}` names no :action: segment"))
+        })?;
+        let verb = parse_verb(verb_name)?;
+        let doors = self.descriptions_for_id(id);
+        let Some((_, first)) = doors.first() else {
+            return Err(Error::Endpoint(format!(
+                "validate: no endpoint with id `{id}`"
+            )));
+        };
+        let contract = |d: &Description| {
+            d.action_specs()
+                .into_iter()
+                .find(|spec| spec.verb == verb)
+                .map(|spec| spec.contract_iri(id))
+        };
+        let expected = contract(first);
+        if doors.iter().any(|(_, d)| contract(d) != expected) {
+            let names: Vec<String> = doors
+                .iter()
+                .map(|(pattern, _)| crate::contract::match_iri(verb, pattern))
+                .collect();
+            return Err(Error::Endpoint(format!(
+                "validate: `{action}` is ambiguous: doors with id `{id}` declare different \
+                 {verb:?} contracts; name one by its match IRI: {}",
+                names.join(", ")
+            )));
+        }
+        Ok((first.clone(), verb))
     }
 
     /// The typed self-description of the endpoint a catalog or manifold row names.
@@ -3249,8 +3319,11 @@ impl Kernel {
                 let matches = self.select_actions(&query);
                 let turtle = kernel_arg(request, "as") == Some("text/turtle");
                 if turtle {
-                    // The auditable face: each match an ik:ActionMatch node joining the
-                    // selection to the full contract in the catalog graph. An exact match
+                    // The auditable face: each match an ik:ActionMatch node of its OWN,
+                    // one per door and verb (`urn:ikigai:match:{verb}:{pattern}`), joined
+                    // by ik:contract to its content-addressed contract in the catalog
+                    // graph — never named after the endpoint id, which a mounted copy or
+                    // a second door shares (ledger #948). An exact match
                     // carries its resolvable IRI as ik:endpoint; a template match carries
                     // its pattern as the ik:template LITERAL — `<urn:file:{path}>` would
                     // not be a legal IRI in Turtle, and downstream RDF parsers must keep
@@ -3265,12 +3338,14 @@ impl Kernel {
                                 m.endpoint.replace('\\', "\\\\").replace('"', "\\\"")
                             )
                         };
-                        // `m.action` embeds the endpoint id, which `Description` never
-                        // validates — percent-encode rather than trust it, or a `>` in an
-                        // id closes the IRI and the rest of the manifold parses as Turtle.
+                        // Both IRIs embed author-supplied strings (the pattern, the
+                        // endpoint id, which `Description` never validates); each is
+                        // percent-encoded where it is minted, so a `>` cannot close the
+                        // IRI and turn the rest of the manifold into attacker Turtle.
                         body.push_str(&format!(
-                            "\n<{}> a ik:ActionMatch ;\n    {named} ;\n    ik:verb \"{:?}\"",
-                            crate::escape_iri_fragment(&m.action),
+                            "\n<{}> a ik:ActionMatch ;\n    {named} ;\n    ik:contract <{}> ;\n    ik:verb \"{:?}\"",
+                            m.match_iri(),
+                            m.action,
                             m.verb
                         ));
                         for scope in &m.requires {
@@ -3328,27 +3403,11 @@ impl Kernel {
             // function of (action, args, capability) — cacheable; the cache key
             // carries the capability fingerprint.
             ("validate", Verb::Source) => {
-                let description = match (
+                let (description, verb) = match (
                     kernel_arg(request, "action"),
                     kernel_arg(request, "endpoint"),
                 ) {
-                    (Some(action), _) => {
-                        let rest = action.strip_prefix("urn:ikigai:endpoint:").ok_or_else(|| {
-                            Error::Endpoint(format!(
-                                "validate: action must be a catalog action IRI (urn:ikigai:endpoint:<id>:action:<verb>), not `{action}`"
-                            ))
-                        })?;
-                        let (id, verb_name) = rest.split_once(":action:").ok_or_else(|| {
-                            Error::Endpoint(format!(
-                                "validate: `{action}` names no :action: segment"
-                            ))
-                        })?;
-                        self.description_for_id(id)?
-                            .map(|d| (d, parse_verb(verb_name)))
-                            .ok_or_else(|| {
-                                Error::Endpoint(format!("validate: no endpoint with id `{id}`"))
-                            })?
-                    }
+                    (Some(action), _) => self.validate_target(action)?,
                     (None, Some(endpoint)) => {
                         let iri = Iri::parse(endpoint).map_err(|e| {
                             Error::Endpoint(format!("validate: bad endpoint IRI: {e}"))
@@ -3360,7 +3419,7 @@ impl Kernel {
                         };
                         let verb_name = kernel_arg(request, "verb")
                             .ok_or_else(|| Error::MissingArgument("verb".to_string()))?;
-                        (resolved.endpoint.describe(), parse_verb(verb_name))
+                        (resolved.endpoint.describe(), parse_verb(verb_name)?)
                     }
                     (None, None) => {
                         return Err(Error::MissingArgument(
@@ -3368,8 +3427,6 @@ impl Kernel {
                         ))
                     }
                 };
-                let (description, verb) = description;
-                let verb = verb?;
                 let Some(spec) = description
                     .action_specs()
                     .into_iter()
@@ -3381,17 +3438,10 @@ impl Kernel {
                     )));
                 };
                 let proposed = kernel_arg(request, "args").unwrap_or_default();
-                let verb_lower = format!("{verb:?}").to_lowercase();
-                let action_iri =
-                    format!("urn:ikigai:endpoint:{}:action:{verb_lower}", description.id);
-                // resultPath must join to the catalog: explicitly authored actions own
-                // action-scoped input nodes; synthesized ones reference endpoint-level.
-                let explicit = description.actions.iter().any(|a| a.verb == verb);
-                let input_ns = if explicit {
-                    format!("{action_iri}:input:")
-                } else {
-                    format!("urn:ikigai:endpoint:{}:input:", description.id)
-                };
+                // The focus node is the contract checked, and resultPath joins to the
+                // catalog's input nodes, which every contract owns under its own IRI.
+                let action_iri = spec.contract_iri(&description.id);
+                let input_ns = format!("{action_iri}:input:");
                 let report =
                     validate_against_spec(&action_iri, &input_ns, &spec, proposed, capability);
                 Ok(Representation::new(
@@ -4643,7 +4693,11 @@ mod tests {
         assert!(manifold(&reader, false).contains("urn:file:{path}"));
         let turtle = manifold(&reader, true);
         assert!(
-            turtle.contains("<urn:ikigai:endpoint:file:action:source> a ik:ActionMatch"),
+            turtle.contains("<urn:ikigai:match:source:urn:file:%7Bpath%7D> a ik:ActionMatch"),
+            "{turtle}"
+        );
+        assert!(
+            turtle.contains("ik:contract <urn:ikigai:contract:file:source:b3:"),
             "{turtle}"
         );
         assert!(
@@ -4693,7 +4747,11 @@ mod tests {
         )
         .unwrap();
         assert!(
-            manifold.contains("<urn:ikigai:endpoint:ev%3Eil:action:source> a ik:ActionMatch"),
+            manifold.contains("<urn:ikigai:match:source:urn:evil> a ik:ActionMatch"),
+            "{manifold}"
+        );
+        assert!(
+            manifold.contains("ik:contract <urn:ikigai:contract:ev%3Eil:source:b3:"),
             "{manifold}"
         );
         assert!(
@@ -4721,10 +4779,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            report.contains("sh:focusNode <urn:ikigai:endpoint:ev%3Eil:action:source>"),
+            report.contains("sh:focusNode <urn:ikigai:contract:ev%3Eil:source:b3:"),
             "{report}"
         );
-        assert!(!report.contains("<urn:ikigai:endpoint:ev>il"), "{report}");
+        assert!(!report.contains("ev>il"), "{report}");
     }
 
     #[test]
@@ -4859,16 +4917,26 @@ mod tests {
         };
 
         let all = turtle(&Capability::root());
-        assert!(all.contains("cal:action:source> a ik:ActionMatch"), "{all}");
-        assert!(all.contains("cal:action:sink> a ik:ActionMatch"), "{all}");
+        assert!(
+            all.contains("<urn:ikigai:match:source:urn:demo:cal> a ik:ActionMatch"),
+            "{all}"
+        );
+        assert!(
+            all.contains("<urn:ikigai:match:sink:urn:demo:cal> a ik:ActionMatch"),
+            "{all}"
+        );
+        assert!(
+            all.contains("ik:contract <urn:ikigai:contract:cal:sink:b3:"),
+            "{all}"
+        );
         assert!(all.contains("ik:requires <urn:cap:cal:write>"), "{all}");
 
         // No kernel:inspect in the scope — an agent may always read its OWN manifold.
         let reader = Capability::scoped(["urn:cap:cal:read"]);
         let scoped = turtle(&reader);
-        assert!(scoped.contains("cal:action:source>"), "{scoped}");
+        assert!(scoped.contains("match:source:urn:demo:cal>"), "{scoped}");
         assert!(
-            !scoped.contains("action:sink"),
+            !scoped.contains("sink"),
             "the write action must not be OFFERED to a read capability: {scoped}"
         );
 
@@ -4976,8 +5044,9 @@ mod tests {
         assert!(bad.contains("not an accepted value of `mode`"), "{bad}");
         assert!(bad.contains("unknown argument `when`"), "{bad}");
         assert!(
-            bad.contains("sh:resultPath <urn:ikigai:endpoint:cal:action:sink:input:start>"),
-            "explicit action inputs are action-scoped: {bad}"
+            bad.contains("sh:resultPath <urn:ikigai:contract:cal:sink:b3:")
+                && bad.contains(":input:start>"),
+            "every contract owns its input nodes: {bad}"
         );
         let odd = validate("start=whenever", &Capability::root());
         assert!(odd.contains("does not look like a"), "{odd}");

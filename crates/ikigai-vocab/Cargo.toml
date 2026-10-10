@@ -24,6 +24,7 @@ ikigai-core = { path = "../ikigai-core", version = "0.1.89" } # 0.1.89 = `space_
 # 0.x caret rules this is the RANGE >=0.1.89, <0.2.0; the path dep satisfies it locally.
 
 [dev-dependencies]
+futures = "0.3" # block_on for the kernel faces in tests/manifold_identity.rs
 # Test-only: parse-validate the bundled vocabulary.ttl / shapes.ttl / the emitted Turtle,
 # and walk the plan fixtures as triples. Neither enters the published library's
 # dependency graph (the crate stays dependency-free).

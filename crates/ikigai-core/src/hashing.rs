@@ -19,6 +19,13 @@ pub(crate) fn feed_str(h: &mut Hasher, s: &str) {
     feed_bytes(h, s.as_bytes());
 }
 
+/// Feed a fixed-width count (a list's length, ahead of its items), so two lists can
+/// never be read as one.
+#[inline]
+pub(crate) fn feed_u64(h: &mut Hasher, v: u64) {
+    h.update(&v.to_le_bytes());
+}
+
 /// Feed a single discriminant byte.
 ///
 /// No length prefix, and none is needed: the module's prefix-free property is
