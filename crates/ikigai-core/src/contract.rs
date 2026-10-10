@@ -23,6 +23,10 @@
 //! Both encode their variable segments with an **injective** percent-encoding (`%`
 //! itself is encoded, unlike [`escape_iri_fragment`](crate::escape_iri_fragment)), so
 //! each IRI parses back to exactly what made it.
+//!
+//! The faces that mirror these functions by hand pin themselves against ONE vector file,
+//! ikigai-vocab's `tests/vectors/contract_vectors.json`, which a test regenerates from
+//! this code and refuses to let drift (ledger #1096).
 
 use crate::content::ContentId;
 use crate::describe::{ActionSpec, ArgSpec, InputSource};
@@ -79,14 +83,21 @@ fn encode_segment(s: &str) -> String {
 }
 
 /// Invert [`encode_segment`]; `None` for a malformed escape or non-UTF-8 result.
+///
+/// An escape is `%` and exactly two hex digits (RFC 3986 `pct-encoded`). The digits are
+/// checked before `u8::from_str_radix`, which also takes a leading `+`: without the
+/// check `%+1` decoded to the same byte as `%01` (ledger #1096, the twin of #750 E2).
 fn decode_segment(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = s.get(i + 1..i + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
+            let pair = bytes.get(i + 1..i + 3)?;
+            if !pair.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            out.push(u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?);
             i += 3;
         } else {
             out.push(bytes[i]);
@@ -301,6 +312,27 @@ mod tests {
         }
         assert_eq!(decode_segment("%G1"), None);
         assert_eq!(decode_segment("%4"), None);
+    }
+
+    /// Ledger #1096: `u8::from_str_radix` takes a leading `+`, so `%+1` decoded to the
+    /// same byte as `%01` and two IRIs parsed to one door. A percent escape is `%` and
+    /// exactly two hex digits (RFC 3986 `pct-encoded`), as `ContentId::parse` already
+    /// insists for the digest (ledger #750, E2).
+    #[test]
+    fn a_sign_in_a_percent_escape_is_not_hex() {
+        assert_eq!(decode_segment("%01").as_deref(), Some("\u{1}"));
+        for bad in ["%+1", "%-1", "%+F", "a%+1b", "% 1", "%1 "] {
+            assert_eq!(decode_segment(bad), None, "{bad}");
+        }
+        assert_eq!(parse_match_iri("urn:ikigai:match:source:%+1"), None);
+        assert_eq!(
+            parse_match_iri("urn:ikigai:match:source:%01"),
+            Some((Verb::Source, "\u{1}".to_string()))
+        );
+        let digest = ActionSpec::new(Verb::Source).contract_id("x");
+        let hex = &digest.to_string()["b3:".len()..];
+        assert!(parse_contract_iri(&format!("urn:ikigai:contract:%+1:source:b3:{hex}")).is_none());
+        assert!(parse_contract_iri(&format!("urn:ikigai:contract:%01:source:b3:{hex}")).is_some());
     }
 
     #[test]
