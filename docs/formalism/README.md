@@ -1982,3 +1982,18 @@ rows, and the entries of its graph faces, sort by every column, so rows sharing 
 **What a consumer observes:** a tracer receives one more event per failed invocation, where it received none (a test that
 counts events on a failing path sees more). **No type change** to `TraceEvent` or `Tracer` (no postcard bump); new public
 `Error::kind` and `FAILED_NOTE`. **Vocabulary:** only `owl:versionInfo`.
+
+**0.1.93** puts WHO a request is for into its capability (ledger [#1077](http://localhost:1060/l/default/item/1077),
+answering [#76](http://localhost:1060/l/default/item/76)) and lets an endpoint hang a failure from a thread it names
+(ledger [#1079](http://localhost:1060/l/default/item/1079)). A door mints `urn:cap:principal:<iri>` with
+`Capability::with_principal`; an endpoint reads it with `Capability::principal` or gates on `Capability::acts_as`. One
+principal per capability (several read as none), an absolute IRI carried verbatim (what cannot be is refused, never
+escaped), narrowing never adds or changes it, `clamp` keeps the ceiling's (so a client's narrower carried capability
+cannot shed the identity its channel authenticated, the ledger [#879](http://localhost:1060/l/default/item/879)
+failure), root names none and acts as everyone, a held wildcard is never an identity. Rules on `Capability`, reasons in
+`docs/design/principal-capability.md`. `Invocation::depends_on(thread)` records a thread for the answer whether the
+endpoint succeeds or fails; on a failure it is honored for `NotFound` and `Unresolved` only, so a refusal stays
+never-cached. **What a consumer observes:** nothing until it adopts them; `Capability::allows` now refuses a principal
+scope held among several, and `attenuate`/`clamp` treat principal scopes by the rules above (no capability in the
+ecosystem holds one yet). **No type change**, no wire change (the serialized capability is the same flat scope set).
+**Vocabulary:** only `owl:versionInfo`.
