@@ -2023,3 +2023,17 @@ cannot drift. **What a consumer observes:** `parse_match_iri` and `parse_contrac
 in an escape, where they returned a door; `urn:kernel:validate action=` refuses such an IRI. Lower-case hex, unnecessary
 escapes and an upper-case digest still parse as before. **No type change**, no wire change. **Vocabulary:** only
 `owl:versionInfo`.
+
+**0.1.95** carries two decisions of 2026-10-10. **Lenient in, canonical out** for match and contract IRIs (ledger
+[#1107](http://localhost:1060/l/default/item/1107)): the parse stays lenient, and every match or contract IRI core emits is
+the canonical spelling. New `canonical_match_iri` and `canonical_contract_iri`; `urn:kernel:validate` compares a contract IRI
+by its parsed digest, so an upper-case digest or an unnecessary escape in the id now pre-flights where it was refused, and
+its errors name the canonical spelling rather than echoing the caller's. The shared vectors gain a `canonical` field per
+parse case. **A write that ran and failed cuts its target** (ledger [#1105](http://localhost:1060/l/default/item/1105),
+R4.4 restated): a `Sink` or `Delete` the kernel dispatched cuts the canonical target's thread whether the endpoint returned
+`Ok` or `Err`; a refusal before dispatch (floor, limiter, depth, unbound) still cuts nothing. **What a consumer observes:**
+a cached read over a target whose write failed after running now recomputes (ikigai-script's pinned
+`a_failed_run_does_not_yet_cut_a_fallback_over_its_record` flips); hand-typed contract IRIs validate; faces copying
+`contract_vectors.json` see a new key. **No type change**, no wire change; two new public functions. ikigai-vocab's core
+floor stays 0.1.91 (its library uses nothing new; only its tests call the new functions). **Vocabulary:** only
+`owl:versionInfo`.
