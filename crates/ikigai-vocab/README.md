@@ -21,6 +21,9 @@ let kernel = Kernel::with_meta_renderer(space, Arc::new(TurtleRenderer));
 
 Turtle rendering is dependency-free, keeping the crate lean and WebAssembly-friendly.
 
+`space()` binds the vocabulary at `urn:ikigai:vocab` and names itself `urn:iki:space:vocab`
+(the `SPACE_ID` const): it is configuration-free, so every call holds the same door.
+
 ## JSON-LD context
 
 `CONTEXT` is a JSON-LD `@context` for the whole vocabulary — every `ns#` term

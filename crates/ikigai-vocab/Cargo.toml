@@ -17,11 +17,11 @@ serde_json = "1"
 # The version is the TRUE minimum, not a family: the path dep satisfies every call
 # locally, so fmt/clippy/test/CI stay green against a pin that cannot resolve on
 # crates.io, and only `cargo publish --dry-run` ever sees it.
-ikigai-core = { path = "../ikigai-core", version = "0.1.66" } # 0.1.66 = `escape_iri_fragment`,
-# the IRI-position escaping this crate applies to every author-supplied identifier before it
-# is interpolated into an `<...>` IRIREF (endpoint ids, argument names). A hard floor: it is a
-# free function that simply does not exist in 0.1.65, so an older core is E0425 at four call
-# sites rather than a silent behavior change.
+ikigai-core = { path = "../ikigai-core", version = "0.1.89" } # 0.1.89 = `space_iri`, the
+# name `space()` claims (`urn:iki:space:vocab`, ledger #987), and the release where binding a
+# door onto a named space drops its name. It also covers the older floors this crate kept
+# under-stating: `escape_iri_fragment` (0.1.66) and `Transreption::lossless` (0.1.77). Under
+# 0.x caret rules this is the RANGE >=0.1.89, <0.2.0; the path dep satisfies it locally.
 
 [dev-dependencies]
 # Test-only: parse-validate the bundled vocabulary.ttl / shapes.ttl / the emitted Turtle,
@@ -29,3 +29,9 @@ ikigai-core = { path = "../ikigai-core", version = "0.1.66" } # 0.1.66 = `escape
 # dependency graph (the crate stays dependency-free).
 oxttl = "0.2"
 oxrdf.workspace = true
+# What "done" means for a module, run against `space()` (tests/conformance.rs). It depends on
+# `ikigai-core` and `ikigai-vocab` from crates.io, which would link a SECOND copy of each beside
+# this workspace's: the workspace root's `[patch.crates-io]` points both at the members here, so
+# the suite and this crate share one kernel. The `ikigai-vocab` edge is a dev-dependency cycle,
+# which cargo permits (an integration test links the plain library).
+ikigai-conformance = "0.6.0"

@@ -15,3 +15,12 @@ categories = ["caching", "data-structures"]
 [workspace.dependencies]
 # core RDF foundations come from the Oxigraph crate family
 oxrdf = "0.3"
+
+# The workspace's own members, for crates.io dependents that reach back into it. Today that is
+# only `ikigai-conformance` (a dev-dependency of ikigai-vocab), which names `ikigai-core` and
+# `ikigai-vocab` by version: without this the test would link two kernels whose types do not
+# unify. In-repo paths only, never a path outside the repo. A workspace-root `[patch]` is not
+# published (no member's manifest carries it), so no consumer's build is redirected.
+[patch.crates-io]
+ikigai-core = { path = "crates/ikigai-core" }
+ikigai-vocab = { path = "crates/ikigai-vocab" }
