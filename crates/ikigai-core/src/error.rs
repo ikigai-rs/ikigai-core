@@ -121,6 +121,48 @@ impl Error {
     pub fn is_transient(&self) -> bool {
         matches!(self, Error::Timeout(_) | Error::Unavailable(_))
     }
+
+    /// The error's **kind** as one stable lowercase word, carrying nothing from its
+    /// payload: no message, no argument name, no IRI, no depth. It is what the kernel
+    /// reports under [`FAILED_NOTE`](crate::FAILED_NOTE) when an invocation fails,
+    /// and it is safe to hand any observer because nothing a caller supplied, and
+    /// nothing an endpoint wrote into its message (a path, a host), can ride along.
+    ///
+    /// The words, one per variant:
+    ///
+    /// ```
+    /// use ikigai_core::{Error, Iri};
+    ///
+    /// let kinds = [
+    ///     (Error::Unresolved(Iri::parse("urn:x").unwrap()), "unresolved"),
+    ///     (Error::MissingArgument("in".into()), "missing-argument"),
+    ///     (Error::InvalidArgument { name: "in".into(), detail: "bad".into() }, "invalid-argument"),
+    ///     (Error::Endpoint("boom".into()), "endpoint"),
+    ///     (Error::Denied("/etc/secret".into()), "denied"),
+    ///     (Error::NotFound("gone".into()), "not-found"),
+    ///     (Error::Conflict("taken".into()), "conflict"),
+    ///     (Error::Timeout("slow".into()), "timeout"),
+    ///     (Error::Unavailable("down".into()), "unavailable"),
+    ///     (Error::DepthExceeded { depth: 65, target: Iri::parse("urn:x").unwrap() }, "depth-exceeded"),
+    /// ];
+    /// for (error, word) in kinds {
+    ///     assert_eq!(error.kind(), word);
+    /// }
+    /// ```
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Error::Unresolved(_) => "unresolved",
+            Error::MissingArgument(_) => "missing-argument",
+            Error::InvalidArgument { .. } => "invalid-argument",
+            Error::Endpoint(_) => "endpoint",
+            Error::Denied(_) => "denied",
+            Error::NotFound(_) => "not-found",
+            Error::Conflict(_) => "conflict",
+            Error::Timeout(_) => "timeout",
+            Error::Unavailable(_) => "unavailable",
+            Error::DepthExceeded { .. } => "depth-exceeded",
+        }
+    }
 }
 
 impl fmt::Display for Error {

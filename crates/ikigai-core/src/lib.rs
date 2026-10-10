@@ -148,8 +148,8 @@ pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
     ALIAS_MISS_NOTE, ALIAS_NOTE, ANSWERED_NOTE, BINDINGS_THREAD, DEFAULT_MAX_DEPTH, DENIED_NOTE,
-    DEPTH_NOTE, LEVEL_NOTE, LIMITED_NOTE, META_LOSSY_ARG, SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE,
-    SCOPE_NOTE, SEALED_NOTE, UNCACHED_NOTE,
+    DEPTH_NOTE, FAILED_NOTE, LEVEL_NOTE, LIMITED_NOTE, META_LOSSY_ARG, SCOPE_CLOCK_NOTE,
+    SCOPE_MISS_NOTE, SCOPE_NOTE, SEALED_NOTE, UNCACHED_NOTE,
 };
 pub use listen::{
     CutBatch, CutEvent, CutListener, ListenSpec, CAP_LISTEN, INVALIDATED_NAMED, LISTEN_CAPACITY,

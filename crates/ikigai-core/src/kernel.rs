@@ -223,6 +223,36 @@ pub const DENIED_NOTE: &str = "denied";
 /// [`Error::DepthExceeded`]; the event is how it reaches an observer.
 pub const DEPTH_NOTE: &str = "depth";
 
+/// The [`TraceEvent::notes`] key marking an invocation that **ran and failed** —
+/// paired with the error's [`kind`](crate::Error::kind), e.g. `("failed",
+/// "not-found")`. Public so an observer can match the key without re-spelling the
+/// literal.
+///
+/// The endpoint was entered and returned `Err`, so — unlike a denial, a depth
+/// refusal or a limited miss — the event is TIMED (`started`/`ended` as any
+/// computed invocation has them) and never a cache hit. It hangs under its parent
+/// like any node, which is the point: since 0.1.73 a failed sub-request is a cache
+/// dependency (a fallback over a child's `NotFound` hangs from the child's thread; a
+/// result over a swallowed `Denied` is never stored), and without this event the
+/// trace showed no node for a child the cache was built on (ledger #559). The
+/// event carries the kind and nothing else from the error: no message, which may
+/// hold a path, a host or other caller data.
+///
+/// **Two refusals, two keys.** A [`Denied`](crate::Error::Denied) the ENDPOINT
+/// returned — a module's parameterized ACL, the real gate for fs and net — is
+/// `("failed", "denied")` on a timed event. The kernel FLOOR's refusal is
+/// [`DENIED_NOTE`] on an event that never ran, and carries no `failed` note: nothing
+/// was invoked. So an observer can tell "the capability floor refused" from "the
+/// module refused" by the key alone (ledger #20). A composite that propagates its
+/// child's refusal with `?` fails too, and its own event says `("failed", "denied")`
+/// as well: the child's event is where the refusal originated.
+///
+/// What it does not cover: a plain miss (no binding at all) is still not traced —
+/// see [`LIMITED_NOTE`] for that line — and neither is a failure the kernel raises
+/// before entering an endpoint (a malformed rewrite, a `Meta` with no renderer), nor
+/// a failed `urn:kernel:*` operation.
+pub const FAILED_NOTE: &str = "failed";
+
 /// The nesting budget a [`Kernel`] starts with: a sub-request more than this many
 /// levels below the host's own request is refused (see
 /// [`Kernel::with_max_depth`]). NetKernel ships 40 and defaults to 32 for a counter
@@ -2565,9 +2595,25 @@ impl Kernel {
                 // hangs it from those threads too — not only from this name, which no
                 // write cuts when the name is a composite. Only when asked: a host's own
                 // request has no invocation to fold them into.
+                //
+                // ★ AND A FAILURE IS A TRACE NODE (ledger #559, #20). The dependency
+                // record above makes this failed invocation part of what its caller's
+                // result was built on, so the trace has to show it too, or the two
+                // disagree about what a resolution touched. Kind only (no message:
+                // it may carry a path or a host), timed like any invocation that ran,
+                // with whatever the endpoint noted before it failed. `FAILED_NOTE`.
                 Err(error) => {
                     if let Some(failed) = failed {
                         *failed = invocation.failure_dependencies(&request.target);
+                    }
+                    if trace.is_some() {
+                        let mut notes = vec![(FAILED_NOTE.to_string(), error.kind().to_string())];
+                        notes.extend(provenance_notes(&trace, alias, answered, levels));
+                        notes.append(&mut invocation.take_trace_notes());
+                        self.trace_record(
+                            &trace, &request, capability, span, parent, started, false, notes,
+                            &scope,
+                        );
                     }
                     return Err(error);
                 }
@@ -8599,13 +8645,25 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 4);
         assert_eq!(kernel.cache_len(), 0, "a refusal never reaches the store");
 
-        // The trace holds the refusal — the one event, since every invocation above
-        // it failed (an endpoint's own failure records nothing: ledger #20) — with
-        // the depth note, nothing run, and its parent the invocation that asked for
-        // one level too many: spans 0..=3 were the four that ran.
+        // The trace holds the refusal, with the depth note, nothing run, and its
+        // parent the invocation that asked for one level too many: spans 0..=3 were
+        // the four that ran. Each of those four propagated the refusal, so each is a
+        // FAILED node too (ledger #559, #20), chained root to leaf: the whole path
+        // to the cycle, not only its last hop.
         let events = rec.events();
-        assert_eq!(events.len(), 1, "{events:?}");
-        let refusal = &events[0];
+        assert_eq!(events.len(), 5, "{events:?}");
+        for span in 0..=3u64 {
+            let ran = events
+                .iter()
+                .find(|e| e.span == span)
+                .expect("a node per run");
+            assert_eq!(ran.parent, span.checked_sub(1), "{ran:?}");
+            assert_eq!(
+                ran.notes,
+                vec![(FAILED_NOTE.to_string(), "depth-exceeded".to_string())]
+            );
+        }
+        let refusal = events.iter().find(|e| e.span == 4).expect("the refusal");
         assert_eq!(refusal.target, "urn:self");
         assert_eq!(
             refusal.notes,
