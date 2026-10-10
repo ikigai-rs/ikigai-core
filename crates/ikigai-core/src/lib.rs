@@ -32,6 +32,14 @@
 //! provides, and `Topology::from_turtle` (the `declare` feature) reads one — so
 //! the arrangement around the endpoints can be data rather than code.
 //!
+//! A name is a cache claim — *any space named `n` holds the same doors* — so a
+//! name goes on only where it is known to be true. A configuration-free module
+//! space names itself under [`SPACE_PREFIX`] (`urn:iki:space:<crate without
+//! ikigai->`, built by [`space_iri`]); an instance-built, parameterized or stateful
+//! constructor stays anonymous and the host names what it builds; a different set
+//! of doors gets a different name or none, and [`EndpointSpace::bind`] drops a name
+//! for that reason. The whole rule is on [`Space::id`].
+//!
 //! [`alias`] adds **logical rewrite** on that same composition primitive: a stable
 //! logical URI ([`Alias`] over an [`AliasTable`]) resolves to a different backing
 //! resource without the caller knowing — the mechanism that lets a namespace
@@ -154,8 +162,8 @@ pub use select::{
     ActionQuery, TransreptionPolicy, TransreptionStep, CANONICAL,
 };
 pub use space::{
-    EndpointSpace, Fallback, Level, LevelPath, Limit, Mount, Resolution, Resolved, Rewrite, Scope,
-    Space, SpaceEntry,
+    space_iri, EndpointSpace, Fallback, Level, LevelPath, Limit, Mount, Resolution, Resolved,
+    Rewrite, Scope, Space, SpaceEntry, SPACE_PREFIX,
 };
 pub use topology::{Door, MatchKind, SpaceKind, Topology, TopologyRule, SKOLEM_PREFIX};
 pub use verb::Verb;
