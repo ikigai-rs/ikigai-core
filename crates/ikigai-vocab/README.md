@@ -69,6 +69,14 @@ no SHACL engine — and `ikigai-shacl` runs them. `tests/fixtures/plan-linkcheck
 the CMS link-check pass written as a plan, with three variants that are three kinds of
 edit (a stricter policy, repair instead of removal, a narrower scope) and no new Rust.
 
+## Shared contract vectors
+
+`tests/vectors/contract_vectors.json` is what core and this crate compute for match IRIs,
+contract IRIs, their parse, and a door's Turtle: the one file a face that mirrors those
+by hand (ikigai-python, ikigai-deno) copies verbatim and tests against. A test recomputes
+it from `tests/vectors/contract_cases.json` and fails on any difference, so it cannot
+drift; `tests/vectors/README.md` says how to consume it and how to add a case.
+
 ## License
 
 Licensed under either of [MIT](../../LICENSE-MIT) or
