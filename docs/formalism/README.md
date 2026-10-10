@@ -672,6 +672,18 @@ the canonical one; the carried set names the canonical one. What remains: an iss
 over a wire or a module host bridge keeps `issue_recording`'s default, which carries nothing, so
 across those seams a miss is recorded under the requested name only, as before.
 
+**And an atom can name the thread its absence depends on** (ledger #1079, 0.1.93). An ATOM
+whose `NotFound` is ANOTHER name's state (ikigai-script's `…:version:{digest}`, absent until a
+publish that cuts the script's thread, never the version's) read nothing, so the carried set
+held only its own name, which no write cuts. `Invocation::depends_on(t)` records t on the
+invocation, so it rides a success (as `Representation::depends_on` does) and a failure alike.
+It changes no rule above: an issuing invocation folds a failure's carried set in for a miss
+only, so a thread attached to a `Denied`, a timeout, a depth refusal or any other error is
+dropped and the composite stays unstored.
+
+    pin: `depends_on::a_fallback_over_a_declared_absence_is_cut_by_the_publish` (crates/ikigai-core/tests/depends_on.rs)
+    pin: `depends_on::every_other_error_stays_uncached_whatever_thread_is_attached` (crates/ikigai-core/tests/depends_on.rs)
+    doctest: `Invocation::depends_on`
     pin: `kernel::tests::a_composite_over_an_unresolved_name_hangs_from_that_name` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::a_composite_over_a_not_found_name_recomputes_when_a_sink_creates_it` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::a_composite_built_on_a_denial_is_not_cached` (crates/ikigai-core/src/kernel.rs)

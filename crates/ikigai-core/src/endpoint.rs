@@ -431,9 +431,10 @@ struct Recorded {
 }
 
 /// What a resolution depended on before it FAILED: the meet of its sub-requests'
-/// expiries and the union of their golden threads, plus the thread named after its
-/// own canonical target — the set a success carries on its [`Representation`], for
-/// the case that has no representation to carry it.
+/// expiries and the union of their golden threads, plus every thread its endpoint
+/// declared with [`Invocation::depends_on`], plus the thread named after its own
+/// canonical target — the set a success carries on its [`Representation`], for the
+/// case that has no representation to carry it.
 ///
 /// Returned beside the error by [`Issuer::issue_recording`], and folded by the
 /// issuing [`Invocation`] into its own dependency record, so a composite that
@@ -527,7 +528,10 @@ impl Recorded {
     ///   from a COMPOSITE — `formula:{ref}` is `NotFound` because `input:{ref}` is, or
     ///   because what `input:{ref}` holds is not a formula — the thread on the
     ///   requested name alone is one no write cuts, and a fallback over it went
-    ///   silently stale when the atom underneath was written (ledger #611). An
+    ///   silently stale when the atom underneath was written (ledger #611). An ATOM
+    ///   whose absence is another name's state names that thread itself with
+    ///   [`Invocation::depends_on`], and it arrives here the same way (ledger #1079).
+    ///   `carried` is honored for these two errors ONLY: the arms below drop it. An
     ///   `Unresolved` the kernel returned itself never reached an endpoint, so it
     ///   carries nothing; one an endpoint propagated carries what that endpoint read.
     /// - [`Error::Denied`]: [`Expiry::Always`]. A grant change has no thread, so a
@@ -1150,6 +1154,86 @@ impl<'a> Invocation<'a> {
         result
     }
 
+    /// Hang this invocation's answer from `thread`, **whether the endpoint succeeds
+    /// or fails** (ledger #1079).
+    ///
+    /// On success it is the same edge as [`Representation::depends_on`]: the answer,
+    /// and every composite built on it, is cut when `thread` is. The point is the
+    /// failure. An atom whose `NotFound` is ANOTHER name's state (a version that is
+    /// absent until its script is published, which cuts the script's thread and never
+    /// the version's IRI) has no representation to carry that edge, and before this a
+    /// failure carried only its sub-requests' threads and its own name. A composite that
+    /// caught the `NotFound` and cached a fallback then hung from nothing the publish
+    /// cut, and served the fallback forever. Declared here, the thread rides the failure
+    /// to whoever catches it.
+    ///
+    /// ★ **Only a miss is ever cached on it.** A caller folds a failure's threads into
+    /// its own record for [`Error::NotFound`] and [`Error::Unresolved`] alone, the two
+    /// errors the kernel already records as dependencies; `Denied`, `Timeout`,
+    /// `DepthExceeded`, `Conflict` and every other error still make anything built on
+    /// them uncacheable, whatever threads the endpoint attached (a grant change or a
+    /// transient fault has no thread to cut, so a thread would be a promise nobody
+    /// keeps). Calling this is never a reason a refusal is cached.
+    ///
+    /// Recorded on this invocation, so it is a no-op on a
+    /// [`detached`](Self::detached) one, and calling it twice for one thread is calling
+    /// it once.
+    ///
+    /// ```
+    /// use std::sync::{Arc, Mutex};
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     AsyncFnEndpoint, Capability, EndpointSpace, Error, Exact, FnEndpoint, Iri, Kernel,
+    ///     ReprType, Representation, Request, Verb,
+    /// };
+    ///
+    /// let published = Arc::new(Mutex::new(false));
+    /// let state = published.clone();
+    /// // The atom: absent until the script is published, and it says what that depends on.
+    /// let version = FnEndpoint::new("version", move |inv| {
+    ///     inv.depends_on("urn:demo:script:s");
+    ///     match *state.lock().unwrap() {
+    ///         true => Ok(Representation::new(ReprType::new("text/plain"), b"v1".to_vec()).cacheable()),
+    ///         false => Err(Error::NotFound("not published".into())),
+    ///     }
+    /// });
+    /// // A composite that caches a fallback over the atom's NotFound.
+    /// let latest = AsyncFnEndpoint::new("latest", |inv| {
+    ///     Box::pin(async move {
+    ///         match inv.source(&Iri::parse("urn:demo:version").unwrap()).await {
+    ///             Err(Error::NotFound(_)) => Ok(Representation::new(
+    ///                 ReprType::new("text/plain"),
+    ///                 b"fallback".to_vec(),
+    ///             )
+    ///             .cacheable()),
+    ///             other => other,
+    ///         }
+    ///     })
+    /// });
+    /// let kernel = Kernel::new(Arc::new(
+    ///     EndpointSpace::new()
+    ///         .bind(Exact::new("urn:demo:version"), version)
+    ///         .bind(Exact::new("urn:demo:latest"), latest),
+    /// ));
+    /// let read = || Request::new(Verb::Source, Iri::parse("urn:demo:latest").unwrap());
+    /// let root = Capability::root();
+    /// assert_eq!(block_on(kernel.issue(read(), &root)).unwrap().bytes, b"fallback");
+    /// assert!(kernel.is_cached(&read(), &root));
+    ///
+    /// // Publishing writes the state and cuts the script's thread: the fallback goes.
+    /// *published.lock().unwrap() = true;
+    /// kernel.cut("urn:demo:script:s");
+    /// assert!(!kernel.is_cached(&read(), &root));
+    /// assert_eq!(block_on(kernel.issue(read(), &root)).unwrap().bytes, b"v1");
+    /// ```
+    pub fn depends_on(&self, thread: impl Into<Thread>) {
+        self.recorded
+            .dep_threads
+            .lock()
+            .expect("dep threads lock")
+            .insert(thread.into());
+    }
+
     /// `SOURCE` another resource — dereference a by-reference argument — recording
     /// it as a dependency.
     pub async fn source(&self, target: &Iri) -> Result<Representation> {
@@ -1411,7 +1495,8 @@ impl<'a> Invocation<'a> {
     }
 
     /// What this invocation depended on when its endpoint FAILED: everything its
-    /// sub-requests recorded, plus the thread named after `canonical` — the name the
+    /// sub-requests recorded and every thread it declared
+    /// ([`depends_on`](Self::depends_on)), plus the thread named after `canonical` — the name the
     /// kernel's write-cut fires on, which a caller holding only the requested (maybe
     /// logical) name could not supply. Drained rather than cloned: the invocation is
     /// over, and this is the last read of its record.
