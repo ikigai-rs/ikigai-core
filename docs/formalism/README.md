@@ -1928,3 +1928,14 @@ parameterized and stateful constructors stay anonymous and the host names them; 
 name or none. **What a consumer observes:** a `.named(..)` followed by `.bind(..)` on the same value loses its name (a
 sweep of every sibling repo found none). No space in core or vocab is named yet. **No type or wire change. Vocabulary:**
 nothing.
+
+**0.1.90** is a vocabulary-crate patch on the lockstep line: no kernel change. **`ikigai_vocab::space()` names itself**
+(ledger [#987](http://localhost:1060/l/default/item/987), step 3): it is configuration-free (one door, `urn:ikigai:vocab`,
+over the compiled-in ontology), so it claims `urn:iki:space:vocab`, exported as `ikigai_vocab::SPACE_ID`, and a
+conformance test (`ikigai-conformance` 0.6.0) holds it to that. **What a consumer observes:** a tree that mounts the
+vocabulary space now shows `urn:iki:space:vocab` instead of a skolem in `urn:kernel:topology` and the space diagrams,
+`answered_by` names it, and its cache entries partition under the name. A host that injects it under a different name
+(`Scope::with_named`, `Confine::new`, `.confine(..)`) would panic on the claim; a sweep of every sibling repo found none.
+Because the workspace moves in lockstep this is a PATCH, so `^0.1` hosts take it on their next resolve rather than by a
+deliberate re-pin. `ikigai-vocab` now states its true core floor, 0.1.89. **No type or wire change. Vocabulary:** only
+`owl:versionInfo`.
