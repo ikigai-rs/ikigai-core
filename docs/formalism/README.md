@@ -1909,3 +1909,10 @@ and `urn:kernel:cache`, `threads` and `dependents` gain Turtle faces that join t
 `ik:layer`, `ik:opaque`, `ik:answer`, `ik:binding`, `ik:bindingValue`, `ik:lacks`, `ik:rewrote`, `ik:CacheEntry`,
 `ik:GoldenThread`, `ik:resolvedFrom`, `ik:entryState`, `ik:mediaType`, `ik:sizeBytes`, `ik:hangsFrom`, `ik:threadName`,
 `ik:cutCount`), so the deployed `/ns` must be refreshed with this release.
+
+**0.1.88** is a vocabulary patch on the lockstep line: no kernel change. **New terms for natural-language drafting**
+(ledger [#974](http://localhost:1060/l/default/item/974)): ikigai-nl's `urn:nl:grounding` and `urn:nl:sparql` move from a
+private `nl:` namespace into `ik:`: `ik:Grounding`, `ik:GroundingPart`, `ik:groundingFocus`, `ik:shownItems`,
+`ik:offeredItems`, `ik:sampleTriple`, `ik:shownSampleTriples`, `ik:shownClassPartitions`, `ik:shownPropertyPartitions`,
+`ik:draftAsk`, `ik:draftValid`, `ik:draftError`, `ik:draftWarning`, and `ik:model` reused for a draft attempt's model.
+The deployed `/ns` must be refreshed with this release.
