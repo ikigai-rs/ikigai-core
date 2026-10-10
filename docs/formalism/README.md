@@ -1997,3 +1997,13 @@ never-cached. **What a consumer observes:** nothing until it adopts them; `Capab
 scope held among several, and `attenuate`/`clamp` treat principal scopes by the rules above (no capability in the
 ecosystem holds one yet). **No type change**, no wire change (the serialized capability is the same flat scope set).
 **Vocabulary:** only `owl:versionInfo`.
+
+**0.1.94** makes a percent escape in a match or contract IRI exactly `%` and two hex digits (ledger
+[#1096](http://localhost:1060/l/default/item/1096)): `u8::from_str_radix` takes a leading `+`, so `%+1` decoded to the same
+byte as `%01` and two IRIs parsed to one door, the twin of ledger [#750](http://localhost:1060/l/default/item/750) E2's
+`ContentId` fix. ikigai-vocab gains `tests/vectors/contract_vectors.json`, the one file of match IRIs, contract IRIs, their
+parses and door Turtle that the hand-mirrored faces (ikigai-python, ikigai-deno) pin against, recomputed by a test so it
+cannot drift. **What a consumer observes:** `parse_match_iri` and `parse_contract_iri` return `None` for an IRI with a sign
+in an escape, where they returned a door; `urn:kernel:validate action=` refuses such an IRI. Lower-case hex, unnecessary
+escapes and an upper-case digest still parse as before. **No type change**, no wire change. **Vocabulary:** only
+`owl:versionInfo`.
