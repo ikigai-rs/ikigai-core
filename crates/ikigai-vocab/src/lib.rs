@@ -9,8 +9,8 @@
 //! revision may project to Hydra / OpenAPI from the same vocabulary.)
 
 use ikigai_core::{
-    Description, EndpointSpace, Error, Exact, FnEndpoint, InputSource, Invocation, MetaRenderer,
-    ReprType, Representation, Result, Verb,
+    space_iri, Description, EndpointSpace, Error, Exact, FnEndpoint, InputSource, Invocation,
+    MetaRenderer, ReprType, Representation, Result, Verb,
 };
 
 /// The ikigai vocabulary namespace. Provisional — the canonical namespace IRI
@@ -48,6 +48,9 @@ pub const CONTEXT: &str = include_str!("context.jsonld");
 
 /// The conventional IRI the vocabulary is bound to by [`space`].
 pub const VOCAB_IRI: &str = "urn:ikigai:vocab";
+
+/// The name [`space`] claims: `urn:iki:space:vocab`.
+pub const SPACE_ID: &str = "urn:iki:space:vocab";
 
 /// The plan IRI scheme — the one place it is coded, so the engine that emits a plan, the
 /// validator that reads one, and the fixtures that pin the shape agree on every IRI.
@@ -376,8 +379,12 @@ pub fn describe_turtle(description: &Description) -> Representation {
 /// in a kernel's root so the vocabulary is `source`-able as a resource — and, via the http
 /// arc, servable at the external `ns#` URL. (Cacheable; lists in the catalog as a plain
 /// endpoint.)
+///
+/// Configuration-free (one door over a compiled-in constant), so it names itself
+/// [`SPACE_ID`].
 pub fn space() -> EndpointSpace {
-    EndpointSpace::new().bind(
+    EndpointSpace::new()
+        .bind(
         Exact::new(VOCAB_IRI),
         FnEndpoint::new("ikigai-vocab", |_inv: &Invocation<'_>| {
             Ok(Representation::new(
@@ -398,6 +405,8 @@ pub fn space() -> EndpointSpace {
                 .output("text/turtle;charset=utf-8"),
         ),
     )
+        // Last, after every door: since core 0.1.89 a later bind drops the name.
+        .named(space_iri("vocab"))
 }
 
 /// Render a [`Description`] as human-readable plain text (for the CLI `describe`).
