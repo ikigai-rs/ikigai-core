@@ -1916,3 +1916,15 @@ private `nl:` namespace into `ik:`: `ik:Grounding`, `ik:GroundingPart`, `ik:grou
 `ik:offeredItems`, `ik:sampleTriple`, `ik:shownSampleTriples`, `ik:shownClassPartitions`, `ik:shownPropertyPartitions`,
 `ik:draftAsk`, `ik:draftValid`, `ik:draftError`, `ik:draftWarning`, and `ik:model` reused for a draft attempt's model.
 The deployed `/ns` must be refreshed with this release.
+
+**0.1.89** is a patch on the lockstep line. **A space's name survives only what keeps its doors** (ledger
+[#987](http://localhost:1060/l/default/item/987), step 1). A name is a cache claim, but `EndpointSpace::bind` and
+`bind_arc` kept it, so extending a self-named space carried its name over a different door set: the cache served the
+extended corridor's answer under the plain one, and a tree holding both was refused as one name claimed twice. Both now
+drop the name; `.named(..)` after the last `bind` names the extended space. No other core combinator gains members after
+construction. **Additive:** `SPACE_PREFIX` (`urn:iki:space:`) and `space_iri(module) -> Iri`, and the convention on
+`Space::id`: a configuration-free module space names itself `urn:iki:space:<crate without ikigai->`; instance-built,
+parameterized and stateful constructors stay anonymous and the host names them; a different door set gets a different
+name or none. **What a consumer observes:** a `.named(..)` followed by `.bind(..)` on the same value loses its name (a
+sweep of every sibling repo found none). No space in core or vocab is named yet. **No type or wire change. Vocabulary:**
+nothing.
