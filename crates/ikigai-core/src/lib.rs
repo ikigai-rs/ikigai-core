@@ -127,7 +127,10 @@ pub use cache::{
     CacheBound, CacheEntry, CacheKey, CachePolicy, CacheRow, CostAware, CutSnapshot, EntryFacts,
     EntryState, Fifo, Lru, ReprCache,
 };
-pub use capability::{is_deny_scope, Capability};
+pub use capability::{
+    is_deny_scope, principal_scope, Capability, PrincipalError, MAX_PRINCIPAL_LEN,
+    PRINCIPAL_SCOPE_PREFIX,
+};
 pub use confine::Confine;
 pub use content::{ContentId, ContentIdError};
 pub use contract::{match_iri, parse_contract_iri, parse_match_iri, CONTRACT_PREFIX, MATCH_PREFIX};
