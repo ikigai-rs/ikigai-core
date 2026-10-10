@@ -2967,7 +2967,29 @@ impl Kernel {
                     return Ok(kernel_turtle(turtle));
                 }
                 let mut rows = self.cache.rows_at(self.now_stamp());
-                rows.sort_by(|a, b| (&a.target, a.scope).cmp(&(&b.target, b.scope)));
+                // A TOTAL order over what a row prints (ledger #1029): the cache is a
+                // `HashMap`, reseeded per kernel, so any tie left here comes out in a
+                // different order per process. Rows still tied after every printed
+                // column render as identical lines, so the text is a pure function of
+                // the set of entries.
+                rows.sort_by(|a, b| {
+                    (
+                        &a.target,
+                        a.scope,
+                        &a.media_type,
+                        a.bytes,
+                        a.threads,
+                        a.state.word(),
+                    )
+                        .cmp(&(
+                            &b.target,
+                            b.scope,
+                            &b.media_type,
+                            b.bytes,
+                            b.threads,
+                            b.state.word(),
+                        ))
+                });
                 let names = {
                     let mut names = self.scope_names.lock().expect("scope names lock");
                     names.retain(|fingerprint, _| rows.iter().any(|r| r.scope == *fingerprint));
@@ -6239,6 +6261,76 @@ mod tests {
         assert_eq!(
             row(&readout(&kernel)).split_whitespace().nth(1),
             Some("live")
+        );
+    }
+
+    // --- ledger #1029: rows sharing a name print in one order -----------------
+
+    /// A fresh kernel holding several entries under ONE name — `toUpper` read with
+    /// different inputs (so different sizes), and `urn:test:typed`, which answers
+    /// one byte in the media type its `as` argument names (so the rows differ ONLY
+    /// in media type) — and its cache readout.
+    fn shared_name_readout() -> String {
+        let typed = FnEndpoint::new("typed", |inv: &Invocation<'_>| {
+            let media = inv.inline_str("as")?;
+            Ok(Representation::new(ReprType::new(media), b"x".to_vec()).cacheable())
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:iki:fn:toUpper"), builtins::to_upper())
+                .bind(Exact::new("urn:test:typed"), typed),
+        ));
+        let cap = Capability::root();
+        for input in ["cccccc", "a", "dddddddd", "bbb"] {
+            let req = Request::new(Verb::Source, iri("urn:iki:fn:toUpper"))
+                .with_arg("in", ArgRef::Inline(input.as_bytes().to_vec()));
+            block_on(kernel.issue(req, &cap)).unwrap();
+        }
+        for media in ["text/turtle", "application/json", "text/plain", "image/png"] {
+            let req = Request::new(Verb::Source, iri("urn:test:typed"))
+                .with_arg("as", ArgRef::Inline(media.as_bytes().to_vec()));
+            block_on(kernel.issue(req, &cap)).unwrap();
+        }
+        readout(&kernel)
+    }
+
+    #[test]
+    fn the_cache_readout_orders_rows_sharing_a_name_the_same_in_every_kernel() {
+        // The readout sorted by (target, scope) alone, so rows sharing both came out
+        // in the cache map's hash order, which a fresh `HashMap` reseeds: the
+        // tutorial saw two `toUpper` rows swap in 2 of 10 runs. Every kernel built
+        // here gets its own seed, so a partial order shows up as a mismatch.
+        let first = shared_name_readout();
+        for run in 1..32 {
+            let again = shared_name_readout();
+            assert_eq!(again, first, "run {run} disagreed with run 0");
+        }
+
+        // And the tiebreak is pinned, not merely stable: after the name and scope,
+        // media type, then size.
+        let rows = |target: &str| -> Vec<(String, String)> {
+            first
+                .lines()
+                .filter(|l| l.split_whitespace().next() == Some(target))
+                .map(|l| {
+                    let cols: Vec<&str> = l.split_whitespace().collect();
+                    (cols[2].to_string(), format!("{} {}", cols[3], cols[4]))
+                })
+                .collect()
+        };
+        let sizes: Vec<String> = rows("urn:iki:fn:toUpper")
+            .into_iter()
+            .map(|(_, size)| size)
+            .collect();
+        assert_eq!(sizes, ["1 B", "3 B", "6 B", "8 B"], "{first}");
+        let media: Vec<String> = rows("urn:test:typed")
+            .into_iter()
+            .map(|(media, _)| media)
+            .collect();
+        assert_eq!(
+            media,
+            ["application/json", "image/png", "text/plain", "text/turtle"],
+            "{first}"
         );
     }
 
