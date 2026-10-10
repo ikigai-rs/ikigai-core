@@ -250,3 +250,114 @@ fn a_face_nobody_offers_is_refused() {
     // The text faces are unchanged by the new argument.
     assert!(ask(&kernel, "cache", &[]).unwrap().starts_with("cache\n"));
 }
+
+// --- ledger #1044: entries sharing a name print in one order ------------------
+
+/// A fresh kernel holding several entries under ONE name and chain: `urn:t:typed`
+/// answers its `in` argument in the media type its `media` argument names, read so
+/// that some entries differ only in size, some only in media type, and two (`a`
+/// and `q`, both one byte of `text/plain`) in nothing either face prints but the
+/// entry's own key. Returns the three faces that list those entries: the cache's
+/// graph, and both faces of the dependents of the thread they all hang from.
+fn shared_name_faces() -> [String; 3] {
+    let typed = FnEndpoint::new("typed", |inv| {
+        let media = inv.inline_str("media")?;
+        let body = inv.inline_arg("in")?;
+        Ok(Representation::new(ReprType::new(media), body.to_vec()).cacheable())
+    });
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:t:typed"), typed),
+    ));
+    for (media, body) in [
+        ("text/plain", "cccccc"),
+        ("text/plain", "a"),
+        ("text/plain", "dddddddd"),
+        ("text/plain", "q"),
+        ("text/plain", "bbb"),
+        ("text/turtle", "x"),
+        ("application/json", "x"),
+        ("image/png", "x"),
+    ] {
+        let request = Request::new(Verb::Source, iri("urn:t:typed"))
+            .with_arg("media", ArgRef::Inline(media.as_bytes().to_vec()))
+            .with_arg("in", ArgRef::Inline(body.as_bytes().to_vec()));
+        block_on(kernel.issue(request, &Capability::root())).unwrap();
+    }
+    [
+        ask(&kernel, "cache", &[("as", "text/turtle")]).unwrap(),
+        ask(
+            &kernel,
+            "dependents",
+            &[("thread", "urn:t:typed"), ("as", "text/turtle")],
+        )
+        .unwrap(),
+        dependents(&kernel, "urn:t:typed"),
+    ]
+}
+
+/// The (media type, size) of each entry a Turtle face states, in document order.
+fn stated_order(turtle: &str) -> Vec<(String, String)> {
+    let graph = triples(turtle);
+    let mut subjects: Vec<&String> = Vec::new();
+    for (s, p, _) in &graph {
+        if p == &format!("{IK}resolvedFrom") && !subjects.contains(&s) {
+            subjects.push(s);
+        }
+    }
+    let object = |subject: &str, predicate: &str| -> String {
+        graph
+            .iter()
+            .find(|(s, p, _)| s == subject && p == &format!("{IK}{predicate}"))
+            .map(|(_, _, o)| o.split("^^").next().unwrap().trim_matches('"').to_string())
+            .unwrap()
+    };
+    subjects
+        .into_iter()
+        .map(|s| (object(s, "mediaType"), object(s, "sizeBytes")))
+        .collect()
+}
+
+#[test]
+fn the_graph_faces_order_entries_sharing_a_name_the_same_in_every_kernel() {
+    // The graph faces sorted entries by (target, chain) alone, so entries sharing
+    // both were stated in the cache map's hash order, which a fresh `HashMap`
+    // reseeds: same graph, different bytes, which a golden or a diff sees. Every
+    // kernel built here gets its own seed, so a partial order shows up as a
+    // mismatch.
+    let first = shared_name_faces();
+    for run in 1..32 {
+        let again = shared_name_faces();
+        for (face, (a, b)) in ["cache graph", "dependents graph", "dependents text"]
+            .iter()
+            .zip(first.iter().zip(again.iter()))
+        {
+            assert_eq!(b, a, "{face}: run {run} disagreed with run 0");
+        }
+    }
+
+    // And the tiebreak is pinned, not merely stable: after the name and chain, the
+    // order the text readout uses (media type, then size), and only then the
+    // entry's key, which no printed column ties.
+    let expected = [
+        ("application/json", "1"),
+        ("image/png", "1"),
+        ("text/plain", "1"),
+        ("text/plain", "1"),
+        ("text/plain", "3"),
+        ("text/plain", "6"),
+        ("text/plain", "8"),
+        ("text/turtle", "1"),
+    ]
+    .map(|(m, s)| (m.to_string(), s.to_string()));
+    assert_eq!(stated_order(&first[0]), expected, "{}", first[0]);
+    assert_eq!(stated_order(&first[1]), expected, "{}", first[1]);
+    let text: Vec<(String, String)> = first[2]
+        .lines()
+        .skip(2)
+        .map(|l| {
+            let cols: Vec<&str> = l.split_whitespace().collect();
+            (cols[1].to_string(), cols[2].to_string())
+        })
+        .collect();
+    assert_eq!(text, expected, "{}", first[2]);
+}

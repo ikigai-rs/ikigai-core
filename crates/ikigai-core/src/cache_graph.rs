@@ -17,6 +17,7 @@
 //! fingerprint of it — the entry's IRI is derived from that key, so two callers'
 //! entries for one name stay two nodes without either capability being written out.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
@@ -58,6 +59,42 @@ fn chain_iri(scope: u64) -> String {
     }
 }
 
+/// The order every face here lists entries in: a TOTAL order (ledger #1044). The
+/// cache is a `HashMap`, reseeded per kernel, so any tie left here comes out in a
+/// different order per process, and the face is the same graph in different bytes,
+/// which a golden or a diff sees. First what the text readout of `urn:kernel:cache`
+/// sorts by (name, chain, media type, size, threads, state; ledger #1029), so a face
+/// lists entries as that readout does; then the entry's KEY (request, capability),
+/// which no two resident entries share, so nothing is left tied.
+fn entry_order(a: &EntryEdges, b: &EntryEdges) -> Ordering {
+    sort_key(a).cmp(&sort_key(b))
+}
+
+/// [`entry_order`]'s key, borrowed from the entry.
+type SortKey<'a> = (
+    &'a str,
+    u64,
+    &'a str,
+    usize,
+    usize,
+    &'static str,
+    [u8; 32],
+    u64,
+);
+
+fn sort_key(e: &EntryEdges) -> SortKey<'_> {
+    (
+        &e.row.target,
+        e.row.scope,
+        &e.row.media_type,
+        e.row.bytes,
+        e.row.threads,
+        e.row.state.word(),
+        *e.key.request.content_id().as_bytes(),
+        e.key.capability,
+    )
+}
+
 /// One entry's block.
 fn write_entry(out: &mut String, entry: &EntryEdges) {
     let row = &entry.row;
@@ -94,7 +131,7 @@ fn write_thread(out: &mut String, name: &str, cuts: u64) {
 /// as the text readout marks them), and every thread any of them hangs from with
 /// how often it has been cut. `cuts` answers a thread's count.
 pub(crate) fn cache_turtle(mut entries: Vec<EntryEdges>, cuts: impl Fn(&str) -> u64) -> String {
-    entries.sort_by(|a, b| (&a.row.target, a.row.scope).cmp(&(&b.row.target, b.row.scope)));
+    entries.sort_by(entry_order);
     let mut out = String::from(PREFIXES);
     let mut threads = BTreeSet::new();
     for entry in &entries {
@@ -127,7 +164,7 @@ pub(crate) fn dependents_text(
     mut entries: Vec<EntryEdges>,
     chain: impl Fn(u64) -> String,
 ) -> String {
-    entries.sort_by(|a, b| (&a.row.target, a.row.scope).cmp(&(&b.row.target, b.row.scope)));
+    entries.sort_by(entry_order);
     let times = if cuts == 1 { "time" } else { "times" };
     let mut out = format!("dependents of {thread}  (cut {cuts} {times})\n");
     if entries.is_empty() {
@@ -177,7 +214,7 @@ pub(crate) fn dependents_turtle(thread: &str, cuts: u64, entries: Vec<EntryEdges
     let mut out = String::from(PREFIXES);
     write_thread(&mut out, thread, cuts);
     let mut entries = entries;
-    entries.sort_by(|a, b| (&a.row.target, a.row.scope).cmp(&(&b.row.target, b.row.scope)));
+    entries.sort_by(entry_order);
     for entry in &entries {
         write_entry(&mut out, entry);
     }
