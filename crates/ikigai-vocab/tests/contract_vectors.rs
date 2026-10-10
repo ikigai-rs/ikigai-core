@@ -16,7 +16,10 @@
 //!
 //! and commit both files.
 
-use ikigai_core::{match_iri, parse_contract_iri, parse_match_iri, ActionSpec, Description, Verb};
+use ikigai_core::{
+    canonical_contract_iri, canonical_match_iri, match_iri, parse_contract_iri, parse_match_iri,
+    ActionSpec, Description, Verb,
+};
 use serde_json::{json, Map, Value};
 
 const CASES: &str = concat!(
@@ -144,6 +147,7 @@ fn compute() -> String {
                 "match": parse_match_iri(iri).map(|(v, p)| json!([verb_name(v), p])),
                 "contract": parse_contract_iri(iri)
                     .map(|(id, v, d)| json!([id, verb_name(v), d.to_string()])),
+                "canonical": canonical_match_iri(iri).or_else(|| canonical_contract_iri(iri)),
             })
         })
         .collect();
@@ -188,6 +192,71 @@ fn the_shared_vectors_pin_the_sign_refusal() {
     assert_eq!(
         find("urn:ikigai:match:source:%01")["match"],
         json!(["Source", "\u{1}"])
+    );
+}
+
+/// Lenient in, canonical out (ledger #1107), pinned in the shared file: every IRI that
+/// parses carries a `canonical` spelling that parses to the same value and is its own
+/// canonical spelling, and the lenient spellings each map to the one core writes.
+#[test]
+fn the_shared_vectors_pin_lenient_in_canonical_out() {
+    let doc: Value = serde_json::from_str(&compute()).unwrap();
+    for p in doc["parses"].as_array().unwrap() {
+        let iri = p["iri"].as_str().unwrap();
+        if p["match"].is_null() && p["contract"].is_null() {
+            assert_eq!(p["canonical"], Value::Null, "{iri}");
+            continue;
+        }
+        let canonical = p["canonical"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{iri} parses but has no canonical spelling"));
+        assert_eq!(
+            canonical_match_iri(canonical).or_else(|| canonical_contract_iri(canonical)),
+            Some(canonical.to_string()),
+            "{iri}: the canonical spelling is a fixed point"
+        );
+        let reparsed = (
+            parse_match_iri(canonical).map(|(v, p)| json!([verb_name(v), p])),
+            parse_contract_iri(canonical)
+                .map(|(id, v, d)| json!([id, verb_name(v), d.to_string()])),
+        );
+        assert_eq!(
+            (
+                reparsed.0.unwrap_or(Value::Null),
+                reparsed.1.unwrap_or(Value::Null)
+            ),
+            (p["match"].clone(), p["contract"].clone()),
+            "{iri}: the canonical spelling names the same door or contract"
+        );
+    }
+    let canonical_of = |iri: &str| {
+        doc["parses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["iri"] == iri)
+            .unwrap_or_else(|| panic!("no parse case for {iri}"))["canonical"]
+            .clone()
+    };
+    for lenient in [
+        "urn:ikigai:match:source:urn:file:{path}",
+        "urn:ikigai:match:source:urn:%66ile:%7bpath%7d",
+    ] {
+        assert_eq!(
+            canonical_of(lenient),
+            json!("urn:ikigai:match:source:urn:file:%7Bpath%7D"),
+            "{lenient}"
+        );
+    }
+    assert_eq!(
+        canonical_of(
+            "urn:ikigai:contract:{x}:source:b3:\
+             ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+        ),
+        json!(
+            "urn:ikigai:contract:%7Bx%7D:source:b3:\
+             abababababababababababababababababababababababababababababababab"
+        )
     );
 }
 

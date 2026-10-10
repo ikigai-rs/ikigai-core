@@ -1289,6 +1289,7 @@
   ],
   "parses": [
     {
+      "canonical": "urn:ikigai:match:source:urn:file:%7Bpath%7D",
       "contract": null,
       "iri": "urn:ikigai:match:source:urn:file:%7Bpath%7D",
       "match": [
@@ -1297,6 +1298,7 @@
       ]
     },
     {
+      "canonical": "urn:ikigai:match:meta:urn:a:%25",
       "contract": null,
       "iri": "urn:ikigai:match:meta:urn:a:%25",
       "match": [
@@ -1305,36 +1307,43 @@
       ]
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:Source:urn:x",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:frobnicate:urn:x",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:source",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:source:%G1",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:source:%4",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:source:%+1",
       "match": null
     },
     {
+      "canonical": "urn:ikigai:match:source:é",
       "contract": null,
       "iri": "urn:ikigai:match:source:%C3%A9",
       "match": [
@@ -1343,11 +1352,13 @@
       ]
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:source:%C3",
       "match": null
     },
     {
+      "canonical": "urn:ikigai:contract:urn:cms:graph:source:b3:abababababababababababababababababababababababababababababababab",
       "contract": [
         "urn:cms:graph",
         "Source",
@@ -1357,6 +1368,7 @@
       "match": null
     },
     {
+      "canonical": "urn:ikigai:contract:ev%3Eil:delete:b3:abababababababababababababababababababababababababababababababab",
       "contract": [
         "ev>il",
         "Delete",
@@ -1366,16 +1378,19 @@
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:contract:x:source:b3:ababababababababababababababababababababababababababababababab",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:contract:x:source:b3:+bababababababababababababababababababababababababababababababab",
       "match": null
     },
     {
+      "canonical": "urn:ikigai:contract::sink:b3:abababababababababababababababababababababababababababababababab",
       "contract": [
         "",
         "Sink",
@@ -1385,41 +1400,49 @@
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:contract:sink:b3:abababababababababababababababababababababababababababababababab",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:endpoint:x:action:source",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:source:%-1",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:source:%+F",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:source:a%+1b",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:source:% 1",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:source:%",
       "match": null
     },
     {
+      "canonical": "urn:ikigai:match:source:%01",
       "contract": null,
       "iri": "urn:ikigai:match:source:%01",
       "match": [
@@ -1428,6 +1451,7 @@
       ]
     },
     {
+      "canonical": "urn:ikigai:match:source:%7B",
       "contract": null,
       "iri": "urn:ikigai:match:source:%7b",
       "match": [
@@ -1436,6 +1460,7 @@
       ]
     },
     {
+      "canonical": "urn:ikigai:match:source:urn:file:%7Bpath%7D",
       "contract": null,
       "iri": "urn:ikigai:match:source:urn:file:{path}",
       "match": [
@@ -1444,6 +1469,7 @@
       ]
     },
     {
+      "canonical": "urn:ikigai:match:source:A",
       "contract": null,
       "iri": "urn:ikigai:match:source:%41",
       "match": [
@@ -1452,11 +1478,13 @@
       ]
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:match:source:%é",
       "match": null
     },
     {
+      "canonical": "urn:ikigai:match:source:",
       "contract": null,
       "iri": "urn:ikigai:match:source:",
       "match": [
@@ -1465,11 +1493,13 @@
       ]
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:contract:%+1:source:b3:abababababababababababababababababababababababababababababababab",
       "match": null
     },
     {
+      "canonical": "urn:ikigai:contract:%01:source:b3:abababababababababababababababababababababababababababababababab",
       "contract": [
         "\u0001",
         "Source",
@@ -1479,22 +1509,54 @@
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:contract:x:Source:b3:abababababababababababababababababababababababababababababababab",
       "match": null
     },
     {
+      "canonical": null,
       "contract": null,
       "iri": "urn:ikigai:contract:x:source:b3:abababababababababababababababababababababababababababababababab00",
       "match": null
     },
     {
+      "canonical": "urn:ikigai:contract:a:b:source:b3:abababababababababababababababababababababababababababababababab",
       "contract": [
         "a:b",
         "Source",
         "b3:abababababababababababababababababababababababababababababababab"
       ],
       "iri": "urn:ikigai:contract:a:b:source:b3:abababababababababababababababababababababababababababababababab",
+      "match": null
+    },
+    {
+      "canonical": "urn:ikigai:match:source:urn:file:%7Bpath%7D",
+      "contract": null,
+      "iri": "urn:ikigai:match:source:urn:%66ile:%7bpath%7d",
+      "match": [
+        "Source",
+        "urn:file:{path}"
+      ]
+    },
+    {
+      "canonical": "urn:ikigai:contract:%7Bx%7D:source:b3:abababababababababababababababababababababababababababababababab",
+      "contract": [
+        "{x}",
+        "Source",
+        "b3:abababababababababababababababababababababababababababababababab"
+      ],
+      "iri": "urn:ikigai:contract:{x}:source:b3:ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+      "match": null
+    },
+    {
+      "canonical": "urn:ikigai:contract:file:source:b3:abababababababababababababababababababababababababababababababab",
+      "contract": [
+        "file",
+        "Source",
+        "b3:abababababababababababababababababababababababababababababababab"
+      ],
+      "iri": "urn:ikigai:contract:%66ile:source:b3:abababababababababababababababababababababababababababababababab",
       "match": null
     }
   ]
