@@ -17,11 +17,11 @@ serde_json = "1"
 # The version is the TRUE minimum, not a family: the path dep satisfies every call
 # locally, so fmt/clippy/test/CI stay green against a pin that cannot resolve on
 # crates.io, and only `cargo publish --dry-run` ever sees it.
-ikigai-core = { path = "../ikigai-core", version = "0.1.89" } # 0.1.89 = `space_iri`, the
-# name `space()` claims (`urn:iki:space:vocab`, ledger #987), and the release where binding a
-# door onto a named space drops its name. It also covers the older floors this crate kept
-# under-stating: `escape_iri_fragment` (0.1.66) and `Transreption::lossless` (0.1.77). Under
-# 0.x caret rules this is the RANGE >=0.1.89, <0.2.0; the path dep satisfies it locally.
+ikigai-core = { path = "../ikigai-core", version = "0.1.91" } # 0.1.91 =
+# `ActionSpec::contract_iri`, the content-addressed name `to_turtle` gives every ik:Action node
+# (ledger #948). It also covers the older floors: `space_iri` (0.1.89, the name `space()`
+# claims), `escape_iri_fragment` (0.1.66) and `Transreption::lossless` (0.1.77). Under 0.x
+# caret rules this is the RANGE >=0.1.91, <0.2.0; the path dep satisfies it locally.
 
 [dev-dependencies]
 futures = "0.3" # block_on for the kernel faces in tests/manifold_identity.rs

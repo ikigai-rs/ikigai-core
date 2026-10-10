@@ -1939,3 +1939,20 @@ vocabulary space now shows `urn:iki:space:vocab` instead of a skolem in `urn:ker
 Because the workspace moves in lockstep this is a PATCH, so `^0.1` hosts take it on their next resolve rather than by a
 deliberate re-pin. `ikigai-vocab` now states its true core floor, 0.1.89. **No type or wire change. Vocabulary:** only
 `owl:versionInfo`.
+
+**0.1.91** gives an action match its own identity and makes contracts content-addressed (ledger
+[#948](http://localhost:1060/l/default/item/948)). An endpoint's description id is not unique in a kernel (a mount
+surfaces a peer's endpoint under its own id; one endpoint can sit at two doors), yet every manifold row was named
+`urn:ikigai:endpoint:{id}:action:{verb}`, so copies wrote onto one subject: a mount hid the local copy, two doors
+collapsed into one action, and a mounted copy with a different contract merged into the local node, which then appeared
+to need the peer's capability. Now a **match** is `urn:ikigai:match:{verb}:{pattern}` (one per door and verb,
+`ActionMatch::match_iri()`, a method, not a field), and a **contract** is `urn:ikigai:contract:{id}:{verb}:b3:{hex}`,
+the BLAKE3 digest (`ContentId`'s tagged spelling) of a declaration-order-free canonical form of the id, the verb and
+every triple on the contract node and its inputs (`ActionSpec::contract_id` / `contract_iri`). `ActionMatch.action`
+carries the contract IRI; the vocabulary's `to_turtle` names the `ik:Action` node by it and hangs each contract's
+inputs under its own IRI, synthesized actions included. `urn:kernel:validate` accepts a match IRI, a contract IRI, or
+the old spelling, which it refuses as ambiguous when copies of the id disagree. **What a consumer observes:** the Turtle
+faces of `urn:kernel:actions` and `urn:kernel:catalog` change shape; a consumer that parses the old action IRI (cli's
+alias prelude, MCP's local SHACL report, ikigai-nl, the python and deno Turtle mirrors) must move with it. **No type
+change** (no public field). **Vocabulary:** new `ik:contract` (domain `ik:ActionMatch`, range `ik:Action`); the
+`ik:ActionMatch`, `ik:Action` and `ik:action` comments change.
