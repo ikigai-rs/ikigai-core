@@ -607,8 +607,9 @@ makes the composite `Always` — a correctness no-op and a performance change wi
 signal. Measured 2026-08-13 in `ikigai-cms-web` (PR #71): joining an uncacheable overlay into a
 cached books graph took a read from ~20 µs to ~1.0 s, every read, with 68 tests green (§10).
 
-**Theorem R4.4 (the write-cut).** After a successful `Sink` or `Delete` on canonical target
-t, the kernel cuts thread t. Every entry with an edge on t is invalid thereafter. **And every
+**Theorem R4.4 (the write-cut).** After a `Sink` or `Delete` on canonical target t that the
+kernel dispatched to its endpoint — successful, or failed after it ran — the kernel cuts thread
+t. Every entry with an edge on t is invalid thereafter. **And every
 stored `Source` or `Exists` of t carries an edge on t**: when the kernel stores such an answer
 it adds the thread named after the request's canonical target — the same name the cut fires on
 — to the representation, whether or not the endpoint declared it. Hence a read after a write
@@ -617,6 +618,21 @@ aliased resource (the thread is canonical, so the logical and backing names stay
 through a nested alias, and for a composite over such a read, which inherits the edge through
 the dependency record and is cut by the same write.
 
+**A write that ran and failed cuts too** (ledger [#1105](http://localhost:1060/l/default/item/1105),
+decided 2026-10-10). The cut fires when the kernel DISPATCHED the `Sink` or `Delete` — the
+endpoint was entered — whether it returned `Ok` or `Err`, because an endpoint can change state
+before it fails (ikigai-script's `:runs` records a run, then the run errors) and no endpoint can
+cut a thread itself. Without it, a cached fallback over what the write recorded goes on
+answering for the old state. A refusal the kernel answers BEFORE dispatch never cuts: the
+limiter's `Unresolved`, the declared-capability floor's `Denied`, `DepthExceeded`, an
+unresolved target, a kernel-namespace rewrite. So only a caller holding the endpoint's declared
+capabilities can trigger a cut. The cost is over-invalidation when the failure changed nothing,
+which is safe: a cut is never wrong, only a recompute.
+
+    pin: `kernel::tests::a_failed_sink_that_ran_cuts_its_target` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_failed_delete_that_ran_cuts_its_target` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_successful_write_still_cuts_its_target` (crates/ikigai-core/src/kernel.rs)
+    pin: `kernel::tests::a_write_refused_before_dispatch_cuts_nothing` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::a_cacheable_read_hangs_from_its_own_canonical_target_without_declaring_it` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::an_exists_answer_hangs_from_its_target_too` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::a_composite_over_an_undeclared_read_is_cut_by_a_sink_to_the_read` (crates/ikigai-core/src/kernel.rs)
@@ -887,8 +903,8 @@ independently.
 external condition is represented by a resource "invalidated explicitly when that condition
 changes", and B.6 records that NetKernel's golden thread is cut by the endpoint that knows.
 ikigai answers the question the paper leaves to the endpoint — *who cuts what* — in the kernel:
-after a successful mutating verb the kernel cuts the thread named after the canonical target
-(R4.4). Under the verb-as-prefix encoding `sink:x` and `source:x` are unrelated identifiers, and
+after a mutating verb it dispatched (successful, or failed after it ran) the kernel cuts the
+thread named after the canonical target (R4.4). Under the verb-as-prefix encoding `sink:x` and `source:x` are unrelated identifiers, and
 the kernel could connect them only by a naming convention it would have to parse out of the
 identifier — which is the verb, spelled differently. Keeping the verb visible is what lets the
 kernel own the internal half of invalidation, so an endpoint never has to remember to cut its

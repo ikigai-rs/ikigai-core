@@ -2625,6 +2625,19 @@ impl Kernel {
                             &scope,
                         );
                     }
+                    // ★ A WRITE THAT RAN AND FAILED STILL CUTS (ledger #1105). The
+                    // endpoint was entered, so it may have changed state before it
+                    // failed (a script run recorded, then the run errored), and no
+                    // endpoint can cut a thread itself: without this, a cached
+                    // fallback over what it wrote goes on answering for the old
+                    // state. Over-invalidation is the cost when the failure changed
+                    // nothing, and it is bounded: this arm is reached only AFTER the
+                    // limiter, the declared-capability floor and the nesting budget,
+                    // so a refusal before dispatch never cuts, and only a caller
+                    // holding the endpoint's declared capabilities can.
+                    if request.verb.is_mutating() {
+                        self.cut(request.target.as_str());
+                    }
                     return Err(error);
                 }
             };
@@ -2782,7 +2795,8 @@ impl Kernel {
         // after it, so cached `Source`s of that resource — and composites over
         // them — recompute. This is the internal half of the golden thread (the
         // kernel owns invalidation on writes); an external watcher cuts the same
-        // thread on an out-of-band change.
+        // thread on an out-of-band change. A failed one that RAN cuts too, in the
+        // invocation's error arm above (ledger #1105).
         if request.verb.is_mutating() {
             self.cut(request.target.as_str());
         }
@@ -2792,8 +2806,49 @@ impl Kernel {
     /// Cut a golden thread: invalidate every cached representation that depends on
     /// it, directly or transitively through composition. Cheap — it bumps the
     /// thread's generation; dependent entries are evicted lazily on next lookup.
-    /// A `Sink` that mutates a resource cuts the thread named after it; an external
-    /// watcher cuts it on change.
+    /// A `Sink` or `Delete` cuts the thread named after its canonical target; an
+    /// external watcher cuts it on change.
+    ///
+    /// **The kernel's own write-cut fires when it DISPATCHED the write**, whether the
+    /// endpoint then returned `Ok` or `Err` (ledger #1105): an endpoint can change
+    /// state before it fails, and cannot cut a thread itself. A refusal the kernel
+    /// answers before dispatch (the capability floor's `Denied`, a limiter's
+    /// `Unresolved`, `DepthExceeded`, an unbound target) cuts nothing, so only a
+    /// caller holding the endpoint's declared capabilities can trigger a cut.
+    ///
+    /// ```
+    /// use std::sync::{Arc, Mutex};
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     Capability, EndpointSpace, Error, Exact, FnEndpoint, Iri, Kernel, ReprType,
+    ///     Representation, Request, Verb,
+    /// };
+    ///
+    /// // A cell whose write records the value and THEN fails.
+    /// let state = Arc::new(Mutex::new(b"old".to_vec()));
+    /// let cell = {
+    ///     let state = Arc::clone(&state);
+    ///     FnEndpoint::new("cell", move |inv| match inv.request.verb {
+    ///         Verb::Sink => {
+    ///             *state.lock().unwrap() = inv.inline_arg("content")?.to_vec();
+    ///             Err(Error::Endpoint("recorded, then failed".to_string()))
+    ///         }
+    ///         _ => Ok(Representation::new(ReprType::new("text/plain"), state.lock().unwrap().clone())
+    ///             .cacheable()),
+    ///     })
+    /// };
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:cell"), cell)));
+    /// let root = Capability::root();
+    /// let name = Iri::parse("urn:cell").unwrap();
+    /// let read = || block_on(kernel.issue(Request::new(Verb::Source, name.clone()), &root));
+    /// assert_eq!(read().unwrap().bytes, b"old"); // now cached
+    ///
+    /// let write = Request::new(Verb::Sink, name.clone())
+    ///     .with_arg("content", ikigai_core::ArgRef::Inline(b"new".to_vec()));
+    /// assert!(block_on(kernel.issue(write, &root)).is_err());
+    /// // The write ran, so it cut: the read recomputes and sees what it recorded.
+    /// assert_eq!(read().unwrap().bytes, b"new");
+    /// ```
     ///
     /// The cut is also *sequenced*, so a request already in flight cannot file a
     /// result that predates it (see [`cache`](crate::cache)).
@@ -8202,6 +8257,284 @@ mod tests {
             b"created"
         );
         assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    // --- ledger #1105: a write that RAN and failed cuts its target ----------------
+
+    /// A cell whose writes CHANGE STATE AND THEN FAIL when `fail` is set — the shape of
+    /// ikigai-script's `:runs`, which records a run even when the run fails. Its Sink
+    /// and Delete declare `urn:cap:cell:write`, so the capability floor can refuse a
+    /// write before it is dispatched; `writes` counts the writes that reached it.
+    struct WriteThenFailCell {
+        value: Mutex<Option<Vec<u8>>>,
+        fail: bool,
+        writes: Arc<AtomicU32>,
+    }
+
+    impl WriteThenFailCell {
+        fn new(value: Option<&[u8]>, fail: bool, writes: &Arc<AtomicU32>) -> Self {
+            WriteThenFailCell {
+                value: Mutex::new(value.map(<[u8]>::to_vec)),
+                fail,
+                writes: Arc::clone(writes),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Endpoint for WriteThenFailCell {
+        async fn invoke(&self, cx: &Invocation<'_>) -> Result<Representation> {
+            let wrote = match cx.request.verb {
+                Verb::Source => {
+                    return match self.value.lock().expect("cell").clone() {
+                        Some(value) => {
+                            Ok(Representation::new(ReprType::new("text/plain"), value).cacheable())
+                        }
+                        None => Err(Error::NotFound("nothing here yet".to_string())),
+                    }
+                }
+                Verb::Sink => {
+                    *self.value.lock().expect("cell") = Some(cx.inline_arg("content")?.to_vec());
+                    "sink"
+                }
+                Verb::Delete => {
+                    *self.value.lock().expect("cell") = None;
+                    "delete"
+                }
+                other => return Err(Error::Endpoint(format!("cell: unsupported {other:?}"))),
+            };
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(Error::Endpoint(format!(
+                    "the {wrote} changed state, then failed"
+                )));
+            }
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                b"ok".to_vec(),
+            ))
+        }
+
+        fn describe(&self) -> Description {
+            Description::new("cell")
+                .action(crate::describe::ActionSpec::new(Verb::Source))
+                .action(crate::describe::ActionSpec::new(Verb::Sink).requires("urn:cap:cell:write"))
+                .action(
+                    crate::describe::ActionSpec::new(Verb::Delete).requires("urn:cap:cell:write"),
+                )
+        }
+    }
+
+    /// The cell at `urn:data:optional` and a cacheable fallback over its `NotFound` at
+    /// `urn:test:fallback`, in `space` so a test can wrap the space.
+    fn write_then_fail_space(cell: WriteThenFailCell, runs: &Arc<AtomicU32>) -> EndpointSpace {
+        EndpointSpace::new()
+            .bind(Exact::new("urn:data:optional"), cell)
+            .bind(
+                Exact::new("urn:test:fallback"),
+                fallback_over(
+                    "urn:data:optional",
+                    |e| matches!(e, Error::NotFound(_) | Error::Unresolved(_)),
+                    Arc::clone(runs),
+                ),
+            )
+    }
+
+    fn delete(target: &str) -> Request {
+        Request::new(Verb::Delete, iri(target))
+    }
+
+    /// Read `urn:test:fallback` twice and return the bytes, asserting the second read
+    /// was served from the cache.
+    fn read_cached_fallback(kernel: &Kernel, runs: &Arc<AtomicU32>) -> Vec<u8> {
+        let req = || Request::new(Verb::Source, iri("urn:test:fallback"));
+        let cap = Capability::root();
+        let first = block_on(kernel.issue(req(), &cap)).unwrap().bytes;
+        let before = runs.load(Ordering::SeqCst);
+        assert_eq!(block_on(kernel.issue(req(), &cap)).unwrap().bytes, first);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            before,
+            "the composite is cached"
+        );
+        first
+    }
+
+    #[test]
+    fn a_failed_sink_that_ran_cuts_its_target() {
+        // The ledger #1105 reproduction: the Sink records state and THEN fails. Before,
+        // the kernel cut only on success, so the cached fallback over the cell's
+        // `NotFound` went on saying "fallback" over a cell that now holds a value.
+        let (runs, writes) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let kernel = Kernel::new(Arc::new(write_then_fail_space(
+            WriteThenFailCell::new(None, true, &writes),
+            &runs,
+        )));
+        assert_eq!(read_cached_fallback(&kernel, &runs), b"fallback");
+
+        let err =
+            block_on(kernel.issue(sink("urn:data:optional", b"recorded"), &Capability::root()))
+                .unwrap_err();
+        assert!(matches!(err, Error::Endpoint(_)), "{err}");
+        assert_eq!(writes.load(Ordering::SeqCst), 1, "the endpoint ran");
+        assert!(
+            !kernel.is_cached(
+                &Request::new(Verb::Source, iri("urn:test:fallback")),
+                &Capability::root()
+            ),
+            "a write that ran and failed cut its target's thread"
+        );
+        assert_eq!(read_cached_fallback(&kernel, &runs), b"recorded");
+    }
+
+    #[test]
+    fn a_failed_delete_that_ran_cuts_its_target() {
+        let (runs, writes) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let kernel = Kernel::new(Arc::new(write_then_fail_space(
+            WriteThenFailCell::new(Some(b"old"), true, &writes),
+            &runs,
+        )));
+        assert_eq!(read_cached_fallback(&kernel, &runs), b"old");
+
+        block_on(kernel.issue(delete("urn:data:optional"), &Capability::root())).unwrap_err();
+        assert_eq!(writes.load(Ordering::SeqCst), 1, "the endpoint ran");
+        assert_eq!(
+            read_cached_fallback(&kernel, &runs),
+            b"fallback",
+            "a delete that ran and failed cut its target's thread"
+        );
+    }
+
+    #[test]
+    fn a_successful_write_still_cuts_its_target() {
+        for (verb, initial, after) in [
+            (Verb::Sink, None, b"written".as_slice()),
+            (
+                Verb::Delete,
+                Some(b"old".as_slice()),
+                b"fallback".as_slice(),
+            ),
+        ] {
+            let (runs, writes) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+            let kernel = Kernel::new(Arc::new(write_then_fail_space(
+                WriteThenFailCell::new(initial, false, &writes),
+                &runs,
+            )));
+            read_cached_fallback(&kernel, &runs);
+            let write = match verb {
+                Verb::Sink => sink("urn:data:optional", b"written"),
+                _ => delete("urn:data:optional"),
+            };
+            block_on(kernel.issue(write, &Capability::root())).unwrap();
+            assert_eq!(read_cached_fallback(&kernel, &runs), after, "{verb:?}");
+        }
+    }
+
+    #[test]
+    fn a_write_refused_before_dispatch_cuts_nothing() {
+        // Only a caller that passed the declared capabilities can cut: every refusal the
+        // kernel answers BEFORE invoking the endpoint leaves the cache alone, for both
+        // mutating verbs.
+        let writes_of = |verb: Verb| match verb {
+            Verb::Sink => sink("urn:data:optional", b"never"),
+            _ => delete("urn:data:optional"),
+        };
+        let still_cached = |kernel: &Kernel, why: &str| {
+            assert!(
+                kernel.is_cached(
+                    &Request::new(Verb::Source, iri("urn:test:fallback")),
+                    &Capability::root()
+                ),
+                "{why} cut the fallback"
+            );
+        };
+        for verb in [Verb::Sink, Verb::Delete] {
+            // The capability floor's `Denied`.
+            let (runs, writes) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+            let kernel = Kernel::new(Arc::new(write_then_fail_space(
+                WriteThenFailCell::new(None, true, &writes),
+                &runs,
+            )));
+            read_cached_fallback(&kernel, &runs);
+            let err =
+                block_on(kernel.issue(writes_of(verb), &Capability::scoped(["urn:cap:other"])))
+                    .unwrap_err();
+            assert!(matches!(err, Error::Denied(_)), "{verb:?}: {err}");
+            assert_eq!(
+                writes.load(Ordering::SeqCst),
+                0,
+                "{verb:?}: the floor refused"
+            );
+            still_cached(&kernel, "a floor denial");
+
+            // The limiter's `Unresolved`: the name is carved out ahead of the cell.
+            let (runs, writes) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+            let kernel = Kernel::new(Arc::new(crate::space::Fallback::new(vec![
+                Arc::new(crate::space::Limit::new("urn:data:optional")),
+                Arc::new(write_then_fail_space(
+                    WriteThenFailCell::new(None, true, &writes),
+                    &runs,
+                )),
+            ])));
+            assert_eq!(read_cached_fallback(&kernel, &runs), b"fallback");
+            let err = block_on(kernel.issue(writes_of(verb), &Capability::root())).unwrap_err();
+            assert!(matches!(err, Error::Unresolved(_)), "{verb:?}: {err}");
+            assert_eq!(writes.load(Ordering::SeqCst), 0, "{verb:?}: limited");
+            still_cached(&kernel, "a limiter");
+
+            // An unresolved target: nothing is bound at the name at all.
+            let runs = Arc::new(AtomicU32::new(0));
+            let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(
+                Exact::new("urn:test:fallback"),
+                fallback_over(
+                    "urn:data:optional",
+                    |e| matches!(e, Error::Unresolved(_)),
+                    Arc::clone(&runs),
+                ),
+            )));
+            read_cached_fallback(&kernel, &runs);
+            let err = block_on(kernel.issue(writes_of(verb), &Capability::root())).unwrap_err();
+            assert!(matches!(err, Error::Unresolved(_)), "{verb:?}: {err}");
+            still_cached(&kernel, "an unresolved write");
+
+            // `DepthExceeded`: the write is issued past the nesting budget.
+            let (runs, writes) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+            let nested =
+                crate::endpoint::AsyncFnEndpoint::new("nested", move |inv: &Invocation<'_>| {
+                    Box::pin(async move {
+                        let write = match inv.request.verb {
+                            Verb::Sink => sink("urn:data:optional", b"never"),
+                            _ => delete("urn:data:optional"),
+                        };
+                        inv.issue(write).await
+                    })
+                });
+            let outer =
+                crate::endpoint::AsyncFnEndpoint::new("outer", move |inv: &Invocation<'_>| {
+                    Box::pin(async move {
+                        inv.issue(Request::new(inv.request.verb, iri("urn:test:nested")))
+                            .await
+                    })
+                });
+            let kernel = Kernel::new(Arc::new(
+                write_then_fail_space(WriteThenFailCell::new(None, true, &writes), &runs)
+                    .bind(Exact::new("urn:test:nested"), nested)
+                    .bind(Exact::new("urn:test:outer"), outer),
+            ))
+            .with_max_depth(1);
+            read_cached_fallback(&kernel, &runs);
+            let outer_write = match verb {
+                Verb::Sink => sink("urn:test:outer", b"never"),
+                _ => delete("urn:test:outer"),
+            };
+            let err = block_on(kernel.issue(outer_write, &Capability::root())).unwrap_err();
+            assert!(
+                matches!(err, Error::DepthExceeded { .. }),
+                "{verb:?}: {err}"
+            );
+            assert_eq!(writes.load(Ordering::SeqCst), 0, "{verb:?}: too deep");
+            still_cached(&kernel, "a depth refusal");
+        }
     }
 
     // --- ledger #611: a failed sub-request carries its own dependencies ---------
