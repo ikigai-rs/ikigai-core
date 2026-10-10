@@ -1956,3 +1956,17 @@ faces of `urn:kernel:actions` and `urn:kernel:catalog` change shape; a consumer 
 alias prelude, MCP's local SHACL report, ikigai-nl, the python and deno Turtle mirrors) must move with it. **No type
 change** (no public field). **Vocabulary:** new `ik:contract` (domain `ik:ActionMatch`, range `ik:Action`); the
 `ik:ActionMatch`, `ik:Action` and `ik:action` comments change.
+
+**0.1.92** makes a failed invocation a trace node (ledger [#559](http://localhost:1060/l/default/item/559),
+[#20](http://localhost:1060/l/default/item/20)). Since 0.1.73 a failed sub-request has been a cache dependency, yet the
+kernel recorded a `TraceEvent` only after an invocation returned `Ok`, so the trace and the cache disagreed about what a
+resolution touched, and a module's own `Denied` from inside `invoke` (a path or host ACL) reached no tracer. Now an
+invocation that ran and failed records an event under its parent noted `(FAILED_NOTE, kind)`, with the new
+`Error::kind()` word (`not-found`, `denied`, ...): timed, never a cache hit, carrying no text from the error's message.
+The floor's refusal stays `DENIED_NOTE` on an event that never ran, so the two refusals differ by key. It also carries
+two determinism fixes to the cache readouts (ledger [#1029](http://localhost:1060/l/default/item/1029),
+[#1044](http://localhost:1060/l/default/item/1044)): `urn:kernel:cache`
+rows, and the entries of its graph faces, sort by every column, so rows sharing a name stop flipping between kernels.
+**What a consumer observes:** a tracer receives one more event per failed invocation, where it received none (a test that
+counts events on a failing path sees more). **No type change** to `TraceEvent` or `Tracer` (no postcard bump); new public
+`Error::kind` and `FAILED_NOTE`. **Vocabulary:** only `owl:versionInfo`.
