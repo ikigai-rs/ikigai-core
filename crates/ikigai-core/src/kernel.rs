@@ -1222,14 +1222,21 @@ impl Kernel {
     /// pre-0.1.91 `urn:ikigai:endpoint:{id}:action:{verb}`, still accepted while every
     /// door carrying that id agrees on the verb's contract, and refused as ambiguous,
     /// naming the match IRIs to use instead, when they do not.
+    ///
+    /// Lenient in, canonical out (ledger #1107): a match or contract IRI is accepted in
+    /// any spelling its parse accepts, compared by what it PARSES to, and named back in
+    /// errors by its canonical spelling, never as the caller typed it.
     fn validate_target(&self, action: &str) -> Result<(Description, Verb)> {
         if let Some((verb, pattern)) = crate::contract::parse_match_iri(action) {
             let description = self.describe_pattern(&pattern).ok_or_else(|| {
-                Error::Endpoint(format!("validate: no door `{pattern}` (from `{action}`)"))
+                Error::Endpoint(format!(
+                    "validate: no door `{pattern}` (from `{}`)",
+                    crate::contract::match_iri(verb, &pattern)
+                ))
             })?;
             return Ok((description, verb));
         }
-        if let Some((id, verb, _)) = crate::contract::parse_contract_iri(action) {
+        if let Some((id, verb, digest)) = crate::contract::parse_contract_iri(action) {
             return self
                 .descriptions_for_id(&id)
                 .into_iter()
@@ -1238,11 +1245,14 @@ impl Kernel {
                     description
                         .action_specs()
                         .iter()
-                        .any(|spec| spec.verb == verb && spec.contract_iri(&id) == action)
+                        .any(|spec| spec.verb == verb && spec.contract_id(&id) == digest)
                 })
                 .map(|description| (description, verb))
                 .ok_or_else(|| {
-                    Error::Endpoint(format!("validate: no bound endpoint carries `{action}`"))
+                    Error::Endpoint(format!(
+                        "validate: no bound endpoint carries `{}`",
+                        crate::contract::contract_iri_of(&id, verb, &digest)
+                    ))
                 });
         }
         let rest = action.strip_prefix("urn:ikigai:endpoint:").ok_or_else(|| {
@@ -4882,6 +4892,61 @@ mod tests {
         assert!(
             unknown.contains("unknown argument `bogus`"),
             "the template action's contract is enforced: {unknown}"
+        );
+    }
+
+    /// Ledger #1107, Postel's law: `action=` takes any spelling the parse accepts
+    /// (lower-case hex, an unnecessary escape, a raw brace, an upper-case digest), and
+    /// every match or contract IRI core says back is the canonical one.
+    #[test]
+    fn validate_is_lenient_in_and_canonical_out() {
+        use crate::grammar::UriTemplate;
+        let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(
+            UriTemplate::parse("urn:file:{path}").unwrap(),
+            template_file_endpoint(),
+        )));
+        let validate = |action: &str| {
+            let req = Request::new(Verb::Source, iri("urn:kernel:validate"))
+                .with_arg("action", ArgRef::Inline(action.as_bytes().to_vec()))
+                .with_arg("args", ArgRef::Inline(b"path=notes.md".to_vec()));
+            block_on(kernel.issue(req, &Capability::root()))
+                .map(|rep| String::from_utf8(rep.bytes).unwrap())
+        };
+        let canonical = kernel
+            .describe_pattern("urn:file:{path}")
+            .unwrap()
+            .action_specs()[0]
+            .contract_iri("file");
+        let hex = canonical.rsplit_once(":b3:").unwrap().1;
+
+        // Lenient in: every spelling of the door and of its contract pre-flights.
+        for action in [
+            "urn:ikigai:match:source:urn:file:%7Bpath%7D".to_string(),
+            "urn:ikigai:match:source:urn:file:%7bpath%7d".to_string(),
+            "urn:ikigai:match:source:urn:file:{path}".to_string(),
+            "urn:ikigai:match:source:urn:%66ile:%7Bpath%7D".to_string(),
+            canonical.clone(),
+            format!("urn:ikigai:contract:file:source:b3:{}", hex.to_uppercase()),
+            format!("urn:ikigai:contract:%66ile:source:b3:{hex}"),
+        ] {
+            let report = validate(&action).unwrap_or_else(|e| panic!("{action}: {e}"));
+            assert!(report.contains("sh:conforms true"), "{action}: {report}");
+        }
+
+        // Canonical out: an error naming the action names its canonical spelling.
+        let err = validate("urn:ikigai:match:source:urn:nope:%7bx%7d")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`urn:ikigai:match:source:urn:nope:%7Bx%7D`"),
+            "{err}"
+        );
+        assert!(!err.contains("%7b"), "{err}");
+        let stranger = format!("urn:ikigai:contract:{{x}}:source:b3:{}", hex.to_uppercase());
+        let err = validate(&stranger).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("`urn:ikigai:contract:%7Bx%7D:source:b3:{hex}`")),
+            "{err}"
         );
     }
 

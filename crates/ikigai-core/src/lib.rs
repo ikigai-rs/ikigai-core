@@ -133,7 +133,10 @@ pub use capability::{
 };
 pub use confine::Confine;
 pub use content::{ContentId, ContentIdError};
-pub use contract::{match_iri, parse_contract_iri, parse_match_iri, CONTRACT_PREFIX, MATCH_PREFIX};
+pub use contract::{
+    canonical_contract_iri, canonical_match_iri, match_iri, parse_contract_iri, parse_match_iri,
+    CONTRACT_PREFIX, MATCH_PREFIX,
+};
 pub use declare::{
     build, DeclarationBound, DeclarationError, Registry, MAX_DECLARATION_DEPTH,
     MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,

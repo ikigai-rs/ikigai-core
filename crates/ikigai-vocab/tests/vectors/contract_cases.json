@@ -980,6 +980,9 @@
     "urn:ikigai:contract:%01:source:b3:abababababababababababababababababababababababababababababababab",
     "urn:ikigai:contract:x:Source:b3:abababababababababababababababababababababababababababababababab",
     "urn:ikigai:contract:x:source:b3:abababababababababababababababababababababababababababababababab00",
-    "urn:ikigai:contract:a:b:source:b3:abababababababababababababababababababababababababababababababab"
+    "urn:ikigai:contract:a:b:source:b3:abababababababababababababababababababababababababababababababab",
+    "urn:ikigai:match:source:urn:%66ile:%7bpath%7d",
+    "urn:ikigai:contract:{x}:source:b3:ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+    "urn:ikigai:contract:%66ile:source:b3:abababababababababababababababababababababababababababababababab"
   ]
 }

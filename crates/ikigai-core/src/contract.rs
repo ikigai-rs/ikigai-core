@@ -24,6 +24,19 @@
 //! itself is encoded, unlike [`escape_iri_fragment`](crate::escape_iri_fragment)), so
 //! each IRI parses back to exactly what made it.
 //!
+//! **Lenient in, canonical out** (Postel's law; ledger #1107). The parse is not
+//! canonical-only: [`parse_match_iri`] and [`parse_contract_iri`] accept every spelling
+//! that decodes to the same door or contract — lower-case hex (`%7b`), an unnecessary
+//! escape (`%41`), a raw character the encoder would have escaped (`{`), an upper-case
+//! digest — so a hand-typed IRI, or one that crossed a once-decoding transport (an HTTP
+//! query string, a form), still resolves. Everything core EMITS is the canonical
+//! spelling: [`match_iri`] and [`ActionSpec::contract_iri`] build it, and an IRI core
+//! took from a caller is said back through [`canonical_match_iri`] /
+//! [`canonical_contract_iri`] (`urn:kernel:validate`'s report and its errors), never
+//! verbatim. So two spellings are two RDF terms on the way in, and one on the way out:
+//! a graph, log or trace core writes holds only canonical IRIs, and can be joined on
+//! them.
+//!
 //! The faces that mirror these functions by hand pin themselves against ONE vector file,
 //! ikigai-vocab's `tests/vectors/contract_vectors.json`, which a test regenerates from
 //! this code and refuses to let drift (ledger #1096).
@@ -140,6 +153,58 @@ pub fn parse_match_iri(iri: &str) -> Option<(Verb, String)> {
     let rest = iri.strip_prefix(MATCH_PREFIX)?;
     let (verb, pattern) = rest.split_once(':')?;
     Some((parse_verb_segment(verb)?, decode_segment(pattern)?))
+}
+
+/// The canonical spelling of a match IRI — `match_iri(parse_match_iri(iri))` — or
+/// `None` if `iri` is not one. What core says back when a caller hands it any spelling
+/// (see the module doc: lenient in, canonical out).
+///
+/// ```
+/// use ikigai_core::canonical_match_iri;
+///
+/// let canonical = "urn:ikigai:match:source:urn:file:%7Bpath%7D";
+/// for spelling in [
+///     canonical,
+///     "urn:ikigai:match:source:urn:file:%7bpath%7d", // lower-case hex
+///     "urn:ikigai:match:source:urn:file:{path}",     // a raw brace
+///     "urn:ikigai:match:source:urn:%66ile:%7Bpath%7D", // an unnecessary escape
+/// ] {
+///     assert_eq!(canonical_match_iri(spelling).as_deref(), Some(canonical));
+/// }
+/// assert_eq!(canonical_match_iri("urn:ikigai:match:source:%+1"), None);
+/// ```
+pub fn canonical_match_iri(iri: &str) -> Option<String> {
+    parse_match_iri(iri).map(|(verb, pattern)| match_iri(verb, &pattern))
+}
+
+/// The canonical spelling of a contract IRI — its parsed id, verb and digest written
+/// back as [`ActionSpec::contract_iri`] writes them (id encoded, digest in lower-case
+/// hex) — or `None` if `iri` is not one.
+///
+/// ```
+/// use ikigai_core::{canonical_contract_iri, ActionSpec, Verb};
+///
+/// let canonical = ActionSpec::new(Verb::Source).contract_iri("file");
+/// let hex = canonical.rsplit_once(":b3:").unwrap().1;
+/// for spelling in [
+///     canonical.clone(),
+///     format!("urn:ikigai:contract:file:source:b3:{}", hex.to_uppercase()),
+///     format!("urn:ikigai:contract:%66ile:source:b3:{hex}"),
+/// ] {
+///     assert_eq!(canonical_contract_iri(&spelling), Some(canonical.clone()));
+/// }
+/// ```
+pub fn canonical_contract_iri(iri: &str) -> Option<String> {
+    parse_contract_iri(iri).map(|(id, verb, digest)| contract_iri_of(&id, verb, &digest))
+}
+
+/// A contract IRI from its parts, in the one canonical spelling.
+pub(crate) fn contract_iri_of(endpoint_id: &str, verb: Verb, digest: &ContentId) -> String {
+    format!(
+        "{CONTRACT_PREFIX}{}:{}:{digest}",
+        encode_segment(endpoint_id),
+        verb_segment(verb)
+    )
 }
 
 /// Parse a contract IRI into its endpoint id, verb and digest; `None` if `iri` is not
@@ -288,12 +353,7 @@ impl ActionSpec {
     ///     .starts_with("urn:ikigai:contract:ev%3Eil:source:b3:"));
     /// ```
     pub fn contract_iri(&self, endpoint_id: &str) -> String {
-        format!(
-            "{CONTRACT_PREFIX}{}:{}:{}",
-            encode_segment(endpoint_id),
-            verb_segment(self.verb),
-            self.contract_id(endpoint_id)
-        )
+        contract_iri_of(endpoint_id, self.verb, &self.contract_id(endpoint_id))
     }
 }
 
