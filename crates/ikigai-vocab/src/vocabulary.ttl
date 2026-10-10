@@ -519,7 +519,7 @@ ik:LlmBackend a rdfs:Class ;
 ik:model a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "model" ;
-    rdfs:comment "A model identity. On an ik:LlmBackend: the backend's configured default model id, e.g. \"llama3.2:3b\". On an ik:Explanation or an ik:Review: the model that derived it — the resolved identity also folded into its ik:versionTag. The domain is deliberately open; the property crosses all three graphs." .
+    rdfs:comment "A model identity. On an ik:LlmBackend: the backend's configured default model id, e.g. \"llama3.2:3b\". On an ik:Explanation or an ik:Review: the model that derived it — the resolved identity also folded into its ik:versionTag. On one attempt of a drafting (a prov:Entity): the model that produced it, as the LLM door that answered named it, while the door itself is the attempt's prov:wasAttributedTo. The domain is deliberately open; the property crosses all four graphs." .
 
 ik:context a rdf:Property ;
     rdfs:domain ik:LlmBackend ;
@@ -940,6 +940,87 @@ ik:appLayer a rdf:Property ;
     rdfs:range rdfs:Resource ;
     rdfs:label "appLayer" ;
     rdfs:comment "The {app}.a11y.toml override that contributed, by its urn:file: IRI — the HIGHER precedence layer, so where both name a key this one won. Determined by the file's NAME, never by position: only files that exist are recorded, so an app override sits at index 0 whenever the shared file is absent." .
+
+# ---- natural language drafting (urn:nl:grounding, urn:nl:sparql) -------------
+# What a natural-language drafter is given, and the provenance of what it drafts
+# (ikigai-nl). The grounding is data under ONE caller's capability: the actions it
+# may take (ik: as the catalog states them), the vocabulary (rdfs:), the shape of
+# each graph it may read (VoID), and worked examples (schema:), each part
+# identified (dcterms:identifier) and derived (prov:wasDerivedFrom). A drafting is
+# PROV-O — a prov:Activity that prov:used the grounding and its prompts, and one
+# prov:Entity per attempt (prov:value the text, prov:wasRevisionOf the attempt
+# before, prov:wasAttributedTo the LLM door). These terms carry only what those
+# vocabularies do not; they were minted under https://ikigai-rs.dev/ns/nl# and
+# promoted here (ledger #974) rather than deployed as a namespace of their own.
+#
+# Every count says "first N of M": a part or a graph shape narrowed by a focus or
+# bounded states both numbers, so a bound can never read as the whole. Counts are
+# xsd:integer because that is what the face emits (an oxrdf u64 literal); the
+# coercion follows the range, so the two have to agree.
+
+ik:Grounding a rdfs:Class ;
+    rdfs:label "Grounding" ;
+    rdfs:comment "What a drafter may know, as data, under one caller's capability: the actions it may take, the vocabulary, the shape of each graph it may read, and worked examples, each an ik:GroundingPart. Named by the sha256 of its content (urn:nl:grounding:sha256:…, with the digest as its dcterms:identifier), so a draft can cite the exact grounding it saw — a drafting prov:used it." .
+
+ik:GroundingPart a rdfs:Class ;
+    rdfs:label "GroundingPart" ;
+    rdfs:comment "One part of an ik:Grounding ({grounding}:actions, :vocabulary, :graphs, :examples), hung from it by dcterms:hasPart, derived from one resource (prov:wasDerivedFrom) and named by the sha256 of what it holds (dcterms:identifier). States ik:shownItems against ik:offeredItems." .
+
+ik:groundingFocus a rdf:Property ;
+    rdfs:domain ik:Grounding ;
+    rdfs:range xsd:string ;
+    rdfs:label "groundingFocus" ;
+    rdfs:comment "The graph IRI or topic word an ik:Grounding was narrowed to, as the caller gave it. A string, not an IRI, because a topic word is not one. Absent means unfocused: every part as far as its bound allows." .
+
+ik:shownItems a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:label "shownItems" ;
+    rdfs:comment "How many items a bounded listing holds — on an ik:GroundingPart, the actions, terms, graphs or examples it gives. Fewer than ik:offeredItems means the listing was narrowed by a focus or bounded: first N of M, never a silent truncation. No domain: \"I show N of M\" is a claim any bounded listing makes, as ik:findingCount argues for \"I checked and found n\"." .
+
+ik:offeredItems a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:label "offeredItems" ;
+    rdfs:comment "How many items the source offered THIS caller before focus and bounds — the denominator to ik:shownItems. Offered, not total: it counts only what the caller's capability let the source list, so the number itself discloses nothing the caller could not read. No domain, for the reason stated on ik:shownItems." .
+
+ik:sampleTriple a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "sampleTriple" ;
+    rdfs:comment "One triple from a graph, as an N-Triples line, on the graph's shape (a void:Dataset). A literal on purpose: a blank node in the data stays a label inside a string and never becomes a node of the graph that describes it. Repeated per sample; ik:shownSampleTriples says how many against void:triples in all. No domain: the subject is a void:Dataset, an external class, and this vocabulary declares only its own (the ik:annotates and ik:passcode precedent)." .
+
+ik:shownSampleTriples a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:label "shownSampleTriples" ;
+    rdfs:comment "How many ik:sampleTriple lines a graph's shape gives, against void:triples in all. No domain, for the reason stated on ik:sampleTriple." .
+
+ik:shownClassPartitions a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:label "shownClassPartitions" ;
+    rdfs:comment "How many void:classPartition nodes a graph's shape gives, against void:classes in all. No domain, for the reason stated on ik:sampleTriple." .
+
+ik:shownPropertyPartitions a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:label "shownPropertyPartitions" ;
+    rdfs:comment "How many void:propertyPartition nodes a graph's shape gives, against void:properties in all. No domain, for the reason stated on ik:sampleTriple." .
+
+ik:draftAsk a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "draftAsk" ;
+    rdfs:comment "What a person asked a drafter for, in natural language: the input of a drafting (a prov:Activity, urn:nl:sparql:drafting:…). Kept verbatim, because the drafting's IRI is a digest over it and a reader checking a draft against its ask needs the words that were asked. No domain: the subject is a prov:Activity, an external class." .
+
+ik:draftValid a rdf:Property ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "draftValid" ;
+    rdfs:comment "Whether one attempt of a drafting (a prov:Entity) passed every mechanical check — and, when it was saved, the script host kept it. Stated on every attempt, true or false, so a failed attempt is a claim rather than an absence; the checks that failed are its ik:draftError values. No domain: the subject is a prov:Entity, an external class." .
+
+ik:draftError a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "draftError" ;
+    rdfs:comment "One thing a check found wrong with an attempt of a drafting, exactly as the repair loop showed it to the model, so the provenance records what the next attempt was answering. Repeated per error. No domain, for the reason stated on ik:draftValid." .
+
+ik:draftWarning a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "draftWarning" ;
+    rdfs:comment "One thing a check could not decide about an attempt of a drafting — an IRI past the grounding's bound, a parameter the preview left unbound. Not an ik:draftError: a warning alone leaves ik:draftValid true, so it goes to the person reviewing the draft rather than back to the model. Repeated per warning. No domain, for the reason stated on ik:draftValid." .
 
 # ---- processes (a plan as a graph) -------------------------------------------
 # A plan is a DAG of requests with single-assignment names: each ik:Step issues one

@@ -24,6 +24,8 @@
     "Finding": "ik:Finding",
     "Fork": "ik:Fork",
     "GoldenThread": "ik:GoldenThread",
+    "Grounding": "ik:Grounding",
+    "GroundingPart": "ik:GroundingPart",
     "Level": "ik:Level",
     "Limit": "ik:Limit",
     "LlmBackend": "ik:LlmBackend",
@@ -153,6 +155,13 @@
       "@type": "xsd:dateTime"
     },
     "doors": "ik:doors",
+    "draftAsk": "ik:draftAsk",
+    "draftError": "ik:draftError",
+    "draftValid": {
+      "@id": "ik:draftValid",
+      "@type": "xsd:boolean"
+    },
+    "draftWarning": "ik:draftWarning",
     "droppedItems": {
       "@id": "ik:droppedItems",
       "@type": "xsd:nonNegativeInteger"
@@ -179,6 +188,7 @@
       "@type": "@id"
     },
     "from": "ik:from",
+    "groundingFocus": "ik:groundingFocus",
     "hangsFrom": {
       "@id": "ik:hangsFrom",
       "@type": "@id"
@@ -226,6 +236,10 @@
     "modality": "ik:modality",
     "model": "ik:model",
     "namespace": "ik:namespace",
+    "offeredItems": {
+      "@id": "ik:offeredItems",
+      "@type": "xsd:integer"
+    },
     "oneOf": "ik:oneOf",
     "opaque": {
       "@id": "ik:opaque",
@@ -312,6 +326,7 @@
       "@type": "@id"
     },
     "ruleKind": "ik:ruleKind",
+    "sampleTriple": "ik:sampleTriple",
     "seals": "ik:seals",
     "severed": {
       "@id": "ik:severed",
@@ -328,6 +343,22 @@
     "sharedLayer": {
       "@id": "ik:sharedLayer",
       "@type": "@id"
+    },
+    "shownClassPartitions": {
+      "@id": "ik:shownClassPartitions",
+      "@type": "xsd:integer"
+    },
+    "shownItems": {
+      "@id": "ik:shownItems",
+      "@type": "xsd:integer"
+    },
+    "shownPropertyPartitions": {
+      "@id": "ik:shownPropertyPartitions",
+      "@type": "xsd:integer"
+    },
+    "shownSampleTriples": {
+      "@id": "ik:shownSampleTriples",
+      "@type": "xsd:integer"
     },
     "sizeBytes": {
       "@id": "ik:sizeBytes",

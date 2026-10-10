@@ -1328,6 +1328,87 @@ mod tests {
         }
     }
 
+    /// The natural-language drafting family (ledger #974): every `ik:` term
+    /// `ikigai-nl` emits once it switches off `https://ikigai-rs.dev/ns/nl#` — the
+    /// grounding's Turtle face (`urn:nl:grounding`) and the PROV a drafting writes
+    /// (`urn:nl:sparql`). Asked over PARSED subjects as the families above ask it.
+    /// Each pair is the `nl:` term it replaces, so this list is also the mapping the
+    /// switch follows; `ik:model` is reused rather than minted.
+    #[test]
+    fn the_terms_the_nl_faces_emit_are_defined() {
+        let subjects: std::collections::BTreeSet<String> = oxttl::TurtleParser::new()
+            .for_reader(VOCABULARY.as_bytes())
+            .map(|t| t.expect("valid turtle").subject.to_string())
+            .collect();
+        for (term, replaces) in [
+            ("Grounding", "nl:Grounding"),
+            ("GroundingPart", "nl:Part"),
+            ("groundingFocus", "nl:focus"),
+            ("shownItems", "nl:shown"),
+            ("offeredItems", "nl:of"),
+            ("sampleTriple", "nl:sample"),
+            ("shownSampleTriples", "nl:samplesShown"),
+            ("shownClassPartitions", "nl:classesShown"),
+            ("shownPropertyPartitions", "nl:propertiesShown"),
+            ("draftAsk", "nl:ask"),
+            ("model", "nl:model"),
+            ("draftValid", "nl:valid"),
+            ("draftError", "nl:error"),
+            ("draftWarning", "nl:warning"),
+        ] {
+            assert!(
+                subjects.contains(&format!("<{NS}{term}>")),
+                "ik:{term} replaces {replaces} in ikigai-nl's faces — without it they \
+                 emit an undefined term"
+            );
+        }
+        // Only ik:groundingFocus is genuinely single-domain. The rest sit on external
+        // classes (a void:Dataset, a prov:Activity, a prov:Entity) or are claims any
+        // bounded listing makes, and a domain would type those subjects into ours.
+        for term in [
+            "shownItems",
+            "offeredItems",
+            "sampleTriple",
+            "shownSampleTriples",
+            "shownClassPartitions",
+            "shownPropertyPartitions",
+            "draftAsk",
+            "draftValid",
+            "draftError",
+            "draftWarning",
+        ] {
+            let block = VOCABULARY
+                .split("\n\n")
+                .find(|b| {
+                    b.trim_start()
+                        .starts_with(&format!("ik:{term} a rdf:Property"))
+                })
+                .unwrap_or_else(|| panic!("ik:{term} is declared"));
+            assert!(
+                !block
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("rdfs:domain")),
+                "ik:{term} must declare no domain:\n{block}"
+            );
+        }
+        // The counts coerce to what the face emits: an oxrdf u64 literal is
+        // xsd:integer, and a coercion that disagrees with the emitted datatype
+        // leaves every count uncompacted in the JSON-LD face.
+        let ctx: serde_json::Value = serde_json::from_str(CONTEXT).unwrap();
+        let ctx = &ctx["@context"];
+        for counted in [
+            "shownItems",
+            "offeredItems",
+            "shownSampleTriples",
+            "shownClassPartitions",
+            "shownPropertyPartitions",
+        ] {
+            assert_eq!(ctx[counted]["@type"], "xsd:integer", "{counted}");
+        }
+        assert_eq!(ctx["draftValid"]["@type"], "xsd:boolean");
+        assert_eq!(ctx["sampleTriple"], "ik:sampleTriple");
+    }
+
     #[test]
     fn a_range_the_generator_never_enumerated_still_coerces() {
         let ctx: serde_json::Value = serde_json::from_str(CONTEXT).unwrap();
