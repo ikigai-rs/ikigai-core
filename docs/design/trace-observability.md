@@ -236,6 +236,38 @@ Three decisions:
 The store now declines an `At` result whose deadline has already passed on the kernel's clock,
 which validity would never have served: it was filed only to be evicted unread.
 
+## A failed invocation — the node the cache already knew about
+
+**Status: built** (ledger #559, #20).
+
+The kernel recorded an event only after an invocation returned `Ok`. Since 0.1.73 a failed
+sub-request is a cache dependency (a fallback over a child's `NotFound` hangs from the child's
+thread; a result over a swallowed `Denied` is never stored), so the trace and the cache disagreed
+about what a resolution touched: the tutorial's tic-tac-toe cell traced as ONE node on an unplayed
+square while its cached answer hung from the stored cell's thread. And the refusal that matters
+most for SSRF and jail escapes, a module's own parameterized ACL returning `Denied` from inside
+`invoke` (the real gate for fs and net), reached no tracer at all.
+
+Now an invocation that ran and failed is an event under its parent, noted
+`(FAILED_NOTE, "<kind>")` with `Error::kind()`'s word (`not-found`, `denied`, `timeout`, …), timed
+like any invocation that ran, never a cache hit, and carrying whatever the endpoint noted before it
+failed. Decisions:
+
+- **The kind, never the message.** An error's text may hold a path, a host or other caller data;
+  the word carries none of it. `Error::kind()` is public and doctested so an observer can use the
+  same vocabulary.
+- **Two refusals, two keys.** The floor's refusal is `DENIED_NOTE` on an event that never ran and
+  has no `failed` note; the endpoint's own is `("failed", "denied")` on a timed one. A composite
+  that propagates its child's refusal fails too and says so; the child's event is where it began.
+- **No struct change, no trait change.** It is a note on the existing event through the existing
+  `Tracer::record`, like the denial before it: no postcard layout bump, no new trait method, no
+  flag day for an implementor. What changes is WHAT a tracer sees: an event per failed
+  invocation, where there was none. A tracer that counted events on a failing path sees more (core's
+  own depth test now sees the four failed ancestors of the refusal, the path to the cycle).
+- **Not covered:** a plain miss in the empty chain (still not traced, the line on `LIMITED_NOTE`),
+  a failure the kernel raises before entering an endpoint (a malformed rewrite, a `Meta` with no
+  renderer or a failed Meta transreption), and a failed `urn:kernel:*` operation.
+
 ## Logistics & constitution
 
 - **Hub work, not a satellite repo:** the arc spans ikigai-core (`TraceEvent`) and
