@@ -39,6 +39,10 @@ const REAL: &[&str] = &[
     "fn",
     // BORN here — `ikigai-store` 0.2.0 (2026-09-13) never had an older namespace.
     "store",
+    // BORN here — this crate's own `SPACE_PREFIX`, ikigai-core 0.1.89 (ledger #987):
+    // the name a configuration-free module space claims, `urn:iki:space:<module>`.
+    // Nothing used it before; no space in core or vocab claims one yet.
+    "space",
 ];
 
 /// Every `urn:iki:<name>` occurrence in `text`, with its line number.

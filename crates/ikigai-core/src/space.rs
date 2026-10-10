@@ -1407,6 +1407,26 @@ pub trait Space: Send + Sync {
     /// the node by it. Name two different arrangements alike and one request is
     /// served the other's answers; name one arrangement consistently and every
     /// corridor built from it shares one cache entry and one node.
+    ///
+    /// # Who names what: `urn:iki:space:<module>`
+    ///
+    /// A name goes on only where the claim is known to be true:
+    ///
+    /// - **A configuration-free module space** (no parameters, and nothing read
+    ///   while building it: no config home, environment, files or ambient platform
+    ///   backend) names itself [`space_iri`]`("<crate>")`, the crate name without
+    ///   `ikigai-`: `urn:iki:space:sparql`, `urn:iki:space:text`. Every call builds
+    ///   the same doors, so every call may claim the same name.
+    /// - **An instance-built or parameterized constructor** (`space(store)`,
+    ///   `space_with_budget(..)`, a config) stays anonymous. The host names it,
+    ///   because only the host knows which instance it passed in.
+    /// - **A different set of doors gets a different name or none.** A subset or
+    ///   an extension of a module's space never carries the module's name; it is
+    ///   `urn:iki:space:<module>:<part>` or anonymous.
+    ///   [`EndpointSpace::bind`] enforces the extension half by dropping the name.
+    /// - **A stateful zero-argument constructor** (one that allocates fresh state
+    ///   on every call) stays anonymous: two calls hold different state behind the
+    ///   same patterns, so a constant name would be false.
     fn id(&self) -> Option<Iri> {
         None
     }
@@ -1421,6 +1441,67 @@ pub trait Space: Send + Sync {
     fn topology(&self) -> Topology {
         Topology::opaque(self.id())
     }
+}
+
+/// The prefix every self-named module space is named under: `urn:iki:space:`. See
+/// [`space_iri`] and the convention on [`Space::id`].
+pub const SPACE_PREFIX: &str = "urn:iki:space:";
+
+/// The conventional name of a module's configuration-free space:
+/// [`SPACE_PREFIX`] followed by `module`, the crate name without `ikigai-`.
+///
+/// `module` is one or more `:`-separated segments, each non-empty lowercase ASCII
+/// letters, digits and `-`, neither starting nor ending with `-`. More than one
+/// segment names a part of a module's space that holds a different set of doors
+/// (`sexpr:arrangement`). The convention itself is on [`Space::id`].
+///
+/// ```
+/// use ikigai_core::{space_iri, SPACE_PREFIX};
+///
+/// assert_eq!(space_iri("sparql").as_str(), "urn:iki:space:sparql");
+/// assert_eq!(space_iri("sexpr:arrangement").as_str(), "urn:iki:space:sexpr:arrangement");
+/// assert!(space_iri("text").as_str().starts_with(SPACE_PREFIX));
+/// ```
+///
+/// # Panics
+///
+/// On a `module` that breaks the rule above, including one that still carries the
+/// `ikigai-` prefix: the argument is a literal in the module's own source, so a bad
+/// one is a programming error, refused where it is written rather than published as
+/// a name nobody can match.
+///
+/// ```should_panic
+/// // The crate name, not the module name: refused.
+/// let _ = ikigai_core::space_iri("ikigai-sparql");
+/// ```
+pub fn space_iri(module: &str) -> Iri {
+    if let Err(reason) = check_space_module(module) {
+        panic!("`{module}` is not a module space name: {reason}");
+    }
+    Iri::parse(format!("{SPACE_PREFIX}{module}"))
+        .expect("a checked module segment always makes an IRI")
+}
+
+/// Why `module` is not a [`space_iri`] segment list, if it is not.
+fn check_space_module(module: &str) -> std::result::Result<(), &'static str> {
+    if module.starts_with("ikigai-") {
+        return Err("drop the crate's `ikigai-` prefix");
+    }
+    for segment in module.split(':') {
+        if segment.is_empty() {
+            return Err("a segment is empty");
+        }
+        if !segment
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err("a segment holds something other than `a-z`, `0-9` and `-`");
+        }
+        if segment.starts_with('-') || segment.ends_with('-') {
+            return Err("a segment starts or ends with `-`");
+        }
+    }
+    Ok(())
 }
 
 /// A shared space **is** a space, so anything generic over `S: Space` accepts an
@@ -1521,28 +1602,67 @@ impl EndpointSpace {
     /// block_on(kernel.issue_in(now(), &cap, Scope::empty().with(pinned()))).unwrap();
     /// assert_eq!(kernel.cache_len(), 1);
     /// ```
+    ///
+    /// # Name it last
+    ///
+    /// The claim covers the doors the space holds **when it is named**, so adding a
+    /// door afterwards ([`bind`](Self::bind), [`bind_arc`](Self::bind_arc)) drops it
+    /// and the space is anonymous again. That is what makes extending a module's
+    /// self-named space safe: `ikigai_fn::space().bind(extra, ..)` holds different
+    /// doors from `ikigai_fn::space()`, so it must not answer to the same name. To
+    /// name the extended space, call `.named(..)` again after the last `bind`, with a
+    /// name of its own.
+    ///
+    /// ```
+    /// use ikigai_core::{builtins, space_iri, EndpointSpace, Exact, Space};
+    ///
+    /// let module = || {
+    ///     EndpointSpace::new()
+    ///         .bind(Exact::new("urn:example:upper"), builtins::to_upper())
+    ///         .named(space_iri("example"))
+    /// };
+    /// assert_eq!(module().id(), Some(space_iri("example")));
+    ///
+    /// // One more door: the old claim is no longer true, so it is gone.
+    /// let extended = module().bind(Exact::new("urn:example:echo"), builtins::echo());
+    /// assert_eq!(extended.id(), None);
+    ///
+    /// // Naming after extending names the extended space.
+    /// let renamed = module()
+    ///     .bind(Exact::new("urn:example:echo"), builtins::echo())
+    ///     .named(space_iri("example:echo"));
+    /// assert_eq!(renamed.id(), Some(space_iri("example:echo")));
+    /// ```
     pub fn named(mut self, id: Iri) -> Self {
         self.id = Some(id);
         self
     }
 
     /// Bind a grammar to an endpoint (builder style).
+    ///
+    /// **Drops the space's name** if it had one: a name claims a set of doors, and
+    /// this changes the set. Name the space after its last binding; see
+    /// [`named`](Self::named).
     pub fn bind(
         mut self,
         grammar: impl Grammar + 'static,
         endpoint: impl Endpoint + 'static,
     ) -> Self {
         self.bindings.push((Box::new(grammar), Arc::new(endpoint)));
+        self.id = None;
         self
     }
 
     /// Bind a grammar to an already-shared endpoint.
+    ///
+    /// **Drops the space's name** if it had one, as [`bind`](Self::bind) does.
     pub fn bind_arc(
         mut self,
         grammar: impl Grammar + 'static,
         endpoint: Arc<dyn Endpoint>,
     ) -> Self {
         self.bindings.push((Box::new(grammar), endpoint));
+        self.id = None;
         self
     }
 }
@@ -2311,6 +2431,38 @@ mod tests {
         let entries = Fallback::new(vec![a, b]).entries().expect("enumerable");
         let patterns: Vec<&str> = entries.iter().map(|e| e.pattern.as_str()).collect();
         assert_eq!(patterns, ["urn:a", "urn:b"]);
+    }
+
+    #[test]
+    fn space_module_segments_are_checked() {
+        for good in [
+            "fn",
+            "sparql",
+            "sexpr:arrangement",
+            "a11y",
+            "cms-web",
+            "x:y:z",
+        ] {
+            assert_eq!(check_space_module(good), Ok(()), "{good}");
+        }
+        for bad in [
+            "",
+            "ikigai-fn",
+            "Fn",
+            "fn:",
+            ":fn",
+            "a::b",
+            "-fn",
+            "fn-",
+            "f n",
+            "fn/x",
+            "f_n",
+        ] {
+            assert!(
+                check_space_module(bad).is_err(),
+                "{bad:?} should be refused"
+            );
+        }
     }
 
     #[test]

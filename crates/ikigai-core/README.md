@@ -25,7 +25,9 @@ assert_eq!(rep.bytes, b"IKIGAI");
   `RequestId`/`ContentId`, and typed `Representation`s with opt-in caching.
 - **Resolution** — a `Grammar` (`Exact`, RFC 6570 `UriTemplate`) matches a request
   within a `Space` to an `Endpoint`; spaces compose via `Mount` / `Fallback` / `Rewrite` /
-  `Limit`, may claim an identity (`.named(iri)`), and **the arrangement is itself a
+  `Limit`, may claim an identity (`.named(iri)`: a claim that any space so named holds
+  the same doors, so binding another door drops it; a configuration-free module space
+  names itself `urn:iki:space:<module>` through `space_iri`), and **the arrangement is itself a
   resource**: `urn:kernel:topology` renders the chain a request is resolved in as a graph
   (every node an IRI, order explicit), so "is this family reachable without passing the
   limiter?" is a query, and a resolution reports which space answered.
