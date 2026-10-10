@@ -6163,6 +6163,41 @@ mod tests {
         );
     }
 
+    /// Ledger #1077: two principals holding otherwise-equal scopes are two cache
+    /// partitions, so an author-scoped answer computed for alice is never served to bob.
+    #[test]
+    fn cache_is_keyed_by_principal() {
+        let base = Capability::scoped(["urn:cap:demo:read"]);
+        let alice = base.with_principal("urn:example:person:alice").unwrap();
+        let bob = base.with_principal("urn:example:person:bob").unwrap();
+        assert_ne!(capability_key(&alice), capability_key(&bob));
+        assert_ne!(capability_key(&alice), capability_key(&base));
+        assert_eq!(
+            capability_key(&alice),
+            capability_key(&base.with_principal("urn:example:person:alice").unwrap()),
+            "the same principal is the same partition"
+        );
+
+        let whoami = FnEndpoint::new("whoami", |inv: &Invocation<'_>| {
+            let who = inv.capability.principal().unwrap_or("-").to_string();
+            Ok(Representation::new(ReprType::new("text/plain"), who.into_bytes()).cacheable())
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:demo:whoami"), whoami),
+        ));
+        let req = || Request::new(Verb::Source, iri("urn:demo:whoami"));
+        assert_eq!(
+            block_on(kernel.issue(req(), &alice)).unwrap().bytes,
+            b"urn:example:person:alice"
+        );
+        assert!(kernel.is_cached(&req(), &alice));
+        assert!(!kernel.is_cached(&req(), &bob), "bob is another partition");
+        assert_eq!(
+            block_on(kernel.issue(req(), &bob)).unwrap().bytes,
+            b"urn:example:person:bob"
+        );
+    }
+
     // --- the kernel-behavior namespace (urn:kernel:*) --------------------------
 
     fn cut_request(thread: &str) -> Request {
