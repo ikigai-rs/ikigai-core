@@ -2037,3 +2037,14 @@ a cached read over a target whose write failed after running now recomputes (iki
 `contract_vectors.json` see a new key. **No type change**, no wire change; two new public functions. ikigai-vocab's core
 floor stays 0.1.91 (its library uses nothing new; only its tests call the new functions). **Vocabulary:** only
 `owl:versionInfo`.
+
+**0.1.96** adds the layer vocabulary (ledger [#1182](http://localhost:1060/l/default/item/1182), layers arc 1 of
+[#1170](http://localhost:1060/l/default/item/1170)), in core before anything emits it. Classes `ik:Layer`,
+`ik:Collaboration`, `ik:Machine` (⊑ `prov:SoftwareAgent`), `ik:Message`, `ik:Question` (⊑ `ik:Message`), `ik:Offer`,
+`ik:Progress`, `ik:Release`, `ik:Handback` (each entry class ⊑ `prov:Entity`); properties `ik:layerModel`, `ik:body`,
+`ik:brief`, `ik:note`, `ik:repository` (an IRI, where `ik:repo` stays a browse root's name), `ik:offer`, `ik:addressedTo`,
+`ik:evidence`, `ik:seq`, `ik:supersedes` (⊑ `prov:wasRevisionOf`) and `ik:inReplyTo`. Only `ik:layerModel` declares a
+domain; `tests/layers.rs` runs every domain and range in the vocabulary over an example graph of the family and fails on
+a node typed into a family it is not in. **What a consumer observes:** nothing in core; `ikigai_vocab::VOCABULARY` and
+`CONTEXT` define twenty new terms. **No type change**, no wire change. **Vocabulary:** twenty terms and
+`owl:versionInfo`; `/ns` needs a deploy.
