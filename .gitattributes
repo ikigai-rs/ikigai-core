@@ -1,0 +1,14 @@
+# Line endings: LF in the repository AND in every checkout, whatever core.autocrlf says.
+#
+# Git for Windows installs with core.autocrlf=true, which checks text files out with CRLF.
+# The shared contract vectors are compared byte for byte across faces (devtools
+# `vector-drift` digests them), and vocabulary.ttl is served live at
+# https://ikigai-rs.dev/ns, so a CRLF checkout of either is drift. `eol=lf` on a path
+# overrides core.autocrlf for it. Ledger #1205.
+* text=auto eol=lf
+
+# Named explicitly, so content detection can never decide them.
+crates/ikigai-vocab/tests/vectors/*.json text eol=lf
+*.ttl    text eol=lf
+*.jsonld text eol=lf
+*.sh     text eol=lf
