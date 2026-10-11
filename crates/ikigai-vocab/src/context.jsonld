@@ -10,6 +10,7 @@
     "Binding": "ik:Binding",
     "CacheEntry": "ik:CacheEntry",
     "Chain": "ik:Chain",
+    "Collaboration": "ik:Collaboration",
     "Confine": "ik:Confine",
     "Consultation": "ik:Consultation",
     "CorsPolicy": "ik:CorsPolicy",
@@ -26,12 +27,20 @@
     "GoldenThread": "ik:GoldenThread",
     "Grounding": "ik:Grounding",
     "GroundingPart": "ik:GroundingPart",
+    "Handback": "ik:Handback",
+    "Layer": "ik:Layer",
     "Level": "ik:Level",
     "Limit": "ik:Limit",
     "LlmBackend": "ik:LlmBackend",
+    "Machine": "ik:Machine",
+    "Message": "ik:Message",
     "Mount": "ik:Mount",
+    "Offer": "ik:Offer",
     "OpaqueSpace": "ik:OpaqueSpace",
     "Process": "ik:Process",
+    "Progress": "ik:Progress",
+    "Question": "ik:Question",
+    "Release": "ik:Release",
     "Review": "ik:Review",
     "Rewrite": "ik:Rewrite",
     "RewriteRule": "ik:RewriteRule",
@@ -47,6 +56,10 @@
     },
     "action": {
       "@id": "ik:action",
+      "@type": "@id"
+    },
+    "addressedTo": {
+      "@id": "ik:addressedTo",
       "@type": "@id"
     },
     "alert": {
@@ -92,6 +105,8 @@
     },
     "bindingValue": "ik:bindingValue",
     "binds": "ik:binds",
+    "body": "ik:body",
+    "brief": "ik:brief",
     "byteSize": {
       "@id": "ik:byteSize",
       "@type": "xsd:integer"
@@ -180,6 +195,10 @@
       "@type": "@id"
     },
     "entryState": "ik:entryState",
+    "evidence": {
+      "@id": "ik:evidence",
+      "@type": "@id"
+    },
     "explanation": "ik:explanation",
     "family": "ik:family",
     "fileName": "ik:fileName",
@@ -198,6 +217,10 @@
       "@type": "@id"
     },
     "id": "ik:id",
+    "inReplyTo": {
+      "@id": "ik:inReplyTo",
+      "@type": "@id"
+    },
     "input": {
       "@id": "ik:input",
       "@type": "@id"
@@ -216,6 +239,7 @@
       "@id": "ik:layer",
       "@type": "@id"
     },
+    "layerModel": "ik:layerModel",
     "layers": "ik:layers",
     "logical": "ik:logical",
     "lossless": {
@@ -240,6 +264,11 @@
     "modality": "ik:modality",
     "model": "ik:model",
     "namespace": "ik:namespace",
+    "note": "ik:note",
+    "offer": {
+      "@id": "ik:offer",
+      "@type": "@id"
+    },
     "offeredItems": {
       "@id": "ik:offeredItems",
       "@type": "xsd:integer"
@@ -289,6 +318,10 @@
       "@type": "@id"
     },
     "repo": "ik:repo",
+    "repository": {
+      "@id": "ik:repository",
+      "@type": "@id"
+    },
     "required": {
       "@id": "ik:required",
       "@type": "xsd:boolean"
@@ -332,6 +365,10 @@
     "ruleKind": "ik:ruleKind",
     "sampleTriple": "ik:sampleTriple",
     "seals": "ik:seals",
+    "seq": {
+      "@id": "ik:seq",
+      "@type": "xsd:integer"
+    },
     "severed": {
       "@id": "ik:severed",
       "@type": "xsd:boolean"
@@ -378,6 +415,10 @@
       "@type": "@id"
     },
     "summary": "ik:summary",
+    "supersedes": {
+      "@id": "ik:supersedes",
+      "@type": "@id"
+    },
     "suppressedItems": {
       "@id": "ik:suppressedItems",
       "@type": "xsd:nonNegativeInteger"

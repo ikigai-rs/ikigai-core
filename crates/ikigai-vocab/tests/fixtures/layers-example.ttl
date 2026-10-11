@@ -1,0 +1,88 @@
+# The layer family as a layer host would emit it (design: ikigai-devtools
+# claude/research/collab-layer-v1-2026-10-10.md, sections 2, 4 and 5): the participants
+# graph, two layers and the manifest mounting them, a thread in the message layer
+# `talk`, and one offer in the task layer `tasks-bobby` with each kind of report on it.
+# Every node asserts the types it really has, so tests/layers.rs can judge each
+# rdfs:domain and rdfs:range the vocabulary declares against them: a property that
+# would type a node into a family it is not in fails there. Skolemized, no blank nodes.
+
+@prefix ik:      <https://ikigai-rs.dev/ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix foaf:    <http://xmlns.com/foaf/0.1/> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+# ---- participants (urn:layers:participants) ----------------------------------
+
+<urn:collab:participant:bobby>        a foaf:Person ; rdfs:label "Bobby" .
+<urn:collab:participant:bobby-claude> a prov:SoftwareAgent ;
+    prov:actedOnBehalfOf <urn:collab:participant:bobby> .
+<urn:collab:participant:bobby-gonk>   a ik:Machine ;
+    prov:actedOnBehalfOf <urn:collab:participant:bobby> .
+<urn:collab:participant:brian>        a foaf:Person ; rdfs:label "Brian" .
+<urn:collab:participant:hub>          a prov:SoftwareAgent ;
+    prov:actedOnBehalfOf <urn:collab:participant:brian> .
+<urn:collab:participant:plasma-gonk>  a ik:Machine ;
+    prov:actedOnBehalfOf <urn:collab:participant:brian> .
+
+# ---- layers (urn:layer:{layer}) and a manifest (urn:collab:{name}) -------------
+
+<urn:layer:talk>        a ik:Layer ; ik:layerModel "channel" .
+<urn:layer:tasks-bobby> a ik:Layer ; ik:layerModel "tuplespace" .
+<urn:collab:bobby>      a ik:Collaboration ; rdfs:label "bobby" .
+
+# ---- the message layer: a question, its answer, and a correction ---------------
+
+<urn:layer:talk:entry:01k0000000000000000000000a> a ik:Question ;
+    ik:body "Which repo should the first task land in?" ;
+    prov:wasAttributedTo <urn:collab:participant:bobby> ;
+    dcterms:created "2026-10-10T12:00:00Z"^^xsd:dateTime ;
+    ik:seq 1 .
+
+<urn:layer:talk:entry:01k0000000000000000000000b> a ik:Message ;
+    ik:body "ikigai-layers, once it exists." ;
+    ik:inReplyTo <urn:layer:talk:entry:01k0000000000000000000000a> ;
+    prov:wasAttributedTo <urn:collab:participant:hub> ;
+    dcterms:created "2026-10-10T12:01:00Z"^^xsd:dateTime ;
+    ik:seq 2 .
+
+<urn:layer:talk:entry:01k0000000000000000000000c> a ik:Message ;
+    ik:body "ikigai-layers: the repo exists now." ;
+    ik:inReplyTo <urn:layer:talk:entry:01k0000000000000000000000a> ;
+    ik:supersedes <urn:layer:talk:entry:01k0000000000000000000000b> ;
+    prov:wasAttributedTo <urn:collab:participant:hub> ;
+    dcterms:created "2026-10-10T12:02:00Z"^^xsd:dateTime ;
+    ik:seq 3 .
+
+# ---- the task layer: an offer and each kind of report on it ---------------------
+
+<urn:layer:tasks-bobby:offer:01k0000000000000000000000d> a ik:Offer ;
+    dcterms:title "Layer vocabulary in ikigai-vocab" ;
+    ik:brief "Add the layer terms to core's vocabulary." ;
+    ik:repository <https://github.com/ikigai-rs/ikigai-core> ;
+    prov:wasAttributedTo <urn:collab:participant:plasma-gonk> ;
+    dcterms:created "2026-10-10T13:00:00Z"^^xsd:dateTime .
+
+<urn:layer:tasks-bobby:report:01k0000000000000000000000e> a ik:Progress ;
+    ik:offer <urn:layer:tasks-bobby:offer:01k0000000000000000000000d> ;
+    ik:addressedTo <urn:collab:participant:plasma-gonk> ;
+    ik:note "Terms drafted; tests next." ;
+    ik:evidence <https://github.com/ikigai-rs/ikigai-core/tree/layer-vocab> ;
+    prov:wasAttributedTo <urn:collab:participant:bobby-gonk> ;
+    dcterms:created "2026-10-10T14:00:00Z"^^xsd:dateTime .
+
+<urn:layer:tasks-bobby:report:01k0000000000000000000000f> a ik:Release ;
+    ik:offer <urn:layer:tasks-bobby:offer:01k0000000000000000000000d> ;
+    ik:addressedTo <urn:collab:participant:plasma-gonk> ;
+    ik:note "Out of time this week." ;
+    prov:wasAttributedTo <urn:collab:participant:bobby-gonk> ;
+    dcterms:created "2026-10-10T15:00:00Z"^^xsd:dateTime .
+
+<urn:layer:tasks-bobby:report:01k0000000000000000000000g> a ik:Handback ;
+    ik:offer <urn:layer:tasks-bobby:offer:01k0000000000000000000000d> ;
+    ik:addressedTo <urn:collab:participant:plasma-gonk> ;
+    ik:note "Merged with green CI." ;
+    ik:evidence <https://github.com/ikigai-rs/ikigai-core/pull/1> ;
+    prov:wasAttributedTo <urn:collab:participant:bobby-gonk> ;
+    dcterms:created "2026-10-10T16:00:00Z"^^xsd:dateTime .

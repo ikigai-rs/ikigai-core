@@ -1028,6 +1028,135 @@ ik:draftWarning a rdf:Property ;
     rdfs:label "draftWarning" ;
     rdfs:comment "One thing a check could not decide about an attempt of a drafting — an IRI past the grounding's bound, a parameter the preview left unbound. Not an ik:draftError: a warning alone leaves ik:draftValid true, so it goes to the person reviewing the draft rather than back to the model. Repeated per warning. No domain, for the reason stated on ik:draftValid." .
 
+# ---- layers (urn:layer:*, urn:collab:*: shared spaces between participants) -
+# A LAYER is one independent shared space, urn:layer:{layer}, with its own access
+# model (ik:layerModel), closed admission shapes, grants (urn:cap:layer:{verb}:{layer}),
+# feed and egress context. A COLLABORATION is a manifest, urn:collab:{name}, naming
+# the layers it mounts and which participant holds which verbs on each; the layer,
+# never the collaboration, is the access boundary. A layer holds entries: in a
+# message layer (the channel model) an ik:Message or ik:Question, append-only and
+# corrected by a new entry that ik:supersedes the old; in a task layer (the
+# tuplespace model) an ik:Offer of work and the reports on it, ik:Progress,
+# ik:Release and ik:Handback, each ik:addressedTo the offerer and naming its
+# ik:offer. The host stamps prov:wasAttributedTo, dcterms:created and (in a channel)
+# ik:seq, and refuses an entry that sends any of them. Participants are PROV agents
+# (a person, an LLM agent as a prov:SoftwareAgent, a host as an ik:Machine), linked
+# to whom they act for by prov:actedOnBehalfOf. Design: ikigai-devtools
+# claude/research/collab-layer-v1-2026-10-10.md, sections 2, 4, 5 and 9 (ledger
+# #1170, #1182).
+#
+# ⚠ Every property below except ik:layerModel declares NO DOMAIN, the argued position
+# this file takes elsewhere: a message, a report and a future brief or artifact entry
+# carry the same words, and a domain would type each into the others under RDFS
+# entailment. ⚠ And ik:layer (lowercase, above) is NOT this family's: it is a dry
+# run's chain cell with rdfs:domain ik:Consultation, so writing it to say "this entry
+# is in layer X" types the entry a consultation. The layer an entry is in is the
+# {layer} segment of its own IRI.
+#
+# ⚠ A layer's JSON-LD context is its OWN allowlist document, never the CONTEXT this
+# crate generates: that one defines every ik: term and so would let all of them cross.
+# tests/layers.rs runs every domain and range here over example graphs.
+
+ik:Layer a rdfs:Class ;
+    rdfs:label "Layer" ;
+    rdfs:comment "One independent shared space between participants, named urn:layer:{layer} ({layer} lowercase [a-z0-9-], at most 24 characters). Its definition chooses an access model (ik:layerModel) and names its closed admission shapes and its egress context; its grants are capabilities named for it (urn:cap:layer:{verb}:{layer}), and it has its own feed. Adding a layer whose model exists is configuration, never code. Not ik:layer (lowercase), which is a dry run's chain cell." .
+
+ik:Collaboration a rdfs:Class ;
+    rdfs:label "Collaboration" ;
+    rdfs:comment "A manifest, urn:collab:{name}: the layers a collaboration mounts and which participant holds which verbs on each. The authoring form of a door's enrollment, which a generator derives from it. A convenience over grants, never a filter inside a layer: the ik:Layer is the access boundary, so two collaborations that must not see each other's messages use two layers." .
+
+ik:Machine a rdfs:Class ;
+    rdfs:subClassOf prov:SoftwareAgent ;
+    rdfs:label "Machine" ;
+    rdfs:comment "A machine principal: a running host, such as a gonk, that acts under its own identity (its own client certificate, so its own principal) on behalf of a person, stated with prov:actedOnBehalfOf. Distinct from the person, and from the person's LLM agent, which is a prov:SoftwareAgent but not a machine: a machine's writes are a host's automation, so a reader can tell them from what a person or an agent said. A subclass of prov:SoftwareAgent, so a PROV-aware reader still sees the agent." .
+
+ik:Message a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Message" ;
+    rdfs:comment "One entry in a message layer (the channel model): what its author said, in ik:body, optionally ik:inReplyTo an earlier entry. Append-only: a message layer has no edit and no delete, so a correction is a new entry that ik:supersedes the old one. The host names it urn:layer:{layer}:entry:{ulid} and stamps its author (prov:wasAttributedTo), its time (dcterms:created) and its ik:seq, refusing any of the three if sent. A message never touches a ledger: nothing in one names an offer or an item. A subclass of prov:Entity, as every attributed entry is." .
+
+ik:Question a rdfs:Class ;
+    rdfs:subClassOf ik:Message ;
+    rdfs:label "Question" ;
+    rdfs:comment "A message that asks: an ik:Message whose author expects an answer, which arrives as an entry ik:inReplyTo it. A subclass of ik:Message, so reading a layer's messages includes its questions." .
+
+ik:Offer a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Offer" ;
+    rdfs:comment "One unit of work offered in a task layer (the tuplespace model): a title (dcterms:title), the ik:brief its offerer wrote for whoever takes it, and the ik:repository it is in. Unaddressed, so any participant holding take on the layer may take it, and taking is the claim: a take is atomic, so exactly one taker wins. Named by its offerer, urn:layer:{layer}:offer:{ulid}; the reports on it name it with ik:offer. An offer that mirrors a ledger item carries only what the mirror's CONSTRUCT and the layer's context let through: the item's IRI, labels, comments and claims never cross. A subclass of prov:Entity, as every attributed entry is." .
+
+ik:Progress a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Progress" ;
+    rdfs:comment "A report on an ik:Offer by its taker: the work is still under way, with an ik:note and optionally ik:evidence. ik:addressedTo the offerer and naming its ik:offer, so only the offerer can take it, and exactly once; the offerer's mirror applies it as a renewal of the claim it holds for the taker." .
+
+ik:Release a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Release" ;
+    rdfs:comment "A report on an ik:Offer by its taker: the work is given back unfinished, with an ik:note saying why. ik:addressedTo the offerer and naming its ik:offer; the offerer's mirror applies it by releasing the claim it holds for the taker, so the work can be offered again." .
+
+ik:Handback a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Handback" ;
+    rdfs:comment "A report on an ik:Offer by its taker: the work is done, with ik:evidence (a pull request, a commit, a published artifact) and an ik:note. ik:addressedTo the offerer and naming its ik:offer. Not a close: the offerer's dispatcher reads the evidence and closes its own record, and nothing closes across a layer." .
+
+ik:layerModel a rdf:Property ;
+    rdfs:domain ik:Layer ;
+    rdfs:range xsd:string ;
+    rdfs:label "layerModel" ;
+    rdfs:comment "The access model an ik:Layer's definition chooses, one word from the closed set the layer host's code defines: \"channel\" (append-only entries, one graph per author), \"tuplespace\" (out, read and an atomic take) or \"graph\" (each author replaces its own graph). A model is code and a layer is configuration. The one property of this family with a domain: only a layer has an access model." .
+
+ik:body a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "body" ;
+    rdfs:comment "The text an entry says: on an ik:Message, what its author wrote, as plain text bounded by the layer's admission shape. No domain: a brief or an artifact entry in a later layer carries its text the same way, and a domain would type each of them an ik:Message." .
+
+ik:brief a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "brief" ;
+    rdfs:comment "The text an ik:Offer gives whoever takes it: what to do, written by the offerer to be shared. Its own property, deliberately, rather than the mirrored item's body: a layer's context controls which properties cross, never what the prose inside one says, so the text that crosses is the text written to cross. No domain: briefs as resources (ledger #1141) carry the same text on a node that is not an offer." .
+
+ik:note a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "note" ;
+    rdfs:comment "A short free-text remark on a report: why work was released, how it is going, what a hand-back adds to its evidence. No domain: ik:Progress, ik:Release and ik:Handback all carry it, and a domain would type each report as one of the others." .
+
+ik:repository a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "repository" ;
+    rdfs:comment "The repository a piece of work is in, by IRI (its web URL, e.g. https://github.com/ikigai-rs/ikigai-core). Not ik:repo, which is a browse root's configured NAME and a string: a name is local to one host's configuration and means nothing to a collaborator, while an IRI names the same repository everywhere. No domain: an ik:Offer carries it today, and anything about work in a repository may." .
+
+ik:offer a rdf:Property ;
+    rdfs:range ik:Offer ;
+    rdfs:label "offer" ;
+    rdfs:comment "The ik:Offer a report is about. Every ik:Progress, ik:Release and ik:Handback names exactly one, which is how the offerer's mirror joins a report to the work it offered, and so to the claim it holds. The range is the class: whatever this names is an offer. No domain: three report classes carry it, and this vocabulary has no class that is their union." .
+
+ik:addressedTo a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "addressedTo" ;
+    rdfs:comment "The participant an entry is for, by its participant IRI. In a task layer defined as addressed, only that participant can take the tuple, so a report reaches the offerer and nobody else, exactly once. No domain: any entry may be addressed. The range is rdfs:Resource rather than prov:Agent: a participant is typed foaf:Person, prov:SoftwareAgent or ik:Machine, and what the host compares is the IRI." .
+
+ik:evidence a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "evidence" ;
+    rdfs:comment "A resource that shows a claim about work is true, by IRI: a pull request, a commit, a passing check, a published artifact. Multi-valued. On an ik:Handback, the offerer's dispatcher reads it before closing anything, so whoever offered the work decides whether it is done. No domain: progress reports carry evidence too, and so will later records of work." .
+
+ik:seq a rdf:Property ;
+    rdfs:range xsd:integer ;
+    rdfs:label "seq" ;
+    rdfs:comment "An entry's position in its layer's feed: a gapless, increasing integer the host stamps (and refuses if sent), so a follower resumes after the last one it saw and a gap means a missed event rather than a quiet hour. It orders entries where dcterms:created, a clock reading, cannot: two entries may share a time, never a sequence number. Not ik:order, a declared position in a configured set. No domain: every kind of entry a feed carries has one." .
+
+ik:supersedes a rdf:Property ;
+    rdfs:subPropertyOf prov:wasRevisionOf ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "supersedes" ;
+    rdfs:comment "An earlier entry this one replaces. In an append-only layer it is the only correction: nothing is edited or deleted, the new entry names the old, and a layer's latest read answers the newest entry about a subject that no entry supersedes. A sub-property of prov:wasRevisionOf, which states the same fact for a PROV-aware reader (both ends are entities, as every attributed entry is). No domain: a message, a brief and an artifact entry supersede the same way." .
+
+ik:inReplyTo a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "inReplyTo" ;
+    rdfs:comment "The entry this one answers: on an ik:Message, the earlier entry of the same layer (often an ik:Question) it replies to. Threads are built from it; it changes nothing about the entry it names. No domain: a reply can be any kind of entry. The range is rdfs:Resource rather than ik:Message, because an entry in another kind of layer may be answered too and a class range would type it a message." .
+
 # ---- processes (a plan as a graph) -------------------------------------------
 # A plan is a DAG of requests with single-assignment names: each ik:Step issues one
 # verb against one IRI with named ik:Argument nodes; the edges are pipe (ik:pipeFrom),
