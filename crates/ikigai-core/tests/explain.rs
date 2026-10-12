@@ -483,3 +483,40 @@ fn the_turtle_face_parses_and_joins_the_topology_and_the_catalog() {
     assert!(turtle.contains("ik:bindingValue \"bob\""), "{turtle}");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
+
+/// Ledger #1345: an id with a bare `%` is a NAME, so its `%` is encoded (`%25`), the way
+/// `ikigai-vocab`'s `to_turtle` spells the catalog node `ik:answer` joins to. Left alone,
+/// `100% sure` became `100%%20sure`, which no parser accepts.
+#[test]
+fn an_answer_whose_id_carries_a_percent_still_parses() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let door =
+        counting("pct", &calls).with_description(Description::new("100% sure").verb(Verb::Source));
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:t:pct"), door),
+    ));
+    let turtle = explain_in(
+        &kernel,
+        "urn:t:pct",
+        &[("as", "text/turtle")],
+        &Capability::scoped([INSPECT]),
+        Scope::empty(),
+    )
+    .unwrap();
+    let triples: Vec<_> = oxttl::TurtleParser::new()
+        .for_reader(turtle.as_bytes())
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| panic!("not Turtle: {e}\n{turtle}"));
+    assert!(
+        triples.iter().any(|t| {
+            t.predicate.as_str() == "https://ikigai-rs.dev/ns#answer"
+                && t.object.to_string() == "<urn:ikigai:endpoint:100%25%20sure>"
+        }),
+        "{turtle}"
+    );
+    let text = explain(&kernel, "urn:t:pct", &[]);
+    assert!(
+        text.contains("(urn:ikigai:endpoint:100%25%20sure)"),
+        "{text}"
+    );
+}

@@ -79,8 +79,10 @@ fn must_encode(c: char) -> bool {
     c == '%' || c <= '\u{20}' || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\')
 }
 
-/// Percent-encode a segment injectively (see the module doc).
-fn encode_segment(s: &str) -> String {
+/// Percent-encode a segment injectively (see the module doc). Also how an endpoint id is
+/// spelled in `urn:ikigai:endpoint:{id}`, so the explain graph's `ik:answer` names the
+/// node `ikigai-vocab`'s `to_turtle` writes (ledger #1345).
+pub(crate) fn encode_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut buf = [0u8; 4];
     for c in s.chars() {

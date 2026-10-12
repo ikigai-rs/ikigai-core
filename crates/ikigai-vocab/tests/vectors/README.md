@@ -39,9 +39,13 @@ validates it, so core percent-encodes it when the result is a real IRI and emits
 **literal** when it is not, whatever its prefix (`https://cap> . <urn:z` is a literal);
 its title and summaries carry newline, CR and tab. A face that writes `<{class}>` raw, or
 chooses `<…>` for a scope by prefix alone, fails that door's `turtle` bytes.
-`tests/contract_vectors.rs` also parses every door's Turtle back; `deno/edge` is listed
-there as a known exception (an id with a bare `%`, a core emission defect reported for
-its own arc), so do not take its Turtle as an example of output that must parse.
+`core/percent-names` (ledger #1345) is the `%` case: an endpoint id or input name is a
+NAME, so its `%` is encoded as `%25` (`50% off` is `urn:ikigai:endpoint:50%25%20off`),
+exactly as a contract IRI spells the id; a `class` or scope is an authored IRI and keeps
+its escapes (`urn:cls:a%20b` stays a resource, `urn:cls:100%` is a literal). A face that
+encodes names with the IRIREF set alone writes `100%%20…` for `deno/edge`'s id and fails
+its `turtle` bytes. `tests/contract_vectors.rs` also parses every door's Turtle back, and
+every door must parse.
 
 ## Lenient in, canonical out
 
