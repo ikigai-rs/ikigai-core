@@ -42,13 +42,14 @@ pub fn is_iri_safe(s: &str) -> bool {
 /// collision between one real name and one that must never exist; it is not a
 /// basis for round-tripping an encoded fragment back to its source.
 ///
-/// ⚠ **For AUTHORED IRIs, not names — and `[` and `]` stay.** This escapes a `requires`
-/// scope, an `ik:requires` capability term, a `class`, a plan id, a request target: IRIs
-/// someone wrote, where `[` and `]` are legal around an IPv6 host (`http://[::1]/cap`) and
-/// encoding them would break the IRI. Do not widen it to the brackets or to the
-/// non-`ucschar` code points: that is [`encode_name`](crate::encode_name)'s job, for a NAME
-/// (an endpoint id, an input name), which is spelled into an IRI path where neither is legal
-/// (ledger #1361).
+/// ⚠ **For AUTHORED IRIs, not names — and `[`, `]`, `#` and `?` stay.** This escapes a
+/// `requires` scope, an `ik:requires` capability term, a `class`, a request target: IRIs
+/// someone wrote, where `[` and `]` are legal around an IPv6 host (`http://[::1]/cap`), a
+/// `#` starts a real fragment (`…XMLSchema#string`) and a `?` a real query, and encoding any
+/// of them would change the IRI. Do not widen it to those or to the non-`ucschar` code
+/// points: that is [`encode_name`](crate::encode_name)'s job, for a NAME (an endpoint id, an
+/// input name, a plan id), which is spelled into ONE IRI path segment where none of them is
+/// legal (ledger #1361, #1390, #1391).
 ///
 /// ```
 /// use ikigai_core::{encode_name, escape_iri_fragment};
@@ -56,6 +57,9 @@ pub fn is_iri_safe(s: &str) -> bool {
 /// // An authored IRI with an IPv6 host keeps its brackets; the same text as a name does not.
 /// assert_eq!(escape_iri_fragment("http://[::1]/cap"), "http://[::1]/cap");
 /// assert_eq!(encode_name("http://[::1]/cap"), "http://%5B::1%5D/cap");
+/// // An authored IRI keeps its fragment; a name holding the same text is one segment.
+/// assert_eq!(escape_iri_fragment("urn:x#y"), "urn:x#y");
+/// assert_eq!(encode_name("urn:x#y"), "urn:x%23y");
 /// ```
 ///
 /// ```

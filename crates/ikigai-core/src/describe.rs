@@ -582,6 +582,8 @@ impl Description {
     ///
     /// `[` and `]` are admitted: an id may be a full IRI with an IPv6 host, and a name's
     /// brackets are encoded (`http://[::1]/x` is `urn:ikigai:endpoint:http://%5B::1%5D/x`).
+    /// So are `#` and `?`, which a name's encoding keeps inside the path (`a#b` is
+    /// `urn:ikigai:endpoint:a%23b`, ledger #1390).
     ///
     /// ```
     /// use ikigai_core::{ArgSpec, Description, Error};

@@ -50,8 +50,17 @@ noncharacter) are percent-encoded in an id, an input name and a door pattern
 (`http://[::1]/x` is `urn:ikigai:endpoint:http://%5B::1%5D/x`), while a `class` or scope with
 an IPv6 host keeps its brackets (`<http://[::1]/cap>`); the `bracket-id` and `non-ucschar-id`
 contracts and the matching `patterns` and `parses` pin the same rule. A face that stops at the
-IRIREF set and `%` writes an IRI no parser accepts. `tests/contract_vectors.rs` also parses
-every door's Turtle back, and every door must parse.
+IRIREF set and `%` writes an IRI no parser accepts. `core/hash-query-names` (ledger #1390) is
+`#` and `?`: a name is ONE path segment, so both are percent-encoded in an id, an input name and
+a door pattern (`a#b?c#d` is `urn:ikigai:endpoint:a%23b%3Fc%23d`, the input `x#y` is
+`…:input:x%23y`), while a `class` or scope keeps its fragment and query
+(`<http://www.w3.org/2001/XMLSchema#string>`, `<urn:cap:hq?scope#all>`); the `hash-id` and
+`query-id` contracts, the `urn:x:a#b#c` and `urn:x:{k}?q=1` patterns, and five `parses` (the
+canonical, raw and lower-case spellings of a match, a raw and an encoded contract) pin the same
+rule. Unlike the brackets, this respells names that parsed before (a single `#` or a `?`), so a
+face that stops at the 0.1.100 set writes `urn:ikigai:endpoint:a#b`, which parses and is the
+wrong resource. `tests/contract_vectors.rs` also parses every door's Turtle back, and every door
+must parse.
 
 ## Lenient in, canonical out
 
