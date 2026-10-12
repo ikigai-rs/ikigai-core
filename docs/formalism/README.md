@@ -2099,3 +2099,17 @@ or `requires` value is an IRI, not a name, and keeps degrading to a literal. **W
 calls `validate` now refuses such an endpoint at bind time; one that does not still emits the unparseable Turtle, since
 `validate` stays opt-in. No encoding changes, so no endpoint node, contract IRI or digest moves. **No type change**, no
 wire change. ikigai-vocab's core floor stays 0.1.91. **Vocabulary:** only `owl:versionInfo` (0.1.98 → 0.1.99).
+
+**0.1.100** carries one PR on top of 0.1.99, **PR 194** (ledger [#1361](http://localhost:1062/l/default/item/1361)): a
+NAME is encoded whatever it holds, so the emitters never write an unparseable document. The name escaper (now public as
+`ikigai_core::encode_name`, which ikigai-vocab's `to_turtle` calls) also percent-encodes `[`, `]` and every code point
+outside RFC 3987's `ucschar`, in an endpoint id, an input name, a door pattern, a thread name and an explain binding key:
+`http://[::1]/x` is `urn:ikigai:endpoint:http://%5B::1%5D/x`. Before, those characters were spelled raw and the endpoint
+node, the contract IRI, the match IRI and every document carrying them were refused by an IRI parser. An authored IRI (a
+`class`, a `requires` scope, a plan id) keeps its brackets: `escape_iri_fragment` does not change. `Description::validate`
+admits brackets, still refuses a non-`ucschar` name as the strict opt-in, and returns `Error::InvalidArgument` naming the
+field for both of its refusals (the IRIREF one was `Error::Endpoint`). **What a consumer observes:** only names that
+produced unparseable IRIs are respelled (a test sweeps every code point against the old rule), contract digests do not
+move, and the lenient parse still accepts the raw spelling. The shared contract vectors gain a `core/bracket-names` door;
+the Python and Deno faces must follow. ikigai-vocab's core floor moves to 0.1.100 (`encode_name`). **Vocabulary:** only
+`owl:versionInfo`.
