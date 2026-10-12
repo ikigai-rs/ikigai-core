@@ -2057,3 +2057,33 @@ a node typed into a family it is not in. **What a consumer observes:** nothing i
 satisfies it". An exact requirement's text is byte-identical. A page or test that prints the whole old wildcard text (the
 tutorial's `code/authority.md` and the gonk book's `ledger/your-own.md`) needs the new line when it takes this release;
 a `contains` on the scope still matches. **No type change**, no wire change. **Vocabulary:** only `owl:versionInfo`.
+
+**0.1.98** is the release of main after 0.1.97, and it exists because **0.1.97 on crates.io was published from the wrong
+commit**: `ccf0cdb`, the head of the DRAFT vocabulary branch (ikigai-rs/ikigai-core PR 185), one unmerged commit on top
+of the release commit `e7d21b5`. So the published 0.1.97 carries draft terms (`ik:principal`, `ik:holds`,
+`ik:egressContext`, `ik:sharedWith`, `ik:maxEntryBytes`, `ik:regionCount` among them) and lacks PRs 186-190. **Those draft
+terms are NOT part of the vocabulary**: they await PR 185's review, `/ns` never served them, and 0.1.97 is yanked. Take
+0.1.98: it is 0.1.97 as merged (the family floor refusal above) plus five PRs merged on main after its release commit:
+- **PR 186** (ledger [#1113](http://localhost:1060/l/default/item/1113)), tests only: `contract_vectors.json` gains the
+  `core/hostile-terms` door (a hostile class and requires, control characters in summaries), and every door's Turtle is
+  parsed back.
+- **PR 187** (ledger [#1345](http://localhost:1060/l/default/item/1345)): a `%` in an endpoint id or input name is encoded
+  as `%25` in the Meta Turtle face's endpoint and input node IRIs and in explain's `ik:answer`, so `to_turtle` no longer
+  emits an IRI a parser refuses. New door `core/percent-names`; `deno/edge` and `python/guarded` change bytes.
+- **PR 188** (ledger [#1352](http://localhost:1060/l/default/item/1352)): the same rule in the other NAME positions: plan
+  var, input and argument IRIs, thread IRIs (`urn:kernel:cache`, `threads`, `dependents`), explain binding keys and
+  validate's `sh:resultPath` (which now joins the catalog for a name like `a%41`). A plan id keeps every real `%XX` escape;
+  only a bare `%` becomes `%25`, so no plan IRI that parsed before changes.
+- **PR 189** (ledger [#1356](http://localhost:1060/l/default/item/1356)): an authored scope is one term in every face. The
+  manifold's `ik:requires` and explain's `ik:requires`/`ik:lacks` use the catalog's rule: a `urn:`/`http(s)://` scope is
+  escaped and then parsed, bracketed only when the escaped form is an IRI, and a literal otherwise.
+- **PR 190** (ledger [#791](http://localhost:1060/l/default/item/791)): the floor memo degrades gracefully past its bound
+  (a sweep evicts down to three quarters of it, so a round-robin over 4097 live endpoints misses a quarter of the time,
+  not every time), and `escape_iri_fragment` writes hex directly (same bytes, about 7x faster).
+
+**What a consumer observes:** Turtle faces that carried a bare `%` in a name or an unparseable scope now parse, with
+`%25` in those IRIs and a literal for such a scope; a root with more than 4096 live endpoints re-describes far less
+often. Contract digests,
+contract IRIs and match IRIs do not move. **No type change**, no wire change. ikigai-vocab's core floor stays 0.1.91.
+**Vocabulary:** only `owl:versionInfo` (0.1.97 → 0.1.98 against `/ns`, which was deployed from main and never served
+the draft terms).
