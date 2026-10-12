@@ -185,6 +185,10 @@
       "@id": "ik:droppedItems",
       "@type": "xsd:nonNegativeInteger"
     },
+    "egressContext": {
+      "@id": "ik:egressContext",
+      "@type": "@id"
+    },
     "endpoint": {
       "@id": "ik:endpoint",
       "@type": "@id"
@@ -214,6 +218,10 @@
     "groundingFocus": "ik:groundingFocus",
     "hangsFrom": {
       "@id": "ik:hangsFrom",
+      "@type": "@id"
+    },
+    "holds": {
+      "@id": "ik:holds",
       "@type": "@id"
     },
     "id": "ik:id",
@@ -252,6 +260,10 @@
     },
     "match": "ik:match",
     "matchKind": "ik:matchKind",
+    "maxEntryBytes": {
+      "@id": "ik:maxEntryBytes",
+      "@type": "xsd:positiveInteger"
+    },
     "maxHops": {
       "@id": "ik:maxHops",
       "@type": "xsd:integer"
@@ -304,6 +316,10 @@
       "@type": "@id"
     },
     "prefix": "ik:prefix",
+    "principal": {
+      "@id": "ik:principal",
+      "@type": "@id"
+    },
     "promptKind": "ik:promptKind",
     "reanchored": {
       "@id": "ik:reanchored",
@@ -316,6 +332,10 @@
     "ref": {
       "@id": "ik:ref",
       "@type": "@id"
+    },
+    "regionCount": {
+      "@id": "ik:regionCount",
+      "@type": "xsd:nonNegativeInteger"
     },
     "repo": "ik:repo",
     "repository": {
@@ -383,6 +403,10 @@
     },
     "sharedLayer": {
       "@id": "ik:sharedLayer",
+      "@type": "@id"
+    },
+    "sharedWith": {
+      "@id": "ik:sharedWith",
       "@type": "@id"
     },
     "shownClassPartitions": {

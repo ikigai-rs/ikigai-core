@@ -34,8 +34,10 @@ const CLASSES: [&str; 9] = [
     "Handback",
 ];
 
-/// The properties arc 1 names. Only `layerModel` declares a domain.
-const PROPERTIES: [&str; 12] = [
+/// The properties arc 1 names, then the four ledger #1214 added (a layer's egress
+/// context, entry bound and sharing decision, and a participant's grants). Only
+/// `layerModel` declares a domain.
+const PROPERTIES: [&str; 16] = [
     "layerModel",
     "body",
     "brief",
@@ -47,10 +49,17 @@ const PROPERTIES: [&str; 12] = [
     "seq",
     "supersedes",
     "inReplyTo",
-    // Not arc 1's, and listed so the example is checked against it: see
+    "egressContext",
+    "maxEntryBytes",
+    "sharedWith",
+    "holds",
+    // Not the family's, and listed so the example is checked against it: see
     // `the_trap_check_sees_a_mistyping`.
     "layer",
 ];
+
+/// The family's own properties: every one of `PROPERTIES` but the last.
+const FAMILY: usize = PROPERTIES.len() - 1;
 
 fn ik(term: &str) -> String {
     format!("{NS}{term}")
@@ -194,7 +203,7 @@ fn the_layer_family_is_defined() {
         .iter()
         .filter_map(|t| named(&t.subject).map(String::from))
         .collect();
-    for term in CLASSES.iter().chain(&PROPERTIES[..11]) {
+    for term in CLASSES.iter().chain(&PROPERTIES[..FAMILY]) {
         assert!(
             subjects.contains(&ik(term)),
             "ik:{term} is a layer term (ledger #1182) and is not declared"
@@ -210,7 +219,7 @@ fn the_layer_family_is_defined() {
     // Only an ik:Layer has an access model. Every other property is carried by more
     // than one kind of entry now or by design, so it declares no domain: checked on a
     // DECLARATION line, since the comments argue about domains in prose.
-    for property in &PROPERTIES[..11] {
+    for property in &PROPERTIES[..FAMILY] {
         let b = block(property, "rdf:Property");
         let domain = b
             .lines()
@@ -275,7 +284,7 @@ fn the_example_types_every_node_the_family_describes() {
         .filter_map(|t| named(&t.subject))
         .collect();
     let used: BTreeSet<&str> = triples.iter().map(|t| t.predicate.as_str()).collect();
-    for property in &PROPERTIES[..11] {
+    for property in &PROPERTIES[..FAMILY] {
         assert!(
             used.contains(ik(property).as_str()),
             "the example uses ik:{property}, so its domain and range are checked"
@@ -362,6 +371,8 @@ fn the_trap_check_sees_a_mistyping() {
         ("evidence", "Handback"),
         ("body", "Question"),
         ("seq", "Question"),
+        // A person and a machine both hold grants.
+        ("holds", "Machine"),
     ] {
         let mut narrowed = Schema::load();
         narrowed.domains.insert(ik(property), ik(domain));

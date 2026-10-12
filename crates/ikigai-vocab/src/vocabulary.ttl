@@ -661,7 +661,7 @@ ik:from a rdf:Property ;
 
 ik:RouteRequest a rdfs:Class ;
     rdfs:label "RouteRequest" ;
-    rdfs:comment "The resolved request a route produced: a skolemized node carrying each captured path variable (as ik:<var>) plus ik:principal / ik:principalId from the credential. The target of a route's ik:shape validation." .
+    rdfs:comment "The resolved request a route produced: a skolemized node carrying each captured path variable (as ik:<var>) plus ik:principal, the credential's subject IRI. The target of a route's ik:shape validation. The principal's bare id is not a term of its own: a route takes it with an ik:bind whose ik:from is \"principalId\", and in a graph the IRI is the identity." .
 
 ik:CorsPolicy a rdfs:Class ;
     rdfs:label "CorsPolicy" ;
@@ -755,7 +755,7 @@ ik:about a rdf:Property ;
     rdfs:domain ik:Explanation ;
     rdfs:range rdfs:Resource ;
     rdfs:label "about" ;
-    rdfs:comment "The browse resource an explanation is about — the resolvable urn:repo: IRI it was derived from. The subject link of the archive: every entry for a resource is found by matching this." .
+    rdfs:comment "The browse resource an explanation is about — the resolvable urn:repo: IRI it was derived from. The subject link of the archive: every entry for a resource is found by matching this. ⚠ Not a general \"about\": its domain types every subject that carries it an ik:Explanation, so a layer entry, a brief or a ledger record saying what it is about uses dcterms:subject (no domain), as a layer host's `latest about=` does by default." .
 
 ik:contentHash a rdf:Property ;
     rdfs:range xsd:string ;
@@ -846,6 +846,11 @@ ik:totalBytes a rdf:Property ;
     rdfs:range xsd:nonNegativeInteger ;
     rdfs:label "totalBytes" ;
     rdfs:comment "The full size in bytes of the input a derivation was asked about — the denominator to ik:reviewedBytes, and equal to it when nothing was truncated. Distinct from ik:byteSize, which is a file's size on disk: an input may be a diff or a rendered section that no file holds. No domain, for the reason stated on ik:reviewedBytes." .
+
+ik:regionCount a rdf:Property ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "regionCount" ;
+    rdfs:comment "How many regions a derivation tiled its input into: EVERY region, whatever came of it — answered from a memo an earlier pass left, derived fresh, or read and left with no memo (every quote misquoted, or the answer was cut at the budget). The denominator a statement such as \"2 of 3 regions unchanged, 1 without a memo\" needs. The memos a pass reused are its prov:used links to region entries (each a prov:Collection) and the memos it wrote name it with prov:wasGeneratedBy, but a region that earned no memo leaves no link at all, so without this number a pass on record can only say \"at least\" — the same absence-doing-the-work-of-a-claim that ik:findingCount exists to end. Stated on a pass that tiled; absent on one with no regions (a diff) and on entries archived before the term, which is not the same as zero. Deliberately the only region count: how many were reused or derived is a count over those links, and a stored copy of a count the graph already holds is a copy that can disagree. No domain, for the reason stated on ik:findingCount: tiling a large input is a fact about any derivation, and rdfs:domain ik:Review would type every other tiled derivation an LLM review pass." .
 
 # ---- review findings (urn:iki:finding:*) -------------------------------------
 # The PENDING QUEUE an ik:Review writes into, and the human act that empties it.
@@ -947,6 +952,23 @@ ik:appLayer a rdf:Property ;
     rdfs:label "appLayer" ;
     rdfs:comment "The {app}.a11y.toml override that contributed, by its urn:file: IRI — the HIGHER precedence layer, so where both name a key this one won. Determined by the file's NAME, never by position: only files that exist are recorded, so an app override sits at index 0 whenever the shared file is absent." .
 
+# ---- authority (who asks, and what they hold) ---------------------------------
+# The kernel carries identity as a capability scope (urn:cap:principal:<iri>, minted by
+# the door that authenticated the caller) and authority as the scopes a capability
+# holds. These two terms let a graph state both, so they join what ik:requires and
+# ik:lacks already say: "may P do X" is X ik:requires ?s . P ik:holds ?s, with the
+# action found in the catalog rather than parsed out of a scope IRI.
+
+ik:principal a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "principal" ;
+    rdfs:comment "Who a request is for: the principal IRI the door that authenticated the caller minted (the urn:cap:principal:<iri> scope its capability carries), carried verbatim and compared as a string. On an ik:RouteRequest, the credential's subject, which a route's ik:shape can cross-check against a captured variable; on an answer about the caller (a layer host's urn:layers:me), the principal it describes. An IRI, never a literal: the same IRI from two doors is the same principal, and a literal joins nothing. Not prov:wasAttributedTo, which says who made an entity: a principal is who was asking, whether or not anything was made. No domain: a request, an answer about its caller and a log entry's attribution all carry it, and a domain would type each as one of the others." .
+
+ik:holds a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "holds" ;
+    rdfs:comment "A capability scope the subject holds — a grant, the converse of ik:requires: a participant holds urn:cap:layer:say:talk because a collaboration's manifest granted it. Multi-valued, one triple per scope, and the scope IRI itself, never a description of it, so the same IRI joins the ik:requires on the contract that demands it. The graph a triple is in says who granted it (a manifest's face states its own grants). States what was granted, not what was checked: satisfaction is the kernel's predicate, under which a wildcard scope (urn:cap:net:*) is held by any grant under its prefix, which a plain join does not see; and a held scope can still be refused by an exclusion. No domain: a person, an agent, a machine and a door's capability all hold scopes, and a domain would type each as one of the others." .
+
 # ---- natural language drafting (urn:nl:grounding, urn:nl:sparql) -------------
 # What a natural-language drafter is given, and the provenance of what it drafts
 # (ikigai-nl). The grounding is data under ONE caller's capability: the actions it
@@ -958,6 +980,17 @@ ik:appLayer a rdf:Property ;
 # before, prov:wasAttributedTo the LLM door). These terms carry only what those
 # vocabularies do not; they were minted under https://ikigai-rs.dev/ns/nl# and
 # promoted here (ledger #974) rather than deployed as a namespace of their own.
+#
+# A predicate's VALUE KINDS and a small closed set of its VALUES are not ik: terms: the
+# property partition is a void:Dataset, and void-ext (http://ldf.fi/void-ext#, every
+# term rdfs:domain void:Dataset, so nothing is typed that is not one already) states
+# both as nested partitions — void-ext:datatypePartition with void-ext:datatype and
+# void:triples per literal datatype; void-ext:distinctIRIReferenceObjects,
+# void-ext:distinctBlankNodeObjects and void-ext:distinctLiterals for which kinds occur;
+# void-ext:objectPartition with void-ext:object and void:triples per value, the set
+# complete when the partitions number the property partition's void:distinctObjects.
+# SHACL's sh:nodeKind, sh:datatype and sh:in were checked and declined: they PRESCRIBE
+# what a shape admits, and a grounding DESCRIBES what a graph holds (ledger #1293).
 #
 # Every count says "first N of M": a part or a graph shape narrowed by a focus or
 # bounded states both numbers, so a bound can never read as the whole. Counts are
@@ -1026,7 +1059,7 @@ ik:draftError a rdf:Property ;
 ik:draftWarning a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "draftWarning" ;
-    rdfs:comment "One thing a check could not decide about an attempt of a drafting — an IRI past the grounding's bound, a parameter the preview left unbound. Not an ik:draftError: a warning alone leaves ik:draftValid true, so it goes to the person reviewing the draft rather than back to the model. Repeated per warning. No domain, for the reason stated on ik:draftValid." .
+    rdfs:comment "One thing a check could not decide about an attempt of a drafting — an IRI past the grounding's bound, a parameter the preview left unbound, a preview that matched nothing. Not an ik:draftError: a warning alone leaves ik:draftValid true, and it goes to the person reviewing the draft. A warning that the preview is EMPTY goes back to the model as well, with the check's evidence (the triple patterns that match nothing on their own); the repair loop shows the model those warnings, and only those, in place of errors. So a warning's text is recorded exactly as it was shown, like an ik:draftError's, and the provenance says what the next attempt was answering either way. Repeated per warning. No domain, for the reason stated on ik:draftValid." .
 
 # ---- layers (urn:layer:*, urn:collab:*: shared spaces between participants) -
 # A LAYER is one independent shared space, urn:layer:{layer}, with its own access
@@ -1055,6 +1088,14 @@ ik:draftWarning a rdf:Property ;
 #
 # ⚠ A layer's JSON-LD context is its OWN allowlist document, never the CONTEXT this
 # crate generates: that one defines every ik: term and so would let all of them cross.
+#
+# Borrowed rather than minted, each domain-free where it is used (ledger #1214): a
+# layer's admission shapes are its dcterms:conformsTo (DCMI states only
+# dcam:rangeIncludes dcterms:Standard, which entails nothing); its feed is its
+# sioc:feed (no domain, no range); what an entry is about is dcterms:subject, the
+# default of a layer's configurable `about` predicate (never ik:about, whose domain
+# types its subject an ik:Explanation, ledger #1201); a participant's grants are
+# ik:holds, in the authority section above.
 # tests/layers.rs runs every domain and range here over example graphs.
 
 ik:Layer a rdfs:Class ;
@@ -1105,6 +1146,21 @@ ik:layerModel a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "layerModel" ;
     rdfs:comment "The access model an ik:Layer's definition chooses, one word from the closed set the layer host's code defines: \"channel\" (append-only entries, one graph per author), \"tuplespace\" (out, read and an atomic take) or \"graph\" (each author replaces its own graph). A model is code and a layer is configuration. The one property of this family with a domain: only a layer has an access model." .
+
+ik:egressContext a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "egressContext" ;
+    rdfs:comment "The JSON-LD context that is the subject's EGRESS ALLOWLIST, by IRI (a layer's urn:layer:{layer}:context): the terms its JSON face may carry out, and so the only properties that cross to a reader of that face. Its own document, deliberately never the vocabulary's generated context, which defines every term and would let all of them cross. Not rdfs:seeAlso, which says only that more is to be read there, and says the same of the shapes and the feed. No domain: any resource with a JSON face it bounds this way may name one." .
+
+ik:maxEntryBytes a rdf:Property ;
+    rdfs:range xsd:positiveInteger ;
+    rdfs:label "maxEntryBytes" ;
+    rdfs:comment "The most bytes one entry's content may have when the subject admits it (a layer's entry_max, one message or one tuple). A larger entry is REFUSED, never truncated: a bound that truncates hands a reader a fragment that looks whole. Stated so a writer can stay under it rather than learn it from a refusal. Positive because a bound of zero admits nothing and is a configuration error. No domain: any resource that admits writes under a size bound may state one." .
+
+ik:sharedWith a rdf:Property ;
+    rdfs:range ik:Collaboration ;
+    rdfs:label "sharedWith" ;
+    rdfs:comment "A collaboration the subject's own definition DECIDES it is shared with: a layer that names none may be mounted by at most one manifest, and one that names some may be mounted only by those. The decision, not the fact of a mount: a manifest's dcterms:hasPart says what it mounts, and this says what the layer allows, so a layer shared with a collaboration that has not mounted it yet says so, and a private layer says nothing. Not dcterms:isPartOf, which DCMI states as the inverse of dcterms:hasPart and so reads as the mount. The range is the class: whatever this names is an ik:Collaboration, which is how the decision is made. No domain: a layer is the access boundary today, and a domain would type anything shared the same way in future a layer." .
 
 ik:body a rdf:Property ;
     rdfs:range xsd:string ;
