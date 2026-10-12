@@ -33,6 +33,16 @@ itself from core 0.1.92 (ikigai-python PR 28, ikigai-deno PR 22). The only outpu
 changed since is the ledger #1096 refusal: `urn:ikigai:match:source:%+1` parsed to
 `\u0001` before and is `null` now.
 
+Doors named `core/…` are core's own. `core/hostile-terms` (ledger #1113) is the hostile
+`class`/`requires` case: a `class` or capability scope is meant to be an IRI but nothing
+validates it, so core percent-encodes it when the result is a real IRI and emits a
+**literal** when it is not, whatever its prefix (`https://cap> . <urn:z` is a literal);
+its title and summaries carry newline, CR and tab. A face that writes `<{class}>` raw, or
+chooses `<…>` for a scope by prefix alone, fails that door's `turtle` bytes.
+`tests/contract_vectors.rs` also parses every door's Turtle back; `deno/edge` is listed
+there as a known exception (an id with a bare `%`, a core emission defect reported for
+its own arc), so do not take its Turtle as an example of output that must parse.
+
 ## Lenient in, canonical out
 
 Postel's law (ledger #1107, decided 2026-10-10). A percent escape is `%` and exactly two
