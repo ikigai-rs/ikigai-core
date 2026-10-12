@@ -1209,4 +1209,34 @@ mod tests {
         );
         assert!(select_action(&space, &[PERSON]).is_empty());
     }
+
+    #[test]
+    fn the_manifold_order_does_not_depend_on_binding_order() {
+        // ledger #791 (4) read the sort's (missing_optional, endpoint, verb) key as able
+        // to tie and fall back to enumeration order. It cannot: one match per door and
+        // verb is kept, and the door is the endpoint key, so no two matches share
+        // (endpoint, verb). Two copies of one contract (same id, same action IRI) on
+        // two doors, bound in both orders, are the case a tie would show up in.
+        let endpoint = |id: &'static str| {
+            FnEndpoint::new(id, |_inv| {
+                Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+            })
+            .with_description(Description::new(id).verb(Verb::Source).verb(Verb::Sink))
+        };
+        let doors = ["urn:demo:b", "urn:demo:a", "urn:demo:c", "urn:demo:a2"];
+        let bind = |order: &mut dyn Iterator<Item = &&str>| {
+            order.fold(EndpointSpace::new(), |space, door| {
+                let id = if door.starts_with("urn:demo:a") {
+                    "same"
+                } else {
+                    "other"
+                };
+                space.bind(Exact::new(*door), endpoint(id))
+            })
+        };
+        let forward = select_actions(&bind(&mut doors.iter()), &ActionQuery::default());
+        let reverse = select_actions(&bind(&mut doors.iter().rev()), &ActionQuery::default());
+        assert_eq!(forward.len(), 2 * doors.len());
+        assert_eq!(forward, reverse);
+    }
 }
