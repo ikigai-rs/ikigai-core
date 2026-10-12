@@ -3496,15 +3496,12 @@ impl Kernel {
                             m.action,
                             m.verb
                         ));
+                        // A scope is authored and unvalidated: escaped, then PARSED, and a
+                        // literal when it still is not an IRI (`urn:cap:100%` bracketed made
+                        // the whole manifold unparseable, ledger #1356). The catalog's rule,
+                        // so a scope is one term in both graphs.
                         for scope in &m.requires {
-                            let term = if scope.starts_with("urn:")
-                                || scope.starts_with("http://")
-                                || scope.starts_with("https://")
-                            {
-                                format!("<{}>", crate::escape_iri_fragment(scope))
-                            } else {
-                                format!("\"{}\"", scope.replace('\\', "\\\\").replace('"', "\\\""))
-                            };
+                            let term = crate::iri::scope_term(scope);
                             body.push_str(&format!(" ;\n    ik:requires {term}"));
                         }
                         if m.missing_optional > 0 {

@@ -73,6 +73,34 @@ pub fn escape_iri_fragment(s: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// A capability scope (an AUTHORED string, validated by nothing) as a Turtle term, by the
+/// rule the catalog uses (`ikigai-vocab`'s `cap_term`), so every face spells one scope as
+/// one term and they join on it: the manifold's and explain's `ik:requires`, explain's
+/// `ik:lacks`, the catalog's `ik:requires`.
+///
+/// - A scope that looks like an IRI (`urn:…`, `http(s)://…`) is escaped
+///   ([`escape_iri_fragment`]) and then PARSED, and is a bracketed IRI only if the escaped
+///   form is one. Escaping alone is not enough: a legal `IRIREF` is not necessarily a
+///   legal IRI. The escaper leaves `%` alone (an authored IRI may carry real escapes), so
+///   `urn:cap:100%` stays a malformed escape, and an escaped `https://ok> . <urn:z` has a
+///   non-numeric port; either one, bracketed, made a parser refuse the WHOLE document
+///   (ledger #1356). What still is not an IRI degrades to a literal of the value as
+///   written: the wrong type for the predicate, but visible, and never a parse failure.
+/// - Anything else is a legacy descriptive label (`cap:net`), a literal, as
+///   `ik:requires`' definition says.
+///
+/// vocab cannot call this private copy; `ikigai-vocab/tests/manifold_identity.rs` pins the
+/// two against each other.
+pub(crate) fn scope_term(scope: &str) -> String {
+    if scope.starts_with("urn:") || scope.starts_with("http://") || scope.starts_with("https://") {
+        let escaped = escape_iri_fragment(scope);
+        if Iri::parse(escaped.as_ref()).is_ok() {
+            return format!("<{escaped}>");
+        }
+    }
+    format!("\"{}\"", crate::topology::escape_literal(scope))
+}
+
 /// The Turtle `IRIREF` exclusion set, stated once so the predicate and the
 /// escaper can never disagree.
 fn is_iri_forbidden(c: char) -> bool {

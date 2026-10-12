@@ -336,3 +336,84 @@ fn validate_keeps_the_old_action_iri_until_it_is_ambiguous() {
         "{refused}"
     );
 }
+
+/// Ledger #1356: one authored scope is ONE term in every face that writes it — the
+/// manifold row's `ik:requires`, the catalog contract's `ik:requires` (this crate's
+/// `cap_term`), and explain's `ik:requires`/`ik:lacks` (core's private `scope_term`, which
+/// cannot be shared with this crate). The two rules are separate copies, so this is what
+/// keeps them from drifting: hostile scopes (a bare `%`, a `%zz`, an escaped string that is
+/// still no IRI, an injection attempt), a real escape, a legacy label and a plain scope.
+#[test]
+fn a_scope_is_one_term_in_the_manifold_the_catalog_and_explain() {
+    const INSPECT: &str = "urn:cap:kernel:inspect";
+    let door = "urn:x:door";
+    for scope in [
+        "urn:cap:100%",
+        "urn:cap:%zz",
+        "https://ok> . <urn:z",
+        "urn:cap:x> . <urn:everything",
+        "urn:cap:a b",
+        "urn:cap:a%20b",
+        "cap:net",
+        "urn:cap:cal:write",
+    ] {
+        let kernel = Kernel::with_meta_renderer(
+            Arc::new(EndpointSpace::new().bind(
+                Exact::new(door),
+                upper(Description::new("door").verb(Verb::Source).requires(scope)),
+            )),
+            Arc::new(TurtleRenderer),
+        );
+        let on = |all: &[Triple], node: &str, predicate: &str| -> Vec<Term> {
+            all.iter()
+                .filter(|t| {
+                    subject(t) == node && t.predicate.as_str() == format!("{IK}{predicate}")
+                })
+                .map(|t| t.object.clone())
+                .collect()
+        };
+
+        let manifold = triples(&source(
+            &kernel,
+            "urn:kernel:actions",
+            &[("as", "text/turtle")],
+        ));
+        let row = format!("urn:ikigai:match:source:{door}");
+        let want = on(&manifold, &row, "requires");
+        assert_eq!(want.len(), 1, "{scope:?}: {want:?}");
+        let contract = on(&manifold, &row, "contract");
+        let Some(Term::NamedNode(contract)) = contract.first() else {
+            panic!("{scope:?}: no contract on the row");
+        };
+
+        let catalog = triples(&source(&kernel, "urn:kernel:catalog", &[]));
+        assert_eq!(
+            on(&catalog, contract.as_str(), "requires"),
+            want,
+            "{scope:?}: the catalog spells it differently"
+        );
+
+        let explained = String::from_utf8(
+            block_on(
+                kernel.issue(
+                    Request::new(Verb::Source, Iri::parse("urn:kernel:explain").unwrap())
+                        .with_arg("target", ArgRef::Inline(door.as_bytes().to_vec()))
+                        .with_arg("as", ArgRef::Inline(b"text/turtle".to_vec())),
+                    &Capability::scoped([INSPECT]),
+                ),
+            )
+            .unwrap()
+            .bytes,
+        )
+        .unwrap();
+        let explained = triples(&explained);
+        for predicate in ["requires", "lacks"] {
+            let terms: Vec<Term> = explained
+                .iter()
+                .filter(|t| t.predicate.as_str() == format!("{IK}{predicate}"))
+                .map(|t| t.object.clone())
+                .collect();
+            assert_eq!(terms, want, "{scope:?}: explain's ik:{predicate}");
+        }
+    }
+}
