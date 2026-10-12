@@ -872,6 +872,40 @@
           "Meta"
         ]
       }
+    },
+    {
+      "name": "core/hash-query-names",
+      "pattern": "urn:hq:{key}?view=full#top",
+      "description": {
+        "id": "a#b?c#d",
+        "inputs": [
+          {
+            "class": "http://www.w3.org/2001/XMLSchema#string",
+            "name": "x#y",
+            "required": true,
+            "source": "argument",
+            "summary": "a name with a hash"
+          },
+          {
+            "name": "q?r",
+            "required": false,
+            "source": "argument",
+            "summary": "a name with a question mark"
+          }
+        ],
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:hq?scope#all"
+        ],
+        "summary": "",
+        "title": "Hash and query names",
+        "verbs": [
+          "Source",
+          "Meta"
+        ]
+      }
     }
   ],
   "contracts": [
@@ -1070,6 +1104,20 @@
       "action": {
         "verb": "Source"
       }
+    },
+    {
+      "name": "hash-id",
+      "id": "a#b#c",
+      "action": {
+        "verb": "Source"
+      }
+    },
+    {
+      "name": "query-id",
+      "id": "a?b",
+      "action": {
+        "verb": "Source"
+      }
     }
   ],
   "patterns": [
@@ -1081,7 +1129,9 @@
     "urn:ts:kv:{bucket}:{key}",
     "urn:ts:naïve 𝄞|x",
     "http://[::1]/{path}",
-    "urn:x:del nel pua nonchar﷐￿"
+    "urn:x:del nel pua nonchar﷐￿",
+    "urn:x:a#b#c",
+    "urn:x:{k}?q=1"
   ],
   "parses": [
     "urn:ikigai:match:source:urn:file:%7Bpath%7D",
@@ -1123,6 +1173,11 @@
     "urn:ikigai:match:source:http://[::1]/x",
     "urn:ikigai:match:source:http://%5B::1%5D/x",
     "urn:ikigai:match:source:a%7Fb%C2%85c",
-    "urn:ikigai:contract:http://[::1]/x:source:b3:abababababababababababababababababababababababababababababababab"
+    "urn:ikigai:contract:http://[::1]/x:source:b3:abababababababababababababababababababababababababababababababab",
+    "urn:ikigai:match:source:a%23b%3Fc",
+    "urn:ikigai:match:source:a#b?c",
+    "urn:ikigai:match:source:a%23b%3fc",
+    "urn:ikigai:contract:a#b#c:source:b3:abababababababababababababababababababababababababababababababab",
+    "urn:ikigai:contract:a%23b%23c:source:b3:abababababababababababababababababababababababababababababababab"
   ]
 }

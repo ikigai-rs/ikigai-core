@@ -78,15 +78,17 @@ fn parse_verb_segment(name: &str) -> Option<Verb> {
 
 /// Whether a character must be percent-encoded in a NAME: `%` itself (so the encoding is
 /// injective), everything a Turtle `IRIREF` cannot carry, `[` and `]` (an IRI admits them
-/// only around an IP-literal host, never in the path a name lands in), and every code point
-/// the IRI grammar refuses although an `IRIREF` carries it (DEL, the C1 controls, private
-/// use, the noncharacters: [`is_non_ucschar`](crate::iri::is_non_ucschar)).
+/// only around an IP-literal host, never in the path a name lands in), `#` and `?` (a name
+/// is one path segment, and either would end the path there and move the rest of the name
+/// into a fragment or a query), and every code point the IRI grammar refuses although an
+/// `IRIREF` carries it (DEL, the C1 controls, private use, the noncharacters:
+/// [`is_non_ucschar`](crate::iri::is_non_ucschar)).
 fn must_encode(c: char) -> bool {
     c == '%'
         || c <= '\u{20}'
         || matches!(
             c,
-            '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\' | '[' | ']'
+            '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\' | '[' | ']' | '#' | '?'
         )
         || crate::iri::is_non_ucschar(c)
 }
@@ -103,14 +105,26 @@ fn must_encode(c: char) -> bool {
 ///
 /// Encoded, as the upper-case `%XX` of each UTF-8 byte: `%` (so the encoding is injective,
 /// and inverts exactly), what a Turtle `IRIREF` cannot carry (space, the C0 controls,
-/// `<>"{}|^` `` ` `` and `\`), `[` and `]`, and every code point outside RFC 3987's
-/// `ucschar` (DEL, the C1 controls, private use, the noncharacters). Whatever a name holds,
-/// the IRI parses. Everything else, ordinary Unicode included, is written as it is, and a
-/// name with nothing to encode is returned borrowed.
+/// `<>"{}|^` `` ` `` and `\`), `[` and `]`, `#` and `?`, and every code point outside RFC
+/// 3987's `ucschar` (DEL, the C1 controls, private use, the noncharacters). Whatever a name
+/// holds, the IRI parses, and the whole name stays in the IRI's path. Everything else,
+/// ordinary Unicode included, is written as it is, and a name with nothing to encode is
+/// returned borrowed.
 ///
-/// ⚠ This is for NAMES only. An authored IRI (a `class`, a `requires` scope, a plan id)
-/// goes through [`escape_iri_fragment`](crate::escape_iri_fragment) instead, which leaves
-/// `%` and the brackets alone: its escapes are real, and an IPv6 host needs its brackets.
+/// ⚠ **`#` and `?` are encoded since 0.1.101, and that RESPELLS names that parsed before**
+/// (ledger #1390). A name is one path segment: in `urn:ikigai:endpoint:{id}` a raw `#`
+/// moved the rest of the name into a fragment, so anything that drops fragments saw `a#b`
+/// and `a#c` as one resource, and a second `#` (id `a#b#c`, or an input `x#y` under id
+/// `a#b`) made the document unparseable. A `?` moved the rest into a query the same way.
+/// So an id `a#b` was `urn:ikigai:endpoint:a#b` and is now `urn:ikigai:endpoint:a%23b`, and
+/// its contract and match IRIs move with it. The brackets and the non-`ucschar` code points
+/// (0.1.100, ledger #1361) respelled only names whose IRIs never parsed.
+///
+/// ⚠ This is for NAMES only. An authored IRI (a `class`, a `requires` scope, a request
+/// target) goes through [`escape_iri_fragment`](crate::escape_iri_fragment) instead, which
+/// leaves `%`, the brackets, `#` and `?` alone: its escapes are real, an IPv6 host needs
+/// its brackets, and an authored IRI may carry a fragment (`xsd:string` is one). A plan id
+/// is spelled as a name, keeping only its real `%XX` escapes (`ikigai_vocab::plan`).
 ///
 /// ```
 /// use ikigai_core::encode_name;
@@ -123,6 +137,9 @@ fn must_encode(c: char) -> bool {
 /// // DEL, NEL, private use, a noncharacter: no IRI carries them raw.
 /// assert_eq!(encode_name("a\u{7F}b\u{85}c"), "a%7Fb%C2%85c");
 /// assert_eq!(encode_name("\u{E000}\u{FFFF}"), "%EE%80%80%EF%BF%BF");
+/// // A name is one path segment: `#` and `?` would start a fragment or a query.
+/// assert_eq!(encode_name("a#b"), "a%23b");
+/// assert_eq!(encode_name("a?b"), "a%3Fb");
 /// ```
 pub fn encode_name(s: &str) -> Cow<'_, str> {
     if !s.chars().any(must_encode) {
@@ -425,6 +442,11 @@ mod tests {
             "]",
             "a\u{7F}b\u{85}c\u{E000}d\u{FDD0}e\u{FFFF}f\u{10FFFF}",
             "%5B[",
+            // ledger #1390: a fragment or a query delimiter.
+            "a#b",
+            "a?b",
+            "a#b#c?d?e",
+            "%23#%3F?",
         ] {
             assert_eq!(decode_segment(&encode_name(s)).as_deref(), Some(s), "{s}");
         }
@@ -437,6 +459,10 @@ mod tests {
     /// character outside the new classes encodes exactly as the old rule did (`%` as `%25`,
     /// then the Turtle `IRIREF` set), and a character inside them is one whose old spelling
     /// no IRI parser accepts, so the name it respells produced an unparseable document.
+    ///
+    /// Ledger #1390 is the deliberate exception: `#` and `?` are the only characters whose
+    /// encoding respells a name that parsed (a single one, `a#b`), and the sweep says so
+    /// rather than skipping them.
     #[test]
     fn the_new_classes_respell_only_names_that_never_parsed() {
         fn old_rule(s: &str) -> String {
@@ -447,6 +473,16 @@ mod tests {
                 continue;
             };
             let name = format!("a{c}b");
+            if matches!(c, '#' | '?') {
+                // It parsed, with the rest of the name outside the path: respelled anyway.
+                let old = format!("urn:ikigai:endpoint:{}", old_rule(&name));
+                assert!(oxiri::Iri::parse(old.as_str()).is_ok(), "{old}");
+                assert_eq!(encode_name(&name), format!("a%{:02X}b", u32::from(c)));
+                let new = format!("urn:ikigai:endpoint:{}", encode_name(&name));
+                let parsed = oxiri::Iri::parse(new.as_str()).expect("parses");
+                assert_eq!((parsed.fragment(), parsed.query()), (None, None), "{new}");
+                continue;
+            }
             let new_class = matches!(c, '[' | ']') || crate::iri::is_non_ucschar(c);
             if new_class {
                 let old = format!("urn:ikigai:endpoint:{}", old_rule(&name));

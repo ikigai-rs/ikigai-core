@@ -12,7 +12,9 @@
 //!
 //! Brian decided (2026-10-12) that the emitters never write an unparseable document,
 //! whatever name an endpoint carries: both classes are percent-encoded in a NAME, and an
-//! authored IRI (a `class`, a `requires` scope, a plan id) keeps its brackets.
+//! authored IRI (a `class`, a `requires` scope) keeps its brackets. A plan id was treated as
+//! an authored IRI here; since 0.1.101 it is spelled as a name (ledger #1391,
+//! `tests/hash_query_names.rs`).
 
 use ikigai_core::{match_iri, ActionSpec, ArgSpec, Description, Verb};
 

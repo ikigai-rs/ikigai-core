@@ -68,11 +68,13 @@ pub const SPACE_ID: &str = "urn:iki:space:vocab";
 ///   character, written `%25`, then everything an `IRIREF` cannot carry — the rule
 ///   [`to_turtle`] spells an endpoint's input names with, so
 ///   `:input:{name}` is one spelling under a plan and under an endpoint;
-/// - the plan id is the IRI segment a stored plan is NAMED by, and a reader recovers it by
-///   stripping `urn:plan:`, so a real escape in it (`a%20b`) is kept byte for byte and only
-///   a `%` that does not start one (`100%`) is written `%25`. Re-encoding every `%` would
-///   rename each stored plan carrying an escape and make a plan read back and written again
-///   a different plan.
+/// - the plan id is spelled as a NAME too ([`ikigai_core::encode_name`]: `[`, `]`, `#`, `?`
+///   and the rest are encoded, since a plan id sits inside a `urn:plan:` path where none of
+///   them is legal, ledger #1391), with ONE exception: it is the IRI segment a stored plan
+///   is NAMED by, and a reader recovers it by stripping `urn:plan:`, so a real escape in it
+///   (`a%20b`) is kept byte for byte and only a `%` that does not start one (`100%`) is
+///   written `%25`. Re-encoding every `%` would rename each stored plan carrying an escape
+///   and make a plan read back and written again a different plan.
 ///
 /// ```
 /// use ikigai_vocab::plan;
@@ -94,35 +96,43 @@ pub const SPACE_ID: &str = "urn:iki:space:vocab";
 /// assert_eq!(plan::var_iri("p", "100%"), "urn:plan:p:var:100%25");
 /// assert_eq!(plan::process_iri("100%"), "urn:plan:100%25");
 /// assert_eq!(plan::process_iri("a%20b"), "urn:plan:a%20b");
+/// // A plan id is one path segment: no brackets, no fragment, no query.
+/// assert_eq!(plan::process_iri("a[0]"), "urn:plan:a%5B0%5D");
+/// assert_eq!(plan::step_iri("a#b", 1), "urn:plan:a%23b:step:1");
 /// ```
 pub mod plan {
     use std::borrow::Cow;
 
     use super::name_fragment;
 
-    /// Encode a plan id: a `%` that does not start a `%XX` escape is written `%25`, then
-    /// everything an `IRIREF` cannot carry. Idempotent, so an id read back out of a plan
-    /// IRI is written as the same IRI.
+    /// Encode a plan id: as a NAME ([`ikigai_core::encode_name`]), except that a real `%XX`
+    /// escape is kept byte for byte, so only a `%` that does not start one is written `%25`.
+    /// Idempotent, so an id read back out of a plan IRI is written as the same IRI.
+    ///
+    /// A plan id sits inside a `urn:plan:` path, where `[`, `]`, `#` and `?` are never legal
+    /// (ledger #1391): before 0.1.101 it went through
+    /// [`ikigai_core::escape_iri_fragment`], the escaper for AUTHORED IRIs, which keeps
+    /// them, so `a[0]` minted an IRI no parser accepts and `a#b` put the rest of every step,
+    /// var and input IRI into a fragment.
     fn id_fragment(plan_id: &str) -> Cow<'_, str> {
+        if !plan_id.contains('%') {
+            return ikigai_core::encode_name(plan_id);
+        }
         let bytes = plan_id.as_bytes();
         let starts_escape = |i: usize| {
             bytes.len() > i + 2 && bytes[i + 1..=i + 2].iter().all(u8::is_ascii_hexdigit)
         };
-        let lone: Vec<usize> = (0..bytes.len())
-            .filter(|&i| bytes[i] == b'%' && !starts_escape(i))
-            .collect();
-        if lone.is_empty() {
-            return ikigai_core::escape_iri_fragment(plan_id);
+        let mut out = String::with_capacity(plan_id.len() + 8);
+        let mut buf = [0u8; 4];
+        for (i, c) in plan_id.char_indices() {
+            if c == '%' && starts_escape(i) {
+                out.push('%');
+            } else {
+                // `%` (a lone one) is written `%25` here, exactly as a name's.
+                out.push_str(&ikigai_core::encode_name(c.encode_utf8(&mut buf)));
+            }
         }
-        let mut out = String::with_capacity(plan_id.len() + 2 * lone.len());
-        let mut from = 0;
-        for i in lone {
-            out.push_str(&plan_id[from..i]);
-            out.push_str("%25");
-            from = i + 1;
-        }
-        out.push_str(&plan_id[from..]);
-        Cow::Owned(ikigai_core::escape_iri_fragment(&out).into_owned())
+        Cow::Owned(out)
     }
 
     /// The IRI of the plan itself: `urn:plan:{plan-id}`.
