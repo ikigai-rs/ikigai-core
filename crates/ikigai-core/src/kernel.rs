@@ -1961,6 +1961,13 @@ impl Kernel {
     /// a namespace this table rewrites — says plainly that the grant looks
     /// un-migrated. Authority is never rewritten to make the check pass (that is how
     /// a silent *grant* is manufactured); the mismatch is reported instead.
+    ///
+    /// A FAMILY requirement (`prefix*`, satisfied by any held grant under the prefix,
+    /// as `cap_satisfies` reads it) also says so, because the endpoint is never
+    /// entered and cannot explain it itself (ledger #1292):
+    /// "capability does not grant `urn:cap:script:run:open-*` (declared by `…`; any
+    /// grant under `urn:cap:script:run:open-` satisfies it)". An exact requirement's
+    /// text is unchanged byte for byte; other repos' tests match it.
     fn denial_message(
         &self,
         scope: &str,
@@ -1968,10 +1975,18 @@ impl Kernel {
         capability: &Capability,
         alias: Option<&AliasHop>,
     ) -> String {
-        let mut message = format!(
-            "capability does not grant `{scope}` (declared by `{}`)",
-            request.target.as_str()
-        );
+        let target = request.target.as_str();
+        let mut message = match scope.strip_suffix('*') {
+            None => format!("capability does not grant `{scope}` (declared by `{target}`)"),
+            Some("") => format!(
+                "capability does not grant `{scope}` (declared by `{target}`; any grant at \
+                 all satisfies it)"
+            ),
+            Some(prefix) => format!(
+                "capability does not grant `{scope}` (declared by `{target}`; any grant \
+                 under `{prefix}` satisfies it)"
+            ),
+        };
         let Some(hop) = alias else {
             return message;
         };
@@ -7197,6 +7212,84 @@ mod tests {
         let unrelated = Capability::root().attenuate(["urn:cap:fs:read:/tmp".to_string()]);
         let err = block_on(kernel.issue(req(), &unrelated)).unwrap_err();
         assert!(matches!(err, Error::Denied(_)), "got {err:?}");
+    }
+
+    /// A floor refusal for a FAMILY requirement (`prefix*`) names what would satisfy
+    /// it. The endpoint is never entered on a denial, so the kernel's text is the
+    /// only explanation a caller gets: an ikigai-script name like `open-door` is
+    /// gated by `urn:cap:script:run:open-*`, and "does not grant `…open-*`" alone
+    /// reads as if a scope literally ending in `*` were wanted (ledger #1292).
+    #[test]
+    fn a_family_floor_refusal_names_what_satisfies_it() {
+        struct ScriptLike;
+        #[async_trait::async_trait]
+        impl Endpoint for ScriptLike {
+            async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+                Ok(Representation::new(
+                    ReprType::new("text/plain"),
+                    b"ok".to_vec(),
+                ))
+            }
+            fn name(&self) -> &str {
+                "scriptlike"
+            }
+            fn describe(&self) -> Description {
+                Description::new("scriptlike")
+                    .verb(Verb::Source)
+                    .requires("urn:cap:script:run:open-*")
+            }
+        }
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:script:open-door"), ScriptLike),
+        ));
+        let req = || Request::new(Verb::Source, iri("urn:script:open-door"));
+        let holds_nothing_under = Capability::scoped(["urn:cap:script:run:close-door"]);
+        let err = block_on(kernel.issue(req(), &holds_nothing_under)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "denied: capability does not grant `urn:cap:script:run:open-*` \
+             (declared by `urn:script:open-door`; any grant under \
+             `urn:cap:script:run:open-` satisfies it)"
+        );
+        // And the hint is true: one grant under the prefix passes the same floor.
+        let one_under = Capability::scoped(["urn:cap:script:run:open-door"]);
+        block_on(kernel.issue(req(), &one_under)).unwrap();
+    }
+
+    /// An EXACT requirement's refusal is byte-identical to what it always was:
+    /// other repos' tests match this text.
+    #[test]
+    fn an_exact_floor_refusal_text_is_unchanged() {
+        struct Exacting;
+        #[async_trait::async_trait]
+        impl Endpoint for Exacting {
+            async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+                Ok(Representation::new(
+                    ReprType::new("text/plain"),
+                    b"ok".to_vec(),
+                ))
+            }
+            fn name(&self) -> &str {
+                "exacting"
+            }
+            fn describe(&self) -> Description {
+                Description::new("exacting")
+                    .verb(Verb::Source)
+                    .requires("urn:cap:cal:read")
+            }
+        }
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:cal"), Exacting),
+        ));
+        let err = block_on(kernel.issue(
+            Request::new(Verb::Source, iri("urn:cal")),
+            &Capability::scoped(["urn:cap:nothing"]),
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "denied: capability does not grant `urn:cap:cal:read` (declared by `urn:cal`)"
+        );
     }
 
     #[test]
