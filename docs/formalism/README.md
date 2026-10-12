@@ -2113,3 +2113,22 @@ produced unparseable IRIs are respelled (a test sweeps every code point against 
 move, and the lenient parse still accepts the raw spelling. The shared contract vectors gain a `core/bracket-names` door;
 the Python and Deno faces must follow. ikigai-vocab's core floor moves to 0.1.100 (`encode_name`). **Vocabulary:** only
 `owl:versionInfo`.
+
+**0.1.101** carries one PR on top of 0.1.100, **PR 196** (ledger [#1390](http://localhost:1062/l/default/item/1390),
+[#1391](http://localhost:1062/l/default/item/1391)): a NAME is one path segment of the IRI minted from it, so
+`encode_name` also percent-encodes `#` (`%23`) and `?` (`%3F`), always. Before, a raw `#` moved the rest of a name into a
+fragment and a `?` into a query: id `a#b#c`, or an input `x#y` under id `a#b`, made the Turtle and the contract IRI
+unparseable, and id `a#b` parsed but was `urn:ikigai:endpoint:a` to anything that drops fragments, the same resource as
+`a#c`. **This respells names that parsed before**, deliberately: an id `a#b` was `urn:ikigai:endpoint:a#b` and is now
+`urn:ikigai:endpoint:a%23b`, and its input nodes, contract IRI and match IRI move with it. No literal endpoint id, input
+name or door pattern in the ecosystem holds either character (surveyed). And a plan id sits inside a `urn:plan:` path,
+where `[`, `]`, `#` and `?` are never legal, so ikigai-vocab's `plan::process_iri`, and every step, var, fork, input and
+argument IRI built on it, spells the id through `encode_name`, keeping only a real `%XX` escape byte for byte (the ledger
+#1352 read-back rule): `a[0]` was `urn:plan:a[0]`, which no IRI parser accepts, and is `urn:plan:a%5B0%5D`. No stored plan
+id holds those characters (script names are lowercase single segments). `escape_iri_fragment` does not change: an
+AUTHORED IRI (`class`, `requires`) keeps its brackets, fragment and query. **What a consumer observes:** contract digests
+do not move (they cover the raw id), and the lenient parse still accepts the raw spelling. The shared contract vectors gain
+a `core/hash-query-names` door, `hash-id` and `query-id` contracts, two patterns and five parses; the Python and Deno
+faces must follow. **A patch, not a minor:** it respells only names nobody in the ecosystem uses, and a 0.2.0 would put
+every consumer's `0.1.x` pin below a ceiling for that. ikigai-vocab's core floor moves to 0.1.101 (the behavior
+`plan::process_iri` relies on; no new API). **Vocabulary:** only `owl:versionInfo`.
