@@ -209,22 +209,16 @@ fn iri_term(s: &str) -> String {
 }
 
 /// Encode a NAME (an endpoint id, an input name, a plan's bound, parameter and argument
-/// names) for an IRI position: `%` as `%25`, then everything a Turtle `IRIREF` cannot
-/// carry ([`ikigai_core::escape_iri_fragment`]).
+/// names) for an IRI position: [`ikigai_core::encode_name`], the ONE spelling core uses for
+/// every name it mints an IRI from, so the catalog's endpoint and input nodes are the nodes
+/// the explain graph's `ik:answer` and a validation report's `sh:resultPath` name (ledger
+/// #1345, #1352, #1361).
 ///
-/// A name is not an authored IRI, so a `%` in it is a character, never the start of an
-/// escape: leaving it alone (as [`iri_term`] must) emitted `100%` as `100%%20…`, which no
-/// parser accepts, and refused the whole document (ledger #1345). Encoded this way the
-/// endpoint and input nodes are spelled exactly as core spells an id in a contract IRI,
-/// and the encoding is injective. A name with no `%` is encoded exactly as before.
+/// A name is not an authored IRI: `%` is a character (`%25`), and `[`, `]` and every
+/// non-`ucschar` code point are encoded too, so whatever a name holds the document parses.
+/// [`iri_term`] keeps all of them for an authored IRI.
 fn name_fragment(s: &str) -> std::borrow::Cow<'_, str> {
-    if s.contains('%') {
-        std::borrow::Cow::Owned(
-            ikigai_core::escape_iri_fragment(&s.replace('%', "%25")).into_owned(),
-        )
-    } else {
-        ikigai_core::escape_iri_fragment(s)
-    }
+    ikigai_core::encode_name(s)
 }
 
 fn verb_name(verb: Verb) -> &'static str {
@@ -843,8 +837,9 @@ mod tests {
 
     #[test]
     fn validate_rejects_what_the_emitter_has_to_encode() {
-        // The opt-in predicate and the emitter must agree on the same character set: a
-        // description that validates is one whose Turtle needs no encoding at all.
+        // What the opt-in predicate refuses, the emitter encodes: a description refused for
+        // an IRIREF character still emits Turtle, with that character encoded. (The converse
+        // no longer holds: a validating name may hold `[` or `]`, which a name encodes.)
         let ok = every_iri_position(
             "tag-suggest",
             "book",

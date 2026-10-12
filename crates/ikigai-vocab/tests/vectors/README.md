@@ -44,8 +44,14 @@ NAME, so its `%` is encoded as `%25` (`50% off` is `urn:ikigai:endpoint:50%25%20
 exactly as a contract IRI spells the id; a `class` or scope is an authored IRI and keeps
 its escapes (`urn:cls:a%20b` stays a resource, `urn:cls:100%` is a literal). A face that
 encodes names with the IRIREF set alone writes `100%%20…` for `deno/edge`'s id and fails
-its `turtle` bytes. `tests/contract_vectors.rs` also parses every door's Turtle back, and
-every door must parse.
+its `turtle` bytes. `core/bracket-names` (ledger #1361) is the rest of a NAME's encoding:
+`[`, `]` and every code point outside RFC 3987's `ucschar` (DEL, a C1 control, private use, a
+noncharacter) are percent-encoded in an id, an input name and a door pattern
+(`http://[::1]/x` is `urn:ikigai:endpoint:http://%5B::1%5D/x`), while a `class` or scope with
+an IPv6 host keeps its brackets (`<http://[::1]/cap>`); the `bracket-id` and `non-ucschar-id`
+contracts and the matching `patterns` and `parses` pin the same rule. A face that stops at the
+IRIREF set and `%` writes an IRI no parser accepts. `tests/contract_vectors.rs` also parses
+every door's Turtle back, and every door must parse.
 
 ## Lenient in, canonical out
 

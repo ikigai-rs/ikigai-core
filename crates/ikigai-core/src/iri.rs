@@ -42,6 +42,22 @@ pub fn is_iri_safe(s: &str) -> bool {
 /// collision between one real name and one that must never exist; it is not a
 /// basis for round-tripping an encoded fragment back to its source.
 ///
+/// ⚠ **For AUTHORED IRIs, not names — and `[` and `]` stay.** This escapes a `requires`
+/// scope, an `ik:requires` capability term, a `class`, a plan id, a request target: IRIs
+/// someone wrote, where `[` and `]` are legal around an IPv6 host (`http://[::1]/cap`) and
+/// encoding them would break the IRI. Do not widen it to the brackets or to the
+/// non-`ucschar` code points: that is [`encode_name`](crate::encode_name)'s job, for a NAME
+/// (an endpoint id, an input name), which is spelled into an IRI path where neither is legal
+/// (ledger #1361).
+///
+/// ```
+/// use ikigai_core::{encode_name, escape_iri_fragment};
+///
+/// // An authored IRI with an IPv6 host keeps its brackets; the same text as a name does not.
+/// assert_eq!(escape_iri_fragment("http://[::1]/cap"), "http://[::1]/cap");
+/// assert_eq!(encode_name("http://[::1]/cap"), "http://%5B::1%5D/cap");
+/// ```
+///
 /// ```
 /// use ikigai_core::escape_iri_fragment;
 ///
@@ -117,13 +133,14 @@ fn is_iri_forbidden(c: char) -> bool {
 /// that is not a `ucschar` (the C1 controls, private use, the noncharacters, the
 /// specials block, and the tags and variation-selector plane E0000 to E0FFF).
 ///
-/// Neither escaper encodes these (ledger #1351): [`escape_iri_fragment`] stops at the
-/// Turtle grammar, and the contract encoding stops at the same set plus `%`. So a NAME
-/// carrying one is spelled into `urn:ikigai:endpoint:{id}`, the contract IRI and the
-/// input nodes as it is, and a parser that checks IRIs (oxttl) refuses the whole
-/// document. Encoding them would change those IRIs' spellings, a wire flag day, so
-/// [`Description::validate`](crate::Description::validate) refuses such a name instead.
-/// A unit test sweeps every code point against `oxiri` so the two cannot disagree.
+/// A NAME holding one is percent-encoded by [`encode_name`](crate::encode_name) (ledger
+/// #1361), so the endpoint node, the contract IRI and the input nodes still parse; before
+/// 0.1.100 it was spelled raw and a parser that checks IRIs (oxttl) refused the whole
+/// document (ledger #1351). [`Description::validate`](crate::Description::validate), the
+/// strict opt-in, still refuses such a name as an authoring mistake.
+/// [`escape_iri_fragment`] leaves them alone: it stops at the Turtle grammar. A unit test
+/// sweeps every code point against `oxiri` so this predicate and the parser cannot
+/// disagree.
 pub(crate) fn is_non_ucschar(c: char) -> bool {
     let cp = u32::from(c);
     if cp < 0x80 {

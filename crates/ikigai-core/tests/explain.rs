@@ -521,6 +521,46 @@ fn an_answer_whose_id_carries_a_percent_still_parses() {
     );
 }
 
+/// Ledger #1361: an id that is a full IRI with an IPv6 host, or that holds a code point
+/// outside RFC 3987's `ucschar`, is encoded in `ik:answer` exactly as the catalog encodes the
+/// endpoint node (`encode_name`). Before, the brackets or the code point were written raw and
+/// the explain graph was refused.
+#[test]
+fn an_answer_whose_id_carries_brackets_or_a_non_ucschar_still_parses() {
+    for (id, spelled) in [
+        ("http://[::1]/x", "urn:ikigai:endpoint:http://%5B::1%5D/x"),
+        (
+            "pua\u{E000}nel\u{85}",
+            "urn:ikigai:endpoint:pua%EE%80%80nel%C2%85",
+        ),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let door =
+            counting("brk", &calls).with_description(Description::new(id).verb(Verb::Source));
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:t:brk"), door),
+        ));
+        let turtle = explain(&kernel, "urn:t:brk", &[("as", "text/turtle")]);
+        let triples: Vec<_> = oxttl::TurtleParser::new()
+            .for_reader(turtle.as_bytes())
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|e| panic!("{id:?}: not Turtle: {e}\n{turtle}"));
+        assert!(
+            triples.iter().any(|t| {
+                t.predicate.as_str() == "https://ikigai-rs.dev/ns#answer"
+                    && t.object.to_string() == format!("<{spelled}>")
+            }),
+            "{turtle}"
+        );
+        assert_eq!(
+            spelled,
+            format!("urn:ikigai:endpoint:{}", ikigai_core::encode_name(id))
+        );
+        let text = explain(&kernel, "urn:t:brk", &[]);
+        assert!(text.contains(&format!("({spelled})")), "{text}");
+    }
+}
+
 /// A grammar whose variables are not identifiers: [`UriTemplate`] only names `[A-Za-z0-9_]`,
 /// but `Grammar` is open and a binding key is whatever a grammar captured.
 struct PercentKeys;
