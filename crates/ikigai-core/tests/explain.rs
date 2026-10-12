@@ -520,3 +520,53 @@ fn an_answer_whose_id_carries_a_percent_still_parses() {
         "{text}"
     );
 }
+
+/// A grammar whose variables are not identifiers: [`UriTemplate`] only names `[A-Za-z0-9_]`,
+/// but `Grammar` is open and a binding key is whatever a grammar captured.
+struct PercentKeys;
+impl ikigai_core::Grammar for PercentKeys {
+    fn match_iri(&self, iri: &Iri) -> Option<ikigai_core::Bindings> {
+        let rest = iri.as_str().strip_prefix("urn:t:keys:")?;
+        let mut bindings = ikigai_core::Bindings::new();
+        bindings.insert("100%", rest);
+        bindings.insert("a%41", "x");
+        bindings.insert("aA", "y");
+        Some(bindings)
+    }
+
+    fn pattern(&self) -> String {
+        "urn:t:keys:*".into()
+    }
+}
+
+/// Ledger #1352: a binding KEY is a name, so its `%` is a character (`%25`). Left alone,
+/// the key `100%` minted `…:binding:100%`, which no parser accepts, and `a%41` collided
+/// with `aA` as one node.
+#[test]
+fn a_binding_whose_key_carries_a_percent_still_parses() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(PercentKeys, counting("keys", &calls)),
+    ));
+    let turtle = explain(&kernel, "urn:t:keys:bob", &[("as", "text/turtle")]);
+    let triples: Vec<_> = oxttl::TurtleParser::new()
+        .for_reader(turtle.as_bytes())
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| panic!("not Turtle: {e}\n{turtle}"));
+    let bindings: std::collections::BTreeSet<String> = triples
+        .iter()
+        .filter(|t| t.predicate.as_str() == "https://ikigai-rs.dev/ns#binding")
+        .map(|t| t.object.to_string())
+        .collect();
+    assert_eq!(bindings.len(), 3, "one node per key: {turtle}");
+    assert!(
+        bindings.iter().any(|b| b.ends_with(":binding:100%25>")),
+        "{bindings:?}"
+    );
+    assert!(
+        bindings.iter().any(|b| b.ends_with(":binding:a%2541>")),
+        "{bindings:?}"
+    );
+    assert!(turtle.contains("ik:var \"100%\""), "{turtle}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}

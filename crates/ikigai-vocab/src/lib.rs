@@ -59,8 +59,20 @@ pub const SPACE_ID: &str = "urn:iki:space:vocab";
 /// the graph diffs, signs, and answers SPARQL). `{plan-id}` is the program's name when the
 /// plan is stored — `urn:program:{name}` is then the resolvable face that RUNS it, and
 /// `urn:plan:{name}` the graph that DESCRIBES it — and the plan's content address when it
-/// is anonymous. Every author-supplied segment passes through
-/// [`ikigai_core::escape_iri_fragment`], so a hostile name cannot close the IRI early.
+/// is anonymous.
+///
+/// Every author-supplied segment is encoded so that a hostile one cannot close the IRI
+/// early and the IRI always parses, and each by what it IS (ledger #1352):
+///
+/// - a bound name, a parameter name and an argument name are NAMES: a `%` in one is a
+///   character, written `%25`, then everything an `IRIREF` cannot carry — the rule
+///   [`to_turtle`] spells an endpoint's input names with, so
+///   `:input:{name}` is one spelling under a plan and under an endpoint;
+/// - the plan id is the IRI segment a stored plan is NAMED by, and a reader recovers it by
+///   stripping `urn:plan:`, so a real escape in it (`a%20b`) is kept byte for byte and only
+///   a `%` that does not start one (`100%`) is written `%25`. Re-encoding every `%` would
+///   rename each stored plan carrying an escape and make a plan read back and written again
+///   a different plan.
 ///
 /// ```
 /// use ikigai_vocab::plan;
@@ -78,13 +90,44 @@ pub const SPACE_ID: &str = "urn:iki:space:vocab";
 /// // escape the IRI.
 /// assert_eq!(plan::step_iri("sha256:9f2c", 1), "urn:plan:sha256:9f2c:step:1");
 /// assert_eq!(plan::var_iri("p", "x> . <urn:y"), "urn:plan:p:var:x%3E%20.%20%3Curn:y");
+/// // A `%` in a name is the character; in a plan id, only a `%` that starts no escape is.
+/// assert_eq!(plan::var_iri("p", "100%"), "urn:plan:p:var:100%25");
+/// assert_eq!(plan::process_iri("100%"), "urn:plan:100%25");
+/// assert_eq!(plan::process_iri("a%20b"), "urn:plan:a%20b");
 /// ```
 pub mod plan {
-    use ikigai_core::escape_iri_fragment;
+    use std::borrow::Cow;
+
+    use super::name_fragment;
+
+    /// Encode a plan id: a `%` that does not start a `%XX` escape is written `%25`, then
+    /// everything an `IRIREF` cannot carry. Idempotent, so an id read back out of a plan
+    /// IRI is written as the same IRI.
+    fn id_fragment(plan_id: &str) -> Cow<'_, str> {
+        let bytes = plan_id.as_bytes();
+        let starts_escape = |i: usize| {
+            bytes.len() > i + 2 && bytes[i + 1..=i + 2].iter().all(u8::is_ascii_hexdigit)
+        };
+        let lone: Vec<usize> = (0..bytes.len())
+            .filter(|&i| bytes[i] == b'%' && !starts_escape(i))
+            .collect();
+        if lone.is_empty() {
+            return ikigai_core::escape_iri_fragment(plan_id);
+        }
+        let mut out = String::with_capacity(plan_id.len() + 2 * lone.len());
+        let mut from = 0;
+        for i in lone {
+            out.push_str(&plan_id[from..i]);
+            out.push_str("%25");
+            from = i + 1;
+        }
+        out.push_str(&plan_id[from..]);
+        Cow::Owned(ikigai_core::escape_iri_fragment(&out).into_owned())
+    }
 
     /// The IRI of the plan itself: `urn:plan:{plan-id}`.
     pub fn process_iri(plan_id: &str) -> String {
-        format!("urn:plan:{}", escape_iri_fragment(plan_id))
+        format!("urn:plan:{}", id_fragment(plan_id))
     }
 
     /// One step, by its 1-based position in the text face: `urn:plan:{plan-id}:step:{n}`.
@@ -95,7 +138,7 @@ pub mod plan {
     /// A bound name — a step's `ik:binds` or a parameter's `ik:inputName` — which is what
     /// an `ik:ref` cites: `urn:plan:{plan-id}:var:{name}`.
     pub fn var_iri(plan_id: &str, name: &str) -> String {
-        format!("{}:var:{}", process_iri(plan_id), escape_iri_fragment(name))
+        format!("{}:var:{}", process_iri(plan_id), name_fragment(name))
     }
 
     /// One fork: `urn:plan:{plan-id}:fork:{n}`.
@@ -106,16 +149,12 @@ pub mod plan {
     /// A declared parameter's ArgSpec node: `urn:plan:{plan-id}:input:{name}` — the same
     /// `:input:{name}` suffix an endpoint's inputs carry under `urn:ikigai:endpoint:{id}`.
     pub fn input_iri(plan_id: &str, name: &str) -> String {
-        format!(
-            "{}:input:{}",
-            process_iri(plan_id),
-            escape_iri_fragment(name)
-        )
+        format!("{}:input:{}", process_iri(plan_id), name_fragment(name))
     }
 
     /// One named argument of a step: `urn:plan:{plan-id}:step:{n}:arg:{name}`.
     pub fn argument_iri(plan_id: &str, n: usize, name: &str) -> String {
-        format!("{}:arg:{}", step_iri(plan_id, n), escape_iri_fragment(name))
+        format!("{}:arg:{}", step_iri(plan_id, n), name_fragment(name))
     }
 }
 
@@ -169,8 +208,9 @@ fn iri_term(s: &str) -> String {
     }
 }
 
-/// Encode a NAME (an endpoint id, an input name) for an IRI position: `%` as `%25`,
-/// then everything a Turtle `IRIREF` cannot carry ([`ikigai_core::escape_iri_fragment`]).
+/// Encode a NAME (an endpoint id, an input name, a plan's bound, parameter and argument
+/// names) for an IRI position: `%` as `%25`, then everything a Turtle `IRIREF` cannot
+/// carry ([`ikigai_core::escape_iri_fragment`]).
 ///
 /// A name is not an authored IRI, so a `%` in it is a character, never the start of an
 /// escape: leaving it alone (as [`iri_term`] must) emitted `100%` as `100%%20…`, which no

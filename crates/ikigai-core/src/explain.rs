@@ -34,7 +34,7 @@ use crate::alias::{AliasTable, Canonical, RuleKind};
 use crate::capability::{is_deny_scope, Capability};
 use crate::contract::encode_segment;
 use crate::error::{Error, Result};
-use crate::iri::{escape_iri_fragment, Iri};
+use crate::iri::Iri;
 use crate::kernel::{capability_key, parse_verb, BINDINGS_THREAD, KERNEL_NS};
 use crate::repr::{ReprType, Representation};
 use crate::request::Request;
@@ -750,7 +750,9 @@ impl Explanation {
         {
             Outcome::Answered(answer) => {
                 for (k, v) in &answer.bindings {
-                    let binding = format!("{me}:binding:{}", escape_iri_fragment(k));
+                    // A binding key is a NAME (whatever the grammar captured under), so
+                    // a `%` in it is a character (ledger #1352).
+                    let binding = format!("{me}:binding:{}", encode_segment(k));
                     let _ = write!(out, " ;\n    ik:binding <{binding}>");
                     let _ = write!(
                         below,

@@ -361,3 +361,58 @@ fn the_graph_faces_order_entries_sharing_a_name_the_same_in_every_kernel() {
         .collect();
     assert_eq!(text, expected, "{}", first[2]);
 }
+
+/// Ledger #1352: a thread NAME is a name, so its `%` is a character (`%25`). Left alone,
+/// a thread named `100% done` minted `urn:ikigai:thread:100%%20done`, and the cache and
+/// threads graphs did not parse; `a%41` and `aA` were one node.
+#[test]
+fn a_thread_whose_name_carries_a_percent_still_parses() {
+    let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(
+        Exact::new("urn:t:pct"),
+        FnEndpoint::new("pct", |_| {
+            Ok(text("pct")
+                .cacheable()
+                .depends_on("100% done")
+                .depends_on("a%41")
+                .depends_on("aA"))
+        }),
+    )));
+    read(&kernel, "urn:t:pct");
+    kernel.cut("100% done");
+    read(&kernel, "urn:t:pct");
+    let cache = triples(&ask(&kernel, "cache", &[("as", "text/turtle")]).unwrap());
+    let mut hangs: Vec<&str> = cache
+        .iter()
+        .filter(|(_, p, _)| p == &format!("{IK}hangsFrom"))
+        .map(|(_, _, o)| o.as_str())
+        .collect();
+    hangs.sort();
+    assert_eq!(
+        hangs,
+        [
+            "<urn:ikigai:thread:100%25%20done>",
+            "<urn:ikigai:thread:a%2541>",
+            "<urn:ikigai:thread:aA>",
+            "<urn:ikigai:thread:urn:t:pct>",
+        ]
+    );
+    let threads = triples(&ask(&kernel, "threads", &[("as", "text/turtle")]).unwrap());
+    assert!(
+        threads
+            .iter()
+            .any(|(s, p, o)| s == "<urn:ikigai:thread:100%25%20done>"
+                && p == &format!("{IK}threadName")
+                && o == "\"100% done\""),
+        "{threads:?}"
+    );
+    let deps = ask(
+        &kernel,
+        "dependents",
+        &[("thread", "100% done"), ("as", "text/turtle")],
+    )
+    .unwrap();
+    triples(&deps);
+    // An entry's `ik:resolvedFrom` is the request TARGET, an `Iri`, which cannot carry a
+    // `%` that is not an escape: that position is an authored IRI and keeps `%` as is.
+    assert!(Iri::parse("urn:t:100%").is_err());
+}

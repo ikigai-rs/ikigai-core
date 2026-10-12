@@ -65,7 +65,12 @@ validation report, an error, a log line, a triple) as its `canonical`, never as 
 
 ## Adding a case
 
-Edit `contract_cases.json`, then regenerate and commit both files:
+Edit `contract_cases.json`, then regenerate and commit both files. A door's `description`
+is deserialized as an `ikigai_core::Description`, which has no defaults for `id`, `title`,
+`summary`, `verbs`, `inputs` or `outputs`: write `"title": ""`, `"summary": ""` and
+`"outputs": []` even when they are empty, or the case fails to load with a missing-field
+error. Each input (an `ArgSpec`) likewise needs `name`, `summary` and `required`; an
+explicit action (an `ActionSpec`) needs only `verb`.
 
 ```text
 cargo test -p ikigai-vocab --test contract_vectors -- --ignored
