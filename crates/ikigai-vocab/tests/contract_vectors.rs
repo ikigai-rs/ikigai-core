@@ -283,33 +283,72 @@ fn door_triples(doc: &Value, name: &str) -> Vec<Triple> {
     parse_door(doc, name).unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// Doors whose committed Turtle a strict parser refuses, each with the error it gives.
-///
-/// `deno/edge`'s id is `ev>il 100% naïve`. `escape_iri_fragment` leaves `%` alone by
-/// design (an authored IRI may carry real escapes), and `to_turtle` uses it for the
-/// endpoint subject and the flat input nodes, so the subject is
-/// `<urn:ikigai:endpoint:ev%3Eil%20100%%20naïve>`: `%%2` is not a percent escape and oxttl
-/// refuses the whole document. The contract IRIs on the same door are fine (`contract_iri`
-/// writes `%` as `%25`). That is a core emission defect (an id or input name with a bare
-/// `%`), reported for its own arc rather than fixed here; when it is fixed this door's
-/// bytes change and this list empties, which the test below insists on.
-const KNOWN_UNPARSEABLE: [(&str, &str); 1] = [("deno/edge", "Invalid IRI percent encoding")];
-
 #[test]
 fn every_door_s_turtle_parses() {
     let doc: Value = serde_json::from_str(&compute()).unwrap();
     for door in doc["doors"].as_array().unwrap() {
         let name = door["name"].as_str().unwrap();
-        let known = KNOWN_UNPARSEABLE.iter().find(|(n, _)| *n == name);
-        match (parse_door(&doc, name), known) {
-            (Ok(triples), None) => assert!(!triples.is_empty(), "door {name}: no triples"),
-            (Err(e), None) => panic!("{e}"),
-            (Err(e), Some((_, why))) => assert!(e.contains(why), "{e}"),
-            (Ok(_), Some(_)) => {
-                panic!("door {name} parses now: take it out of KNOWN_UNPARSEABLE (and its note)")
-            }
-        }
+        assert!(
+            !door_triples(&doc, name).is_empty(),
+            "door {name}: no triples"
+        );
     }
+}
+
+/// Ledger #1345: an endpoint id or input name is a NAME, so a `%` in it is encoded as
+/// `%25`, the way core spells the id in a contract IRI. Left alone, `deno/edge`'s id
+/// `ev>il 100% naïve` became `<urn:ikigai:endpoint:ev%3Eil%20100%%20naïve>` and oxttl
+/// refused the whole document. An authored IRI (a `class`, a scope) keeps its escapes:
+/// a real one stays a resource, a malformed one degrades to a literal.
+#[test]
+fn a_percent_in_a_name_is_encoded_and_in_an_authored_iri_is_kept() {
+    let doc: Value = serde_json::from_str(&compute()).unwrap();
+    let subjects = |name: &str| -> BTreeSet<String> {
+        door_triples(&doc, name)
+            .iter()
+            .filter_map(|t| match &t.subject {
+                NamedOrBlankNode::NamedNode(n) => Some(n.as_str().to_string()),
+                NamedOrBlankNode::BlankNode(_) => None,
+            })
+            .collect()
+    };
+    assert!(
+        subjects("deno/edge").contains("urn:ikigai:endpoint:ev%3Eil%20100%25%20na\u{ef}ve"),
+        "{:?}",
+        subjects("deno/edge")
+    );
+    let percent = subjects("core/percent-names");
+    for node in [
+        "urn:ikigai:endpoint:50%25%20off",
+        "urn:ikigai:endpoint:50%25%20off:input:100%25",
+        "urn:ikigai:endpoint:50%25%20off:input:rate%2525",
+    ] {
+        assert!(percent.contains(node), "{node} not in {percent:?}");
+    }
+    // The action view's input nodes hang off the contract IRI, which encodes the id the
+    // same way, and spell each input name as the endpoint view does.
+    assert!(
+        percent.iter().any(
+            |s| s.starts_with("urn:ikigai:contract:50%25%20off:source:b3:")
+                && s.ends_with(":input:rate%2525")
+        ),
+        "{percent:?}"
+    );
+    let triples = door_triples(&doc, "core/percent-names");
+    assert_eq!(
+        objects(&triples, "class"),
+        BTreeSet::from([
+            Kind::Iri("urn:cls:a%20b".into()),
+            Kind::Literal("urn:cls:100%".into()),
+        ])
+    );
+    assert_eq!(
+        objects(&triples, "requires"),
+        BTreeSet::from([
+            Kind::Iri("urn:cap:a%20b".into()),
+            Kind::Literal("urn:cap:100%".into()),
+        ])
+    );
 }
 
 /// What a term is, for comparing objects across the endpoint and action views.

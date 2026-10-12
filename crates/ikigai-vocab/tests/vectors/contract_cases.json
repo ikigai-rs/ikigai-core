@@ -802,6 +802,42 @@
           "Meta"
         ]
       }
+    },
+    {
+      "name": "core/percent-names",
+      "pattern": "urn:core:percent",
+      "description": {
+        "id": "50% off",
+        "inputs": [
+          {
+            "class": "urn:cls:a%20b",
+            "name": "100%",
+            "required": true,
+            "source": "argument",
+            "summary": "a name with a bare %"
+          },
+          {
+            "class": "urn:cls:100%",
+            "name": "rate%25",
+            "required": false,
+            "source": "argument",
+            "summary": "a name that looks escaped"
+          }
+        ],
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:a%20b",
+          "urn:cap:100%"
+        ],
+        "summary": "",
+        "title": "Percent names",
+        "verbs": [
+          "Source",
+          "Meta"
+        ]
+      }
     }
   ],
   "contracts": [

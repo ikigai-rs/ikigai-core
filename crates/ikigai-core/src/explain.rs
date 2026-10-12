@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 use crate::alias::{AliasTable, Canonical, RuleKind};
 use crate::capability::{is_deny_scope, Capability};
+use crate::contract::encode_segment;
 use crate::error::{Error, Result};
 use crate::iri::{escape_iri_fragment, Iri};
 use crate::kernel::{capability_key, parse_verb, BINDINGS_THREAD, KERNEL_NS};
@@ -637,7 +638,7 @@ impl Explanation {
                     out,
                     "  endpoint    {} (urn:ikigai:endpoint:{})",
                     answer.name,
-                    escape_iri_fragment(&answer.id)
+                    encode_segment(&answer.id)
                 );
                 for member in &self.members {
                     for door in &member.doors {
@@ -769,7 +770,7 @@ impl Explanation {
                 (
                     Some(format!(
                         "urn:ikigai:endpoint:{}",
-                        escape_iri_fragment(&answer.id)
+                        encode_segment(&answer.id)
                     )),
                     floor.0,
                     floor.1,
@@ -783,7 +784,7 @@ impl Explanation {
                 lacking,
             } => (
                 crate::kernel_ops::description(op)
-                    .map(|d| format!("urn:ikigai:endpoint:{}", escape_iri_fragment(&d.id))),
+                    .map(|d| format!("urn:ikigai:endpoint:{}", encode_segment(&d.id))),
                 requires,
                 lacking,
             ),

@@ -149,11 +149,15 @@ fn lit(s: &str) -> String {
 ///
 /// **Two defenses, because escaping alone is not enough.** Percent-encoding
 /// ([`ikigai_core::escape_iri_fragment`]) makes the value a legal Turtle `IRIREF`, but a
-/// legal `IRIREF` is not necessarily a legal IRI: encoding `http://a> . <b` yields
-/// `http://a%3E%20.%20%3Cb`, whose authority has a non-numeric "port", and an RDF parser
-/// rejects the whole document. So the escaped form is parsed, and anything that still
-/// isn't an IRI degrades to a literal — wrong *type* for the predicate, but visible in
-/// the graph and never a parse failure for consumers.
+/// legal `IRIREF` is not necessarily a legal IRI: encoding `http://ok> . <urn:z` yields
+/// `http://ok%3E%20.%20%3Curn:z`, whose authority has a non-numeric port (`z`), and an
+/// RDF parser rejects the whole document. So the escaped form is parsed, and anything
+/// that still isn't an IRI degrades to a literal — wrong *type* for the predicate, but
+/// visible in the graph and never a parse failure for consumers.
+///
+/// `%` is left alone here, unlike in [`name_fragment`]: a `class` or `requires` value is
+/// an authored IRI that may carry real percent-escapes, and re-encoding them would change
+/// its identity. A malformed escape (`100%`) fails the parse and degrades to a literal.
 ///
 /// Every `class` and `requires` value in the ecosystem is already a valid IRI, so this
 /// changes no existing output.
@@ -162,6 +166,24 @@ fn iri_term(s: &str) -> String {
     match ikigai_core::Iri::parse(escaped.as_ref()) {
         Ok(_) => format!("<{escaped}>"),
         Err(_) => lit(s),
+    }
+}
+
+/// Encode a NAME (an endpoint id, an input name) for an IRI position: `%` as `%25`,
+/// then everything a Turtle `IRIREF` cannot carry ([`ikigai_core::escape_iri_fragment`]).
+///
+/// A name is not an authored IRI, so a `%` in it is a character, never the start of an
+/// escape: leaving it alone (as [`iri_term`] must) emitted `100%` as `100%%20…`, which no
+/// parser accepts, and refused the whole document (ledger #1345). Encoded this way the
+/// endpoint and input nodes are spelled exactly as core spells an id in a contract IRI,
+/// and the encoding is injective. A name with no `%` is encoded exactly as before.
+fn name_fragment(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('%') {
+        std::borrow::Cow::Owned(
+            ikigai_core::escape_iri_fragment(&s.replace('%', "%25")).into_owned(),
+        )
+    } else {
+        ikigai_core::escape_iri_fragment(s)
     }
 }
 
@@ -237,18 +259,31 @@ fn input_predicates(input: &ikigai_core::ArgSpec) -> String {
 /// Render a [`Description`] as a Turtle document using the ikigai vocabulary.
 ///
 /// Every identifier that lands in an IRI position — the endpoint id, each input name,
-/// each declared class, each capability scope — is percent-encoded on the way out (see
-/// [`ikigai_core::escape_iri_fragment`], and the private `iri_term` for the author-supplied IRIs);
+/// each declared class, each capability scope — is percent-encoded on the way out;
 /// `Description` enforces nothing at construction, so this function must not assume
-/// anything about their shape. The output always parses. Call
-/// [`Description::validate`] if you want the *description* refused instead.
+/// anything about their shape. Names (the id, input names) encode `%` too, as core's
+/// contract IRIs do; an authored IRI (a class, a scope) keeps its escapes and degrades to
+/// a literal when it still is not an IRI (see the private `iri_term`). So no character
+/// can close an IRI early or inject a triple, and a `%` anywhere still parses. Call
+/// [`Description::validate`] if you want a description carrying a character an `IRIREF`
+/// forbids refused instead of encoded.
+///
+/// ⚠ **Not every input parses.** A name carrying a code point an IRI cannot hold at all
+/// (outside RFC 3987's `ucschar`: DEL, a C1 control, a private-use character, a Unicode
+/// noncharacter) is emitted as is, in the endpoint node AND in the contract IRI core
+/// builds, and a strict parser refuses the document. `validate` does not catch these
+/// either: it checks what a Turtle `IRIREF` forbids, not what an IRI does.
+///
+/// ```
+/// use ikigai_core::{Description, Verb};
+///
+/// let ttl = ikigai_vocab::to_turtle(&Description::new("100% sure").verb(Verb::Source));
+/// assert!(ttl.contains("<urn:ikigai:endpoint:100%25%20sure> a ik:Endpoint"), "{ttl}");
+/// ```
 pub fn to_turtle(description: &Description) -> String {
     // The endpoint's node, computed ONCE so the subject and every IRI hung off it
     // (inputs, actions) cannot disagree about how the id was encoded.
-    let endpoint_iri = format!(
-        "urn:ikigai:endpoint:{}",
-        ikigai_core::escape_iri_fragment(&description.id)
-    );
+    let endpoint_iri = format!("urn:ikigai:endpoint:{}", name_fragment(&description.id));
     let subject = format!("<{endpoint_iri}>");
 
     // A transreptor is typed as both classes explicitly (`ik:Transreptor ⊏ ik:Endpoint`),
@@ -314,10 +349,7 @@ pub fn to_turtle(description: &Description) -> String {
     // own inputs again under its content-addressed contract node, below.
     let mut extra_nodes: Vec<String> = Vec::new();
     for input in &description.inputs {
-        let node_iri = format!(
-            "{endpoint_iri}:input:{}",
-            ikigai_core::escape_iri_fragment(&input.name)
-        );
+        let node_iri = format!("{endpoint_iri}:input:{}", name_fragment(&input.name));
         predicates.push(format!("ik:input <{node_iri}>"));
         extra_nodes.push(format!("<{node_iri}> {} .", input_predicates(input)));
     }
@@ -350,7 +382,7 @@ pub fn to_turtle(description: &Description) -> String {
             preds.push(format!("ik:requires {}", cap_term(cap)));
         }
         for input in &action.inputs {
-            let name = ikigai_core::escape_iri_fragment(&input.name);
+            let name = name_fragment(&input.name);
             let node_iri = format!("{action_iri}:input:{name}");
             extra_nodes.push(format!("<{node_iri}> {} .", input_predicates(input)));
             preds.push(format!("ik:input <{node_iri}>"));
