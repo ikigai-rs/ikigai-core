@@ -752,6 +752,56 @@
           "Meta"
         ]
       }
+    },
+    {
+      "name": "core/hostile-terms",
+      "pattern": "urn:core:hostile",
+      "description": {
+        "id": "hostile-terms",
+        "inputs": [
+          {
+            "class": "urn:cls:a> b",
+            "name": "encoded",
+            "required": true,
+            "source": "argument",
+            "summary": "line one\r\nline\ttwo"
+          },
+          {
+            "class": "http://ok> . <urn:z> a <urn:w",
+            "default": "x\ry",
+            "name": "fallback",
+            "required": false,
+            "source": "argument",
+            "summary": ""
+          },
+          {
+            "class": "not a class",
+            "name": "bare",
+            "one_of": [
+              "a\nb",
+              "c\td"
+            ],
+            "required": false,
+            "source": "argument",
+            "summary": ""
+          }
+        ],
+        "outputs": [
+          "text/turtle"
+        ],
+        "requires": [
+          "urn:cap:core:read",
+          "not an iri",
+          "urn:cap:x> . <urn:everything",
+          "https://cap> . <urn:z"
+        ],
+        "summary": "one\ntwo\rthree\tfour \"q\" \\",
+        "title": "T\tab\r\nend",
+        "verbs": [
+          "Source",
+          "Meta"
+        ]
+      }
     }
   ],
   "contracts": [
