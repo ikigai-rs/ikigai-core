@@ -112,6 +112,33 @@ fn is_iri_forbidden(c: char) -> bool {
     c <= '\u{20}' || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\')
 }
 
+/// Whether `c` is a code point the IRI grammar (RFC 3987) does not admit in a path
+/// segment although a Turtle `IRIREF` carries it: DEL, and every non-ASCII code point
+/// that is not a `ucschar` (the C1 controls, private use, the noncharacters, the
+/// specials block, and the tags and variation-selector plane E0000 to E0FFF).
+///
+/// Neither escaper encodes these (ledger #1351): [`escape_iri_fragment`] stops at the
+/// Turtle grammar, and the contract encoding stops at the same set plus `%`. So a NAME
+/// carrying one is spelled into `urn:ikigai:endpoint:{id}`, the contract IRI and the
+/// input nodes as it is, and a parser that checks IRIs (oxttl) refuses the whole
+/// document. Encoding them would change those IRIs' spellings, a wire flag day, so
+/// [`Description::validate`](crate::Description::validate) refuses such a name instead.
+/// A unit test sweeps every code point against `oxiri` so the two cannot disagree.
+pub(crate) fn is_non_ucschar(c: char) -> bool {
+    let cp = u32::from(c);
+    if cp < 0x80 {
+        return cp == 0x7F;
+    }
+    // RFC 3987 `ucschar`; a `char` is never a surrogate, so D800-DFFF needs no arm.
+    let in_bmp = matches!(cp, 0xA0..=0xD7FF | 0xF900..=0xFDCF | 0xFDF0..=0xFFEF);
+    // Planes 1 to 14, less each plane's last two code points (noncharacters) and E0000
+    // to E0FFF; planes 15 and 16 are private use.
+    let above_bmp = (0x1_0000..=0xE_FFFD).contains(&cp)
+        && (cp & 0xFFFF) <= 0xFFFD
+        && !(0xE_0000..=0xE_0FFF).contains(&cp);
+    !(in_bmp || above_bmp)
+}
+
 /// A validated, absolute RDF [IRI](https://www.w3.org/TR/rdf11-concepts/#dfn-iri).
 ///
 /// Construction validates against RFC 3987 (absolute form) via `oxiri`, so an
@@ -242,6 +269,24 @@ mod tests {
         match escape_iri_fragment(s) {
             Cow::Borrowed(b) => assert!(std::ptr::eq(b, s)),
             Cow::Owned(o) => panic!("safe fragment was rewritten to {o}"),
+        }
+    }
+
+    #[test]
+    fn the_non_ucschar_set_is_exactly_what_the_iri_parser_refuses() {
+        // ledger #1351: swept against oxiri over every code point outside ASCII (plus
+        // DEL), in a path position, so the predicate `validate` refuses names by can
+        // never drift from the parser that refuses the document.
+        for cp in 0x7F..=0x10_FFFF {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let refused = oxiri::Iri::parse(format!("urn:x:a{c}b").as_str()).is_err();
+            assert_eq!(is_non_ucschar(c), refused, "U+{cp:04X}");
+        }
+        // The rest of ASCII is the escapers' business, never this predicate's.
+        for c in '\u{0}'..'\u{7F}' {
+            assert!(!is_non_ucschar(c), "{c:?}");
         }
     }
 

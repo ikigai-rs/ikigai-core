@@ -216,7 +216,10 @@ pub struct Description {
     /// ([`is_iri_safe`](crate::is_iri_safe)), because it is projected into IRI positions
     /// (`urn:ikigai:endpoint:{id}`, and the action and input nodes hung off it). Emitters
     /// percent-encode rather than trust it, and [`validate`](Self::validate) reports it —
-    /// call that if you would rather fail than be encoded.
+    /// call that if you would rather fail than be encoded. A second requirement has no
+    /// encoded fallback: no code point outside RFC 3987's `ucschar` (DEL, a C1 control,
+    /// private use, a noncharacter), which emitters spell as it is and an IRI parser
+    /// refuses; only [`validate`](Self::validate) catches it (ledger #1351).
     ///
     /// **What is convention**: a short noun in `kebab-case` (`camel-case`, `tag-suggest`).
     /// Not enforced, and not universal — 27 ids in the ecosystem are full IRIs
@@ -560,12 +563,22 @@ impl Description {
     ///
     /// **Opt-in.** [`Description::new`] validates nothing and never will: it has hundreds
     /// of call sites and a fallible constructor would be a flag day. The RDF projection
-    /// percent-encodes ([`escape_iri_fragment`](crate::escape_iri_fragment)) so a bad name
-    /// can never break the emitted graph; this is for a host that would rather refuse the
-    /// endpoint at bind time than serve it under an encoded name.
+    /// percent-encodes ([`escape_iri_fragment`](crate::escape_iri_fragment)) what a Turtle
+    /// `IRIREF` cannot carry, so those characters never break the emitted graph; for them
+    /// this is for a host that would rather refuse the endpoint at bind time than serve it
+    /// under an encoded name.
+    ///
+    /// ⚠ **One refusal has no encoded fallback.** A NAME (the id, an input name) holding a
+    /// code point the IRI grammar refuses although an `IRIREF` carries it (DEL, a C1
+    /// control, private use, a noncharacter: anything outside RFC 3987's `ucschar`) is
+    /// spelled into the endpoint node and the contract IRI as it is, and a parser that
+    /// checks IRIs refuses the whole document. That is refused here as
+    /// [`InvalidArgument`](crate::Error::InvalidArgument), naming the field and the code
+    /// point, and only here: a description that never comes through `validate` still
+    /// emits that unparseable Turtle (ledger #1351).
     ///
     /// ```
-    /// use ikigai_core::{ArgSpec, Description};
+    /// use ikigai_core::{ArgSpec, Description, Error};
     ///
     /// assert!(Description::new("tag-suggest").input(ArgSpec::new("book")).validate().is_ok());
     ///
@@ -575,6 +588,14 @@ impl Description {
     ///
     /// // Nested fields are checked too — an input name is an IRI segment as well.
     /// assert!(Description::new("ok").input(ArgSpec::new("a b")).validate().is_err());
+    ///
+    /// // A name no IRI can carry: refused, naming the field and the code point.
+    /// let err = Description::new("ok").input(ArgSpec::new("a\u{85}b")).validate().unwrap_err();
+    /// assert!(matches!(&err, Error::InvalidArgument { name, .. } if name == "input name"));
+    /// assert!(err.to_string().contains("U+0085"), "{err}");
+    ///
+    /// // Ordinary Unicode is a ucschar, and still a name.
+    /// assert!(Description::new("naïve").input(ArgSpec::new("書名")).validate().is_ok());
     /// ```
     pub fn validate(&self) -> crate::Result<()> {
         let flat = self
@@ -592,6 +613,32 @@ impl Description {
                      (an RDF IRIREF cannot contain <>\"{{}}|^`\\, space or a control character)",
                     self.id
                 )));
+            }
+        }
+        // A NAME is spelled into IRIs nearly as it is, so a code point the IRI grammar
+        // refuses breaks the endpoint node, the contract IRI and the whole document
+        // (ledger #1351). Refused here rather than encoded: encoding would respell those
+        // IRIs. An authored `class` or `requires` IRI is not a name: the emitters parse
+        // it and degrade one that is not an IRI to a literal.
+        let names = std::iter::once(("id", self.id.as_str())).chain(
+            self.inputs
+                .iter()
+                .chain(self.actions.iter().flat_map(|a| a.inputs.iter()))
+                .map(|input| ("input name", input.name.as_str())),
+        );
+        for (field, value) in names {
+            if let Some(c) = value.chars().find(|&c| crate::iri::is_non_ucschar(c)) {
+                return Err(crate::Error::InvalidArgument {
+                    name: field.to_string(),
+                    detail: format!(
+                        "endpoint `{}`: {field} `{}` contains U+{:04X}, which no IRI can carry \
+                         (DEL, a C1 control, private use or a noncharacter); a name is \
+                         refused, not encoded",
+                        self.id.escape_debug(),
+                        value.escape_debug(),
+                        u32::from(c)
+                    ),
+                });
             }
         }
         Ok(())
