@@ -2087,3 +2087,15 @@ often. Contract digests,
 contract IRIs and match IRIs do not move. **No type change**, no wire change. ikigai-vocab's core floor stays 0.1.91.
 **Vocabulary:** only `owl:versionInfo` (0.1.97 → 0.1.98 against `/ns`, which was deployed from main and never served
 the draft terms).
+
+**0.1.99** carries one PR on top of 0.1.98, **PR 192** (ledger [#1351](http://localhost:1060/l/default/item/1351)):
+`Description::validate` refuses a NAME no IRI can carry. DEL, the C1 controls, private use and the noncharacters (every
+code point outside RFC 3987's `ucschar`) are legal in a Turtle `IRIREF`, so neither escaper encodes them, and an IRI
+parser refuses them: an endpoint id or input name holding one was spelled into the endpoint node, the input nodes and the
+contract IRI as it was, and oxttl refused the whole document. `validate` now returns `Error::InvalidArgument` naming the
+field (`id`, `input name`) and the code point, for the id, every flat input name and every input name on an explicit
+`ActionSpec`; the predicate is swept against `oxiri` over every code point so the two cannot drift. An authored `class`
+or `requires` value is an IRI, not a name, and keeps degrading to a literal. **What a consumer observes:** a host that
+calls `validate` now refuses such an endpoint at bind time; one that does not still emits the unparseable Turtle, since
+`validate` stays opt-in. No encoding changes, so no endpoint node, contract IRI or digest moves. **No type change**, no
+wire change. ikigai-vocab's core floor stays 0.1.91. **Vocabulary:** only `owl:versionInfo` (0.1.98 → 0.1.99).
