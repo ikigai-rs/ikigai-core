@@ -3974,7 +3974,9 @@ fn validate_against_spec(
         }
     }
     for input in &spec.inputs {
-        let node = format!("{input_ns}{}", input.name);
+        // The input node as the catalog spells it: an input name is a NAME, so a `%` in it
+        // is `%25` (`ikigai-vocab`'s `to_turtle`; ledger #1352).
+        let node = format!("{input_ns}{}", crate::contract::encode_segment(&input.name));
         let value = provided
             .iter()
             .find(|(k, _)| *k == input.name)

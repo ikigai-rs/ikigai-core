@@ -22,12 +22,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::cache::EntryEdges;
+use crate::contract::encode_segment;
 use crate::iri::escape_iri_fragment;
 use crate::topology::escape_literal;
 
 /// Where an entry is skolemized: `{ENTRY}{16 hex digits}`, from its cache key.
 const ENTRY: &str = "urn:ikigai:cache:entry:";
-/// Where a golden thread is named: `{THREAD}{its name}`, IRI-escaped.
+/// Where a golden thread is named: `{THREAD}{its name}`, encoded as a NAME (see
+/// [`thread_iri`]).
 const THREAD: &str = "urn:ikigai:thread:";
 
 const PREFIXES: &str = "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
@@ -47,8 +49,16 @@ fn entry_iri(entry: &EntryEdges) -> String {
 }
 
 /// A thread's IRI, from its name.
+///
+/// A thread name is a NAME, not an authored IRI, even when it is spelled like one (most
+/// are a canonical target): `ik:threadName` carries it, and nothing reads it back out of
+/// this IRI. So a `%` in it is a character and is written `%25`, as an endpoint id is
+/// ([`encode_segment`]), and the encoding is injective. Left alone, a thread named
+/// `100% done` minted an IRI no parser accepts and refused the whole graph, and `a%41`
+/// and `aA` were one node (ledger #1352). An entry's `ik:resolvedFrom` stays
+/// [`escape_iri_fragment`]: a request target is an [`Iri`](crate::Iri), whose escapes are real.
 pub(crate) fn thread_iri(name: &str) -> String {
-    format!("{THREAD}{}", escape_iri_fragment(name))
+    format!("{THREAD}{}", encode_segment(name))
 }
 
 /// The `ik:Chain` IRI of a chain fingerprint, as `urn:kernel:topology` names it.

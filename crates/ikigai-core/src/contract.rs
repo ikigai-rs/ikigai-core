@@ -81,7 +81,9 @@ fn must_encode(c: char) -> bool {
 
 /// Percent-encode a segment injectively (see the module doc). Also how an endpoint id is
 /// spelled in `urn:ikigai:endpoint:{id}`, so the explain graph's `ik:answer` names the
-/// node `ikigai-vocab`'s `to_turtle` writes (ledger #1345).
+/// node `ikigai-vocab`'s `to_turtle` writes (ledger #1345), and how core spells every other
+/// NAME it mints an IRI from: a thread name, an explain binding key, an input name in a
+/// validation report's `sh:resultPath` (ledger #1352).
 pub(crate) fn encode_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut buf = [0u8; 4];
