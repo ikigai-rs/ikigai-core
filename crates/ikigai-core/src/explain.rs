@@ -835,14 +835,14 @@ fn list_or_none(items: &[String]) -> String {
     }
 }
 
-/// A scope as a Turtle term: an IRI when it is one that can be written bracketed,
-/// else a literal (a legacy descriptive label), as `ik:requires`'s comment allows.
+/// A scope as a Turtle term, by the rule the manifold and the catalog use
+/// ([`crate::iri::scope_term`]), so `ik:requires`/`ik:lacks` here name the catalog's term
+/// (ledger #1356). This face had its own rule before, and it differed in two places: a
+/// scope an escape makes an IRI (`urn:cap:a b`) was a literal here and `<urn:cap:a%20b>`
+/// there, and a legacy label that happens to parse (`cap:net`) was `<cap:net>` here and
+/// the literal `ik:requires`' definition calls for there.
 fn scope_term(scope: &str) -> String {
-    if Iri::parse(scope).is_ok() && crate::iri::is_iri_safe(scope) {
-        format!("<{scope}>")
-    } else {
-        format!("\"{}\"", literal(scope))
-    }
+    crate::iri::scope_term(scope)
 }
 
 fn literal(s: &str) -> String {
