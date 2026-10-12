@@ -665,10 +665,14 @@ pub struct Kernel {
 const SCOPE_NAMES_SLACK: usize = 16;
 
 /// How many endpoints' floors the memo holds before it sweeps — dead entries first,
-/// then everything. The cache's default entry bound, chosen for the same reason: a
-/// ceiling on memory for a root that hands out a fresh endpoint per resolution, not
-/// a tuning knob (see [`FloorMemo`]).
+/// then live ones down to [`FLOOR_MEMO_LOW`]. The cache's default entry bound, chosen
+/// for the same reason: a ceiling on memory for a root that hands out a fresh endpoint
+/// per resolution, not a tuning knob (see [`FloorMemo`]).
 const FLOOR_MEMO_BOUND: usize = 4096;
+
+/// What a sweep leaves at most: three quarters of [`FLOOR_MEMO_BOUND`], so at least a
+/// quarter of the bound in inserts separates two sweeps, whatever is live.
+const FLOOR_MEMO_LOW: usize = FLOOR_MEMO_BOUND - FLOOR_MEMO_BOUND / 4;
 
 /// What the capability floor checks: the `requires` an endpoint declares per verb,
 /// in [`Description::action_specs`] order, and what that declaration implies for a
@@ -791,11 +795,33 @@ impl Floor {
 /// endpoint in a fresh `Arc` on every resolution (every ikigai-throttle governor
 /// does today) never presents the same address twice: each request misses,
 /// describes, and inserts an entry whose weak dies at once. The bound keeps that
-/// from being a leak — at [`FLOOR_MEMO_BOUND`] entries the dead ones are swept, and
-/// if none were dead everything is — so such a resource pays the old per-request
-/// `describe()` plus one insert, while every stably bound resource pays one read
-/// lock and a hash. Reusing the wrapper per inner endpoint is the overlay's fix,
-/// not the kernel's. Pinned by `a_per_resolution_wrapper_is_bounded_and_floored_correctly`.
+/// from being a leak — at [`FLOOR_MEMO_BOUND`] entries the dead ones are swept — so
+/// such a resource pays the old per-request `describe()` plus one insert, while every
+/// stably bound resource pays one read lock and a hash. Reusing the wrapper per inner
+/// endpoint is the overlay's fix, not the kernel's. Pinned by
+/// `a_per_resolution_wrapper_is_bounded_and_floored_correctly`.
+///
+/// **More live endpoints than the bound degrade, they do not fall off a cliff**
+/// (ledger #791). A sweep that leaves more than [`FLOOR_MEMO_LOW`] entries evicts
+/// arbitrary LIVE ones down to it: an evicted endpoint is only described again on
+/// its next request. It used to clear everything when nothing was dead, so one
+/// endpoint over the bound took a random-access memo from no misses to one in ten,
+/// and a round-robin one to every request missing; and a live set just under the
+/// bound beside a per-resolution wrapper swept all 4096 entries on EVERY insert
+/// (~5 µs a request against ~150 ns). Both pinned by
+/// `a_memo_over_its_bound_degrades_gracefully`.
+///
+/// **The sweep does not race the lookups** (the published critical annotation at
+/// the `retain` said it did). It runs under the write lock, which excludes every
+/// lookup, and a lookup copies its answer out before it releases the read lock, so
+/// nothing removed is "in use". What is NOT under the lock is the endpoint's
+/// strong count — an `Arc` drops wherever it drops — and that is harmless both
+/// ways: the count only ever falls, and a zero never comes back (a `Weak` cannot
+/// upgrade a dead allocation), so an entry read as dead IS dead, while one that
+/// dies just after it was read as live is a dead entry kept until the next sweep,
+/// its address still reserved by its weak. Removing a live entry is only a future
+/// miss — which is exactly what the eviction above does on purpose. Exercised by
+/// `the_memo_stays_correct_while_endpoints_die_on_other_threads`.
 ///
 /// Invalidated as a whole by a cut of [`BINDINGS_THREAD`]: the thread is this memo's
 /// validity predicate, the same one the catalog hangs from.
@@ -843,9 +869,16 @@ impl FloorMemo {
         let mut entries = self.entries.write().expect("floor memo lock");
         if entries.len() >= FLOOR_MEMO_BOUND {
             entries.retain(|_, entry| entry.endpoint.strong_count() > 0);
-            if entries.len() >= FLOOR_MEMO_BOUND {
-                entries.clear();
-            }
+            // Then live ones, arbitrarily (the map's order is its hash order), never
+            // all of them: see "More live endpoints than the bound" above.
+            let mut excess = entries.len().saturating_sub(FLOOR_MEMO_LOW);
+            entries.retain(|_, _| {
+                if excess == 0 {
+                    return true;
+                }
+                excess -= 1;
+                false
+            });
         }
         // Two threads that missed on one key both insert one floor; last wins, same value.
         entries.insert(
@@ -9742,5 +9775,117 @@ mod tests {
             "the memo is bounded: {}",
             kernel.floors.len()
         );
+    }
+
+    /// `n` live endpoints, each counting its describes on one shared counter.
+    fn live_endpoints(
+        n: usize,
+        requires: Option<&'static str>,
+    ) -> (Vec<Arc<dyn Endpoint>>, Arc<AtomicU32>) {
+        let describes = Arc::new(AtomicU32::new(0));
+        let endpoints = (0..n)
+            .map(|_| {
+                Arc::new(Described {
+                    describes: describes.clone(),
+                    requires,
+                }) as Arc<dyn Endpoint>
+            })
+            .collect();
+        (endpoints, describes)
+    }
+
+    #[test]
+    fn a_memo_over_its_bound_degrades_gracefully() {
+        // ledger #791. Measured before the fix (release, 200 000 accesses after warmup):
+        // one live endpoint over the bound took a random-access memo from no misses to
+        // 10%, a round-robin one to EVERY access missing, and a live set one under the
+        // bound beside a per-resolution wrapper swept the whole memo on every insert.
+        let req = Request::new(Verb::Source, iri("urn:test:d"));
+        let cap = Capability::root();
+
+        // Round-robin over one more live endpoint than the bound: the old full clear
+        // missed every time; evicting a quarter misses about a quarter of the time.
+        let (endpoints, describes) = live_endpoints(FLOOR_MEMO_BOUND + 1, None);
+        let memo = FloorMemo::default();
+        for endpoint in &endpoints {
+            memo.unsatisfied(endpoint, &req, &cap);
+        }
+        let before = describes.load(Ordering::SeqCst);
+        let accesses = 4 * endpoints.len();
+        for endpoint in endpoints.iter().cycle().take(accesses) {
+            memo.unsatisfied(endpoint, &req, &cap);
+        }
+        let misses = (describes.load(Ordering::SeqCst) - before) as usize;
+        assert!(
+            misses * 2 < accesses,
+            "{misses} of {accesses} round-robin accesses missed"
+        );
+
+        // A live set just under the bound beside a fresh endpoint per request: an
+        // insert that does not sweep grows the memo by one (a fresh allocation never
+        // lands on a reserved address), so `len` not growing is a sweep. The old memo
+        // swept on every insert; now at least a quarter of the bound separates two.
+        let (stable, _) = live_endpoints(FLOOR_MEMO_BOUND - 1, None);
+        let memo = FloorMemo::default();
+        for endpoint in &stable {
+            memo.unsatisfied(endpoint, &req, &cap);
+        }
+        let inserts = 2 * FLOOR_MEMO_BOUND;
+        let mut sweeps = 0;
+        for _ in 0..inserts {
+            let before = memo.len();
+            let (fresh, _) = live_endpoints(1, None);
+            memo.unsatisfied(&fresh[0], &req, &cap);
+            if memo.len() <= before {
+                sweeps += 1;
+            }
+            assert!(memo.len() <= FLOOR_MEMO_BOUND, "bounded: {}", memo.len());
+        }
+        assert!(
+            sweeps <= inserts / (FLOOR_MEMO_BOUND - FLOOR_MEMO_LOW) + 1,
+            "{sweeps} sweeps in {inserts} inserts"
+        );
+    }
+
+    #[test]
+    fn the_memo_stays_correct_while_endpoints_die_on_other_threads() {
+        // The published critical annotation on the sweep claimed its `strong_count`
+        // read races the endpoints' drops and can lose a live entry. This is a stress
+        // test, not a proof: threads allocate an open or a gated endpoint, floor it
+        // through ONE memo, and drop it, past the bound several times over, so sweeps
+        // run while other threads drop endpoints, insert, and read long-lived ones.
+        // What it would catch is the failure that matters — a wrong floor (an endpoint
+        // served a dead one's contract at a reused address) or a panic. A removed live
+        // entry is not a failure at all, only a re-describe; see `FloorMemo`.
+        let memo = FloorMemo::default();
+        let (open, _) = live_endpoints(1, None);
+        let (gated, _) = live_endpoints(1, Some("urn:cap:demo:read"));
+        let cap = Capability::scoped(["urn:cap:other"]);
+        let threads = 8;
+        let rounds = FLOOR_MEMO_BOUND;
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                let (memo, open, gated, cap) = (&memo, &open[0], &gated[0], &cap);
+                scope.spawn(move || {
+                    let req = Request::new(Verb::Source, iri("urn:test:d"));
+                    for i in 0..rounds {
+                        let gate = (t + i) % 2 == 0;
+                        let (fresh, _) = live_endpoints(1, gate.then_some("urn:cap:demo:read"));
+                        let lacking = memo.unsatisfied(&fresh[0], &req, cap);
+                        assert_eq!(lacking.is_some(), gate, "thread {t} round {i}: fresh");
+                        drop(fresh);
+                        assert!(
+                            memo.unsatisfied(open, &req, cap).is_none(),
+                            "open stays open"
+                        );
+                        assert!(
+                            memo.unsatisfied(gated, &req, cap).is_some(),
+                            "gated stays gated"
+                        );
+                    }
+                });
+            }
+        });
+        assert!(memo.len() <= FLOOR_MEMO_BOUND, "bounded: {}", memo.len());
     }
 }

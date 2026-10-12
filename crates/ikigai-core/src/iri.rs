@@ -59,12 +59,17 @@ pub fn escape_iri_fragment(s: &str) -> Cow<'_, str> {
     if is_iri_safe(s) {
         return Cow::Borrowed(s);
     }
+    // Upper-case hex written digit by digit: a `format!` per byte was a String
+    // allocated and dropped for every escaped byte (ledger #791).
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len() + 8);
     let mut buf = [0u8; 4];
     for c in s.chars() {
         if is_iri_forbidden(c) {
-            for byte in c.encode_utf8(&mut buf).as_bytes() {
-                out.push_str(&format!("%{byte:02X}"));
+            for &byte in c.encode_utf8(&mut buf).as_bytes() {
+                out.push('%');
+                out.push(char::from(HEX[usize::from(byte >> 4)]));
+                out.push(char::from(HEX[usize::from(byte & 0x0f)]));
             }
         } else {
             out.push(c);
@@ -248,5 +253,37 @@ mod tests {
         assert_eq!(escape_iri_fragment("a\u{7f}b"), "a\u{7f}b");
         assert_eq!(escape_iri_fragment("a\u{20}b"), "a%20b");
         assert_eq!(escape_iri_fragment("a\u{0}b"), "a%00b");
+    }
+
+    #[test]
+    fn escaping_writes_the_same_bytes_the_format_spelling_did() {
+        // ledger #791 replaced a `format!("%{byte:02X}")` per escaped byte with digits
+        // written directly (~1 µs to ~150 ns on a fragment with 25 escapes). The output
+        // is a wire contract, so the old spelling stays here as the reference, over
+        // every ASCII character and a few multi-byte ones, alone and in company.
+        fn reference(s: &str) -> String {
+            let mut out = String::new();
+            let mut buf = [0u8; 4];
+            for c in s.chars() {
+                if is_iri_forbidden(c) {
+                    for byte in c.encode_utf8(&mut buf).as_bytes() {
+                        out.push_str(&format!("%{byte:02X}"));
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+        let mut all = String::new();
+        for c in (0u8..=0x7f)
+            .map(char::from)
+            .chain(['é', '\u{a0}', '€', '😀'])
+        {
+            all.push(c);
+            let alone = format!("a{c}b");
+            assert_eq!(escape_iri_fragment(&alone), reference(&alone), "{c:?}");
+        }
+        assert_eq!(escape_iri_fragment(&all), reference(&all));
     }
 }
