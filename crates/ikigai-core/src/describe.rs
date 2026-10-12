@@ -561,21 +561,27 @@ impl Description {
     /// safe to write there — the [`id`](Self::id), each input `name` and `class`, and each
     /// `requires` scope, across the flat fields and every explicit [`ActionSpec`].
     ///
-    /// **Opt-in.** [`Description::new`] validates nothing and never will: it has hundreds
-    /// of call sites and a fallible constructor would be a flag day. The RDF projection
-    /// percent-encodes ([`escape_iri_fragment`](crate::escape_iri_fragment)) what a Turtle
-    /// `IRIREF` cannot carry, so those characters never break the emitted graph; for them
-    /// this is for a host that would rather refuse the endpoint at bind time than serve it
-    /// under an encoded name.
+    /// **Opt-in, and STRICT.** [`Description::new`] validates nothing and never will: it has
+    /// hundreds of call sites and a fallible constructor would be a flag day. Nor does this
+    /// stand between a bad name and a broken graph: the emitters never write an unparseable
+    /// document, whatever a name holds. A NAME (the id, an input name) is percent-encoded by
+    /// [`encode_name`](crate::encode_name), and an authored `class` or `requires` IRI is
+    /// escaped ([`escape_iri_fragment`](crate::escape_iri_fragment)) and degraded to a
+    /// literal when it is still not an IRI. So this is for a host that would rather refuse
+    /// an endpoint at bind time than serve it under an encoded name.
     ///
-    /// ⚠ **One refusal has no encoded fallback.** A NAME (the id, an input name) holding a
-    /// code point the IRI grammar refuses although an `IRIREF` carries it (DEL, a C1
-    /// control, private use, a noncharacter: anything outside RFC 3987's `ucschar`) is
-    /// spelled into the endpoint node and the contract IRI as it is, and a parser that
-    /// checks IRIs refuses the whole document. That is refused here as
-    /// [`InvalidArgument`](crate::Error::InvalidArgument), naming the field and the code
-    /// point, and only here: a description that never comes through `validate` still
-    /// emits that unparseable Turtle (ledger #1351).
+    /// Refused, each as [`InvalidArgument`](crate::Error::InvalidArgument) whose `name` is
+    /// the field (`id`, `input name`, `input class`, `requires`):
+    ///
+    /// - any field holding what a Turtle `IRIREF` cannot carry (`<>"{}|^` `` ` `` `\`, a
+    ///   space, a control character): an id that would close the IRI early is an injection
+    ///   attempt or a typo, never a name anyone meant;
+    /// - a NAME holding a code point outside RFC 3987's `ucschar` (DEL, a C1 control, private
+    ///   use, a noncharacter), named by its `U+XXXX`: the emitters encode it, and here it is
+    ///   refused as an authoring mistake (ledger #1351, #1361).
+    ///
+    /// `[` and `]` are admitted: an id may be a full IRI with an IPv6 host, and a name's
+    /// brackets are encoded (`http://[::1]/x` is `urn:ikigai:endpoint:http://%5B::1%5D/x`).
     ///
     /// ```
     /// use ikigai_core::{ArgSpec, Description, Error};
@@ -584,15 +590,19 @@ impl Description {
     ///
     /// // An id that would close the IRI early and inject triples into every Meta response.
     /// let err = Description::new("evil> ; a <urn:x> . <urn:y").validate().unwrap_err();
-    /// assert!(err.to_string().contains("id"), "{err}");
+    /// assert!(matches!(&err, Error::InvalidArgument { name, .. } if name == "id"), "{err}");
     ///
     /// // Nested fields are checked too — an input name is an IRI segment as well.
-    /// assert!(Description::new("ok").input(ArgSpec::new("a b")).validate().is_err());
+    /// let err = Description::new("ok").input(ArgSpec::new("a b")).validate().unwrap_err();
+    /// assert!(matches!(&err, Error::InvalidArgument { name, .. } if name == "input name"));
     ///
-    /// // A name no IRI can carry: refused, naming the field and the code point.
+    /// // A name no IRI can carry raw: refused, naming the field and the code point.
     /// let err = Description::new("ok").input(ArgSpec::new("a\u{85}b")).validate().unwrap_err();
     /// assert!(matches!(&err, Error::InvalidArgument { name, .. } if name == "input name"));
     /// assert!(err.to_string().contains("U+0085"), "{err}");
+    ///
+    /// // Brackets are encoded in a name, so an id that is a full IRI with an IPv6 host is fine.
+    /// assert!(Description::new("http://[::1]/x").input(ArgSpec::new("a[0]")).validate().is_ok());
     ///
     /// // Ordinary Unicode is a ucschar, and still a name.
     /// assert!(Description::new("naïve").input(ArgSpec::new("書名")).validate().is_ok());
@@ -608,18 +618,23 @@ impl Description {
             .chain(self.actions.iter().flat_map(ActionSpec::iri_positions));
         for (field, value) in positions {
             if !crate::is_iri_safe(value) {
-                return Err(crate::Error::Endpoint(format!(
-                    "endpoint `{}`: {field} `{value}` is not safe in an IRI position \
-                     (an RDF IRIREF cannot contain <>\"{{}}|^`\\, space or a control character)",
-                    self.id
-                )));
+                return Err(crate::Error::InvalidArgument {
+                    name: field.to_string(),
+                    detail: format!(
+                        "endpoint `{}`: {field} `{}` is not safe in an IRI position \
+                         (an RDF IRIREF cannot contain <>\"{{}}|^`\\, space or a control \
+                         character)",
+                        self.id.escape_debug(),
+                        value.escape_debug()
+                    ),
+                });
             }
         }
-        // A NAME is spelled into IRIs nearly as it is, so a code point the IRI grammar
-        // refuses breaks the endpoint node, the contract IRI and the whole document
-        // (ledger #1351). Refused here rather than encoded: encoding would respell those
-        // IRIs. An authored `class` or `requires` IRI is not a name: the emitters parse
-        // it and degrade one that is not an IRI to a literal.
+        // A NAME holding a code point the IRI grammar refuses is encoded by every emitter
+        // (`encode_name`, ledger #1361), so the documents parse; the strict check refuses it
+        // anyway, as an authoring mistake (ledger #1351). An authored `class` or `requires`
+        // IRI is not a name: the emitters parse it and degrade one that is not an IRI to a
+        // literal.
         let names = std::iter::once(("id", self.id.as_str())).chain(
             self.inputs
                 .iter()
@@ -632,8 +647,8 @@ impl Description {
                     name: field.to_string(),
                     detail: format!(
                         "endpoint `{}`: {field} `{}` contains U+{:04X}, which no IRI can carry \
-                         (DEL, a C1 control, private use or a noncharacter); a name is \
-                         refused, not encoded",
+                         (DEL, a C1 control, private use or a noncharacter); the emitters \
+                         would percent-encode it, and a strict check refuses it",
                         self.id.escape_debug(),
                         value.escape_debug(),
                         u32::from(c)
@@ -873,10 +888,12 @@ mod tests {
             ),
         ];
         for (field, d) in cases {
-            let err = d.validate().expect_err("must be refused").to_string();
+            // One variant for every refusal (ledger #1361): the IRIREF one was
+            // `Error::Endpoint` before, the code-point one `InvalidArgument`.
+            let err = d.validate().expect_err("must be refused");
             assert!(
-                err.contains(field),
-                "expected `{field}` to be blamed: {err}"
+                matches!(&err, crate::Error::InvalidArgument { name, .. } if name == field),
+                "expected `{field}` to be blamed: {err:?}"
             );
         }
     }

@@ -1,9 +1,11 @@
-//! **A name no IRI can carry** (ledger #1351). DEL, the C1 controls, private use and the
-//! noncharacters are legal in a Turtle `IRIREF`, so neither escaper encodes them, and they
-//! are not RFC 3987 `ucschar`s, so an IRI parser refuses them. An endpoint id or input
-//! name holding one was spelled into the endpoint node, the input nodes and the contract
-//! IRI as it was, and oxttl refused the whole document. Brian decided (2026-10-12) that
-//! `Description::validate` refuses such a name, and that no encoding changes.
+//! **A name no IRI can carry** (ledger #1351, #1361). DEL, the C1 controls, private use and
+//! the noncharacters are legal in a Turtle `IRIREF` but are not RFC 3987 `ucschar`s, so an
+//! IRI parser refuses them. Before 0.1.100 neither name escaper encoded them, an endpoint id
+//! or input name holding one was spelled into the endpoint node, the input nodes and the
+//! contract IRI as it was, and oxttl refused the whole document. Now `encode_name`
+//! percent-encodes them in every name, so the documents parse whether or not a host calls
+//! `Description::validate`, and `validate`, the strict opt-in, still refuses such a name as
+//! an authoring mistake.
 
 use ikigai_core::{ActionSpec, ArgSpec, Description, Error, Verb};
 
@@ -43,23 +45,26 @@ fn in_every_name_position(c: char) -> [(&'static str, Description); 3] {
 }
 
 #[test]
-fn the_defect_is_real_without_validate() {
-    // What validate is guarding: the emitted Turtle and the contract IRI are both
-    // unparseable, and no encoding steps in.
+fn without_validate_the_name_is_encoded_and_every_document_parses() {
+    // What validate used to be the only guard against (ledger #1351): the Turtle and the
+    // contract IRI were both unparseable. Encoded now (ledger #1361), with no validate.
     for c in REFUSED {
         let d = Description::new(format!("tag{c}suggest"))
             .verb(Verb::Source)
             .input(ArgSpec::new(format!("bo{c}ok")));
         let cp = u32::from(c);
-        assert!(
-            !turtle_parses(&ikigai_vocab::to_turtle(&d)),
-            "U+{cp:04X}: Turtle parsed"
-        );
+        let ttl = ikigai_vocab::to_turtle(&d);
+        assert!(turtle_parses(&ttl), "U+{cp:04X}: Turtle refused\n{ttl}");
+        // Encoded in the IRIs (the literals still carry the name as written).
+        let node = format!("<urn:ikigai:endpoint:{}>", ikigai_core::encode_name(&d.id));
+        assert!(!node.contains(c), "U+{cp:04X} written raw in {node}");
+        assert!(ttl.contains(&node), "U+{cp:04X}: no {node}\n{ttl}");
         for spec in d.action_specs() {
-            assert!(
-                !iri_parses(&spec.contract_iri(&d.id)),
-                "U+{cp:04X}: contract IRI parsed"
-            );
+            let iri = spec.contract_iri(&d.id);
+            assert!(iri_parses(&iri), "U+{cp:04X}: contract IRI {iri:?}");
+            // The id still round-trips out of the contract IRI.
+            let (id, _, _) = ikigai_core::parse_contract_iri(&iri).unwrap();
+            assert_eq!(id, d.id);
         }
     }
 }

@@ -838,6 +838,40 @@
           "Meta"
         ]
       }
+    },
+    {
+      "name": "core/bracket-names",
+      "pattern": "http://[::1]:8080/{key}",
+      "description": {
+        "id": "http://[::1]/x",
+        "inputs": [
+          {
+            "class": "http://[::1]/cls",
+            "name": "a[0]",
+            "required": true,
+            "source": "argument",
+            "summary": "a name with brackets"
+          },
+          {
+            "name": "del nel pua nonchar﷐￿",
+            "required": false,
+            "source": "argument",
+            "summary": "a name with every kind of non-ucschar code point"
+          }
+        ],
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "http://[::1]/cap"
+        ],
+        "summary": "",
+        "title": "Bracket names",
+        "verbs": [
+          "Source",
+          "Meta"
+        ]
+      }
     }
   ],
   "contracts": [
@@ -1022,6 +1056,20 @@
       "action": {
         "verb": "Source"
       }
+    },
+    {
+      "name": "bracket-id",
+      "id": "http://[::1]/x",
+      "action": {
+        "verb": "Source"
+      }
+    },
+    {
+      "name": "non-ucschar-id",
+      "id": "abcd﷐e￿",
+      "action": {
+        "verb": "Source"
+      }
     }
   ],
   "patterns": [
@@ -1031,7 +1079,9 @@
     "urn:a:{",
     "urn:sp ace:<>\"|^`\\:naïve",
     "urn:ts:kv:{bucket}:{key}",
-    "urn:ts:naïve 𝄞|x"
+    "urn:ts:naïve 𝄞|x",
+    "http://[::1]/{path}",
+    "urn:x:del nel pua nonchar﷐￿"
   ],
   "parses": [
     "urn:ikigai:match:source:urn:file:%7Bpath%7D",
@@ -1069,6 +1119,10 @@
     "urn:ikigai:contract:a:b:source:b3:abababababababababababababababababababababababababababababababab",
     "urn:ikigai:match:source:urn:%66ile:%7bpath%7d",
     "urn:ikigai:contract:{x}:source:b3:ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
-    "urn:ikigai:contract:%66ile:source:b3:abababababababababababababababababababababababababababababababab"
+    "urn:ikigai:contract:%66ile:source:b3:abababababababababababababababababababababababababababababababab",
+    "urn:ikigai:match:source:http://[::1]/x",
+    "urn:ikigai:match:source:http://%5B::1%5D/x",
+    "urn:ikigai:match:source:a%7Fb%C2%85c",
+    "urn:ikigai:contract:http://[::1]/x:source:b3:abababababababababababababababababababababababababababababababab"
   ]
 }

@@ -112,3 +112,62 @@ fn a_result_path_for_an_input_name_with_a_percent_parses_and_joins_the_catalog()
         ]
     );
 }
+
+/// Ledger #1361: an input name holding `[`, `]` or a code point outside RFC 3987's
+/// `ucschar` is encoded in `sh:resultPath` exactly as the catalog encodes the input node
+/// (`encode_name`), so the report parses and still joins the contract. Before, the path was
+/// written with the raw character and the whole report was refused.
+#[test]
+fn a_result_path_for_an_input_name_with_brackets_or_a_non_ucschar_parses() {
+    let description = Description::new("http://[::1]/ep")
+        .verb(Verb::Source)
+        .input(ArgSpec::new("a[0]"))
+        .input(ArgSpec::new("nel\u{85}pua\u{E000}"));
+    let contract = description
+        .action_specs()
+        .into_iter()
+        .find(|a| a.verb == Verb::Source)
+        .unwrap()
+        .contract_iri(&description.id);
+    let endpoint = FnEndpoint::new("ep", |_| {
+        Ok(Representation::new(
+            ReprType::new("text/plain"),
+            b"x".to_vec(),
+        ))
+    })
+    .with_description(description);
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:x:ep"), endpoint),
+    ));
+    let request = Request::new(Verb::Source, Iri::parse("urn:kernel:validate").unwrap())
+        .with_arg("endpoint", ArgRef::Inline(b"urn:x:ep".to_vec()))
+        .with_arg("verb", ArgRef::Inline(b"source".to_vec()))
+        .with_arg("args", ArgRef::Inline(Vec::new()));
+    let text = String::from_utf8(
+        block_on(kernel.issue(request, &Capability::root()))
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    let triples: Vec<_> = oxttl::TurtleParser::new()
+        .for_reader(text.as_bytes())
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| panic!("not Turtle: {e}\n{text}"));
+    let mut paths: Vec<String> = triples
+        .iter()
+        .filter(|t| t.predicate.as_str() == "http://www.w3.org/ns/shacl#resultPath")
+        .map(|t| t.object.to_string())
+        .collect();
+    paths.sort();
+    assert!(
+        contract.starts_with("urn:ikigai:contract:http://%5B::1%5D/ep:source:b3:"),
+        "{contract}"
+    );
+    assert_eq!(
+        paths,
+        [
+            format!("<{contract}:input:a%5B0%5D>"),
+            format!("<{contract}:input:nel%C2%85pua%EE%80%80>"),
+        ]
+    );
+}

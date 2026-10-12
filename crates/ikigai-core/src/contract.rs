@@ -20,9 +20,10 @@
 //!   catalog writes on the node, so no two contracts that would render differently can
 //!   share one.
 //!
-//! Both encode their variable segments with an **injective** percent-encoding (`%`
-//! itself is encoded, unlike [`escape_iri_fragment`](crate::escape_iri_fragment)), so
-//! each IRI parses back to exactly what made it.
+//! Both encode their variable segments with [`encode_name`], an **injective**
+//! percent-encoding (`%` itself is encoded, unlike
+//! [`escape_iri_fragment`](crate::escape_iri_fragment)), so each IRI parses back to exactly
+//! what made it, and parses as an IRI whatever the name holds.
 //!
 //! **Lenient in, canonical out** (Postel's law; ledger #1107). The parse is not
 //! canonical-only: [`parse_match_iri`] and [`parse_contract_iri`] accept every spelling
@@ -40,6 +41,8 @@
 //! The faces that mirror these functions by hand pin themselves against ONE vector file,
 //! ikigai-vocab's `tests/vectors/contract_vectors.json`, which a test regenerates from
 //! this code and refuses to let drift (ledger #1096).
+
+use std::borrow::Cow;
 
 use crate::content::ContentId;
 use crate::describe::{ActionSpec, ArgSpec, InputSource};
@@ -73,33 +76,76 @@ fn parse_verb_segment(name: &str) -> Option<Verb> {
     }
 }
 
-/// Whether a character must be percent-encoded in a segment: `%` itself (so the
-/// encoding is injective), and everything a Turtle `IRIREF` cannot carry.
+/// Whether a character must be percent-encoded in a NAME: `%` itself (so the encoding is
+/// injective), everything a Turtle `IRIREF` cannot carry, `[` and `]` (an IRI admits them
+/// only around an IP-literal host, never in the path a name lands in), and every code point
+/// the IRI grammar refuses although an `IRIREF` carries it (DEL, the C1 controls, private
+/// use, the noncharacters: [`is_non_ucschar`](crate::iri::is_non_ucschar)).
 fn must_encode(c: char) -> bool {
-    c == '%' || c <= '\u{20}' || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\')
+    c == '%'
+        || c <= '\u{20}'
+        || matches!(
+            c,
+            '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\' | '[' | ']'
+        )
+        || crate::iri::is_non_ucschar(c)
 }
 
-/// Percent-encode a segment injectively (see the module doc). Also how an endpoint id is
-/// spelled in `urn:ikigai:endpoint:{id}`, so the explain graph's `ik:answer` names the
-/// node `ikigai-vocab`'s `to_turtle` writes (ledger #1345), and how core spells every other
-/// NAME it mints an IRI from: a thread name, an explain binding key, an input name in a
-/// validation report's `sh:resultPath` (ledger #1352).
-pub(crate) fn encode_segment(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+/// Percent-encode a NAME for an IRI position, injectively: the one spelling of every name
+/// ikigai mints an IRI from.
+///
+/// A name is an endpoint id (`urn:ikigai:endpoint:{id}`, and the id in a contract IRI), an
+/// input name (the `:input:{name}` nodes, and a validation report's `sh:resultPath`), a
+/// door pattern (a match IRI), a thread name, an explain binding key, and a plan's bound,
+/// parameter and argument names. `ikigai-vocab`'s `to_turtle` calls this function, so the
+/// catalog, the explain graph and the validation report name one node one way (ledger
+/// #1345, #1352, #1361).
+///
+/// Encoded, as the upper-case `%XX` of each UTF-8 byte: `%` (so the encoding is injective,
+/// and inverts exactly), what a Turtle `IRIREF` cannot carry (space, the C0 controls,
+/// `<>"{}|^` `` ` `` and `\`), `[` and `]`, and every code point outside RFC 3987's
+/// `ucschar` (DEL, the C1 controls, private use, the noncharacters). Whatever a name holds,
+/// the IRI parses. Everything else, ordinary Unicode included, is written as it is, and a
+/// name with nothing to encode is returned borrowed.
+///
+/// ⚠ This is for NAMES only. An authored IRI (a `class`, a `requires` scope, a plan id)
+/// goes through [`escape_iri_fragment`](crate::escape_iri_fragment) instead, which leaves
+/// `%` and the brackets alone: its escapes are real, and an IPv6 host needs its brackets.
+///
+/// ```
+/// use ikigai_core::encode_name;
+///
+/// assert_eq!(encode_name("toUpper"), "toUpper");
+/// assert_eq!(encode_name("naïve"), "naïve");
+/// assert_eq!(encode_name("50% off"), "50%25%20off");
+/// // An id that is a full IRI with an IPv6 host: the brackets are encoded in a NAME.
+/// assert_eq!(encode_name("http://[::1]/x"), "http://%5B::1%5D/x");
+/// // DEL, NEL, private use, a noncharacter: no IRI carries them raw.
+/// assert_eq!(encode_name("a\u{7F}b\u{85}c"), "a%7Fb%C2%85c");
+/// assert_eq!(encode_name("\u{E000}\u{FFFF}"), "%EE%80%80%EF%BF%BF");
+/// ```
+pub fn encode_name(s: &str) -> Cow<'_, str> {
+    if !s.chars().any(must_encode) {
+        return Cow::Borrowed(s);
+    }
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len() + 8);
     let mut buf = [0u8; 4];
     for c in s.chars() {
         if must_encode(c) {
-            for byte in c.encode_utf8(&mut buf).as_bytes() {
-                out.push_str(&format!("%{byte:02X}"));
+            for &byte in c.encode_utf8(&mut buf).as_bytes() {
+                out.push('%');
+                out.push(char::from(HEX[usize::from(byte >> 4)]));
+                out.push(char::from(HEX[usize::from(byte & 0x0f)]));
             }
         } else {
             out.push(c);
         }
     }
-    out
+    Cow::Owned(out)
 }
 
-/// Invert [`encode_segment`]; `None` for a malformed escape or non-UTF-8 result.
+/// Invert [`encode_name`]; `None` for a malformed escape or non-UTF-8 result.
 ///
 /// An escape is `%` and exactly two hex digits (RFC 3986 `pct-encoded`). The digits are
 /// checked before `u8::from_str_radix`, which also takes a leading `+`: without the
@@ -148,7 +194,7 @@ pub fn match_iri(verb: Verb, pattern: &str) -> String {
     format!(
         "{MATCH_PREFIX}{}:{}",
         verb_segment(verb),
-        encode_segment(pattern)
+        encode_name(pattern)
     )
 }
 
@@ -206,7 +252,7 @@ pub fn canonical_contract_iri(iri: &str) -> Option<String> {
 pub(crate) fn contract_iri_of(endpoint_id: &str, verb: Verb, digest: &ContentId) -> String {
     format!(
         "{CONTRACT_PREFIX}{}:{}:{digest}",
-        encode_segment(endpoint_id),
+        encode_name(endpoint_id),
         verb_segment(verb)
     )
 }
@@ -367,15 +413,63 @@ mod tests {
 
     #[test]
     fn segments_round_trip_including_percent_and_non_ascii() {
-        for s in ["plain", "urn:a:%7B", "urn:a:{x}", "a b>c", "naïve|é", "%"] {
-            assert_eq!(
-                decode_segment(&encode_segment(s)).as_deref(),
-                Some(s),
-                "{s}"
-            );
+        for s in [
+            "plain",
+            "urn:a:%7B",
+            "urn:a:{x}",
+            "a b>c",
+            "naïve|é",
+            "%",
+            // ledger #1361: brackets and the non-ucschar code points.
+            "http://[::1]/x",
+            "]",
+            "a\u{7F}b\u{85}c\u{E000}d\u{FDD0}e\u{FFFF}f\u{10FFFF}",
+            "%5B[",
+        ] {
+            assert_eq!(decode_segment(&encode_name(s)).as_deref(), Some(s), "{s}");
         }
         assert_eq!(decode_segment("%G1"), None);
         assert_eq!(decode_segment("%4"), None);
+    }
+
+    /// Ledger #1361: encoding the brackets and the non-`ucschar` code points respells NO
+    /// name that worked before. Swept over every code point, alone and between letters: a
+    /// character outside the new classes encodes exactly as the old rule did (`%` as `%25`,
+    /// then the Turtle `IRIREF` set), and a character inside them is one whose old spelling
+    /// no IRI parser accepts, so the name it respells produced an unparseable document.
+    #[test]
+    fn the_new_classes_respell_only_names_that_never_parsed() {
+        fn old_rule(s: &str) -> String {
+            crate::escape_iri_fragment(&s.replace('%', "%25")).into_owned()
+        }
+        for cp in 0..=0x10_FFFF {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let name = format!("a{c}b");
+            let new_class = matches!(c, '[' | ']') || crate::iri::is_non_ucschar(c);
+            if new_class {
+                let old = format!("urn:ikigai:endpoint:{}", old_rule(&name));
+                assert!(
+                    oxiri::Iri::parse(old.as_str()).is_err(),
+                    "U+{cp:04X}: {old}"
+                );
+                assert_ne!(encode_name(&name), old_rule(&name), "U+{cp:04X}");
+            } else {
+                assert_eq!(encode_name(&name), old_rule(&name), "U+{cp:04X}");
+            }
+            let new = format!("urn:ikigai:endpoint:{}", encode_name(&name));
+            assert!(oxiri::Iri::parse(new.as_str()).is_ok(), "U+{cp:04X}: {new}");
+        }
+    }
+
+    #[test]
+    fn a_name_with_nothing_to_encode_is_borrowed() {
+        let s = "urn:iki:fn:toUpper";
+        match encode_name(s) {
+            Cow::Borrowed(b) => assert!(std::ptr::eq(b, s)),
+            Cow::Owned(o) => panic!("rewritten to {o}"),
+        }
     }
 
     /// Ledger #1096: `u8::from_str_radix` takes a leading `+`, so `%+1` decoded to the

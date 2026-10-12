@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use crate::alias::{AliasTable, Canonical, RuleKind};
 use crate::capability::{is_deny_scope, Capability};
-use crate::contract::encode_segment;
+use crate::contract::encode_name;
 use crate::error::{Error, Result};
 use crate::iri::Iri;
 use crate::kernel::{capability_key, parse_verb, BINDINGS_THREAD, KERNEL_NS};
@@ -638,7 +638,7 @@ impl Explanation {
                     out,
                     "  endpoint    {} (urn:ikigai:endpoint:{})",
                     answer.name,
-                    encode_segment(&answer.id)
+                    encode_name(&answer.id)
                 );
                 for member in &self.members {
                     for door in &member.doors {
@@ -752,7 +752,7 @@ impl Explanation {
                 for (k, v) in &answer.bindings {
                     // A binding key is a NAME (whatever the grammar captured under), so
                     // a `%` in it is a character (ledger #1352).
-                    let binding = format!("{me}:binding:{}", encode_segment(k));
+                    let binding = format!("{me}:binding:{}", encode_name(k));
                     let _ = write!(out, " ;\n    ik:binding <{binding}>");
                     let _ = write!(
                         below,
@@ -770,10 +770,7 @@ impl Explanation {
                     (&answer.requires, &answer.lacking)
                 };
                 (
-                    Some(format!(
-                        "urn:ikigai:endpoint:{}",
-                        encode_segment(&answer.id)
-                    )),
+                    Some(format!("urn:ikigai:endpoint:{}", encode_name(&answer.id))),
                     floor.0,
                     floor.1,
                 )
@@ -786,7 +783,7 @@ impl Explanation {
                 lacking,
             } => (
                 crate::kernel_ops::description(op)
-                    .map(|d| format!("urn:ikigai:endpoint:{}", encode_segment(&d.id))),
+                    .map(|d| format!("urn:ikigai:endpoint:{}", encode_name(&d.id))),
                 requires,
                 lacking,
             ),
