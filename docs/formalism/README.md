@@ -2048,3 +2048,12 @@ domain; `tests/layers.rs` runs every domain and range in the vocabulary over an 
 a node typed into a family it is not in. **What a consumer observes:** nothing in core; `ikigai_vocab::VOCABULARY` and
 `CONTEXT` define twenty new terms. **No type change**, no wire change. **Vocabulary:** twenty terms and
 `owl:versionInfo`; `/ns` needs a deploy.
+
+**0.1.97** makes a floor refusal for a FAMILY requirement say what satisfies it (ledger
+[#1292](http://localhost:1060/l/default/item/1292)). A declared `prefix*` is met by any held grant under the prefix
+(`cap_satisfies`), and the endpoint is never entered on a denial, so the kernel's text is the only explanation a caller gets.
+**What a consumer observes:** a wildcard denial reads ``capability does not grant `urn:cap:script:run:open-*` (declared by
+`urn:script:open-door`; any grant under `urn:cap:script:run:open-` satisfies it)``; a bare `*` says "any grant at all
+satisfies it". An exact requirement's text is byte-identical. A page or test that prints the whole old wildcard text (the
+tutorial's `code/authority.md` and the gonk book's `ledger/your-own.md`) needs the new line when it takes this release;
+a `contains` on the scope still matches. **No type change**, no wire change. **Vocabulary:** only `owl:versionInfo`.
