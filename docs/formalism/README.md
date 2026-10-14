@@ -2132,3 +2132,25 @@ a `core/hash-query-names` door, `hash-id` and `query-id` contracts, two patterns
 faces must follow. **A patch, not a minor:** it respells only names nobody in the ecosystem uses, and a 0.2.0 would put
 every consumer's `0.1.x` pin below a ceiling for that. ikigai-vocab's core floor moves to 0.1.101 (the behavior
 `plan::process_iri` relies on; no new API). **Vocabulary:** only `owl:versionInfo`.
+
+**0.1.102** carries six PRs on top of 0.1.101, from one backlog batch. Additive in the API (no signature changes); three
+change what a caller observes. **PR 198** (ledger [#9](http://localhost:1062/l/default/item/9)): `Verb` derives
+`PartialOrd`/`Ord` in declaration order (Source < Sink < Exists < Delete < Meta, also the discriminant order), so
+`(id, verb)` keys a `BTreeSet`. **PR 199** (ledger [#439](http://localhost:1062/l/default/item/439)):
+`Capability::satisfies(scope)`, the kernel's declared-scope predicate (`cap_satisfies`: exact for a plain scope, a
+presence test under the prefix for a trailing `*`), public beside `allows`, which stays exact; both doc comments say which
+one a host wants. **PR 200** (ledger [#16](http://localhost:1062/l/default/item/16)): `ActionQuery::want` / `want=`
+compares media types, not strings: the essence case-insensitively, a parameter only when the want asks for it (a
+declaration stating a different value is out, one stating none is in). Declared outputs are not canonicalized (that would
+move contract digests). **PR 201** (ledger [#271](http://localhost:1062/l/default/item/271)): an action declaring no
+inputs is trivially satisfiable in class-driven selection and ranks after every fitted match. **What a consumer
+observes:** a typed `select_action` / `select_actions` / `urn:kernel:actions types=` now ends with every argument-free
+action, the kernel's own `aliases`, `catalog`, `constraint`, `scheduler`, `topology` and `uncached` among them
+(capability-filtered in `urn:kernel:actions`; `Kernel::select_action` has no capability axis), so a suite asserting an
+exact typed list sees them. An action with only optional inputs is unchanged. **PR 202** (ledger
+[#39](http://localhost:1062/l/default/item/39)): every `urn:kernel:*` operation is a trace node, served (`cache_hit`) or
+computed (with `uncached` when not stored, `failed` when it fails on anything but capability); a denial is still recorded
+once, and the constraint window is unchanged. **PR 203** (ledger [#28](http://localhost:1062/l/default/item/28)):
+`urn:kernel:validate endpoint=` resolves the name where the request would, the kernel's operations ahead and then the
+caller's chain (corridors, then the root unless severed), and its cached answer is keyed by the chain. ikigai-vocab's core
+floor stays 0.1.101 (it uses none of this). **Vocabulary:** only `owl:versionInfo`.
