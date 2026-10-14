@@ -514,13 +514,16 @@ impl Capability {
     /// Whether this capability grants `scope`, matched **exactly**.
     ///
     /// This is the primitive, not the whole predicate. Enforcement, selection, and
-    /// `urn:kernel:validate` all go through `select::cap_satisfies`, which layers the
-    /// trailing-`*` family form on top of this: `urn:cap:net:*` means "holds ANY grant
-    /// under this prefix." That form is how a parameterized capability grammar
+    /// `urn:kernel:validate` all go through [`satisfies`](Self::satisfies), which layers
+    /// the trailing-`*` family form on top of this: `urn:cap:net:*` means "holds ANY
+    /// grant under this prefix." That form is how a parameterized capability grammar
     /// (`urn:cap:net:<host-rule>`, `urn:cap:fs:<action>:<path>`) annotates an action
     /// whose authorization depends on an argument, so a declared `urn:cap:net:*` IS
-    /// satisfied by a held `urn:cap:net:example.com` — through `cap_satisfies`, never
-    /// through this method. Callers wanting the enforced semantics want that one.
+    /// satisfied by a held `urn:cap:net:example.com` — through `satisfies`, never
+    /// through this method. ⚠ A host asking "can this caller invoke what that action
+    /// DECLARES?" wants [`satisfies`](Self::satisfies): this method answers `false`
+    /// for every declared wildcard a scoped capability does not hold literally, which
+    /// reads like a correct denial and is not.
     ///
     /// ⚠ The family form is a PRESENCE test, and an exclusion is present: a holder of
     /// nothing but `urn:cap:fs:read:-/secret` satisfies a declared `urn:cap:fs:read:*`,
@@ -550,6 +553,44 @@ impl Capability {
                     && principal_in(scope).is_none_or(|p| single_principal(held) == Some(p))
             }
         }
+    }
+
+    /// Whether this capability satisfies one DECLARED scope, the way the kernel decides
+    /// it: the predicate behind the declared-capability floor at dispatch, the
+    /// manifold (`urn:kernel:actions`) and `urn:kernel:validate`, so a host that asks
+    /// it agrees with what the kernel will offer and admit.
+    ///
+    /// - A plain scope is [`allows`](Self::allows): exact, an exclusion never granted,
+    ///   a principal granted only as the capability's one principal.
+    /// - A scope ending in `*` is the parameterized family form, a PRESENCE test:
+    ///   "holds ANY scope under this prefix". Root satisfies it; so does a held
+    ///   exclusion under the prefix (ledger #858: the floor says "may hold a grant
+    ///   here", the module's own rule says which).
+    ///
+    /// **Which one a host wants.** Deciding what to OFFER or pre-flight against an
+    /// action's `requires` (a UI greying out a button, a door choosing what to list, a
+    /// startup check that a grant covers a contract) is this method. Asking whether a
+    /// concrete grant is HELD, the operation attenuation and clamping rest on, is
+    /// [`allows`](Self::allows). The finer runtime gate (a path or host ACL) stays the
+    /// module's either way. To check a whole contract at once, see
+    /// [`Description::unsatisfied_scopes`](crate::Description::unsatisfied_scopes).
+    ///
+    /// ```
+    /// use ikigai_core::Capability;
+    ///
+    /// let per_root = Capability::scoped(["urn:cap:browse:read:ikigai-core"]);
+    /// // The family form a contract declares is satisfied by a grant under it...
+    /// assert!(per_root.satisfies("urn:cap:browse:read:*"));
+    /// // ...which the exact primitive does not see.
+    /// assert!(!per_root.allows("urn:cap:browse:read:*"));
+    /// // Plain scopes are exact either way.
+    /// assert!(per_root.satisfies("urn:cap:browse:read:ikigai-core"));
+    /// assert!(!per_root.satisfies("urn:cap:browse:read:ikigai-gonk"));
+    /// assert!(!per_root.satisfies("urn:cap:browse:write:*"));
+    /// assert!(Capability::root().satisfies("urn:cap:net:*"));
+    /// ```
+    pub fn satisfies(&self, scope: &str) -> bool {
+        crate::select::cap_satisfies(self, scope)
     }
 
     /// The scopes this capability holds — grants and exclusions alike — or `None` for
@@ -1132,6 +1173,55 @@ mod tests {
             "urn:cap:principal:*"
         ));
         assert_eq!(presence.principal(), None);
+    }
+
+    /// Ledger #439: a host asking "can this caller?" of a DECLARED scope needs the
+    /// kernel's predicate, and `allows` is the exact-match primitive. The case that
+    /// bit: a per-root grant against a declared family wildcard.
+    #[test]
+    fn satisfies_is_the_kernels_predicate_and_allows_stays_exact() {
+        let per_root = Capability::scoped(["urn:cap:browse:read:ikigai-core"]);
+        // The hazard: exact containment answers a false negative for the family form.
+        assert!(!per_root.allows("urn:cap:browse:read:*"));
+        assert!(per_root.satisfies("urn:cap:browse:read:*"));
+        // Plain scopes: identical to `allows`, exclusions and principals included.
+        for (cap, scope) in [
+            (&per_root, "urn:cap:browse:read:ikigai-core"),
+            (&per_root, "urn:cap:browse:read:ikigai-gonk"),
+            (&per_root, "urn:cap:browse:read"),
+            (
+                &Capability::scoped(["urn:cap:fs:read:-/secret"]),
+                "urn:cap:fs:read:-/secret",
+            ),
+            (
+                &Capability::scoped(["urn:cap:x"])
+                    .with_principal(ALICE)
+                    .unwrap(),
+                "urn:cap:principal:urn:example:person:alice",
+            ),
+        ] {
+            assert_eq!(cap.satisfies(scope), cap.allows(scope), "{scope}");
+        }
+        // The wildcard is a prefix presence test, not a sibling-family match.
+        assert!(!per_root.satisfies("urn:cap:browse:write:*"));
+        assert!(!per_root.satisfies("urn:cap:net:*"));
+        // An exclusion is present, so it satisfies the family form (ledger #858).
+        assert!(Capability::scoped(["urn:cap:fs:read:-/secret"]).satisfies("urn:cap:fs:read:*"));
+        // Root satisfies everything; the empty capability nothing.
+        assert!(Capability::root().satisfies("urn:cap:net:*"));
+        assert!(!Capability::scoped(Vec::<String>::new()).satisfies("urn:cap:net:*"));
+        // And it IS the kernel's predicate, case for case.
+        for scope in [
+            "urn:cap:browse:read:*",
+            "urn:cap:browse:read:ikigai-core",
+            "urn:cap:*",
+        ] {
+            assert_eq!(
+                per_root.satisfies(scope),
+                crate::select::cap_satisfies(&per_root, scope),
+                "{scope}"
+            );
+        }
     }
 
     #[test]
