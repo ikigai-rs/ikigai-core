@@ -2154,3 +2154,12 @@ once, and the constraint window is unchanged. **PR 203** (ledger [#28](http://lo
 `urn:kernel:validate endpoint=` resolves the name where the request would, the kernel's operations ahead and then the
 caller's chain (corridors, then the root unless severed), and its cached answer is keyed by the chain. ikigai-vocab's core
 floor stays 0.1.101 (it uses none of this). **Vocabulary:** only `owl:versionInfo`.
+
+**0.1.103** carries one PR on top of 0.1.102. **PR 206** (ledger [#271](http://localhost:1062/l/default/item/271),
+option a): an action declaring no inputs is still satisfiable in class-driven selection, but it is offered only beside a
+**fitted** match (an action whose required inputs are all typed and present), after every one of them. The rule runs after
+the capability, verb and `want=` filters, so a fitted match the caller may not invoke unlocks nothing. **What a consumer
+observes:** a typed query that fits nothing answers nothing again, as before 0.1.102, so `urn:agent:select
+types=urn:no:Such` can say that no authorized action fits; a typed query with a fit keeps 0.1.102's answer (the fitted
+matches, then the argument-free ones, the kernel's own among them). An empty present set is unchanged: no type filter. No
+API change. ikigai-vocab's core floor stays 0.1.101 (it uses none of this). **Vocabulary:** only `owl:versionInfo`.
