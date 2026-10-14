@@ -179,11 +179,15 @@ adding a field forces a protocol-version bump on every host shipping it.
 request that never ran. Both enforcement points report — bound endpoints
 (`unsatisfied_scope`) and the `urn:kernel:*` builtins (`issue_kernel`'s gate).
 
-**Deliberate asymmetry:** a *successful* `urn:kernel:*` builtin records no event at
-all — that arm returns before the trace path and is likewise absent from the
-constraint window, because these are introspection, not throughput. An observer
-therefore sees denials from that namespace and never successes. The refusal is the
-fact worth keeping.
+**Kernel operations are trace nodes too** (ledger #39, core 0.1.102). Until then a
+*successful* `urn:kernel:*` builtin recorded no event at all, so a tracer saw every
+endpoint's cache behavior except the kernel's own, and a kernel operation an endpoint
+issued was missing from that endpoint's tree. Now the `urn:kernel:*` arm records one
+event per operation: `cache_hit` when served, computed otherwise, with the alias hop,
+the `uncached` note when a cacheable verb's answer was not stored, and the `failed`
+note when it fails on anything but capability. A denial is still recorded once, by
+`issue_kernel`'s gate. Kernel operations stay absent from the constraint window,
+because these are introspection, not throughput.
 
 ### ★ The coupling this creates, and the API it argues for
 
