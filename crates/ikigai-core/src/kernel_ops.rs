@@ -78,8 +78,9 @@ pub(crate) const OPS: &[&str] = &[
 /// is keyed by the chain's fingerprint like any scoped resolution.
 pub(crate) fn depends_on_chain(op: &str) -> bool {
     // The explanation walks the asker's chain too: what declines and what answers
-    // is a property of the chain the name would be resolved in.
-    op == "topology" || op == "explain"
+    // is a property of the chain the name would be resolved in. So does `validate`
+    // by `endpoint=`: the door it checks is the one the chain resolves (ledger #28).
+    op == "topology" || op == "explain" || op == "validate"
 }
 
 /// The self-description of one kernel operation, or `None` for a name the kernel
