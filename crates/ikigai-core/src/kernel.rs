@@ -2324,39 +2324,98 @@ impl Kernel {
         // chain's fingerprint, as any scoped resolution is.
         if let Some(op) = request.target.as_str().strip_prefix(KERNEL_NS) {
             let mut key = CacheKey::new(request.id(), capability_key(capability));
-            if crate::kernel_ops::depends_on_chain(op) {
+            // The chain this answer is a function of, for its key and its trace event:
+            // the caller's for the operations whose subject it is, else the empty one
+            // (a kernel operation is resolved ahead of the chain).
+            let chain_dependent = crate::kernel_ops::depends_on_chain(op);
+            if chain_dependent {
                 key = key.in_scope(scope.fingerprint());
             }
+            let empty_chain = Scope::empty();
+            let event_chain = if chain_dependent {
+                &scope
+            } else {
+                &empty_chain
+            };
             let cacheable_verb = request.verb.is_cacheable();
             let started = self.now_stamp();
+            // ★ A KERNEL OPERATION IS A TRACE NODE (ledger #39), served or computed,
+            // like every endpoint: otherwise a tracer sees every cache behavior but the
+            // kernel's own, and a kernel operation an endpoint issues is missing from
+            // that endpoint's tree. Its span is allocated when it is recorded (a kernel
+            // operation issues no sub-requests), so a denial, which `issue_kernel`
+            // records itself, takes exactly one span as before. Still absent from the
+            // constraint window: these are introspection, not throughput.
+            let record = |cache_hit: bool, mut notes: Vec<(String, String)>| {
+                if trace.is_some() {
+                    let mut all = alias_notes(alias.as_ref());
+                    all.append(&mut notes);
+                    let span = trace.as_ref().map(TraceScope::next_span);
+                    self.trace_record(
+                        &trace,
+                        &request,
+                        capability,
+                        span,
+                        parent,
+                        started,
+                        cache_hit,
+                        all,
+                        event_chain,
+                    );
+                }
+            };
             if cacheable_verb {
                 if let Some(cached) = self.cache.get(&key, started) {
+                    record(true, Vec::new());
                     return Ok(cached);
                 }
             }
             let representation =
-                self.issue_kernel(op, &request, capability, &trace, parent, &scope)?;
-            let storable = cacheable_verb
-                && match representation.expiry {
-                    Expiry::Always => false,
-                    Expiry::Never => true,
-                    Expiry::At(_) => self.clock.is_some(),
+                match self.issue_kernel(op, &request, capability, &trace, parent, &scope) {
+                    Ok(representation) => representation,
+                    // A denial is already on the trace, as the refusal it is.
+                    Err(error @ Error::Denied(_)) => return Err(error),
+                    Err(error) => {
+                        record(
+                            false,
+                            vec![(FAILED_NOTE.to_string(), error.kind().to_string())],
+                        );
+                        return Err(error);
+                    }
                 };
-            if storable {
-                let stored = self.cache.store(
+            let mut why = Uncached::default();
+            if cacheable_verb {
+                match representation.expiry {
+                    Expiry::Always => why.declared = true,
+                    Expiry::Never => {}
+                    Expiry::At(_) if self.clock.is_none() => {
+                        why.declined = Some(Declined::NoClock);
+                    }
+                    Expiry::At(_) => {}
+                }
+            }
+            if cacheable_verb && why.is_empty() {
+                match self.cache.store_outcome(
                     key,
                     request.target.as_str().to_string(),
                     representation.clone(),
                     taken,
                     self.elapsed_since(started),
-                );
-                // A chain-keyed entry names its chain in the readout, as a scoped
-                // resolution's does; every other kernel operation is keyed with
-                // scope 0 and takes no lock here.
-                if stored && key.scope != 0 {
-                    self.remember_scope(key.scope, &scope);
+                ) {
+                    // A chain-keyed entry names its chain in the readout, as a scoped
+                    // resolution's does; every other kernel operation is keyed with
+                    // scope 0 and takes no lock here.
+                    Ok(()) if key.scope != 0 => self.remember_scope(key.scope, &scope),
+                    Ok(()) => {}
+                    Err(declined) => why.declined = Some(declined),
                 }
             }
+            let notes = if why.is_empty() {
+                Vec::new()
+            } else {
+                vec![(UNCACHED_NOTE.to_string(), why.to_string())]
+            };
+            record(false, notes);
             return Ok(representation);
         }
 
@@ -3034,12 +3093,10 @@ impl Kernel {
         // a denied endpoint, and the same reasoning applies: the operation never
         // runs, so nothing downstream can report it.
         //
-        // ★ Asymmetry, deliberate: a SUCCESSFUL kernel builtin records no event at
-        // all (this whole arm returns before the trace path, and is likewise absent
-        // from the constraint window — these are introspection, not throughput). So
-        // an observer sees denials from `urn:kernel:*` and never successes. That is
-        // the security-correct trade, not an oversight: the refusal is the fact
-        // worth keeping.
+        // A successful (or otherwise failed) kernel operation is recorded by the
+        // caller, `issue_inner`'s `urn:kernel:*` arm (ledger #39); a DENIAL is
+        // recorded here, where the scope it lacked is known. Kernel operations stay
+        // absent from the constraint window: introspection, not throughput.
         let require_cap = |scope: &str| -> Result<()> {
             if capability.allows(scope) {
                 return Ok(());
@@ -7548,6 +7605,87 @@ mod tests {
                 "each leaf links to the fan parent"
             );
         }
+    }
+
+    /// Ledger #39: the `urn:kernel:*` arm looked up and stored the cache without a
+    /// trace record, so a tracer saw every endpoint's cache behavior except the
+    /// kernel's own, and a kernel operation issued by an endpoint was missing from
+    /// its tree.
+    #[test]
+    fn a_kernel_operation_is_a_trace_node_computed_or_cached() {
+        struct Rec(std::sync::Mutex<Vec<TraceEvent>>);
+        impl Tracer for Rec {
+            fn record(&self, event: TraceEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        let asks = crate::endpoint::AsyncFnEndpoint::new("asks", |inv| {
+            Box::pin(async move {
+                let manifold = inv
+                    .source(&Iri::parse("urn:kernel:actions").unwrap())
+                    .await?;
+                Ok(Representation::new(
+                    ReprType::new("text/plain"),
+                    manifold.bytes,
+                ))
+            })
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:asks"), asks),
+        ));
+        let root = Capability::root();
+        let traced = |target: &str| {
+            let rec = Arc::new(Rec(std::sync::Mutex::new(Vec::new())));
+            let result = block_on(kernel.issue_traced(
+                Request::new(Verb::Source, iri(target)),
+                &root,
+                rec.clone(),
+            ));
+            let events = rec.0.lock().unwrap().clone();
+            (result, events)
+        };
+
+        // Computed, then served from the cache: one event each, saying which.
+        let (_, first) = traced("urn:kernel:actions");
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_eq!(first[0].target, "urn:kernel:actions");
+        assert!(!first[0].cache_hit);
+        assert_eq!(first[0].parent, None);
+        assert_eq!(first[0].capability, None, "root");
+        let (_, second) = traced("urn:kernel:actions");
+        assert_eq!(second.len(), 1, "{second:?}");
+        assert!(second[0].cache_hit);
+
+        // A live readout is computed every time, and says why it was not cached.
+        let (_, live) = traced("urn:kernel:cache");
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert!(!live[0].cache_hit);
+        assert!(
+            live[0]
+                .notes
+                .contains(&(UNCACHED_NOTE.to_string(), "declared".to_string())),
+            "{live:?}"
+        );
+
+        // A kernel operation an endpoint issues is a child in the endpoint's tree.
+        let (_, tree) = traced("urn:asks");
+        assert_eq!(tree.len(), 2, "{tree:?}");
+        let parent = tree.iter().find(|e| e.target == "urn:asks").unwrap();
+        let child = tree
+            .iter()
+            .find(|e| e.target == "urn:kernel:actions")
+            .unwrap();
+        assert_eq!(child.parent, Some(parent.span));
+        assert_ne!(child.span, parent.span);
+
+        // A kernel operation that fails (not on capability) is a node too, by kind.
+        let (result, failed) = traced("urn:kernel:no-such-op");
+        assert!(result.is_err());
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(
+            failed[0].notes.iter().any(|(k, _)| k == FAILED_NOTE),
+            "{failed:?}"
+        );
     }
 
     #[test]
