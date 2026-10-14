@@ -273,7 +273,10 @@ pub fn select_transreptor_in_with(
 /// The placeholder each `{var}` takes when a template pattern is probe-expanded into a
 /// concrete IRI for `Meta` resolution (see [`describe_entry`]). The value is arbitrary:
 /// `describe()` does not depend on bindings, and [`describe_entry`]'s identity guard
-/// catches the case where the probe IRI resolves elsewhere.
+/// catches the case where the probe IRI resolves elsewhere. Arbitrary to the walk, not to
+/// a grammar: one whose `match_iri` validates its captures refuses this value and drops
+/// its own endpoint from every walk ([`Grammar::match_iri`](crate::Grammar::match_iri),
+/// ledger #70).
 const PROBE: &str = "probe";
 
 /// **The one resolver every `entries → Meta → describe` walk uses**, and where the
@@ -1407,6 +1410,47 @@ mod tests {
         );
         // The exact binding itself is still offered normally.
         assert!(matches.iter().any(|m| m.endpoint == "urn:t:probe:x"));
+    }
+
+    #[test]
+    fn a_grammar_that_validates_its_capture_makes_its_endpoint_undescribable() {
+        // Ledger #70, pinned as documented on `Grammar::match_iri`: the walks reach a
+        // template-bound endpoint through the probe IRI (`{n}` := "probe"), so a
+        // grammar that refuses that capture drops its endpoint from the manifold,
+        // while the same endpoint keeps resolving for a name that validates.
+        use crate::grammar::Grammar;
+        struct DigitsOnly(UriTemplate);
+        impl Grammar for DigitsOnly {
+            fn match_iri(&self, iri: &Iri) -> Option<crate::grammar::Bindings> {
+                let bindings = self.0.match_iri(iri)?;
+                let n = bindings.get("path")?;
+                (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then_some(bindings)
+            }
+            fn pattern(&self) -> String {
+                self.0.pattern()
+            }
+        }
+        let validating = EndpointSpace::new().bind(
+            DigitsOnly(UriTemplate::parse("urn:n:{path}").unwrap()),
+            template_file_endpoint(),
+        );
+        let lenient = EndpointSpace::new().bind(
+            UriTemplate::parse("urn:n:{path}").unwrap(),
+            template_file_endpoint(),
+        );
+        let offered = |space: &EndpointSpace| {
+            select_actions(space, &ActionQuery::default())
+                .iter()
+                .any(|m| m.endpoint == "urn:n:{path}")
+        };
+        assert!(offered(&lenient), "the shape-only grammar is offered");
+        assert!(
+            !offered(&validating),
+            "the validating grammar is not: the probe IRI fails its own check"
+        );
+        // …and still resolves a name that validates: invisible, not unbound.
+        assert!(probe(&validating, Iri::parse("urn:n:42").unwrap()).is_some());
+        assert!(probe(&validating, Iri::parse("urn:n:probe").unwrap()).is_none());
     }
 
     #[test]

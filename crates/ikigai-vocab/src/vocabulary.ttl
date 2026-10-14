@@ -1168,6 +1168,11 @@ ik:inReplyTo a rdf:Property ;
 # Turing complete: no conditional, no loop, no "now" — a conditional in a plan is a
 # missing resource, and the environment (capability, clock, host) comes from the kernel
 # at run time, never from the plan, which is what keeps a plan portable and signable.
+# ⚠ One more thing comes from the host at run time: which ARGUMENT a piped or mapped
+# input fills. A pipe is an edge between steps, not an argument, so the plan does not
+# record its routing; the engine resolves it against the target's contract when the
+# step runs (ik:pipeFrom). The graph is portable and the routing is not: one plan on
+# two hosts whose contracts differ can route the same edge differently.
 # The SHACL shapes that say this formally are in shapes.ttl (`ikigai_vocab::SHAPES`);
 # the text face is the REPL grammar plus names (`x = source a | b`, `@x`).
 
@@ -1209,7 +1214,7 @@ ik:argument a rdf:Property ;
     rdfs:domain ik:Step ;
     rdfs:range ik:Argument ;
     rdfs:label "argument" ;
-    rdfs:comment "Links a step to one of its named arguments (the `key=value` and `key=@name` words of the text face). The piped or mapped input is not an argument; it arrives as the request's content through ik:pipeFrom / ik:mapOver." .
+    rdfs:comment "Links a step to one of its named arguments (the `key=value` and `key=@name` words of the text face). The piped or mapped input is not an argument and is not recorded as one: which argument it fills is decided at run time from the target's contract (see ik:pipeFrom)." .
 
 ik:binds a rdf:Property ;
     rdfs:domain ik:Step ;
@@ -1221,13 +1226,13 @@ ik:pipeFrom a rdf:Property ;
     rdfs:domain ik:Step ;
     rdfs:range rdfs:Resource ;
     rdfs:label "pipeFrom" ;
-    rdfs:comment "The step or fork of the same plan whose whole representation is this step's piped input (the text face's `|`). At most one per step, and exclusive with ik:mapOver." .
+    rdfs:comment "The step or fork of the same plan whose whole representation is this step's piped input (the text face's `|`). At most one per step, and exclusive with ik:mapOver. The edge says WHERE the input comes from, not WHICH argument it fills: that is resolved when the step runs, from the target's contract — for a Sink or Delete always `content`; for a Source the one declared argument the step leaves unnamed, or the one REQUIRED argument among several unnamed, else the step is refused as ambiguous. So the routing is not in the plan, and the same plan on two hosts whose contracts differ can execute differently. When the routing must not move, bind the upstream to a name (ik:binds) and pass it as a named ik:argument by ik:ref instead of piping it." .
 
 ik:mapOver a rdf:Property ;
     rdfs:domain ik:Step ;
     rdfs:range rdfs:Resource ;
     rdfs:label "mapOver" ;
-    rdfs:comment "The step or fork of the same plan whose representation this step is mapped over (the text face's `..`): the step runs once per newline-separated item, each item as its input, and the per-item outputs are rejoined with newlines — the kernel's list convention. At most one per step, and exclusive with ik:pipeFrom." .
+    rdfs:comment "The step or fork of the same plan whose representation this step is mapped over (the text face's `..`): the step runs once per newline-separated item, each item as its input, and the per-item outputs are rejoined with newlines — the kernel's list convention. At most one per step, and exclusive with ik:pipeFrom. Which argument each item fills is resolved at run time exactly as for ik:pipeFrom, and is not in the plan." .
 
 ik:forkOf a rdf:Property ;
     rdfs:domain ik:Step ;

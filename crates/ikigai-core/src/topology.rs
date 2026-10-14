@@ -11,7 +11,30 @@
 //!
 //! `urn:kernel:topology` renders the tree the request's **chain** sees — each
 //! injected corridor innermost first, then the root unless the chain is severed —
-//! as Turtle over the `ik:` vocabulary (`ik:Chain`, `ik:Fallback` with `ik:layers`,
+//! entered at one `ik:Chain` node: `urn:ikigai:chain:root` for the empty chain, and
+//! `urn:ikigai:chain:{fingerprint}` otherwise, the chain's
+//! [`Scope::fingerprint`](crate::Scope::fingerprint) as sixteen lower-case hex digits
+//! (as `urn:kernel:cache` prints it), so two chains' graphs can share a store without
+//! their entry points colliding. The root space's own node is that chain's last layer;
+//! [`Kernel::root_topology`](crate::Kernel::root_topology) hands it back without the
+//! chain around it.
+//!
+//! ```
+//! use std::sync::Arc;
+//! use ikigai_core::{EndpointSpace, Kernel, Scope, SpaceKind};
+//!
+//! let kernel = Kernel::new(Arc::new(EndpointSpace::new()));
+//! let chain = kernel.topology();
+//! assert!(matches!(chain.kind, SpaceKind::Chain { severed: false }));
+//! assert_eq!(chain.id.unwrap().as_str(), "urn:ikigai:chain:root");
+//!
+//! let corridor: Arc<dyn ikigai_core::Space> = Arc::new(EndpointSpace::new());
+//! let scope = Scope::empty().with(corridor);
+//! let id = format!("urn:ikigai:chain:{:016x}", scope.fingerprint());
+//! assert_eq!(kernel.topology_in(&scope).id.unwrap().as_str(), id);
+//! ```
+//!
+//! The graph is over the `ik:` vocabulary (`ik:Chain`, `ik:Fallback` with `ik:layers`,
 //! `ik:Mount` with `ik:prefix` and `ik:space`, `ik:Limit` with `ik:family` and
 //! `ik:matchKind`, `ik:EndpointSpace` with its `ik:pattern`s and its ordered
 //! `ik:doors`, `ik:Alias` with its `ik:rewrites` and `ik:maxHops`, `ik:Rewrite`,

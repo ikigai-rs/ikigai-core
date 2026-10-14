@@ -35,12 +35,15 @@ it for roughly two months after that crate had already moved out. Diff it agains
 
 ## Status
 
-Pre-1.0 and in active use. 0.1.70 is on crates.io, 51 published crates depend on it, and
-the kernel's shape — resources, the five verbs, representations, transreptors,
-golden threads, capabilities — has been stable for months.
+Pre-1.0 and in active use. It is published on
+[crates.io](https://crates.io/crates/ikigai-core), the ecosystem's published modules depend
+on it, and the kernel's shape — resources, the five verbs, representations, transreptors,
+golden threads, capabilities — has been stable for months. (This section deliberately names
+no version or dependent count: the last ones written here went stale within weeks. The
+crates.io page has both.)
 
 What that does **not** promise is a frozen API. Under Cargo's 0.x rules the second number is
-the breaking one, so this line moves when a type does, and it has moved 64 times. Recent
+the breaking one, so this line moves when a type does, and it is past 0.1.100. Recent
 examples of the kind of change to expect: a public struct gaining a field (which broke a
 published consumer once — the reason `Resolved` is now built rather than constructed), and
 async endpoints gaining a flat authoring form. Pin an exact minimum and read the release notes

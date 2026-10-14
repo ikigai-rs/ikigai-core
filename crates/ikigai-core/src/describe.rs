@@ -207,6 +207,32 @@ impl ActionSpec {
 /// `ikigai-core` keeps this free of any RDF dependency; `ikigai-vocab` projects
 /// it to RDF (e.g. Turtle) so a `Meta` request can return a machine-readable
 /// description of an endpoint.
+///
+/// **On the wire it is JSON, or another SELF-DESCRIBING format.** The serde derive
+/// here, and on [`ArgSpec`](crate::ArgSpec) and [`ActionSpec`] inside it,
+/// omits empty and default fields (`skip_serializing_if`) so the JSON Meta face stays
+/// small and a field added later never changes an existing contract's JSON. A format
+/// that is not self-describing (postcard, bincode) cannot read that back: it has no
+/// field names, so an omitted field reads as the end of the buffer
+/// (`DeserializeUnexpectedEnd` from postcard, even for `Description::new("x")`). A
+/// binary protocol that carries a description carries it as JSON text inside its own
+/// frame, which is what `ikigai-module` does. [`Request`](crate::Request) is the
+/// opposite case on purpose: it skips nothing, because the IPC wire is postcard.
+///
+/// ```
+/// use ikigai_core::{ArgSpec, Description, Verb};
+///
+/// let d = Description::new("wc").verb(Verb::Source).input(ArgSpec::new("in"));
+/// let json = serde_json::to_value(&d).unwrap();
+/// // The empty and default fields are omitted, not written as empty values…
+/// for absent in ["requires", "actions", "kind"] {
+///     assert!(json.get(absent).is_none(), "{absent} is omitted");
+/// }
+/// assert!(json["inputs"][0].get("one_of").is_none());
+/// // …and a self-describing reader fills them back in.
+/// let back: Description = serde_json::from_value(json).unwrap();
+/// assert_eq!(back, d);
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Description {
     /// The endpoint identifier.
@@ -494,6 +520,46 @@ impl Description {
     /// The conversion is declared **lossless** (a transreption in the formal sense: the
     /// output represents the same resource in another form); a projection follows this
     /// with [`lossy`](Self::lossy).
+    ///
+    /// Three properties of this declaration that a module must design around (ledger
+    /// #325), none of which anything checks:
+    ///
+    /// - **It is a cross product, not a list of pairs.** Selection treats the endpoint
+    ///   as handling every `(f, t)` with `f` in `from` and `t` in `to`. Declaring two
+    ///   multi-element sides claims every combination, so a type-preserving transform
+    ///   (`T → T+gzip` for each `T`) cannot be declared for several types without
+    ///   claiming conversions it cannot do. Keep one side a singleton when the pairs are
+    ///   not all real (`ikigai-compress`: payload types → `application/gzip`, and the
+    ///   reverse on its own endpoint), or bind one endpoint per pair.
+    /// - **There is no wildcard.** A transform defined for every media type enumerates
+    ///   the ones it expects to be asked about, and that list can go stale.
+    /// - **The pivot assumes the pair decides the transform.** When no direct hop
+    ///   exists, [`select_transreptor`](crate::select_transreptor) plans
+    ///   `from → text/turtle → to`. A transform whose output type depends on the payload
+    ///   rather than the pair (decompression) can be planned into that pivot and label a
+    ///   payload that is not Turtle as Turtle.
+    ///
+    /// ```
+    /// use ikigai_core::{select_transreptor, Description, EndpointSpace, Exact, FnEndpoint};
+    /// use ikigai_core::{ArgSpec, ReprType, Representation};
+    ///
+    /// let both = Description::new("two-by-two")
+    ///     .transreptor(["text/a", "text/b"], ["text/x", "text/y"])
+    ///     .input(ArgSpec::new("content"));
+    /// let space = EndpointSpace::new().bind(
+    ///     Exact::new("urn:demo:two-by-two"),
+    ///     FnEndpoint::new("two-by-two", |_| {
+    ///         Ok(Representation::new(ReprType::new("text/x"), Vec::new()))
+    ///     })
+    ///     .with_description(both),
+    /// );
+    /// // Declared as two lists, planned as four pairs: `text/b → text/x` is offered
+    /// // whether or not the endpoint can do it.
+    /// for (from, to) in [("text/a", "text/x"), ("text/a", "text/y"), ("text/b", "text/x"), ("text/b", "text/y")] {
+    ///     let plan = select_transreptor(&space, from, to).unwrap();
+    ///     assert_eq!(plan[0].endpoint, "urn:demo:two-by-two");
+    /// }
+    /// ```
     pub fn transreptor(
         mut self,
         from: impl IntoIterator<Item = impl Into<String>>,
