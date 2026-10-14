@@ -440,7 +440,11 @@ pub struct ActionQuery<'a> {
     pub present: &'a [&'a str],
     /// Only actions with this verb.
     pub verb: Option<Verb>,
-    /// Only actions that can produce this media type.
+    /// Only actions that can produce this media type. Compared as a media type, not a
+    /// string: the essence (`type/subtype`) case-insensitively, and a parameter only
+    /// when this asks for one, so `text/turtle` matches a declared
+    /// `text/turtle;charset=utf-8`, and `text/turtle;charset=utf-8` matches a declared
+    /// `text/turtle` but not a declared `text/turtle;charset=iso-8859-1`.
     pub want: Option<&'a str>,
     /// The caller's capability: actions whose `requires` it does not satisfy are NOT
     /// offered. This is the same [`Capability::satisfies`](crate::Capability::satisfies)
@@ -497,7 +501,7 @@ pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch>
                 }
             }
             if let Some(want) = query.want {
-                if !action.outputs.iter().any(|o| o == want) {
+                if !action.outputs.iter().any(|o| output_fits_want(o, want)) {
                     continue;
                 }
             }
@@ -571,6 +575,51 @@ pub(crate) fn cap_satisfies(capability: &crate::Capability, scope: &str) -> bool
         },
         None => capability.allows(scope),
     }
+}
+
+/// Whether a declared output media type fits a `want=` — compared as MEDIA TYPES, not
+/// strings (ledger #16): the essence (`type/subtype`) case-insensitively, whitespace
+/// ignored, so `text/turtle` and `Text/Turtle ;charset=utf-8` are one type. Parameters
+/// are ignored unless the want ASKS for one; then a declaration stating a DIFFERENT
+/// value for it is out, and one stating none is in (it does not contradict the ask —
+/// the essence is what an output declaration is about). Values compare after unquoting,
+/// `charset` case-insensitively (RFC 9110 §8.3.2), every other parameter exactly.
+fn output_fits_want(declared: &str, want: &str) -> bool {
+    let (declared_essence, declared_params) = media_type_parts(declared);
+    let (want_essence, want_params) = media_type_parts(want);
+    declared_essence == want_essence
+        && want_params.iter().all(|(name, value)| {
+            declared_params
+                .iter()
+                .find(|(n, _)| n == name)
+                .is_none_or(|(_, v)| v == value)
+        })
+}
+
+/// A media type's lowercased essence and its parameters (names lowercased, values
+/// unquoted, `charset` values lowercased), for [`output_fits_want`] only: no
+/// validation, so a malformed string compares as whatever it splits into.
+fn media_type_parts(media_type: &str) -> (String, Vec<(String, String)>) {
+    let mut parts = media_type.split(';');
+    let essence = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
+    let params = parts
+        .filter_map(|param| {
+            let (name, value) = param.split_once('=')?;
+            let name = name.trim().to_ascii_lowercase();
+            let value = value.trim();
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value);
+            let value = if name == "charset" {
+                value.to_ascii_lowercase()
+            } else {
+                value.to_string()
+            };
+            Some((name, value))
+        })
+        .collect();
+    (essence, params)
 }
 
 /// Whether every required input of `action` declares a class present in `present`, with
@@ -952,6 +1001,60 @@ mod tests {
             ..Default::default()
         };
         assert!(select_actions(&space, &query).is_empty());
+    }
+
+    /// Ledger #16: `want=` compared declared outputs by string, so `text/turtle` and
+    /// `text/turtle;charset=utf-8` selected DISJOINT sets for no semantic reason.
+    #[test]
+    fn want_compares_media_types_not_strings() {
+        let emits = |id: &'static str, output: &'static str| {
+            FnEndpoint::new(id, |_inv| {
+                Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+            })
+            .with_description(Description::new(id).verb(Verb::Source).output(output))
+        };
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:t:bare"), emits("bare", "text/turtle"))
+            .bind(
+                Exact::new("urn:t:utf8"),
+                emits("utf8", "text/turtle;charset=utf-8"),
+            )
+            .bind(
+                Exact::new("urn:t:spaced"),
+                emits("spaced", "Text/Turtle; Charset=\"UTF-8\""),
+            )
+            .bind(
+                Exact::new("urn:t:latin1"),
+                emits("latin1", "text/turtle;charset=iso-8859-1"),
+            )
+            .bind(Exact::new("urn:t:plain"), emits("plain", "text/plain"));
+        let wanted = |want: &str| {
+            let query = ActionQuery {
+                want: Some(want),
+                ..Default::default()
+            };
+            endpoints(&select_actions(&space, &query))
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        // The media type alone: parameters on the declaration do not exclude it.
+        let every_turtle = vec!["urn:t:bare", "urn:t:latin1", "urn:t:spaced", "urn:t:utf8"];
+        assert_eq!(wanted("text/turtle"), every_turtle);
+        assert_eq!(wanted("TEXT/Turtle "), every_turtle);
+        // A parameter that is ASKED for is honored: a declaration that states a
+        // different value is out; one that states none (or the same, in any spelling
+        // RFC 9110 calls equal) stays in. So the two wants no longer select disjoint
+        // sets: they differ only by the declaration that contradicts the ask.
+        let utf8 = vec!["urn:t:bare", "urn:t:spaced", "urn:t:utf8"];
+        assert_eq!(wanted("text/turtle;charset=utf-8"), utf8);
+        assert_eq!(wanted("text/turtle; charset=\"UTF-8\""), utf8);
+        assert_eq!(
+            wanted("text/turtle;charset=iso-8859-1"),
+            vec!["urn:t:bare", "urn:t:latin1"]
+        );
+        assert_eq!(wanted("text/plain"), vec!["urn:t:plain"]);
+        assert!(wanted("application/ld+json").is_empty());
     }
 
     #[test]
