@@ -4566,7 +4566,13 @@ mod tests {
             &Capability::root(),
         ))
         .unwrap();
-        assert_eq!(String::from_utf8(rep.bytes).unwrap(), "urn:demo:greet");
+        let body = String::from_utf8(rep.bytes).unwrap();
+        let mut offered = body.split(',');
+        // The fitted match first; after it only the kernel's own argument-free
+        // operations, which need nothing and so are available under any binding set
+        // (ledger #271). `select_action` applies no capability filter.
+        assert_eq!(offered.next(), Some("urn:demo:greet"), "{body}");
+        assert!(offered.all(|e| e.starts_with("urn:kernel:")), "{body}");
     }
 
     #[test]
@@ -5317,12 +5323,12 @@ mod tests {
                 as Arc<dyn Space>
         };
 
-        // Without the axiom: foaf:Person matches nothing (exact-class only).
+        // Without the axiom: foaf:Person does not reach greet (exact-class only). Only
+        // the argument-free kernel operations are offered, as under any binding set.
+        let plain = Kernel::new(space()).select_action(&[FOAF_PERSON]);
         assert!(
-            Kernel::new(space())
-                .select_action(&[FOAF_PERSON])
-                .is_empty(),
-            "no axioms ⇒ exact-class only"
+            plain.iter().all(|m| m.endpoint.starts_with("urn:kernel:")),
+            "no axioms ⇒ exact-class only: {plain:?}"
         );
 
         // With the axiom: foaf:Person ⊑ schema:Person ⇒ greet is satisfiable.

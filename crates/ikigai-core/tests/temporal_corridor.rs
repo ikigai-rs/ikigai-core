@@ -90,6 +90,18 @@ fn temporal(name: &str, at: u64) -> Scope {
 /// The endpoint under test: reads time by RESOLUTION and by the CLOCK, and lists
 /// the actions its chain offers for a document. Cacheable on its own account, so
 /// its effective expiry is whatever its time door's is.
+/// What a typed selection offers for this file's subject: the fitted matches. The
+/// kernel's own argument-free operations (`urn:kernel:catalog`, …) need nothing, so
+/// they are offered under every binding set, after every fitted match (ledger #271);
+/// they are the same inside and outside a chain, so they say nothing about corridors.
+fn fitted(matches: Vec<ikigai_core::ActionMatch>) -> Vec<String> {
+    matches
+        .into_iter()
+        .map(|m| m.endpoint)
+        .filter(|e| !e.starts_with("urn:kernel:"))
+        .collect()
+}
+
 fn probe(computed: &Arc<AtomicU32>) -> AsyncFnEndpoint {
     let computed = Arc::clone(computed);
     AsyncFnEndpoint::new("probe", move |inv| {
@@ -99,11 +111,7 @@ fn probe(computed: &Arc<AtomicU32>) -> AsyncFnEndpoint {
             let resolved = inv.source(&iri("urn:time:now")).await?;
             let resolved = String::from_utf8_lossy(&resolved.bytes).into_owned();
             let clock = millis(inv.now());
-            let mut offers: Vec<String> = inv
-                .select_action(&["urn:class:Doc"])
-                .into_iter()
-                .map(|m| m.endpoint)
-                .collect();
+            let mut offers: Vec<String> = fitted(inv.select_action(&["urn:class:Doc"]));
             offers.sort();
             Ok(text(
                 format!(
@@ -348,11 +356,7 @@ fn a_confined_endpoints_manifold_never_lists_a_root_only_action_or_transreptor()
     let observer = |seen: &Arc<Mutex<Vec<String>>>| {
         let seen = Arc::clone(seen);
         FnEndpoint::new("observer", move |inv: &Invocation<'_>| {
-            let actions: Vec<String> = inv
-                .select_action(&["urn:class:Doc"])
-                .into_iter()
-                .map(|m| m.endpoint)
-                .collect();
+            let actions: Vec<String> = fitted(inv.select_action(&["urn:class:Doc"]));
             let plan = inv
                 .select_transreptor("text/turtle", "application/rdf+xml")
                 .map(|steps| steps[0].endpoint.clone())
@@ -430,7 +434,10 @@ fn an_issuer_that_cannot_select_in_a_chain_offers_nothing_rather_than_the_root()
     let inv = Invocation::with_issuer(&request, &bindings, &cap, &issuer);
 
     // The empty chain delegates: the old issuer's manifold, unchanged.
-    assert_eq!(inv.select_action(&["urn:class:Doc"]).len(), 1);
+    assert_eq!(
+        fitted(inv.select_action(&["urn:class:Doc"])),
+        ["urn:summarize"]
+    );
     assert!(inv
         .select_transreptor("text/turtle", "application/rdf+xml")
         .is_some());
