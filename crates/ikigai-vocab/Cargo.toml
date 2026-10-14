@@ -39,4 +39,4 @@ oxrdf.workspace = true
 # this workspace's: the workspace root's `[patch.crates-io]` points both at the members here, so
 # the suite and this crate share one kernel. The `ikigai-vocab` edge is a dev-dependency cycle,
 # which cargo permits (an integration test links the plain library).
-ikigai-conformance = "0.6.0"
+ikigai-conformance = "0.8.0"
