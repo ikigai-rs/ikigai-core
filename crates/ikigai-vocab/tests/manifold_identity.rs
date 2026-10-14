@@ -417,3 +417,50 @@ fn a_scope_is_one_term_in_the_manifold_the_catalog_and_explain() {
         }
     }
 }
+
+/// Ledger #305, pinned as `urn:kernel:catalog`'s own summary now states it: the catalog
+/// names a local endpoint by its description id, never by the IRI it is bound at, so a
+/// search of the catalog for the door finds nothing. The manifold and the topology are
+/// where the doors are.
+#[test]
+fn the_catalog_names_an_endpoint_by_its_id_and_the_manifold_by_its_door() {
+    let door = "urn:iki:fn:toUpper";
+    let kernel = Kernel::with_meta_renderer(
+        Arc::new(EndpointSpace::new().bind(Exact::new(door), upper(local_contract()))),
+        Arc::new(TurtleRenderer),
+    );
+    let mentions = |all: &[Triple]| {
+        all.iter().any(|t| {
+            subject(t).contains(door)
+                || matches!(&t.object, Term::NamedNode(n) if n.as_str().contains(door))
+                || matches!(&t.object, Term::Literal(l) if l.value().contains(door))
+        })
+    };
+
+    let catalog = source(&kernel, "urn:kernel:catalog", &[]);
+    assert!(
+        triples(&catalog)
+            .iter()
+            .any(|t| subject(t) == "urn:ikigai:endpoint:toUpper"),
+        "{catalog}"
+    );
+    assert!(
+        !mentions(&triples(&catalog)),
+        "the catalog never names the door: {catalog}"
+    );
+
+    let manifold = source(&kernel, "urn:kernel:actions", &[("as", "text/turtle")]);
+    assert!(mentions(&triples(&manifold)), "{manifold}");
+    let topology = source(&kernel, "urn:kernel:topology", &[]);
+    assert!(mentions(&triples(&topology)), "{topology}");
+
+    // And the catalog's self-description says so.
+    let summary = kernel
+        .describe(&Iri::parse("urn:kernel:catalog").unwrap())
+        .unwrap()
+        .summary;
+    assert!(
+        summary.contains("not by the IRI it is bound at"),
+        "{summary}"
+    );
+}

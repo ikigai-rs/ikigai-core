@@ -1,13 +1,35 @@
 # ikigai — Module System & Resolution Architecture (design draft)
 
-**Status:** forward-looking design sketch. None of the *new* machinery below
-(named spaces, modules, the loading boundary, transreption as a first-class
-primitive, typed-argument pull, interception, supply-chain security) is built
-yet. The *foundations* it stands on are real and shipping: `compose` +
-re-entrant `Invocation`, the `Resolver` seam, `ikigai-wire`, the four runtimes
-(embedded / IPC / QUIC / WebTransport), the content-addressed cache, and the
-`space.rs` composition primitives (`EndpointSpace` / `Mount` / `Fallback` /
-`Rewrite`).
+**Status:** HISTORICAL design sketch (2026-06-17/18), kept as the reasoning. When it
+was written none of the *new* machinery below was built; much of it has been since,
+not always as sketched, and where this document and the code disagree the code and
+the newer design notes are the spec. Where each part landed (checked 2026-10-14):
+
+- §1 named spaces: `Space::id` and `urn:iki:space:` names, `Level`, and the per-request
+  chain (`Scope`); the arrangement is a resource at `urn:kernel:topology`. See
+  [`resolution-scope.md`](resolution-scope.md) and
+  [`spaces-as-named-graphs.md`](spaces-as-named-graphs.md).
+- §2–§3 modules and the loading boundary: every module is a crate in its own repository,
+  and [`ikigai-module`](https://github.com/ikigai-rs/ikigai-module) is the loadable
+  format (in process, out of process behind a Unix socket, and wasm in the browser).
+- §4 transreption: in core — `Description::transreptor`, `select_transreptor`, and the
+  lossless/lossy declaration.
+- §5 typed argument pull: `ArgSpec` classes and the action manifold
+  (`urn:kernel:actions`), with `urn:kernel:validate` as the pre-flight.
+- §7 interception: interception overlays, spaces wrapping spaces, in
+  [`ikigai-throttle`](https://github.com/ikigai-rs/ikigai-throttle).
+- §8 debuggability: tracing (`TraceEvent`, `Kernel::issue_traced`) and
+  `urn:kernel:explain`, `urn:kernel:dependents`, `urn:kernel:cache`.
+- §10 supply chain: `ikigai-sign` signs graphs; nothing in core or `ikigai-module`
+  verifies a signature when it loads a module.
+
+The `#N` numbers in §11 are the June 2026 roadmap's, which predates the work ledger:
+they are neither ledger items nor pull requests.
+
+The foundations it stood on were real then: `compose` + re-entrant `Invocation`, the
+`Resolver` seam, `ikigai-wire`, the four runtimes (embedded / IPC / QUIC / WebTransport),
+the content-addressed cache, and the `space.rs` composition primitives (`EndpointSpace` /
+`Mount` / `Fallback` / `Rewrite`).
 
 This document consolidates the design worked out in conversation on
 2026-06-17/18 so we have one artifact to react to and iterate against, rather

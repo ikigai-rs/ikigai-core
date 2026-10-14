@@ -212,7 +212,11 @@ fn catalog() -> Description {
             "Every bound endpoint's self-description as one Turtle graph — the kernel made \
              queryable about itself with SPARQL, and renderable to HTML by transreption. \
              Says what EXISTS, for a caller with inspect authority; `urn:kernel:actions` is \
-             the capability-scoped answer to what you MAY DO.",
+             the capability-scoped answer to what you MAY DO. An endpoint is named by its \
+             description id (urn:ikigai:endpoint:{id}), not by the IRI it is bound at, so \
+             searching this graph for a resolvable IRI finds an endpoint only when its id \
+             happens to contain that IRI; the doors are in `urn:kernel:actions` (each match \
+             IRI carries its pattern) and `urn:kernel:topology` (ik:pattern).",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)
@@ -299,6 +303,8 @@ fn topology() -> Description {
         .summary(
             "The arrangement resolution walks, as one Turtle graph: the chain this request \
              is resolved in (its corridors innermost first, then the root unless severed), \
+             entered at the ik:Chain node urn:ikigai:chain:root for the empty chain and \
+             urn:ikigai:chain:{fingerprint} (sixteen hex digits) otherwise, \
              each space as an ik:Fallback (ordered ik:layers), ik:Mount (ik:prefix, ik:space), \
              ik:Limit (ik:family, ik:matchKind), ik:EndpointSpace (ik:pattern, and ordered \
              ik:doors naming each door's endpoint), ik:Alias (ik:rewrites, ik:maxHops), \

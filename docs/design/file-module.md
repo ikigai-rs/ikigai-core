@@ -6,7 +6,11 @@ native `std::fs` with a stubbed wasm `localStorage` backend) and the CLI wiring
 (`sink` command, `read-only`/`read`/`write`/`delete`/`agent` cap profiles).
 Companion to [`resolution-architecture.md`](resolution-architecture.md) and the
 capability work (`ikigai-core 0.1.7`). This document is the rationale; the code is
-the spec where they differ.
+the spec where they differ — and the code no longer lives here: `ikigai-fs` left this
+workspace for its own repository,
+[`ikigai-rs/ikigai-fs`](https://github.com/ikigai-rs/ikigai-fs), and is published on its
+own cadence. The `#N` numbers below are the June 2026 roadmap's, not ledger items or pull
+requests.
 
 Files are the single most dangerous endpoint in the system — arbitrary
 filesystem read *and write* — so the **security model is the point**, not an

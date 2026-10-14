@@ -47,8 +47,35 @@ impl Request {
     /// The content-addressed identity of this request (request scope).
     ///
     /// Argument order is irrelevant: identity depends only on the set of
-    /// `(name, value-identity)` pairs. The resolved-endpoint / evaluation-scope
-    /// dimension is layered on by the kernel at resolution time.
+    /// `(name, value-identity)` pairs.
+    ///
+    /// This is half of the kernel's cache key, not all of it. The kernel adds the
+    /// fingerprint of the capability the request was issued under and the fingerprint
+    /// of the resolution chain it was resolved in ([`CacheKey`](crate::CacheKey)), and
+    /// nothing else. **The endpoint the request resolved to is not in the key**: a
+    /// cached answer stays valid across a rebind until something cuts it. Within a
+    /// process that is the host's job, since it knows which names it moved
+    /// ([`Kernel::bindings_changed`](crate::Kernel::bindings_changed),
+    /// [`Kernel::cut`](crate::Kernel::cut)); across processes it is why a cache cannot
+    /// simply be imported (`docs/design/cache-ejection.md` §3).
+    ///
+    /// ```
+    /// use ikigai_core::{ArgRef, CacheKey, Iri, Request, Verb};
+    ///
+    /// let target = Iri::parse("urn:demo:greet").unwrap();
+    /// let a = Request::new(Verb::Source, target.clone())
+    ///     .with_arg("name", ArgRef::Inline(b"ada".to_vec()))
+    ///     .with_arg("lang", ArgRef::Inline(b"en".to_vec()));
+    /// let b = Request::new(Verb::Source, target)
+    ///     .with_arg("lang", ArgRef::Inline(b"en".to_vec()))
+    ///     .with_arg("name", ArgRef::Inline(b"ada".to_vec()));
+    /// assert_eq!(a.id(), b.id(), "argument order is not identity");
+    ///
+    /// // The kernel's key: the request, the capability's fingerprint, the chain's
+    /// // fingerprint (0 for the empty chain). No endpoint anywhere in it.
+    /// let key = CacheKey::new(a.id(), 7).in_scope(0);
+    /// assert_eq!((key.request, key.capability, key.scope), (a.id(), 7, 0));
+    /// ```
     pub fn id(&self) -> RequestId {
         let mut h = blake3::Hasher::new();
         feed_str(&mut h, "ikigai.request.v0");

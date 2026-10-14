@@ -1,7 +1,13 @@
 # ikigai module vocabulary (design draft)
 
-**Status:** design draft. Placeholder namespaces (`https://ikigai-rs.org/ns/…`);
-not yet wired into the kernel. Companion to
+**Status:** design draft for MODULE MANIFESTS, still not wired into the kernel
+(checked 2026-10-14). Its namespaces (`https://ikigai-rs.org/ns/…`) are placeholders.
+Not to be confused with the self-description vocabulary that did ship: that one is
+`crates/ikigai-vocab/src/vocabulary.ttl`, published at `https://ikigai-rs.dev/ns#`, and
+it is what the catalog, the manifold and the topology are written in. A module today is
+a crate with a `space()`, or an `ikigai-module` artifact, and its endpoints describe
+themselves through `describe()`; `ikigai-module`'s own `ModuleManifest` (how a loaded module
+names its prefixes) is a wire type, not this vocabulary. Companion to
 [`../resolution-architecture.md`](../resolution-architecture.md) — §2 (modules),
 §6 (manifests), §10 (loading & supply-chain).
 

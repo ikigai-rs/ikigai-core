@@ -42,6 +42,16 @@ impl Bindings {
 /// against the grammars in scope.
 pub trait Grammar: Send + Sync {
     /// Return captured bindings if `iri` matches this grammar, else `None`.
+    ///
+    /// **Match the SHAPE here; validate the VALUES in the endpoint's invoke.** Every
+    /// walk that describes a space (the catalog, the action manifold,
+    /// `urn:kernel:validate`) reaches a template-bound endpoint by expanding its
+    /// [`pattern`](Self::pattern) with the literal placeholder `probe` in every
+    /// variable and resolving `Meta` on the result. A grammar whose `match_iri`
+    /// refuses that capture (`{n}` must be digits, say) makes its own endpoint
+    /// undescribable: it drops out of the catalog and the manifold, while still
+    /// resolving for a caller who already knows a valid name. Accept any capture the
+    /// pattern admits, and let the endpoint refuse a bad value when it runs.
     fn match_iri(&self, iri: &Iri) -> Option<Bindings>;
 
     /// A human-readable pattern for this grammar, used when enumerating a space
