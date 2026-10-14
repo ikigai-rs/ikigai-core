@@ -2319,9 +2319,10 @@ impl Kernel {
         // still reaches them. So the answer does not depend on the scope and the
         // key carries none (scope fingerprint 0): a confined endpoint reading the
         // catalog sees the same catalog as everyone else — a list of NAMES it may
-        // not be able to resolve, which is names and not content. The one
-        // exception is the topology, whose SUBJECT is the chain: it is keyed by the
-        // chain's fingerprint, as any scoped resolution is.
+        // not be able to resolve, which is names and not content. The exceptions
+        // are the operations whose SUBJECT includes the chain (the topology, an
+        // explanation, `validate` by `endpoint=`; `kernel_ops::depends_on_chain`):
+        // they are keyed by the chain's fingerprint, as any scoped resolution is.
         if let Some(op) = request.target.as_str().strip_prefix(KERNEL_NS) {
             let mut key = CacheKey::new(request.id(), capability_key(capability));
             // The chain this answer is a function of, for its key and its trace event:
@@ -3648,8 +3649,17 @@ impl Kernel {
                             Error::Endpoint(format!("validate: bad endpoint IRI: {e}"))
                         })?;
                         // Through the shared probe: a limited name pre-flights as
-                        // unresolved, as it would resolve.
-                        let Some(resolved) = crate::select::probe(&self.root, iri) else {
+                        // unresolved, as it would resolve. And resolved where the
+                        // request would be (ledger #28): the kernel's own operations
+                        // ahead, then the caller's chain — its corridors innermost
+                        // first, then the root unless severed. The empty chain is the
+                        // catalog's and the manifold's space, `described()`.
+                        let resolved = if chain.is_empty() {
+                            crate::select::probe(&self.described(), iri)
+                        } else {
+                            crate::select::probe(&self.described_in(chain), iri)
+                        };
+                        let Some(resolved) = resolved else {
                             return Err(Error::Unresolved(Iri::parse(endpoint).expect("parsed")));
                         };
                         let verb_name = kernel_arg(request, "verb")
@@ -5670,6 +5680,84 @@ mod tests {
             report.contains("urn:cap:kernel:cut"),
             "pre-flight must report the missing capability: {report}"
         );
+    }
+
+    /// Ledger #28: `urn:kernel:validate endpoint=` probed `self.root`, so it could not
+    /// see the kernel's own operations (which `described()` composes ahead of the root)
+    /// nor a door the caller's chain binds: it validated a different answer from the
+    /// one the request would resolve to.
+    #[test]
+    fn validate_by_endpoint_resolves_the_name_as_the_request_would() {
+        let contract = |id: &'static str, input: &'static str| {
+            FnEndpoint::new(id, |_inv| {
+                Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+            })
+            .with_description(
+                Description::new(id)
+                    .verb(Verb::Source)
+                    .input(crate::describe::ArgSpec::new(input)),
+            )
+        };
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:root:thing"), contract("thing", "x")),
+        ));
+        let root = Capability::root();
+        let validate = |endpoint: &str, verb: &str, args: &str, scope: Scope| {
+            let request = Request::new(Verb::Source, iri("urn:kernel:validate"))
+                .with_arg("endpoint", ArgRef::Inline(endpoint.as_bytes().to_vec()))
+                .with_arg("verb", ArgRef::Inline(verb.as_bytes().to_vec()))
+                .with_arg("args", ArgRef::Inline(args.as_bytes().to_vec()));
+            block_on(kernel.issue_in(request, &root, scope))
+                .map(|r| String::from_utf8(r.bytes).unwrap())
+        };
+        // A named corridor's name is its cache identity, so each contract gets its own.
+        let corridor = |input: &'static str| {
+            Scope::empty().with_named(
+                iri(&format!("urn:ctx:as-of:{input}")),
+                Arc::new(EndpointSpace::new().bind(
+                    Exact::new("urn:as-of:summarize"),
+                    contract("summarize", input),
+                )),
+            )
+        };
+
+        // The kernel's own operation, which `urn:kernel:actions` offers and the
+        // `action=` spelling already validates.
+        let cut = validate("urn:kernel:cut", "sink", "thread=urn:x", Scope::empty()).unwrap();
+        assert!(cut.contains("sh:conforms true"), "{cut}");
+
+        // A door the caller's chain binds validates against ITS contract...
+        let doc = validate(
+            "urn:as-of:summarize",
+            "source",
+            "doc=urn:d",
+            corridor("doc"),
+        )
+        .unwrap();
+        assert!(doc.contains("sh:conforms true"), "{doc}");
+        // ...and a second chain binding the same name to another contract gets that
+        // contract's answer, never the first chain's cached one.
+        let when = validate(
+            "urn:as-of:summarize",
+            "source",
+            "doc=urn:d",
+            corridor("when"),
+        )
+        .unwrap();
+        assert!(when.contains("unknown argument"), "{when}");
+        // Outside the chain the name resolves to nothing, as a request would.
+        assert!(matches!(
+            validate("urn:as-of:summarize", "source", "doc=urn:d", Scope::empty()),
+            Err(Error::Unresolved(_))
+        ));
+        // The root still answers through a chain that keeps it, and not through one
+        // that severs it.
+        let thing = validate("urn:root:thing", "source", "x=1", corridor("doc")).unwrap();
+        assert!(thing.contains("sh:conforms true"), "{thing}");
+        assert!(matches!(
+            validate("urn:root:thing", "source", "x=1", corridor("doc").sever()),
+            Err(Error::Unresolved(_))
+        ));
     }
 
     #[test]
