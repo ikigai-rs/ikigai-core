@@ -403,6 +403,46 @@ fn an_endpoint_can_only_narrow_its_chain() {
     block_on(kernel.issue(source("urn:top"), &Capability::root())).unwrap();
 }
 
+#[test]
+fn a_host_corridor_shadows_the_confined_spaces_own_door() {
+    // The consequence of placing S BEHIND the host's corridors (resolution-scope.md
+    // decision 3; formalism R7.5, the §1.3 deviation from Def. 10): an endpoint
+    // confined to S that sources a name S binds, and that a corridor the host injected
+    // for this request also binds, gets the corridor's answer. The nested case above
+    // never has the outer corridor bind the contested name; this one does.
+    let s_hits = Arc::new(AtomicU32::new(0));
+    let corridor_hits = Arc::new(AtomicU32::new(0));
+    let confined_space = space_with("s-door", "urn:contested", b"from S", &s_hits);
+    let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind_arc(
+        Exact::new("urn:run"),
+        Arc::new(Confine::new(
+            iri("urn:ctx:s"),
+            confined_space,
+            Arc::new(sourcer("inner", "urn:contested")),
+        )),
+    )));
+    let corridor = space_with(
+        "corridor-door",
+        "urn:contested",
+        b"from the host",
+        &corridor_hits,
+    );
+    let cap = Capability::root();
+
+    // The host injects its corridor for this request: the corridor wins inside S.
+    let injected = Scope::empty().with_named(iri("urn:ctx:host"), corridor);
+    let out = block_on(kernel.issue_in(source("urn:run"), &cap, injected)).unwrap();
+    assert_eq!(out.bytes, b"from the host");
+    assert_eq!(corridor_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(s_hits.load(Ordering::SeqCst), 0, "S's own door never ran");
+
+    // Without the corridor, the same request answers from S: the shadowing was a
+    // property of the host's chain, not of the confinement.
+    let out = block_on(kernel.issue(source("urn:run"), &cap)).unwrap();
+    assert_eq!(out.bytes, b"from S");
+    assert_eq!(s_hits.load(Ordering::SeqCst), 1);
+}
+
 // ---- 7. The empty chain is the status quo ---------------------------------
 
 #[test]

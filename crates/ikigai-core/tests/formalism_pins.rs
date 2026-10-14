@@ -17,8 +17,19 @@
 //! - `pin:` resolves to a `fn <name>` under a `#[…test…]` attribute. With a file in
 //!   parentheses, that file must contain it and the path's first segment must be the
 //!   file's stem (`kernel::tests::x` lives in `kernel.rs`; `scope::x` in `tests/scope.rs`).
-//! - `doctest:` resolves to a public item — `Type`, or `Type::member` for a field or
-//!   method of `Type` — whose `///` block carries a fenced example.
+//!   The stem rule holds for a crate root too, which reads oddly: a unit test in
+//!   `crates/ikigai-vocab/src/lib.rs` is pinned as `lib::tests::x`, not by the crate name.
+//! - `doctest:` resolves to a documented item — `pub`, `pub(crate)` or `pub(super)`, since
+//!   rustdoc runs a doctest whatever the item's visibility (`Invocation::with_scope` is
+//!   crate-private and carries one) — named `Type`, or `Type::member` for a field or
+//!   method of `Type`, whose `///` block carries a fenced example.
+//!
+//!   A `compile_fail,E0624` fence is checked for FAILING, not for the code: stable rustdoc
+//!   ignores the error code (measured on rustc 1.99.0, 2026-10-14: a fence naming
+//!   `E0308` over a snippet that fails with E0624 passes; the rustdoc book says the code
+//!   check is nightly-only). So a visibility pin's "and for no other reason" is held by
+//!   the snippet's shape and a standalone compile that shows the one error, recorded
+//!   beside each fence, not by the toolchain.
 //! - `UNPINNED` must carry a sentence after an em dash. It is counted, never resolved:
 //!   the register of these is the document's finding.
 //!
@@ -63,7 +74,8 @@ enum Pin {
     /// A `#[test]` function, by its last path segment, with the path's first
     /// segment and the file the document names (if any).
     Test { path: String, file: Option<String> },
-    /// A public item with a doctest: `Type` or `Type::member`.
+    /// A documented item (any visibility rustdoc tests) with a doctest: `Type` or
+    /// `Type::member`.
     Doctest { item: String },
     /// A claim the code cannot vouch for, with what a test would assert.
     Unpinned { claim: String },

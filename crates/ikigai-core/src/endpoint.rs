@@ -350,7 +350,10 @@ pub trait Spawner: Send + Sync {
 /// **private** `issue_under(request, capability)`, and nothing public takes a
 /// capability. That privacy is the visibility half of `docs/formalism/README.md`
 /// R2.2, and this block pins it: it fails to compile with E0624, *method
-/// `issue_under` is private*, and for no other reason.
+/// `issue_under` is private*, and for no other reason. ⚠ Stable rustdoc checks only that
+/// it fails, not the `E0624` on the fence (the code check is nightly-only): "for no
+/// other reason" is held by a standalone compile of this snippet, which reports exactly
+/// that one error (rustc 1.99.0, 2026-10-14). Recheck that way after editing it.
 ///
 /// ```compile_fail,E0624
 /// use ikigai_core::{Bindings, Capability, Invocation, Iri, Request, Verb};
@@ -872,7 +875,9 @@ impl<'a> Invocation<'a> {
     /// That is the visibility half of `docs/formalism/README.md` R7.5 ("no endpoint
     /// can set its own chain"), and this block pins it: from outside the crate it
     /// fails to compile with E0624, *method `with_scope` is private*, and for no
-    /// other reason.
+    /// other reason. ⚠ Stable rustdoc checks only that it fails, not the `E0624` on the
+    /// fence: "for no other reason" is held by a standalone compile of this snippet,
+    /// which reports exactly that one error (rustc 1.99.0, 2026-10-14).
     ///
     /// ```compile_fail,E0624
     /// use ikigai_core::{Bindings, Capability, Invocation, Iri, Request, Scope, Verb};

@@ -64,7 +64,9 @@ UNPINNED — what a test would assert, in one sentence
 - `doctest:` names an item whose `///` block carries a fenced example, which `cargo test`
   compiles and runs — or, for a `compile_fail` fence, compiles and requires to fail, which is
   how a visibility fact (an item that is *not* public) gets a pin. The only comment the
-  compiler reads.
+  compiler reads. ⚠ Stable rustdoc checks that a `compile_fail` fence fails, not the error
+  code it names (measured on rustc 1.99.0: a fence naming the wrong code passes), so why it
+  fails is held by the snippet's shape and a standalone compile recorded beside the fence.
 - `UNPINNED` is **a finding, not a formatting choice**: the sentence after the dash says what a
   test would assert. The register in §9 collects every one of them; that list is the set of
   things this crate cannot yet vouch for.
@@ -1229,6 +1231,7 @@ Two consequences of that placement are stated where the decision is
   trapdoor already wrapped in §9.3's mapper that exposes one identifier.
 
     pin: `scope::an_endpoint_can_only_narrow_its_chain` (crates/ikigai-core/tests/scope.rs)
+    pin: `scope::a_host_corridor_shadows_the_confined_spaces_own_door` (crates/ikigai-core/tests/scope.rs)
     doctest: `Invocation::with_scope`
     doctest: `Invocation::confine`
     doctest: `Kernel::issue_in`

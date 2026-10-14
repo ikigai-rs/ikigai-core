@@ -143,7 +143,8 @@ to `S` that sources a name both `S` and a corridor the host injected bind gets t
 answer, never `S`'s — the host's per-request context outranks the endpoint's confinement
 exactly as it outranks the root. The paper's Definition 10 places `S` innermost and would
 answer from `S`; the swap is deliberate (an endpoint must not get ahead of a host corridor)
-and is argued as a deviation in `docs/formalism/README.md` §1.3.
+and is argued as a deviation in `docs/formalism/README.md` §1.3. Tested by
+`scope::a_host_corridor_shadows_the_confined_spaces_own_door` (`tests/scope.rs`).
 
 And `Confine` is bound at one door — it is **not transparent**. The paper's trapdoor is a
 transparent overlay that admits from outside everything `S` serves, which is how its worked
