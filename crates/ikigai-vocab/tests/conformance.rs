@@ -30,6 +30,8 @@ fn conforms() {
         .fold(Suite::new(), |suite, id| suite.pure(*id).cacheable(*id))
         .self_named_space("vocab", ikigai_vocab::space)
         .run_blocking(&kernel);
+    // Printed so `--nocapture` shows what was probed and what was not, even when clean.
+    println!("{report}");
     assert!(report.is_clean(), "{report}");
     assert_eq!(
         ikigai_core::space_iri("vocab").as_str(),
