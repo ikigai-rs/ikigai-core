@@ -455,16 +455,62 @@ pub struct ActionQuery<'a> {
 }
 
 /// Find endpoints in `root` whose required inputs are *fully typed and satisfiable* by
-/// `present` — the RDF classes available in a context. An endpoint matches iff **every**
-/// required input declares an [`ArgSpec::class`](crate::ArgSpec) that appears in
-/// `present` and it has at least one required input, or it declares no inputs at all:
-/// an action needing nothing is available under every binding set (ledger #271), and
-/// ranks after every fitted match. This is
+/// `present` — the RDF classes available in a context. An endpoint is a **fitted** match
+/// iff it has at least one required input and **every** required input declares an
+/// [`ArgSpec::class`](crate::ArgSpec) that appears in `present`. This is
 /// [`select_transreptor`]'s sibling at the RDF-class level — "given these typed entities,
 /// what can I do with them?" — the seed of layer action-inference. Optional inputs are
 /// ignored; required inputs without a declared class make an endpoint un-inferable (it can't
 /// be driven from the present types alone), so it's excluded. Capability-scoping — offering
 /// only what the caller may invoke — composes on top and is **not** applied here.
+///
+/// An endpoint that declares **no inputs at all** needs nothing, so it is satisfiable under
+/// any binding set (ledger #271) — but it says nothing about the present entities, so it is
+/// offered only **beside a fitted match**, after every one of them. A `present` that fits
+/// nothing answers nothing: "no action fits these types" stays sayable. An empty `present`
+/// applies no type filter at all and lists every endpoint.
+///
+/// ```
+/// use ikigai_core::{
+///     select_action, ActionSpec, ArgSpec, Description, EndpointSpace, Exact, FnEndpoint,
+///     ReprType, Representation, Verb,
+/// };
+///
+/// const PERSON: &str = "https://schema.org/Person";
+/// let endpoint = |id: &'static str, description: Description| {
+///     FnEndpoint::new(id, |_inv| {
+///         Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+///     })
+///     .with_description(description)
+/// };
+/// let space = EndpointSpace::new()
+///     // greet(Person): a fitted match whenever a Person is present.
+///     .bind(
+///         Exact::new("urn:demo:greet"),
+///         endpoint(
+///             "greet",
+///             Description::new("greet")
+///                 .verb(Verb::Source)
+///                 .input(ArgSpec::new("who").class(PERSON)),
+///         ),
+///     )
+///     // info: declares no inputs, so it needs nothing.
+///     .bind(
+///         Exact::new("urn:demo:info"),
+///         endpoint("info", Description::new("info").action(ActionSpec::new(Verb::Source))),
+///     );
+/// let offered = |present: &[&str]| -> Vec<String> {
+///     select_action(&space, present)
+///         .into_iter()
+///         .map(|m| m.endpoint)
+///         .collect()
+/// };
+///
+/// // A fitted match first, then the input-free one.
+/// assert_eq!(offered(&[PERSON]), ["urn:demo:greet", "urn:demo:info"]);
+/// // Nothing fits: nothing is offered, the input-free action included.
+/// assert!(offered(&["urn:no:Such"]).is_empty());
+/// ```
 pub fn select_action(root: &dyn Space, present: &[&str]) -> Vec<ActionMatch> {
     let query = ActionQuery {
         present,
@@ -482,8 +528,16 @@ pub fn select_action(root: &dyn Space, present: &[&str]) -> Vec<ActionMatch> {
 /// capability first (the caller never sees what it may not invoke), then verb, then the
 /// wanted output type, then type-satisfiability of required inputs. Ordered
 /// best-fitted-first ([`ActionMatch::missing_optional`], then endpoint/verb for
-/// determinism); when `present` is non-empty, an action that declares no inputs at all
-/// is trivially satisfiable and ranks after every fitted match (ledger #271).
+/// determinism).
+///
+/// When `present` is non-empty, an action that declares no inputs at all is trivially
+/// satisfiable (ledger #271), but it is offered only when at least one FITTED match (an
+/// action whose required inputs are all typed and present) survives every other filter,
+/// and then after every fitted match. A fitted match the capability, verb or `want=`
+/// filter removed does not count, so it cannot unlock the input-free actions. With no
+/// fitted match the answer is empty. When `present` is empty there is no type filter and
+/// no such rule: every action the other filters keep is offered, best-fitted-first.
+/// [`select_action`] shows both shapes.
 pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch> {
     // Each match beside whether it was offered only because it needs nothing, which
     // ranks it last: it says nothing about the present entities.
@@ -551,6 +605,14 @@ pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch>
                 },
             ));
         }
+    }
+    // An input-free action rides on a real fit: it says nothing about the present
+    // entities, so offering it alone would answer a query that fits nothing and hide that
+    // nothing fits (ledger #271). Every filter has already run, so a fitted match the
+    // caller may not invoke is gone and unlocks nothing. With `present` empty no match is
+    // marked, so this keeps everything.
+    if matches.iter().all(|(argless, _)| *argless) {
+        matches.clear();
     }
     matches.sort_by(|(a_argless, a), (b_argless, b)| {
         (*a_argless, a.missing_optional, &a.endpoint, a.verb as u8).cmp(&(
@@ -633,9 +695,11 @@ fn media_type_parts(media_type: &str) -> (String, Vec<(String, String)>) {
 }
 
 /// Whether every required input of `action` declares a class present in `present`, with
-/// at least one required input — or whether `action` declares no inputs at all, which
-/// needs nothing and so is satisfiable by any `present` (ledger #271; see
-/// [`select_action`]). An action with only OPTIONAL inputs is still not inferable.
+/// at least one required input (a FITTED action) — or whether `action` declares no inputs
+/// at all, which needs nothing and so is satisfiable by any `present` (ledger #271). The
+/// second kind is satisfiable but not offered on its own: [`select_actions`] drops it
+/// unless a fitted match survives beside it (see [`select_action`]). An action with only
+/// OPTIONAL inputs is still not inferable.
 fn spec_satisfiable(action: &crate::describe::ActionSpec, present: &[&str]) -> bool {
     if action.inputs.is_empty() {
         return true;
@@ -1037,6 +1101,152 @@ mod tests {
         );
         // And the per-endpoint view sees them too.
         assert!(endpoints(&select_action(&space, &[PERSON])).contains(&"urn:iki:store:info"));
+    }
+
+    /// An input-free Source action (the ikigai-store list and status shape) with the given
+    /// capability requirements and declared outputs.
+    fn argless_action(id: &'static str, requires: &[&str], outputs: &[&str]) -> FnEndpoint {
+        let mut spec = ActionSpec::new(Verb::Source);
+        for scope in requires {
+            spec = spec.requires(*scope);
+        }
+        for media_type in outputs {
+            spec = spec.output(*media_type);
+        }
+        FnEndpoint::new(id, |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(Description::new(id).action(spec))
+    }
+
+    /// Ledger #271, option (a): input-free actions ride on a real fit. A typed query that
+    /// fits nothing answers nothing, so "no authorized action fits" stays sayable; this is
+    /// the shape ikigai-cli's `urn:agent:select types=urn:no:Such` asks.
+    #[test]
+    fn a_typed_query_that_fits_nothing_offers_no_input_free_action() {
+        let space = action_space()
+            .bind(
+                Exact::new("urn:iki:store:graph-list"),
+                argless_action("graph-list", &[], &[]),
+            )
+            .bind(
+                Exact::new("urn:iki:store:info"),
+                argless_action("info", &[], &[]),
+            );
+        let root = crate::Capability::root();
+        let query = ActionQuery {
+            present: &["urn:no:Such"],
+            capability: Some(&root),
+            ..Default::default()
+        };
+        assert!(select_actions(&space, &query).is_empty());
+        assert!(select_action(&space, &["urn:no:Such"]).is_empty());
+
+        // One fitted match brings them back, after it (the 0.1.102 ranking), whatever
+        // else the present set holds.
+        let query = ActionQuery {
+            present: &[PERSON, "urn:no:Such"],
+            capability: Some(&root),
+            ..Default::default()
+        };
+        let ranked: Vec<String> = select_actions(&space, &query)
+            .into_iter()
+            .map(|m| m.endpoint)
+            .collect();
+        assert_eq!(
+            ranked,
+            [
+                "urn:demo:greet",
+                "urn:iki:store:graph-list",
+                "urn:iki:store:info"
+            ]
+        );
+        let per_endpoint: Vec<String> = select_action(&space, &[PERSON, "urn:no:Such"])
+            .into_iter()
+            .map(|m| m.endpoint)
+            .collect();
+        assert_eq!(per_endpoint, ranked);
+    }
+
+    /// The rule runs after every other filter: a fitted match the caller may not invoke,
+    /// or one the verb or `want=` filter removed, is not a fit, so it unlocks nothing.
+    #[test]
+    fn a_filtered_out_fitted_match_does_not_unlock_the_input_free_actions() {
+        let greet = FnEndpoint::new("greet", |_inv| {
+            Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+        })
+        .with_description(
+            Description::new("greet").action(
+                ActionSpec::new(Verb::Source)
+                    .input(crate::describe::ArgSpec::new("who").class(PERSON))
+                    .output("text/turtle")
+                    .requires("urn:cap:greet"),
+            ),
+        );
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:demo:greet"), greet)
+            .bind(
+                Exact::new("urn:iki:store:info"),
+                argless_action("info", &["urn:cap:store:read"], &["text/plain"]),
+            );
+        let offered = |query: &ActionQuery| -> Vec<String> {
+            select_actions(&space, query)
+                .into_iter()
+                .map(|m| m.endpoint)
+                .collect()
+        };
+
+        // The capability removes greet: info, which the caller MAY invoke, stays out.
+        let reader = crate::Capability::scoped(["urn:cap:store:read"]);
+        let query = ActionQuery {
+            present: &[PERSON],
+            capability: Some(&reader),
+            ..Default::default()
+        };
+        assert!(offered(&query).is_empty(), "{:?}", offered(&query));
+
+        // Holding both: the fit counts, and info follows it.
+        let both = crate::Capability::scoped(["urn:cap:store:read", "urn:cap:greet"]);
+        let query = ActionQuery {
+            present: &[PERSON],
+            capability: Some(&both),
+            ..Default::default()
+        };
+        assert_eq!(offered(&query), ["urn:demo:greet", "urn:iki:store:info"]);
+
+        // The verb filter removes greet: nothing.
+        let query = ActionQuery {
+            present: &[PERSON],
+            verb: Some(Verb::Sink),
+            capability: Some(&both),
+            ..Default::default()
+        };
+        assert!(offered(&query).is_empty());
+
+        // The want= filter removes greet (it makes Turtle) while info makes text: nothing.
+        let query = ActionQuery {
+            present: &[PERSON],
+            want: Some("text/plain"),
+            capability: Some(&both),
+            ..Default::default()
+        };
+        assert!(offered(&query).is_empty());
+
+        // With NO present types there is no type filter and no fit to ride on: every
+        // action the capability keeps is offered (unchanged by ledger #271).
+        let query = ActionQuery {
+            capability: Some(&both),
+            ..Default::default()
+        };
+        assert_eq!(
+            endpoints(&select_actions(&space, &query)),
+            ["urn:demo:greet", "urn:iki:store:info"]
+        );
+        let query = ActionQuery {
+            capability: Some(&reader),
+            ..Default::default()
+        };
+        assert_eq!(offered(&query), ["urn:iki:store:info"]);
     }
 
     // --- template grammars in the manifold ---

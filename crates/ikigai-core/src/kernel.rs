@@ -5390,13 +5390,11 @@ mod tests {
                 as Arc<dyn Space>
         };
 
-        // Without the axiom: foaf:Person does not reach greet (exact-class only). Only
-        // the argument-free kernel operations are offered, as under any binding set.
+        // Without the axiom: foaf:Person does not reach greet (exact-class only), so
+        // nothing fits, and the argument-free kernel operations are not offered on their
+        // own either (ledger #271: they ride on a fitted match).
         let plain = Kernel::new(space()).select_action(&[FOAF_PERSON]);
-        assert!(
-            plain.iter().all(|m| m.endpoint.starts_with("urn:kernel:")),
-            "no axioms ⇒ exact-class only: {plain:?}"
-        );
+        assert!(plain.is_empty(), "no axioms ⇒ exact-class only: {plain:?}");
 
         // With the axiom: foaf:Person ⊑ schema:Person ⇒ greet is satisfiable.
         let reasoning = Kernel::new(space()).with_subclass_axioms([(FOAF_PERSON, SCHEMA_PERSON)]);
