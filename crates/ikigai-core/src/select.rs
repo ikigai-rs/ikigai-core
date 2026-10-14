@@ -442,9 +442,9 @@ pub struct ActionQuery<'a> {
     pub verb: Option<Verb>,
     /// Only actions that can produce this media type.
     pub want: Option<&'a str>,
-    /// The caller's capability: actions whose `requires` it does not allow are NOT
-    /// offered. This is the same [`Capability::allows`](crate::Capability::allows) check
-    /// enforcement uses at invoke time — selection is a pre-flight of enforcement, never a
+    /// The caller's capability: actions whose `requires` it does not satisfy are NOT
+    /// offered. This is the same [`Capability::satisfies`](crate::Capability::satisfies)
+    /// check enforcement uses at invoke time — selection is a pre-flight of enforcement, never a
     /// substitute — so an attenuated agent's manifold simply lacks what it may not do.
     /// `None` = no capability filter (equivalent to root).
     pub capability: Option<&'a crate::Capability>,
