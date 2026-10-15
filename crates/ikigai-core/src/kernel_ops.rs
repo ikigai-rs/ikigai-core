@@ -409,11 +409,20 @@ fn uncached() -> Description {
              declared no caching; a named dependency, refusal or failure made it volatile; a \
              volatile piped input; a deadline with no clock or already past; a cut while it \
              computed; the cache policy), and the chain it was computed in. Needs no tracer \
-             installed.",
+             installed. `target=` keeps only that name's rows, so a caller asking about one \
+             name never parses the list to find it.",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)
         .requires(CAP_INSPECT)
+        .input(
+            ArgSpec::new("target")
+                .summary(
+                    "keep only this IRI's rows: as asked, and under the name the kernel's \
+                     rewrite table resolves it as",
+                )
+                .optional(),
+        )
         .output(TEXT_PLAIN_UTF8)
 }
 

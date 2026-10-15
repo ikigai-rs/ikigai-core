@@ -913,40 +913,105 @@ struct ResolutionSample {
     cache_hit: bool,
 }
 
+/// Where one request sits in a resolution, beyond the request and its capability:
+/// everything `Kernel::issue_inner` needs to place it (ledger #792). Named fields
+/// rather than six positional arguments, four of which are `None` or zero at most
+/// call sites; [`top`](Self::top) is a top-level request and a call site states
+/// only what differs from it.
+struct IssueCtx<'f> {
+    /// The span of the invocation that issued this as a sub-request, for trace
+    /// parentage; `None` at the top.
+    parent: Option<u64>,
+    /// An upstream pipe stage's provenance (expiry and golden threads), folded into
+    /// this answer's effective cacheability (`issue_with_incoming`).
+    incoming: Option<Provenance>,
+    /// The trace this resolution records into, if any.
+    trace: Option<TraceScope>,
+    /// The resolution chain the request is resolved in.
+    scope: Scope,
+    /// How deep in sub-requests this is, against the kernel's nesting budget.
+    depth: u32,
+    /// Where a FAILED invocation's dependencies are written, so the endpoint that
+    /// issued this sub-request can hang a fallback from them (ledger #611).
+    failed: Option<&'f mut Dependencies>,
+}
+
+impl IssueCtx<'_> {
+    /// A top-level request: no parent, no incoming provenance, untraced, in the
+    /// empty chain, at depth zero.
+    fn top() -> Self {
+        IssueCtx {
+            parent: None,
+            incoming: None,
+            trace: None,
+            scope: Scope::empty(),
+            depth: 0,
+            failed: None,
+        }
+    }
+}
+
 impl Kernel {
     /// A kernel over the given root space.
+    ///
+    /// Panics when the root's arrangement breaks the seal rules (a level sealing
+    /// outside its namespace, two levels claiming overlapping prefixes, a door
+    /// under a sealed prefix where its owner is not), naming the refusal.
+    /// [`try_new`](Self::try_new) is the same constructor with the refusal as a
+    /// value, for a host whose arrangement comes from configuration.
     pub fn new(root: Arc<dyn Space>) -> Self {
         let seals = seals_for(&root, &[]);
-        Kernel {
-            root,
-            cache: ReprCache::default(),
-            meta: None,
-            clock: None,
-            spawner: None,
-            self_ref: None,
-            tracer: Mutex::new(None),
-            tracing: AtomicBool::new(false),
-            span_counter: Arc::new(AtomicU64::new(0)),
-            scheduler: None,
-            constraint: Mutex::new(VecDeque::new()),
-            aliases: None,
-            subclass_closure: BTreeMap::new(),
-            max_depth: DEFAULT_MAX_DEPTH,
-            floors: FloorMemo::default(),
-            scope_names: Mutex::new(BTreeMap::new()),
-            uncached: Mutex::new(UncachedLog::default()),
-            seals,
-            listeners: Listeners::default(),
-        }
+        Self::assemble(root, None, seals)
+    }
+
+    /// [`new`](Self::new), with a refused arrangement returned rather than panicked
+    /// on (ledger #792): a host loading its arrangement from configuration can
+    /// report the [`SealError`] and degrade instead of aborting. The check is the
+    /// one [`check_sealing`](Self::check_sealing) runs, made once.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{EndpointSpace, Iri, Kernel, Level, Mount, SealError, Space};
+    ///
+    /// // A module whose level seals a prefix outside its own namespace.
+    /// let squat: Arc<dyn Space> = Arc::new(Mount::new(
+    ///     "urn:mod:",
+    ///     Arc::new(
+    ///         Level::new(
+    ///             Iri::parse("urn:example:level:mod").unwrap(),
+    ///             Arc::new(EndpointSpace::new()),
+    ///         )
+    ///         .sealing(["urn:sign:"]),
+    ///     ),
+    /// ));
+    /// match Kernel::try_new(squat) {
+    ///     Err(SealError::OutsideNamespace { prefix, .. }) => assert_eq!(prefix, "urn:sign:"),
+    ///     Err(other) => panic!("refused for another reason: {other}"),
+    ///     Ok(_) => panic!("a squatting seal was accepted"),
+    /// }
+    ///
+    /// // An arrangement that keeps the rules builds as `new` would.
+    /// assert!(Kernel::try_new(Arc::new(EndpointSpace::new())).is_ok());
+    /// ```
+    pub fn try_new(root: Arc<dyn Space>) -> std::result::Result<Self, SealError> {
+        let seals = Seals::build(root.as_ref(), &[])?;
+        Ok(Self::assemble(root, None, seals))
     }
 
     /// A kernel that answers `Meta` requests by rendering through `renderer`.
+    /// Panics on a refused arrangement, as [`new`](Self::new) does; check it first
+    /// with [`check_sealing`](Self::check_sealing) where that matters.
     pub fn with_meta_renderer(root: Arc<dyn Space>, renderer: Arc<dyn MetaRenderer>) -> Self {
         let seals = seals_for(&root, &[]);
+        Self::assemble(root, Some(renderer), seals)
+    }
+
+    /// The one place a kernel's fields are set, for every constructor.
+    fn assemble(root: Arc<dyn Space>, meta: Option<Arc<dyn MetaRenderer>>, seals: Seals) -> Self {
         Kernel {
             root,
             cache: ReprCache::default(),
-            meta: Some(renderer),
+            meta,
             clock: None,
             spawner: None,
             self_ref: None,
@@ -975,8 +1040,9 @@ impl Kernel {
     /// Checked against the root's topology here: a level whose doors can answer a
     /// sealed name, or a level's own seal that overlaps one of these, is
     /// **refused** — this builder panics, naming the level, the door and the prefix
-    /// (a builder has no error channel; [`check_sealing`](Self::check_sealing) is
-    /// the fallible form). A module that genuinely needs such a name asks the host
+    /// ([`try_with_sealed`](Self::try_with_sealed) returns the refusal instead, and
+    /// [`check_sealing`](Self::check_sealing) checks an arrangement before any
+    /// kernel is built). A module that genuinely needs such a name asks the host
     /// to bind it outside the level. What the topology cannot show (an opaque space
     /// inside a level) is checked on every resolution and refused there.
     ///
@@ -1024,7 +1090,43 @@ impl Kernel {
     /// let refused = Kernel::check_sealing(squatter.as_ref(), ["urn:sign:"]).unwrap_err();
     /// assert!(refused.to_string().contains("`urn:sign:trust-set`"), "{refused}");
     /// ```
-    pub fn with_sealed<I, S>(mut self, prefixes: I) -> Self
+    pub fn with_sealed<I, S>(self, prefixes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.try_with_sealed(prefixes)
+            .unwrap_or_else(|refused| panic!("the kernel's seals are refused: {refused}"))
+    }
+
+    /// [`with_sealed`](Self::with_sealed), with a refusal returned rather than
+    /// panicked on (ledger #792) — for a host whose sealed prefixes come from
+    /// configuration. On `Err` the kernel is consumed; build it again without the
+    /// refused prefix, or report and stop.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{EndpointSpace, Exact, FnEndpoint, Iri, Kernel, Level, Mount, Space};
+    ///
+    /// // A module that binds `urn:sign:trust-set` inside its level.
+    /// let module: Arc<dyn Space> = Arc::new(Mount::new(
+    ///     "urn:mod:",
+    ///     Arc::new(Level::new(
+    ///         Iri::parse("urn:example:level:mod").unwrap(),
+    ///         Arc::new(EndpointSpace::new().bind(
+    ///             Exact::new("urn:sign:trust-set"),
+    ///             FnEndpoint::new("fake", |_| unreachable!()),
+    ///         )),
+    ///     )),
+    /// ));
+    /// let refused = Kernel::new(Arc::clone(&module))
+    ///     .try_with_sealed(["urn:sign:"])
+    ///     .err()
+    ///     .expect("sealing a name the module binds is refused");
+    /// assert!(refused.to_string().contains("`urn:sign:trust-set`"), "{refused}");
+    /// assert!(Kernel::new(module).try_with_sealed(["urn:other:"]).is_ok());
+    /// ```
+    pub fn try_with_sealed<I, S>(mut self, prefixes: I) -> std::result::Result<Self, SealError>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -1037,8 +1139,8 @@ impl Kernel {
             .map(|(prefix, _)| prefix.clone())
             .collect();
         host.extend(prefixes.into_iter().map(Into::into));
-        self.seals = seals_for(&self.root, &host);
-        self
+        self.seals = Seals::build(self.root.as_ref(), &host)?;
+        Ok(self)
     }
 
     /// Check `root`'s arrangement against the seal rules, with `host` sealed
@@ -1459,12 +1561,13 @@ impl Kernel {
             current = Box::pin(self.issue_inner(
                 request,
                 capability,
-                parent,
-                None,
-                trace.clone(),
-                scope.clone(),
-                depth + 1,
-                None,
+                IssueCtx {
+                    parent,
+                    trace: trace.clone(),
+                    scope: scope.clone(),
+                    depth: depth + 1,
+                    ..IssueCtx::top()
+                },
             ))
             .await?;
         }
@@ -1634,6 +1737,52 @@ impl Kernel {
     /// The installed rewrite table, if any.
     pub fn aliases(&self) -> Option<&Arc<AliasTable>> {
         self.aliases.as_ref()
+    }
+
+    /// **The name this kernel resolves `target` under**, through its installed
+    /// rewrite table ([`with_aliases`](Self::with_aliases)) — the same canonical name
+    /// the kernel keys its cache, golden threads, capability floor and trace on, so
+    /// two IRIs with the same answer here are one resource to the kernel's table
+    /// (ledger #369). `Ok(None)`: the name stands as written (no table, or no rule
+    /// matched). `Ok(Some(canonical))`: the table rewrites it to `canonical`. `Err`: the
+    /// table refuses it (a cycle, an over-long chain, a rewrite that is not an IRI) —
+    /// the very refusal a request for `target` would meet before dispatch.
+    ///
+    /// Answered from the table alone: it resolves nothing and invokes nothing. ⚠ So it
+    /// does NOT see a rewrite a [`Space`] performs on its own — an [`Alias`] or
+    /// [`Rewrite`](crate::Rewrite) composed inside the root, which the kernel learns
+    /// only from [`Resolved::canonical`](crate::Resolved::canonical) when it resolves.
+    /// A name that is one resource only by such a space-level rewrite needs a
+    /// resolution to say so: `urn:kernel:explain` for the dry run, or a trace's
+    /// `alias` note.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{AliasTable, EndpointSpace, Iri, Kernel};
+    ///
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new()))
+    ///     .with_aliases(Arc::new(AliasTable::new().prefix("urn:fn:", "urn:iki:fn:")));
+    /// let iri = |s: &str| Iri::parse(s).unwrap();
+    ///
+    /// // Rewritten: the logical name and the backing name are one resource.
+    /// assert_eq!(
+    ///     kernel.canonical(&iri("urn:fn:upper")).unwrap(),
+    ///     Some(iri("urn:iki:fn:upper"))
+    /// );
+    /// // Already canonical, or outside every rule: the name stands.
+    /// assert_eq!(kernel.canonical(&iri("urn:iki:fn:upper")).unwrap(), None);
+    /// assert_eq!(kernel.canonical(&iri("urn:example:other")).unwrap(), None);
+    ///
+    /// // A cyclic table is refused, as a request would be.
+    /// let cyclic = Kernel::new(Arc::new(EndpointSpace::new())).with_aliases(Arc::new(
+    ///     AliasTable::new().exact("urn:a:x", "urn:b:x").exact("urn:b:x", "urn:a:x"),
+    /// ));
+    /// assert!(cyclic.canonical(&iri("urn:a:x")).is_err());
+    /// ```
+    pub fn canonical(&self, target: &Iri) -> Result<Option<Iri>> {
+        Ok(self
+            .canonicalize(target)?
+            .map(|hop| hop.canonical().clone()))
     }
 
     /// Canonicalize a target through the installed table. `Ok(None)` means the name
@@ -2051,12 +2200,10 @@ impl Kernel {
         self.issue_inner(
             request,
             capability,
-            None,
-            None,
-            trace,
-            Scope::empty(),
-            0,
-            None,
+            IssueCtx {
+                trace,
+                ..IssueCtx::top()
+            },
         )
         .await
     }
@@ -2135,8 +2282,16 @@ impl Kernel {
         scope: Scope,
     ) -> Result<Representation> {
         let trace = self.global_scope();
-        self.issue_inner(request, capability, None, None, trace, scope, 0, None)
-            .await
+        self.issue_inner(
+            request,
+            capability,
+            IssueCtx {
+                trace,
+                scope,
+                ..IssueCtx::top()
+            },
+        )
+        .await
     }
 
     /// Issue a request, recording every invocation of **this resolution** into
@@ -2163,12 +2318,10 @@ impl Kernel {
         self.issue_inner(
             request,
             capability,
-            None,
-            None,
-            Some(TraceScope::new(tracer)),
-            Scope::empty(),
-            0,
-            None,
+            IssueCtx {
+                trace: Some(TraceScope::new(tracer)),
+                ..IssueCtx::top()
+            },
         )
         .await
     }
@@ -2206,12 +2359,12 @@ impl Kernel {
         self.issue_inner(
             request,
             capability,
-            None,
-            Some(incoming),
-            trace,
-            scope,
-            0,
-            None,
+            IssueCtx {
+                incoming: Some(incoming),
+                trace,
+                scope,
+                ..IssueCtx::top()
+            },
         )
         .await
     }
@@ -2229,13 +2382,16 @@ impl Kernel {
         &self,
         request: Request,
         capability: &Capability,
-        parent: Option<u64>,
-        incoming: Option<Provenance>,
-        trace: Option<TraceScope>,
-        scope: Scope,
-        depth: u32,
-        failed: Option<&mut Dependencies>,
+        ctx: IssueCtx<'_>,
     ) -> Result<Representation> {
+        let IssueCtx {
+            parent,
+            incoming,
+            trace,
+            scope,
+            depth,
+            failed,
+        } = ctx;
         // ★ THE CUT SNAPSHOT, BEFORE ANYTHING ELSE. Everything this request is
         // about to observe is state as of *now*; a cut that lands after this point
         // invalidates whatever comes back, and `ReprCache::store` declines the entry
@@ -3290,10 +3446,38 @@ impl Kernel {
             // Why reads were not cached: the last few resources computed and not
             // stored, each with the reason `UNCACHED_NOTE` puts on its event. Needs
             // no tracer — "why is this slow" arrives unannounced.
+            //
+            // `target=` keeps one name's rows (ledger #967), matched as asked AND under
+            // the name the kernel's own rewrite table resolves it as, since a row is
+            // recorded under the canonical target. A rewrite a space performs on its
+            // own is not seen (`Kernel::canonical`); ask by the name `explain` reports.
             ("uncached", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
+                let asked = match kernel_arg(request, "target").map(str::trim) {
+                    None => None,
+                    Some(target) => {
+                        Some(Iri::parse(target).map_err(|e| Error::InvalidArgument {
+                            name: "target".to_string(),
+                            detail: e.to_string(),
+                        })?)
+                    }
+                };
+                let canonical = match &asked {
+                    // A refused rewrite leaves the name as asked: the log holds no row
+                    // for a name every request for it is refused.
+                    Some(asked) => self.canonical(asked).ok().flatten(),
+                    None => None,
+                };
+                let names: Option<Vec<&str>> = asked.as_ref().map(|asked| {
+                    std::iter::once(asked.as_str())
+                        .chain(canonical.as_ref().map(Iri::as_str))
+                        .collect()
+                });
                 Ok(kernel_text(
-                    self.uncached.lock().expect("uncached lock").render(),
+                    self.uncached
+                        .lock()
+                        .expect("uncached lock")
+                        .render(names.as_deref()),
                 ))
             }
             // Inspect the golden threads that have been cut, and how many times.
@@ -4062,7 +4246,8 @@ fn shared_id_marks(copies: &BTreeMap<&str, usize>) -> String {
 }
 
 /// The seal table for `root` with `host` sealed besides core, or a panic naming
-/// the refusal — the constructors and [`Kernel::with_sealed`] build here.
+/// the refusal — the panicking constructors build here; [`Kernel::try_new`] and
+/// [`Kernel::try_with_sealed`] build through [`Seals::build`] and return it.
 fn seals_for(root: &Arc<dyn Space>, host: &[String]) -> Seals {
     Seals::build(root.as_ref(), host)
         .unwrap_or_else(|refused| panic!("the kernel's seals are refused: {refused}"))
@@ -4320,12 +4505,11 @@ impl Issuer for Kernel {
         self.issue_inner(
             request,
             capability,
-            parent,
-            None,
-            trace,
-            Scope::empty(),
-            0,
-            None,
+            IssueCtx {
+                parent,
+                trace,
+                ..IssueCtx::top()
+            },
         )
         .await
     }
@@ -4346,12 +4530,11 @@ impl Issuer for Kernel {
         self.issue_inner(
             request,
             capability,
-            parent,
-            None,
-            trace,
-            Scope::empty(),
-            0,
-            None,
+            IssueCtx {
+                parent,
+                trace,
+                ..IssueCtx::top()
+            },
         )
         .await
     }
@@ -4369,8 +4552,17 @@ impl Issuer for Kernel {
         // entered it, an injected corridor is visible all the way down. Depth 0:
         // a caller on this seam did not say how deep it is, and the count restarts
         // here rather than guessing (see `Issuer::issue_at_depth`).
-        self.issue_inner(request, capability, parent, None, trace, scope, 0, None)
-            .await
+        self.issue_inner(
+            request,
+            capability,
+            IssueCtx {
+                parent,
+                trace,
+                scope,
+                ..IssueCtx::top()
+            },
+        )
+        .await
     }
 
     async fn issue_at_depth(
@@ -4385,8 +4577,18 @@ impl Issuer for Kernel {
         // Everything `issue_in_scope` carries plus the nesting depth the budget is
         // checked against in `issue_inner`. (`issue_recording` below is the seam
         // `Invocation` calls; this one is for an issuer that wraps the kernel.)
-        self.issue_inner(request, capability, parent, None, trace, scope, depth, None)
-            .await
+        self.issue_inner(
+            request,
+            capability,
+            IssueCtx {
+                parent,
+                trace,
+                scope,
+                depth,
+                ..IssueCtx::top()
+            },
+        )
+        .await
     }
 
     async fn issue_recording(
@@ -4407,12 +4609,14 @@ impl Issuer for Kernel {
             .issue_inner(
                 request,
                 capability,
-                parent,
-                None,
-                trace,
-                scope,
-                depth,
-                Some(&mut failed),
+                IssueCtx {
+                    parent,
+                    trace,
+                    scope,
+                    depth,
+                    failed: Some(&mut failed),
+                    ..IssueCtx::top()
+                },
             )
             .await;
         (result, failed)

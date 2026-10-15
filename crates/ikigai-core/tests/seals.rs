@@ -638,3 +638,51 @@ fn the_registered_owner_still_answers_its_sealed_names() {
     let got = block_on(kernel.issue(source("urn:a:secret"), &Capability::root())).unwrap();
     assert_eq!(got.bytes, b"REAL");
 }
+
+/// ★ Ledger #792: `Kernel::new` panics on a refused arrangement, so a host whose
+/// arrangement comes from configuration could not degrade; `try_new` and
+/// `try_with_sealed` hand back the same refusal as a value, and accept what `new`
+/// accepts.
+#[test]
+fn try_new_and_try_with_sealed_return_the_refusal_new_and_with_sealed_panic_on() {
+    let squat = || {
+        module(
+            "urn:mod:",
+            level("urn:example:level:mod", EndpointSpace::new()).sealing(["urn:sign:"]),
+        )
+    };
+    let expected = Kernel::check_sealing(squat().as_ref(), Vec::<String>::new()).unwrap_err();
+
+    // The claim, reproduced: the infallible constructor panics, naming the refusal.
+    let panicked = std::panic::catch_unwind(|| Kernel::new(squat()))
+        .err()
+        .and_then(|p| p.downcast_ref::<String>().cloned())
+        .expect("Kernel::new panics on a refused arrangement");
+    assert!(panicked.contains(&expected.to_string()), "{panicked}");
+
+    // The fallible form returns the same refusal.
+    assert_eq!(Kernel::try_new(squat()).err(), Some(expected));
+    assert!(Kernel::try_new(real_trust_set()).is_ok());
+
+    // And the host's own seals: refused as a value, accepted where `with_sealed` is.
+    let squatter = module(
+        "urn:mod:",
+        level(
+            "urn:example:level:mod",
+            EndpointSpace::new().bind(Exact::new("urn:sign:trust-set"), constant("fake", b"fake")),
+        ),
+    );
+    let refused = Kernel::new(Arc::clone(&squatter))
+        .try_with_sealed(["urn:sign:"])
+        .err()
+        .expect("sealing a name the module binds is refused");
+    assert_eq!(
+        Some(refused),
+        Kernel::check_sealing(squatter.as_ref(), ["urn:sign:"]).err()
+    );
+    let kernel = Kernel::try_new(real_trust_set())
+        .unwrap()
+        .try_with_sealed(["urn:sign:"])
+        .unwrap();
+    assert_eq!(get(&kernel, "urn:sign:trust-set"), "real");
+}

@@ -85,6 +85,23 @@
 //! the convention settled, and those are live MCP tool names — renaming them moves
 //! an agent's tool list, so they ride one coordinated ecosystem-wide wave rather
 //! than leaking out of an unrelated change.
+//!
+//! # Lock poisoning
+//!
+//! The kernel's interior state (the cache, the tracer slot, the uncached log, the
+//! floor memo, the listeners) sits behind `std::sync` locks, and every acquisition
+//! is `.expect("… lock")`: **a poisoned lock is propagated as a panic, never
+//! recovered** with `PoisonError::into_inner`. A lock is poisoned only when a
+//! thread panicked while holding it: a bug in the kernel's own bookkeeping, or in
+//! host code the kernel calls with a lock held, which is a [`CachePolicy`]
+//! (`admit` and `victim` run with the cache locked). Either way the state it
+//! guarded may be half-written: a cache entry stored without its threads, a
+//! generation bumped without its cut recorded. Serving on from that would trade a
+//! loud failure for a wrong answer, and caching makes a wrong answer durable. No
+//! ENDPOINT runs under a kernel lock, so an endpoint's panic never poisons one
+//! ([`Invocation::scope_sync`] turns a sync endpoint's panic into an error). A
+//! host that must survive a kernel or policy bug isolates the kernel (a process,
+//! a restartable task) rather than expecting it to recover in place.
 #![forbid(unsafe_code)]
 
 pub mod alias;
@@ -165,9 +182,9 @@ pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};
 pub use seal::{SealError, SealOwner};
 pub use select::{
-    is_auto_invocable, is_lossless_plan, select_action, select_action_in, select_transreptor,
-    select_transreptor_in, select_transreptor_in_with, select_transreptor_with, ActionMatch,
-    ActionQuery, TransreptionPolicy, TransreptionStep, CANONICAL,
+    describe_entry, is_auto_invocable, is_lossless_plan, select_action, select_action_in,
+    select_transreptor, select_transreptor_in, select_transreptor_in_with, select_transreptor_with,
+    ActionMatch, ActionQuery, EntryDescription, TransreptionPolicy, TransreptionStep, CANONICAL,
 };
 pub use space::{
     space_iri, EndpointSpace, Fallback, Level, LevelPath, Limit, Mount, Resolution, Resolved,

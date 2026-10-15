@@ -299,15 +299,24 @@ pub(crate) fn probe(space: &dyn Space, iri: Iri) -> Option<Resolved> {
 /// A space entry's self-description, with how its pattern names the endpoint: `None`
 /// for an exact, directly resolvable IRI; `Some(vars)` for a URI-template pattern
 /// whose variables must be supplied (as `Binding`-source arguments) to form one.
-pub(crate) struct EntryDescription {
+/// What [`describe_entry`] answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EntryDescription {
     /// The bound endpoint's `describe()`.
     pub description: Description,
-    /// The template's variable names, when the pattern is a template grammar.
+    /// The template's variable names, in the order the pattern states them, when the
+    /// pattern is a template grammar; `None` for an exact IRI.
     pub template_vars: Option<Vec<String>>,
 }
 
 /// Describe one space entry — the shared step of every `entries → Meta → describe`
-/// walk (catalog, selection, validate's id lookup). An exact pattern IS the IRI to
+/// walk (catalog, selection, validate's id lookup), exported so a walk outside the
+/// kernel (a module's cards, a test sweeping every action a space binds) runs the
+/// kernel's own rule rather than a copy that drifts (ledger #52, #73). It works on any
+/// [`Space`], not only a kernel's root; over a kernel,
+/// [`Kernel::describe_pattern`](crate::Kernel::describe_pattern) is the same walk by
+/// pattern. An exact pattern IS the IRI to
 /// `Meta`-resolve. A template pattern (`urn:file:{path}`) is not an IRI at all, so it is
 /// **probe-expanded**: each `{var}` takes a placeholder, and the concrete probe IRI is
 /// resolved the normal way — reaching the same endpoint the template binds, since
@@ -328,7 +337,63 @@ pub(crate) struct EntryDescription {
 /// PR-grain rows (`…:pr:{n}:explain`, `…:pr:{n}:review`) were swallowed by the shorter
 /// `…:pr:{n}` sibling's guess and vanished from every mounted manifold and MCP tool list,
 /// while resolving correctly through the REPL.
-pub(crate) fn describe_entry(root: &dyn Space, entry: &SpaceEntry) -> Option<EntryDescription> {
+///
+/// A name a [`Limit`](crate::Limit) carves out is `None` here, as it is unresolved on
+/// the issue path. And a grammar whose `match_iri` validates its captures refuses the
+/// placeholder and is `None` too: match the shape and validate in the endpoint
+/// ([`Grammar::match_iri`](crate::Grammar::match_iri)).
+///
+/// Sweeping every action a space binds is `entries()` and this, nothing else: no
+/// hand-written expansion of the template variables.
+///
+/// ```
+/// use ikigai_core::{
+///     describe_entry, ArgSpec, Description, EndpointSpace, Exact, FnEndpoint, ReprType,
+///     Representation, Space, UriTemplate, Verb,
+/// };
+///
+/// fn door(id: &'static str, description: Description) -> FnEndpoint {
+///     FnEndpoint::new(id, move |_| {
+///         Ok(Representation::new(ReprType::new("text/plain"), id.as_bytes().to_vec()))
+///     })
+///     .with_description(description)
+/// }
+/// let space = EndpointSpace::new()
+///     .bind(
+///         Exact::new("urn:example:items"),
+///         door("items", Description::new("items").verb(Verb::Source)),
+///     )
+///     .bind(
+///         UriTemplate::parse("urn:example:{ledger}:item:{id}").unwrap(),
+///         door(
+///             "item",
+///             Description::new("item")
+///                 .verb(Verb::Source)
+///                 .verb(Verb::Sink)
+///                 .input(ArgSpec::new("ledger").binding())
+///                 .input(ArgSpec::new("id").binding()),
+///         ),
+///     );
+///
+/// let mut actions = Vec::new();
+/// for entry in space.entries().unwrap() {
+///     let described = describe_entry(&space, &entry).expect("every door describes itself");
+///     for spec in described.description.action_specs() {
+///         actions.push(format!("{} {:?}", described.description.id, spec.verb));
+///     }
+///     if entry.pattern.contains('{') {
+///         assert_eq!(
+///             described.template_vars,
+///             Some(vec!["ledger".to_string(), "id".to_string()])
+///         );
+///     } else {
+///         assert_eq!(described.template_vars, None);
+///     }
+/// }
+/// actions.sort();
+/// assert_eq!(actions, ["item Sink", "item Source", "items Source"]);
+/// ```
+pub fn describe_entry(root: &dyn Space, entry: &SpaceEntry) -> Option<EntryDescription> {
     if let Ok(iri) = Iri::parse(&entry.pattern) {
         let resolved = probe(root, iri)?;
         return Some(EntryDescription {
