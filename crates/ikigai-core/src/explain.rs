@@ -33,10 +33,11 @@ use std::sync::Arc;
 use crate::alias::{AliasTable, Canonical, RuleKind};
 use crate::capability::{is_deny_scope, Capability};
 use crate::contract::encode_name;
+use crate::describe::ContractCaching;
 use crate::error::{Error, Result};
 use crate::iri::Iri;
 use crate::kernel::{capability_key, kernel_op, parse_verb, BINDINGS_THREAD};
-use crate::repr::{ReprType, Representation};
+use crate::repr::{ReprType, Representation, Time};
 use crate::request::Request;
 use crate::seal::Seals;
 use crate::space::{Consulted, Resolution, Scope, Space};
@@ -56,6 +57,8 @@ pub(crate) struct Ask<'a> {
     pub(crate) root: &'a Arc<dyn Space>,
     pub(crate) seals: &'a Seals,
     pub(crate) aliases: Option<&'a AliasTable>,
+    /// The kernel's clock reading, for the answered contract's caching bound.
+    pub(crate) now: Option<Time>,
 }
 
 /// One rewrite the kernel's own table would perform.
@@ -185,6 +188,9 @@ struct Explanation {
     outcome: Outcome,
     /// The dry run's own IRI, for the Turtle face.
     node: String,
+    /// How long the answer may be kept: the answered endpoint's contract bound, since
+    /// its declared verbs and floor are part of the answer (ledger #1579).
+    caching: ContractCaching,
 }
 
 /// Answer `urn:kernel:explain` — the kernel's arm calls this after its inspect gate.
@@ -222,12 +228,13 @@ pub(crate) fn explain(ask: Ask<'_>) -> Result<Representation> {
         ("text/plain", explanation.to_text())
     };
     // A face derived from the bindings, like the topology it walks: valid until the
-    // binding set changes. Keyed by the asker's capability and chain by the kernel.
+    // binding set changes, and no longer than the answered contract may be kept.
+    // Keyed by the asker's capability and chain by the kernel.
     Ok(Representation::new(
         ReprType::new(media).with_param("charset", "utf-8"),
         body.into_bytes(),
     )
-    .cacheable()
+    .with_expiry(explanation.caching.expiry_at(ask.now))
     .depends_on(BINDINGS_THREAD))
 }
 
@@ -290,6 +297,7 @@ fn walk(
         members: Vec::new(),
         outcome: Outcome::Nothing,
         node,
+        caching: ContractCaching::UntilRebind,
     };
 
     // 1. The kernel's own rewrite, as `Kernel::canonicalize` would apply it — but
@@ -422,6 +430,7 @@ fn walk(
                 return explanation;
             }
             let description = resolved.endpoint.describe();
+            explanation.caching = description.contract_caching;
             let declares_verb = (!description.verbs.is_empty())
                 .then(|| verb == Verb::Meta || description.verbs.contains(&verb));
             Outcome::Answered(Box::new(Answer {

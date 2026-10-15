@@ -607,6 +607,18 @@ pub fn select_action(root: &dyn Space, present: &[&str]) -> Vec<ActionMatch> {
 /// no such rule: every action the other filters keep is offered, best-fitted-first.
 /// [`select_action`] shows both shapes.
 pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch> {
+    select_actions_bounded(root, query).0
+}
+
+/// [`select_actions`] with the tightest [`ContractCaching`](crate::ContractCaching) of
+/// every description the walk read — matched or filtered out alike, because a contract
+/// that changes may start matching — so the kernel keeps the manifold no longer than
+/// that (ledger #1579).
+pub(crate) fn select_actions_bounded(
+    root: &dyn Space,
+    query: &ActionQuery,
+) -> (Vec<ActionMatch>, crate::ContractCaching) {
+    let mut caching = crate::ContractCaching::UntilRebind;
     // Each match beside whether it was offered only because it needs nothing, which
     // ranks it last: it says nothing about the present entities.
     let mut matches: Vec<(bool, ActionMatch)> = Vec::new();
@@ -616,6 +628,7 @@ pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch>
             continue;
         };
         let description = described.description;
+        caching = caching.most_restrictive(description.contract_caching);
         for action in description.action_specs() {
             if let Some(vars) = &described.template_vars {
                 if !template_drivable(&action, vars) {
@@ -690,7 +703,7 @@ pub fn select_actions(root: &dyn Space, query: &ActionQuery) -> Vec<ActionMatch>
             b.verb as u8,
         ))
     });
-    matches.into_iter().map(|(_, m)| m).collect()
+    (matches.into_iter().map(|(_, m)| m).collect(), caching)
 }
 
 /// Whether `capability` satisfies one required scope — [`Capability::allows`] for a plain

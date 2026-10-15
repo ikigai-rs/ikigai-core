@@ -1584,6 +1584,11 @@ pub trait Endpoint: Send + Sync {
 
     /// A structured self-description, which `ikigai-vocab` can project to RDF.
     /// The default reports just the endpoint's name.
+    ///
+    /// The kernel keeps what it derives from it (the `Meta` answer, the capability
+    /// floor, the catalog and manifold rows) until the bindings change, so a contract
+    /// that can change while the endpoint stays bound says how long it may be kept:
+    /// [`Description::contract_max_age`] or [`Description::contract_volatile`].
     fn describe(&self) -> Description {
         Description::new(self.name())
     }

@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
+use crate::repr::{Expiry, Time};
 use crate::verb::Verb;
 
 /// Where an input's value comes from — the two channels an endpoint can read a
@@ -233,7 +236,7 @@ impl ActionSpec {
 /// let back: Description = serde_json::from_value(json).unwrap();
 /// assert_eq!(back, d);
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Description {
     /// The endpoint identifier.
     ///
@@ -288,6 +291,148 @@ pub struct Description {
     /// omitted from serialized output when empty, so existing JSON contracts are unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionSpec>,
+    /// How long a kernel may keep what it derives from this description before it calls
+    /// `describe()` again — see [`ContractCaching`]. Defaults to
+    /// [`UntilRebind`](ContractCaching::UntilRebind), a static contract. Set it with
+    /// [`contract_max_age`](Self::contract_max_age) or
+    /// [`contract_volatile`](Self::contract_volatile).
+    ///
+    /// Kernel-local, like a representation's golden threads: **never serialized** (a JSON
+    /// contract is unchanged by it, and a description read from JSON carries the default),
+    /// and **not part of a description's equality** (two doors with one contract are one
+    /// contract in the catalog, whatever each may be cached for).
+    #[serde(skip)]
+    pub contract_caching: ContractCaching,
+}
+
+// Every field but `contract_caching`, which is cache policy, not contract (see the field).
+// Destructured exhaustively, so a field added later is a compile error here rather than a
+// field silently left out of equality.
+impl PartialEq for Description {
+    fn eq(&self, other: &Self) -> bool {
+        let Description {
+            id,
+            title,
+            summary,
+            verbs,
+            inputs,
+            outputs,
+            kind,
+            requires,
+            actions,
+            contract_caching: _,
+        } = self;
+        *id == other.id
+            && *title == other.title
+            && *summary == other.summary
+            && *verbs == other.verbs
+            && *inputs == other.inputs
+            && *outputs == other.outputs
+            && *kind == other.kind
+            && *requires == other.requires
+            && *actions == other.actions
+    }
+}
+
+impl Eq for Description {}
+
+/// How long a kernel may keep what it derives from a [`Description`] before it calls
+/// `describe()` again (ledger #1579).
+///
+/// What it governs is everything the kernel builds from a description and caches: the
+/// `Meta` answer in every face (the contract the engine routes named arguments by), the
+/// capability floor it enforces before dispatch, and the catalog, action manifold,
+/// `urn:kernel:validate` and `urn:kernel:explain` answers built from it. A face built from
+/// several descriptions (the catalog, the manifold) is kept no longer than the tightest of
+/// them.
+///
+/// The default, [`UntilRebind`](Self::UntilRebind), is a static contract: kept until the
+/// binding set changes, which is a cut of [`BINDINGS_THREAD`](crate::BINDINGS_THREAD).
+/// That is right for an endpoint whose contract is its code. It is wrong for one whose
+/// contract can change while it stays bound, such as a mount whose peer narrows what it
+/// serves: nothing on the mounting side cuts the binding thread when the peer changes, so
+/// the old contract would be served for the life of the process. Such an endpoint states a
+/// bound. The binding thread still invalidates a bounded answer too.
+///
+/// ```
+/// use std::time::Duration;
+/// use ikigai_core::{ContractCaching, Description, Expiry, Time, Verb};
+///
+/// // A static contract: kept until the bindings change.
+/// let fixed = Description::new("upper").verb(Verb::Source);
+/// assert_eq!(fixed.contract_caching, ContractCaching::UntilRebind);
+/// assert_eq!(fixed.contract_caching.expiry_at(None), Expiry::Never);
+///
+/// // A mounted contract the peer may change: kept at most five seconds.
+/// let mounted = Description::new("upper")
+///     .verb(Verb::Source)
+///     .contract_max_age(Duration::from_secs(5));
+/// let now = Time::from_millis(1_000);
+/// assert_eq!(
+///     mounted.contract_caching.expiry_at(Some(now)),
+///     Expiry::At(Time::from_millis(6_000))
+/// );
+/// // A deadline needs a clock: a kernel without one keeps nothing.
+/// assert_eq!(mounted.contract_caching.expiry_at(None), Expiry::Always);
+///
+/// // Cache policy is not contract: equality and the JSON wire form ignore it.
+/// assert_eq!(fixed, mounted);
+/// assert_eq!(
+///     serde_json::to_value(&fixed).unwrap(),
+///     serde_json::to_value(&mounted).unwrap()
+/// );
+///
+/// // A face built from both is kept no longer than the tighter of the two.
+/// assert_eq!(
+///     fixed.contract_caching.most_restrictive(mounted.contract_caching),
+///     ContractCaching::MaxAge(Duration::from_secs(5))
+/// );
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ContractCaching {
+    /// Kept until the binding set changes: a static contract. The default.
+    #[default]
+    UntilRebind,
+    /// Kept at most this long, on the kernel's [`Clock`](crate::Clock). A kernel with no
+    /// clock cannot honor a deadline, so it keeps nothing (the rule an
+    /// [`Expiry::At`] answer follows). `MaxAge(Duration::ZERO)` keeps nothing either.
+    MaxAge(Duration),
+    /// Never kept: every read derives it from a fresh `describe()`.
+    Volatile,
+}
+
+impl ContractCaching {
+    /// The tighter of two bounds: [`Volatile`](Self::Volatile) over any
+    /// [`MaxAge`](Self::MaxAge), the shorter of two ages, and any bound over
+    /// [`UntilRebind`](Self::UntilRebind) — how long a face derived from both descriptions
+    /// may be kept.
+    pub fn most_restrictive(self, other: ContractCaching) -> ContractCaching {
+        use ContractCaching::*;
+        match (self, other) {
+            (Volatile, _) | (_, Volatile) => Volatile,
+            (MaxAge(a), MaxAge(b)) => MaxAge(a.min(b)),
+            (MaxAge(age), UntilRebind) | (UntilRebind, MaxAge(age)) => MaxAge(age),
+            (UntilRebind, UntilRebind) => UntilRebind,
+        }
+    }
+
+    /// The [`Expiry`] a representation derived from the description takes when it is
+    /// computed at `now` (the kernel's clock reading; `None` for a kernel with no clock):
+    /// [`Expiry::Never`] until a rebind, `now + max_age` for a bound, [`Expiry::Always`]
+    /// for a volatile contract or a bound with no clock to measure it.
+    pub fn expiry_at(self, now: Option<Time>) -> Expiry {
+        match self {
+            ContractCaching::UntilRebind => Expiry::Never,
+            ContractCaching::MaxAge(age) => match now {
+                Some(now) => {
+                    Expiry::At(now.plus_millis(u64::try_from(age.as_millis()).unwrap_or(u64::MAX)))
+                }
+                None => Expiry::Always,
+            },
+            ContractCaching::Volatile => Expiry::Always,
+        }
+    }
 }
 
 /// What *kind* of endpoint this is — a first-class type that projects to an RDF class
@@ -421,6 +566,24 @@ impl Description {
     /// Set the endpoint kind (builder).
     pub fn kind(mut self, kind: EndpointKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Say that what a kernel derives from this description may be kept at most
+    /// `max_age` (builder): [`ContractCaching::MaxAge`]. For an endpoint whose contract can
+    /// change while it stays bound, such as a mount, which sets its own contract memo's
+    /// lifetime here so a mounted name is never described staler than the memo.
+    pub fn contract_max_age(mut self, max_age: Duration) -> Self {
+        self.contract_caching = ContractCaching::MaxAge(max_age);
+        self
+    }
+
+    /// Say that nothing a kernel derives from this description may be kept (builder):
+    /// [`ContractCaching::Volatile`]. Every `Meta` read and every dispatch then calls
+    /// `describe()`, so an endpoint whose `describe()` is not cheap should prefer
+    /// [`contract_max_age`](Self::contract_max_age).
+    pub fn contract_volatile(mut self) -> Self {
+        self.contract_caching = ContractCaching::Volatile;
         self
     }
 

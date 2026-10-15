@@ -53,7 +53,7 @@ use crate::alias::{Alias, AliasHop, AliasTable, Canonical};
 use crate::arg::ArgRef;
 use crate::cache::{CacheKey, CachePolicy, ReprCache};
 use crate::capability::Capability;
-use crate::describe::Description;
+use crate::describe::{ContractCaching, Description};
 use crate::endpoint::{Dependencies, Endpoint, Invocation, Issuer, Spawner};
 use crate::error::{Error, Result};
 use crate::iri::Iri;
@@ -478,7 +478,10 @@ pub const SCOPE_CLOCK_NOTE: &str = "scope-clock";
 /// canonical Turtle and any transrepted face alike — and so does the kernel's memo of
 /// each resolved endpoint's declared floor (the `requires` the capability floor
 /// checks before dispatch — `FloorMemo` in `kernel.rs`). Cutting it recomputes all of them on
-/// their next read. Nothing else the kernel caches depends on it — a stored read of
+/// their next read. Each is also kept no longer than the [`ContractCaching`] bound of the
+/// descriptions it was built from, for a contract that can change while it stays bound (a
+/// mount's), which no party would cut this thread for (ledger #1579); the default bound is
+/// this thread alone. Nothing else the kernel caches depends on it — a stored read of
 /// a resource hangs from the thread named after its target, not from this one; see
 /// [`Kernel::bindings_changed`] for why that is a decision.
 ///
@@ -766,12 +769,15 @@ impl Floor {
 /// `describe()` runs once per bound endpoint instead of once per request (ledger #22:
 /// ~130 ns of a ~600 ns cached read, a `Description` built by a builder each time).
 ///
-/// **Why it is sound.** A description is a STATIC contract. Two places already
-/// assume so: the catalog renders every description once and caches it `Never`,
-/// and selection matches on it (MCP projects what selection sees). An endpoint
-/// whose `describe()` varied at runtime would already be lying to both; this memo
-/// makes the same assumption a third time and states it here so that a future
-/// endpoint wanting a live contract knows what it is breaking. So one endpoint has
+/// **Why it is sound.** A description is a STATIC contract unless it says otherwise.
+/// The catalog renders every description once and caches it until the bindings
+/// change, and selection matches on it (MCP projects what selection sees); this memo
+/// makes the same assumption a third time. An endpoint whose contract can change while
+/// it stays bound (a mount, whose peer may narrow what it serves) says so with its
+/// description's [`ContractCaching`], and every one of those, this memo included,
+/// describes it again once that bound runs out: a `MaxAge` entry carries its deadline
+/// (`FloorEntry::until`) and a stale hit is a miss, and a `Volatile` contract is never
+/// memoized (ledger #1579). So a static endpoint has
 /// one floor for as long as it is bound, and "the same endpoint" is exactly "the
 /// same `Arc` allocation": the key is the address of [`Resolved::endpoint`], and
 /// every entry holds a [`Weak`] to it. The weak is not there to be upgraded — it is
@@ -834,6 +840,9 @@ struct FloorEntry {
     /// Reserves the key's address for as long as the entry lives; see [`FloorMemo`].
     endpoint: Weak<dyn Endpoint>,
     floor: Floor,
+    /// When the description's [`ContractCaching`] bound runs out, on the kernel's
+    /// clock; `None` for a static contract, kept until the bindings change.
+    until: Option<Time>,
 }
 
 impl FloorMemo {
@@ -843,14 +852,18 @@ impl FloorMemo {
     }
 
     /// The first scope `request.verb` on `endpoint` requires that `capability` lacks:
-    /// from the memo when it has seen this endpoint, else from `describe()`, memoized.
+    /// from the memo when it has seen this endpoint and its entry is still within the
+    /// description's [`ContractCaching`] bound at `now` (the kernel's clock), else from
+    /// `describe()`, memoized for as long as that bound allows.
     fn unsatisfied(
         &self,
         endpoint: &Arc<dyn Endpoint>,
         request: &Request,
         capability: &Capability,
+        now: Option<Time>,
     ) -> Option<String> {
         let key = Self::key(endpoint);
+        let mut stale = false;
         {
             let entries = self.entries.read().expect("floor memo lock");
             if let Some(entry) = entries.get(&key) {
@@ -861,11 +874,31 @@ impl FloorMemo {
                     key,
                     "a memo hit is the same allocation by construction"
                 );
-                return entry.floor.unsatisfied(request, capability);
+                let fresh = match entry.until {
+                    None => true,
+                    Some(until) => now.is_some_and(|now| now < until),
+                };
+                if fresh {
+                    return entry.floor.unsatisfied(request, capability);
+                }
+                stale = true;
             }
         }
-        let floor = Floor::of(&endpoint.describe());
+        let description = endpoint.describe();
+        let floor = Floor::of(&description);
         let lacking = floor.unsatisfied(request, capability);
+        let until = match description.contract_caching.expiry_at(now) {
+            Expiry::Never => None,
+            Expiry::At(deadline) => Some(deadline),
+            // A contract that may not be kept is not memoized: every dispatch describes.
+            // A stale entry it replaces goes, so the next lookup does not find it again.
+            Expiry::Always => {
+                if stale {
+                    self.entries.write().expect("floor memo lock").remove(&key);
+                }
+                return lacking;
+            }
+        };
         let mut entries = self.entries.write().expect("floor memo lock");
         if entries.len() >= FLOOR_MEMO_BOUND {
             entries.retain(|_, entry| entry.endpoint.strong_count() > 0);
@@ -886,6 +919,7 @@ impl FloorMemo {
             FloorEntry {
                 endpoint: Arc::downgrade(endpoint),
                 floor,
+                until,
             },
         );
         lacking
@@ -1297,6 +1331,22 @@ impl Kernel {
             ..*query
         };
         crate::select::select_actions(&self.described(), &expanded_query)
+    }
+
+    /// [`select_actions`](Self::select_actions) with the tightest [`ContractCaching`] of
+    /// every description the walk read, matched or not — how long the manifold built
+    /// from it may be kept (ledger #1579).
+    fn select_actions_bounded(
+        &self,
+        query: &crate::select::ActionQuery<'_>,
+    ) -> (Vec<ActionMatch>, ContractCaching) {
+        let expanded = self.expand_present(query.present);
+        let refs: Vec<&str> = expanded.iter().map(String::as_str).collect();
+        let expanded_query = crate::select::ActionQuery {
+            present: &refs,
+            ..*query
+        };
+        crate::select::select_actions_bounded(&self.described(), &expanded_query)
     }
 
     /// [`select_actions`](Self::select_actions) **in a resolution chain** — see
@@ -2744,9 +2794,9 @@ impl Kernel {
         // own declaration, not the root's. The declaration comes from the
         // per-endpoint memo: `describe()` runs once per bound endpoint, not once per
         // request, and a cut of `urn:kernel:bindings` forgets it (ledger #22, #510).
-        if let Some(lacking) = self
-            .floors
-            .unsatisfied(&resolved.endpoint, &request, capability)
+        if let Some(lacking) =
+            self.floors
+                .unsatisfied(&resolved.endpoint, &request, capability, started)
         {
             self.trace_denial(
                 &trace, &request, capability, span, parent, &lacking, alias, answered, levels,
@@ -2833,7 +2883,12 @@ impl Kernel {
             // A description is a function of the BINDING, not of any state, so the
             // one thread it hangs from is the binding-change thread — every face,
             // the canonical rendering and a transrepted one alike (ledger #26).
-            rendered.depends_on(BINDINGS_THREAD)
+            // And no longer than the description says it may be kept: a contract
+            // that can change while it stays bound (a mount's) states a bound, and
+            // nothing would cut the binding thread for it (ledger #1579).
+            let bound = description.contract_caching.expiry_at(started);
+            let expiry = rendered.expiry.most_restrictive(bound);
+            rendered.depends_on(BINDINGS_THREAD).with_expiry(expiry)
         } else {
             // Invocation is asynchronous. On a scheduled kernel, hand it the spawner
             // and an owned self-handle so re-entrant fan-out runs concurrently.
@@ -3610,6 +3665,7 @@ impl Kernel {
                     root: &self.root,
                     seals: &self.seals,
                     aliases: self.aliases.as_deref(),
+                    now: self.now_stamp(),
                 })
             }
             // Inspect the host scheduler (backend, threads, live task counts).
@@ -3662,6 +3718,10 @@ impl Kernel {
                     .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
                 let turtle = ReprType::new("text/turtle");
                 let mut described: Vec<Description> = Vec::new();
+                // The tightest bound of every contract read, folded BEFORE the dedup: a
+                // description equal to one already listed may still be kept for less
+                // (equality ignores cache policy), and the catalog says what it says.
+                let mut caching = ContractCaching::UntilRebind;
                 let mut templates = Vec::new();
                 // The kernel's own operations come first (see [`Self::described`]),
                 // so the catalog opens with the resources that make the rest of it
@@ -3680,6 +3740,7 @@ impl Kernel {
                     // of the reachability algebra, at the face that computes reach).
                     if let Some(resolved) = crate::select::probe(&space, iri) {
                         let description = resolved.endpoint.describe();
+                        caching = caching.most_restrictive(description.contract_caching);
                         if !described.contains(&description) {
                             described.push(description);
                         }
@@ -3689,6 +3750,7 @@ impl Kernel {
                     let Some(entry) = crate::select::describe_entry(&space, &entry) else {
                         continue;
                     };
+                    caching = caching.most_restrictive(entry.description.contract_caching);
                     if !described.contains(&entry.description) {
                         described.push(entry.description);
                     }
@@ -3709,7 +3771,7 @@ impl Kernel {
                     ReprType::new("text/turtle").with_param("charset", "utf-8"),
                     body.into_bytes(),
                 )
-                .cacheable()
+                .with_expiry(caching.expiry_at(self.now_stamp()))
                 .depends_on(BINDINGS_THREAD))
             }
             // Selection as a resource: the endpoints whose required inputs are satisfiable by
@@ -3747,7 +3809,9 @@ impl Kernel {
                     // computed for.
                     capability: Some(capability),
                 };
-                let matches = self.select_actions(&query);
+                // Kept no longer than the tightest contract the walk read (ledger #1579).
+                let (matches, caching) = self.select_actions_bounded(&query);
+                let expiry = caching.expiry_at(self.now_stamp());
                 let turtle = kernel_arg(request, "as") == Some("text/turtle");
                 if turtle {
                     // The auditable face: each match an ik:ActionMatch node of its OWN,
@@ -3799,7 +3863,7 @@ impl Kernel {
                         ReprType::new("text/turtle").with_param("charset", "utf-8"),
                         body.into_bytes(),
                     )
-                    .cacheable()
+                    .with_expiry(expiry)
                     .depends_on(BINDINGS_THREAD));
                 }
                 // The plain face stays one endpoint identifier per line (deduped across
@@ -3818,7 +3882,7 @@ impl Kernel {
                     ReprType::new("text/plain").with_param("charset", "utf-8"),
                     body.into_bytes(),
                 )
-                .cacheable()
+                .with_expiry(expiry)
                 .depends_on(BINDINGS_THREAD))
             }
             // Validated invoke, stage four of the selection funnel: check a PROPOSED
@@ -3885,7 +3949,7 @@ impl Kernel {
                     ReprType::new("text/turtle").with_param("charset", "utf-8"),
                     report.into_bytes(),
                 )
-                .cacheable()
+                .with_expiry(description.contract_caching.expiry_at(self.now_stamp()))
                 .depends_on(BINDINGS_THREAD))
             }
             // `describe urn:kernel:<op>` — the operation's own self-description, so every
@@ -4703,7 +4767,7 @@ mod tests {
     use super::*;
     use crate::arg::ArgRef;
     use crate::builtins;
-    use crate::describe::Description;
+    use crate::describe::{ContractCaching, Description};
     use crate::endpoint::{BoxFuture, Endpoint, FnEndpoint, Invocation, Issuer, Spawner};
     use crate::grammar::Exact;
     use crate::iri::Iri;
@@ -10290,12 +10354,12 @@ mod tests {
         let (endpoints, describes) = live_endpoints(FLOOR_MEMO_BOUND + 1, None);
         let memo = FloorMemo::default();
         for endpoint in &endpoints {
-            memo.unsatisfied(endpoint, &req, &cap);
+            memo.unsatisfied(endpoint, &req, &cap, None);
         }
         let before = describes.load(Ordering::SeqCst);
         let accesses = 4 * endpoints.len();
         for endpoint in endpoints.iter().cycle().take(accesses) {
-            memo.unsatisfied(endpoint, &req, &cap);
+            memo.unsatisfied(endpoint, &req, &cap, None);
         }
         let misses = (describes.load(Ordering::SeqCst) - before) as usize;
         assert!(
@@ -10310,14 +10374,14 @@ mod tests {
         let (stable, _) = live_endpoints(FLOOR_MEMO_BOUND - 1, None);
         let memo = FloorMemo::default();
         for endpoint in &stable {
-            memo.unsatisfied(endpoint, &req, &cap);
+            memo.unsatisfied(endpoint, &req, &cap, None);
         }
         let inserts = 2 * FLOOR_MEMO_BOUND;
         let mut sweeps = 0;
         for _ in 0..inserts {
             let before = memo.len();
             let (fresh, _) = live_endpoints(1, None);
-            memo.unsatisfied(&fresh[0], &req, &cap);
+            memo.unsatisfied(&fresh[0], &req, &cap, None);
             if memo.len() <= before {
                 sweeps += 1;
             }
@@ -10353,15 +10417,15 @@ mod tests {
                     for i in 0..rounds {
                         let gate = (t + i) % 2 == 0;
                         let (fresh, _) = live_endpoints(1, gate.then_some("urn:cap:demo:read"));
-                        let lacking = memo.unsatisfied(&fresh[0], &req, cap);
+                        let lacking = memo.unsatisfied(&fresh[0], &req, cap, None);
                         assert_eq!(lacking.is_some(), gate, "thread {t} round {i}: fresh");
                         drop(fresh);
                         assert!(
-                            memo.unsatisfied(open, &req, cap).is_none(),
+                            memo.unsatisfied(open, &req, cap, None).is_none(),
                             "open stays open"
                         );
                         assert!(
-                            memo.unsatisfied(gated, &req, cap).is_some(),
+                            memo.unsatisfied(gated, &req, cap, None).is_some(),
                             "gated stays gated"
                         );
                     }
@@ -10369,5 +10433,255 @@ mod tests {
             }
         });
         assert!(memo.len() <= FLOOR_MEMO_BOUND, "bounded: {}", memo.len());
+    }
+
+    // ── A contract that changes while it stays bound (ledger #1579) ──────────────
+
+    /// What one [`Living`] endpoint currently declares: its id, and the scope its
+    /// Source requires, if any.
+    type Contract = Arc<Mutex<(&'static str, Option<&'static str>)>>;
+
+    /// An endpoint whose CONTRACT changes while it stays bound, which is what a mount
+    /// is when its peer narrows what it serves: nothing on the mounting side cuts the
+    /// binding thread. `describe()` reads the current contract on every call, with the
+    /// caching the test chose.
+    struct Living {
+        contract: Contract,
+        caching: ContractCaching,
+    }
+    #[async_trait::async_trait]
+    impl Endpoint for Living {
+        async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+            Ok(Representation::new(ReprType::new("text/plain"), b"ok".to_vec()).cacheable())
+        }
+        fn name(&self) -> &str {
+            "living"
+        }
+        fn describe(&self) -> Description {
+            let (id, requires) = *self.contract.lock().expect("contract lock");
+            let mut spec = crate::describe::ActionSpec::new(Verb::Source);
+            if let Some(scope) = requires {
+                spec = spec.requires(scope);
+            }
+            let mut description = Description::new(id).action(spec);
+            description.contract_caching = self.caching;
+            description
+        }
+    }
+
+    /// A kernel with a settable clock over one [`Living`] endpoint at
+    /// `urn:test:living`, first declaring id `v1` and no floor.
+    fn living_kernel(caching: ContractCaching) -> (Kernel, TestClock, Contract) {
+        let contract: Contract = Arc::new(Mutex::new(("v1", None)));
+        let space = EndpointSpace::new().bind(
+            Exact::new("urn:test:living"),
+            Living {
+                contract: contract.clone(),
+                caching,
+            },
+        );
+        let clock = TestClock::at(1_000_000);
+        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer))
+            .with_clock(Arc::new(clock.clone()));
+        (kernel, clock, contract)
+    }
+
+    fn living_meta() -> Request {
+        Request::new(Verb::Meta, iri("urn:test:living"))
+    }
+
+    fn text_of(kernel: &Kernel, request: Request) -> String {
+        let rep = block_on(kernel.issue(request, &Capability::root())).unwrap();
+        String::from_utf8(rep.bytes).unwrap()
+    }
+
+    #[test]
+    fn a_static_contract_is_kept_until_the_bindings_change() {
+        // The default, and the behavior ledger #1579 found: the clock moves an hour and
+        // the description changes, and Meta still answers the old contract, because only
+        // a cut of the binding thread invalidates it.
+        let (kernel, clock, contract) = living_kernel(ContractCaching::UntilRebind);
+        assert_eq!(text_of(&kernel, living_meta()), "v1");
+        contract.lock().unwrap().0 = "v2";
+        clock.set(1_000_000 + 3_600_000);
+        assert_eq!(
+            text_of(&kernel, living_meta()),
+            "v1",
+            "stale until a rebind"
+        );
+        kernel.bindings_changed();
+        assert_eq!(text_of(&kernel, living_meta()), "v2");
+    }
+
+    #[test]
+    fn a_bounded_contract_is_described_again_after_its_max_age() {
+        let (kernel, clock, contract) =
+            living_kernel(ContractCaching::MaxAge(std::time::Duration::from_secs(5)));
+        assert_eq!(text_of(&kernel, living_meta()), "v1");
+        assert!(kernel.is_cached(&living_meta(), &Capability::root()));
+        contract.lock().unwrap().0 = "v2";
+        // Inside the bound the cached answer stands.
+        clock.set(1_004_999);
+        assert_eq!(
+            text_of(&kernel, living_meta()),
+            "v1",
+            "kept within the bound"
+        );
+        // Past it, the next Meta describes again and shows the change.
+        clock.set(1_005_000);
+        assert!(!kernel.is_cached(&living_meta(), &Capability::root()));
+        assert_eq!(text_of(&kernel, living_meta()), "v2");
+        // And the binding thread still cuts a bounded answer early.
+        contract.lock().unwrap().0 = "v3";
+        kernel.bindings_changed();
+        assert_eq!(text_of(&kernel, living_meta()), "v3");
+    }
+
+    #[test]
+    fn a_volatile_or_clockless_bounded_contract_is_never_kept() {
+        let (kernel, _clock, contract) = living_kernel(ContractCaching::Volatile);
+        assert_eq!(text_of(&kernel, living_meta()), "v1");
+        assert!(!kernel.is_cached(&living_meta(), &Capability::root()));
+        contract.lock().unwrap().0 = "v2";
+        assert_eq!(text_of(&kernel, living_meta()), "v2");
+
+        // A bound needs a clock to be measured against: without one, nothing is kept,
+        // never kept forever.
+        let contract: Contract = Arc::new(Mutex::new(("v1", None)));
+        let space = EndpointSpace::new().bind(
+            Exact::new("urn:test:living"),
+            Living {
+                contract: contract.clone(),
+                caching: ContractCaching::MaxAge(std::time::Duration::from_secs(5)),
+            },
+        );
+        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(EchoIdRenderer));
+        assert_eq!(text_of(&kernel, living_meta()), "v1");
+        assert!(!kernel.is_cached(&living_meta(), &Capability::root()));
+        contract.lock().unwrap().0 = "v2";
+        assert_eq!(text_of(&kernel, living_meta()), "v2");
+    }
+
+    #[test]
+    fn a_transrepted_meta_face_keeps_the_contract_bound_too() {
+        // The other Meta path: a face the renderer cannot emit is transrepted from the
+        // canonical Turtle and comes back cacheable on its own; the bound still applies.
+        let contract: Contract = Arc::new(Mutex::new(("v1", None)));
+        let space = EndpointSpace::new()
+            .bind(
+                Exact::new("urn:test:living"),
+                Living {
+                    contract: contract.clone(),
+                    caching: ContractCaching::MaxAge(std::time::Duration::from_secs(5)),
+                },
+            )
+            .bind(Exact::new("urn:rdf:transrept"), stub_rdf_transrept());
+        let clock = TestClock::at(1_000_000);
+        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleishRenderer))
+            .with_clock(Arc::new(clock.clone()));
+        let face = || {
+            String::from_utf8(meta_as(&kernel, "urn:test:living", "application/rdf+xml").bytes)
+                .unwrap()
+        };
+        assert!(face().contains("\"v1\""));
+        contract.lock().unwrap().0 = "v2";
+        clock.set(1_004_999);
+        assert!(face().contains("\"v1\""), "kept within the bound");
+        clock.set(1_005_000);
+        assert!(face().contains("\"v2\""), "described again past it");
+    }
+
+    #[test]
+    fn the_floor_memo_honors_the_contract_bound() {
+        // The floor is derived from the description too: a peer that starts requiring a
+        // scope is enforced locally once the bound passes, not only after a rebind.
+        let (kernel, clock, contract) =
+            living_kernel(ContractCaching::MaxAge(std::time::Duration::from_secs(5)));
+        let caller = Capability::scoped(["urn:cap:other"]);
+        let read = || Request::new(Verb::Source, iri("urn:test:living"));
+        block_on(kernel.issue(read(), &caller)).unwrap();
+        contract.lock().unwrap().1 = Some("urn:cap:demo:read");
+        clock.set(1_004_999);
+        // Within the bound the memo stands; the cache would serve the read anyway, so
+        // ask Exists, which the floor checks with the Source requires.
+        let exists = || Request::new(Verb::Exists, iri("urn:test:living"));
+        block_on(kernel.issue(exists(), &caller)).unwrap();
+        clock.set(1_005_000);
+        let err = block_on(kernel.issue(exists(), &caller)).unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "{err:?}");
+
+        // Volatile: never memoized, so the change is enforced on the next dispatch.
+        let (kernel, _clock, contract) = living_kernel(ContractCaching::Volatile);
+        block_on(kernel.issue(exists(), &caller)).unwrap();
+        assert_eq!(kernel.floors.len(), 0, "a volatile floor is not memoized");
+        contract.lock().unwrap().1 = Some("urn:cap:demo:read");
+        let err = block_on(kernel.issue(exists(), &caller)).unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "{err:?}");
+    }
+
+    #[test]
+    fn every_face_built_from_a_bounded_contract_keeps_its_bound() {
+        // The catalog, the manifold, validate and explain are derived from descriptions
+        // too. Each is kept no longer than the bound of the contracts it read, and
+        // describes the new contract after it.
+        let (kernel, clock, contract) =
+            living_kernel(ContractCaching::MaxAge(std::time::Duration::from_secs(5)));
+        let root = Capability::root();
+        // Validate is asked by a caller the new contract will refuse, so its report
+        // changes with the contract (a conforming report names no contract).
+        let caller = Capability::scoped(["urn:cap:other"]);
+        let catalog = || Request::new(Verb::Source, iri("urn:kernel:catalog"));
+        let actions = || {
+            Request::new(Verb::Source, iri("urn:kernel:actions"))
+                .with_arg("as", ArgRef::Inline(b"text/turtle".to_vec()))
+        };
+        let explain = || {
+            Request::new(Verb::Source, iri("urn:kernel:explain"))
+                .with_arg("target", ArgRef::Inline(b"urn:test:living".to_vec()))
+                .with_arg("as", ArgRef::Inline(b"text/turtle".to_vec()))
+        };
+        let validate = || {
+            Request::new(Verb::Source, iri("urn:kernel:validate"))
+                .with_arg("endpoint", ArgRef::Inline(b"urn:test:living".to_vec()))
+                .with_arg("verb", ArgRef::Inline(b"source".to_vec()))
+        };
+        let validated = || {
+            let rep = block_on(kernel.issue(validate(), &caller)).unwrap();
+            String::from_utf8(rep.bytes).unwrap()
+        };
+        let faces = [catalog, actions, explain];
+        for face in faces {
+            let body = text_of(&kernel, face());
+            assert!(body.contains("v1"), "{}: {body}", face().target);
+            assert!(
+                kernel.is_cached(&face(), &root),
+                "{} is cached",
+                face().target
+            );
+        }
+        assert!(validated().contains("sh:conforms true"));
+        assert!(kernel.is_cached(&validate(), &caller));
+
+        *contract.lock().unwrap() = ("v2", Some("urn:cap:demo:read"));
+        clock.set(1_004_999);
+        for face in faces {
+            let kept = kernel.is_cached(&face(), &root);
+            assert!(kept, "{} kept within the bound", face().target);
+        }
+        assert!(kernel.is_cached(&validate(), &caller));
+
+        clock.set(1_005_000);
+        for face in faces {
+            assert!(
+                !kernel.is_cached(&face(), &root),
+                "{} expired",
+                face().target
+            );
+            let body = text_of(&kernel, face());
+            assert!(body.contains("v2"), "{}: {body}", face().target);
+        }
+        assert!(!kernel.is_cached(&validate(), &caller));
+        let report = validated();
+        assert!(report.contains("sh:conforms false"), "{report}");
     }
 }
