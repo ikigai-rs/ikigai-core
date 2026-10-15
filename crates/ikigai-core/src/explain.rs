@@ -35,7 +35,7 @@ use crate::capability::{is_deny_scope, Capability};
 use crate::contract::encode_name;
 use crate::error::{Error, Result};
 use crate::iri::Iri;
-use crate::kernel::{capability_key, parse_verb, BINDINGS_THREAD, KERNEL_NS};
+use crate::kernel::{capability_key, kernel_op, parse_verb, BINDINGS_THREAD};
 use crate::repr::{ReprType, Representation};
 use crate::request::Request;
 use crate::seal::Seals;
@@ -331,7 +331,7 @@ fn walk(
     };
 
     // 2. The kernel's own namespace is answered ahead of every space.
-    if let Some(op) = name.as_str().strip_prefix(KERNEL_NS) {
+    if let Some(op) = kernel_op(name.as_str()) {
         let description = crate::kernel_ops::description(op);
         let requires = crate::kernel_ops::required_scopes(op, verb);
         let lacking = requires
@@ -412,7 +412,7 @@ fn walk(
             if let Some(canonical) = resolved
                 .canonical
                 .as_ref()
-                .filter(|c| c.as_str().starts_with(KERNEL_NS))
+                .filter(|c| kernel_op(c.as_str()).is_some())
             {
                 explanation.outcome = Outcome::Refused(format!(
                     "a space rewrote the name to `{}`, inside the kernel's own namespace — \

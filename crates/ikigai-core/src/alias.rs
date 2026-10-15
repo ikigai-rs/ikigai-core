@@ -169,12 +169,13 @@ use crate::verb::Verb;
 /// legitimate (a namespace migrated twice); an unbounded walk is not.
 pub const DEFAULT_MAX_HOPS: usize = 8;
 
-/// The reserved kernel-behavior namespace. Targets under it are **never**
-/// aliased: the kernel resolves `urn:kernel:*` itself, ahead of the root space,
-/// precisely so nothing can shadow it — and a rewrite that could re-point
-/// `urn:kernel:cut` would be exactly that shadowing, arriving through a different
-/// door. Aliasing *to* a kernel resource is fine; aliasing one *away* is not.
-const KERNEL_NS: &str = "urn:kernel:";
+// The reserved kernel-behavior namespace (`crate::kernel::kernel_op`). Targets under
+// it are **never** aliased: the kernel resolves `urn:kernel:*` itself, ahead of the
+// root space, precisely so nothing can shadow it — and a rewrite that could re-point
+// `urn:kernel:cut` would be exactly that shadowing, arriving through a different door.
+// The test is the kernel's own, so a prefix in another case (`URN:KERNEL:cut`, the same
+// name under RFC 8141) is reserved too. Aliasing *to* a kernel resource is fine;
+// aliasing one *away* is not.
 
 /// How a rule matches: the whole name, or a leading namespace.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -508,8 +509,8 @@ impl AliasTable {
 
     /// The walk both faces share; `record` says whether it bumps the counters.
     fn walk(&self, target: &Iri, record: bool) -> Canonical {
-        // The reserved namespace is not aliasable; see `KERNEL_NS`.
-        if target.as_str().starts_with(KERNEL_NS) {
+        // The reserved namespace is not aliasable, in any case of its prefix (above).
+        if crate::kernel::kernel_op(target.as_str()).is_some() {
             return Canonical::Direct;
         }
         let mut current = target.clone();

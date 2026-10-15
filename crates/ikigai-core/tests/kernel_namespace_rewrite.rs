@@ -153,3 +153,77 @@ fn the_kernels_own_alias_into_the_namespace_still_reaches_the_kernel() {
             .unwrap();
     assert_eq!(via.bytes, direct.bytes);
 }
+
+/// Ledger #91: the namespace is `urn:kernel:` in ANY case of its prefix. RFC 8141 makes
+/// the `urn` scheme and the namespace identifier case-insensitive, so `URN:KERNEL:actions`
+/// is the kernel's name and must not fall through to a root door that happens to be
+/// spelled that way. The operation after the prefix stays case-sensitive (the NSS is).
+#[test]
+fn the_kernel_namespace_prefix_matches_in_any_case_and_the_operation_does_not() {
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new()
+            .bind(
+                Exact::new("URN:KERNEL:actions"),
+                FnEndpoint::new("fake", |_| Ok(text("FAKE MANIFOLD"))),
+            )
+            .bind(
+                Exact::new("Urn:Kernel:cache"),
+                FnEndpoint::new("fake-cache", |_| Ok(text("FAKE CACHE"))),
+            ),
+    ));
+    let cap = Capability::root();
+    let read = |name: &str| block_on(kernel.issue(Request::new(Verb::Source, iri(name)), &cap));
+
+    let real = read("urn:kernel:actions").unwrap();
+    for spelling in [
+        "URN:KERNEL:actions",
+        "Urn:Kernel:actions",
+        "urn:KERNEL:actions",
+    ] {
+        let answer = read(spelling).unwrap_or_else(|e| panic!("{spelling}: {e}"));
+        assert_eq!(
+            answer.bytes, real.bytes,
+            "{spelling} is the kernel's manifold"
+        );
+    }
+    let cache = read("Urn:Kernel:cache").unwrap();
+    assert!(
+        !String::from_utf8_lossy(&cache.bytes).contains("FAKE"),
+        "a root door spelled in another case does not shadow urn:kernel:cache"
+    );
+    // The operation is case-sensitive: `Actions` names no operation.
+    let err = read("urn:kernel:Actions").unwrap_err();
+    assert!(matches!(err, ikigai_core::Error::Unresolved(_)), "{err:?}");
+}
+
+/// The alias walk's reservation uses the same test: the kernel's alias table cannot
+/// move a kernel name away in another case either.
+#[test]
+fn the_alias_reservation_matches_the_prefix_in_any_case() {
+    let kernel = Kernel::new(Arc::new(EndpointSpace::new())).with_aliases(Arc::new(
+        ikigai_core::AliasTable::new().prefix("URN:KERNEL:", "urn:example:moved:kernel:"),
+    ));
+    let cap = Capability::root();
+    let moved = block_on(kernel.issue(Request::new(Verb::Source, iri("URN:KERNEL:actions")), &cap));
+    assert!(
+        moved.is_ok(),
+        "the alias moved a kernel name away: {moved:?}"
+    );
+}
+
+/// And so does the refusal to adopt a space's rewrite into the namespace: a space that
+/// rewrites its public name into `URN:KERNEL:` is refused as it is in the canonical
+/// spelling.
+#[test]
+fn a_space_rewrite_into_the_namespace_in_another_case_is_refused() {
+    let cap = Capability::root();
+    let kernel = Kernel::new(in_no_level(rewriting_module(
+        "urn:mod:x",
+        "URN:KERNEL:actions",
+    )));
+    let through = block_on(kernel.issue(Request::new(Verb::Source, iri("urn:mod:x")), &cap));
+    assert!(
+        through.is_err(),
+        "a rewrite into URN:KERNEL: was answered: {through:?}"
+    );
+}
