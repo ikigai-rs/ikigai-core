@@ -93,3 +93,50 @@ cargo test -p ikigai-vocab --test contract_vectors -- --ignored
 
 A face picks the new vectors up by copying the file again; devtools' `vector-drift`
 compares the copies with this one.
+
+# Shared capability vectors
+
+`capability_vectors.json` is what ikigai-core decides about **capability coverage** and the
+**declared-capability floor** (ledger #1583). ikigai-python and ikigai-deno enforce a served
+door's declared `requires` themselves (ledger #1580), so each mirrors these by hand
+(`ikigai.capability` and `required_scopes` in `serve.py`; `Capability` and `isDenyScope` in
+`src/wire.ts`, `requiredScopes` and `denialMessage` in `src/serve.ts`), and pins itself against
+a VERBATIM copy of this file instead of a hand copy of core's test tables.
+
+It cannot drift from core: `tests/capability_vectors.rs` recomputes every output from
+`capability_cases.json` and fails if the committed file differs by a byte. Each `denials` row is
+computed by issuing the request through a kernel, so its text is the kernel's own; and a second
+test checks every `floors` row against what the kernel ENFORCES (a caller holding nothing is
+refused naming the first required scope, a caller holding exactly the list is admitted).
+
+| section | input | what the face must compute |
+|---|---|---|
+| `deny_scopes[]` | `scope` | `is_deny_scope` = `is_deny_scope(scope)` |
+| `coverage[]` | `capability`, `scope` | `allows` = `Capability::allows(scope)` (exact), `satisfies` = `Capability::satisfies(scope)` (a trailing `*` is "holds any scope under the prefix"; root satisfies everything) |
+| `principals[]` | `capability` | `principal` = `Capability::principal()`: the ONE principal it carries, `null` for root, none, several, or a scope under `urn:cap:principal:` that names no carriable principal |
+| `floors[]` | `description` (the serde shape of `ikigai_core::Description`) | per `verbs[]`: `required_scopes` = `Description::required_scopes(verb)`, for all five verbs |
+| `denials[]` | `target`, `description`, `verb`, `capability` | `denied` = the text of the kernel's `Denied` for that request (core's `denial_message` for the first required scope the capability does not satisfy, in declaration order), `null` when the floor admits it |
+
+A `capability` is `"root"` or the list of scopes a scoped capability holds (not the wire's
+`{"kind": …}` form). Verbs are spelled as `ikigai_core::Verb` serializes them. The `denied`
+text is the `Denied` payload, without the `denied: ` that `Display` adds; no row travels through
+an alias, so none carries the alias-hop suffix (a peer never sees a hop).
+
+Two rows record behavior worth knowing before porting: `required_scopes` deduplicates only the
+UNION (an undeclared verb's floor); a declared verb's own `requires` is returned as declared,
+duplicates included (`floors` `duplicate-verbs`). And an `actions[]` entry for a verb not listed
+in `verbs` is ignored, as is a `Meta` action's `requires` (`action-for-undeclared-verb`,
+`meta-action-is-not-gated`).
+
+## Adding a case
+
+Edit `capability_cases.json`, then regenerate and commit both files. A `description` needs `id`,
+`title`, `summary`, `verbs`, `inputs` and `outputs` (see the contract vectors above); a
+`denials` target must be an IRI.
+
+```text
+cargo test -p ikigai-vocab --test capability_vectors -- --ignored
+```
+
+A face picks the new vectors up by copying the file again; devtools' `vector-drift` compares the
+copies with this one.
