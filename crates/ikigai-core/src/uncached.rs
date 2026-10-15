@@ -222,14 +222,35 @@ impl UncachedLog {
     /// computed first — its target, how many times it was computed uncached, the
     /// reason, and the chain it was computed in, bracketed last (a chain and a reason
     /// both contain spaces; the brackets keep them apart).
-    pub(crate) fn render(&self) -> String {
-        let mut rows: Vec<&Row> = self.rows.values().collect();
+    ///
+    /// `target` keeps only the rows whose target is one of the names given (ledger
+    /// #967): the asked name and the name the kernel resolves it under. The filter is
+    /// here so a consumer asking about one name never parses rows to find it, and a
+    /// change to the row grammar cannot make it silently find nothing. The header then
+    /// names what was asked, and an empty answer says so for that name.
+    pub(crate) fn render(&self, target: Option<&[&str]>) -> String {
+        let mut rows: Vec<&Row> = self
+            .rows
+            .values()
+            .filter(|row| target.is_none_or(|names| names.contains(&row.target.as_str())))
+            .collect();
         rows.sort_by_key(|row| std::cmp::Reverse(row.tick));
-        let mut body = format!(
-            "uncached (why a computed read was not cached; the last {UNCACHED_LOG}, most recent first)\n"
-        );
+        let asked = target.and_then(|names| names.first());
+        let mut body = match asked {
+            None => format!(
+                "uncached (why a computed read was not cached; the last {UNCACHED_LOG}, most recent first)\n"
+            ),
+            Some(name) => format!(
+                "uncached {name} (why a computed read was not cached; of the last {UNCACHED_LOG}, most recent first)\n"
+            ),
+        };
         if rows.is_empty() {
-            body.push_str("  (nothing computed uncached)\n");
+            match asked {
+                None => body.push_str("  (nothing computed uncached)\n"),
+                Some(name) => body.push_str(&format!(
+                    "  ({name} not computed uncached among the last {UNCACHED_LOG})\n"
+                )),
+            }
             return body;
         }
         let width = rows

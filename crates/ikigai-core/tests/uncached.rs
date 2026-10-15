@@ -355,3 +355,80 @@ fn the_readout_names_the_chain_is_bounded_and_never_records_a_kernel_operation()
     // Reading the readout (and the cache readout) is not itself remembered.
     assert!(!body.contains("urn:kernel:"), "{body}");
 }
+
+/// `urn:kernel:uncached` with `target=` — the readout for one name.
+fn readout_for(kernel: &Kernel, target: &str) -> ikigai_core::Result<String> {
+    let request = source("urn:kernel:uncached").with_arg(
+        "target",
+        ikigai_core::ArgRef::Inline(target.as_bytes().to_vec()),
+    );
+    let body = block_on(kernel.issue(request, &Capability::root()))?.bytes;
+    Ok(String::from_utf8(body).unwrap())
+}
+
+/// ★ Ledger #967: a caller asking about ONE name gets that name's rows from the kernel,
+/// rather than filtering the whole readout by its first word (the REPL's `why` did, so a
+/// change to the row grammar would have made it silently find nothing). Matched as asked
+/// and under the name the kernel's rewrite table resolves it as, since a row is recorded
+/// under the canonical target; a name that merely shares a prefix is not claimed.
+#[test]
+fn target_keeps_one_names_rows_as_asked_or_by_its_canonical_name() {
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new()
+            .bind(Exact::new("urn:tags:overlay"), live("overlay"))
+            .bind(Exact::new("urn:tags:overlay:extra"), live("extra"))
+            .bind(Exact::new("urn:books:catalog"), constant("catalog"))
+            .bind(
+                Exact::new("urn:books:graph"),
+                composite(&["urn:books:catalog", "urn:tags:overlay"]),
+            ),
+    ))
+    .with_aliases(Arc::new(
+        ikigai_core::AliasTable::new().exact("urn:old:graph", "urn:books:graph"),
+    ));
+    for target in ["urn:books:graph", "urn:tags:overlay:extra"] {
+        block_on(kernel.issue(source(target), &Capability::root())).unwrap();
+    }
+
+    let graph = readout_for(&kernel, "urn:books:graph").unwrap();
+    let mut lines = graph.lines();
+    assert!(
+        lines
+            .next()
+            .unwrap()
+            .starts_with("uncached urn:books:graph "),
+        "{graph}"
+    );
+    let rows: Vec<&str> = lines.collect();
+    assert_eq!(rows.len(), 1, "{graph}");
+    assert!(rows[0].contains("dependency urn:tags:overlay"), "{graph}");
+
+    // A prefix of another row's name claims none of it; the dependency was read too.
+    let overlay = readout_for(&kernel, "urn:tags:overlay").unwrap();
+    assert_eq!(overlay.lines().count(), 2, "{overlay}");
+    assert!(overlay.contains("declared"), "{overlay}");
+    assert!(!overlay.contains("urn:tags:overlay:extra"), "{overlay}");
+
+    // The logical name finds the row recorded under its canonical name.
+    let aliased = readout_for(&kernel, "urn:old:graph").unwrap();
+    assert!(aliased.starts_with("uncached urn:old:graph "), "{aliased}");
+    assert!(aliased.contains("dependency urn:tags:overlay"), "{aliased}");
+
+    // A name never computed uncached says so, for that name.
+    assert_eq!(
+        readout_for(&kernel, "urn:books:catalog").unwrap(),
+        "uncached urn:books:catalog (why a computed read was not cached; of the last 64, \
+         most recent first)\n  (urn:books:catalog not computed uncached among the last 64)\n"
+    );
+
+    // Not an IRI: refused by name, not answered with an empty list.
+    match readout_for(&kernel, "not an iri") {
+        Err(Error::InvalidArgument { name, .. }) => assert_eq!(name, "target"),
+        other => panic!("expected InvalidArgument for target, got {other:?}"),
+    }
+
+    // And with no target the whole readout is unchanged.
+    let all = readout(&kernel);
+    assert!(all.starts_with("uncached (why"), "{all}");
+    assert!(all.contains("urn:tags:overlay:extra"), "{all}");
+}
