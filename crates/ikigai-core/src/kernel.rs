@@ -2323,7 +2323,7 @@ impl Kernel {
         // are the operations whose SUBJECT includes the chain (the topology, an
         // explanation, `validate` by `endpoint=`; `kernel_ops::depends_on_chain`):
         // they are keyed by the chain's fingerprint, as any scoped resolution is.
-        if let Some(op) = request.target.as_str().strip_prefix(KERNEL_NS) {
+        if let Some(op) = kernel_op(request.target.as_str()) {
             let mut key = CacheKey::new(request.id(), capability_key(capability));
             // The chain this answer is a function of, for its key and its trace event:
             // the caller's for the operations whose subject it is, else the empty one
@@ -2512,7 +2512,7 @@ impl Kernel {
         // The seal check refuses this on most paths already (`Seals::admit`); this
         // is the one that holds on every path, the host's corridors included.
         if let Some(canonical) = resolved.canonical.as_ref() {
-            if canonical.as_str().starts_with(KERNEL_NS) {
+            if kernel_op(canonical.as_str()).is_some() {
                 return Err(Error::Endpoint(format!(
                     "`{}` was rewritten by a space to `{}`, inside the kernel's own \
                      namespace — `urn:kernel:` is answered only by the kernel: refused",
@@ -3459,10 +3459,17 @@ impl Kernel {
             // renderable to HTML via transreption. Cacheable under `urn:kernel:bindings`:
             // valid until the host reports that the binding set changed
             // ([`Kernel::bindings_changed`]). Each Exact-bound endpoint is resolved and
-            // rendered via the meta renderer; template patterns (not concrete IRIs) render after them via
-            // the probe walk, once per description id — an endpoint bound both exactly
-            // and by template (the calendar shape) is not described twice, and an
-            // endpoint bound ONLY by template (urn:file:{path}) is no longer invisible.
+            // rendered via the meta renderer; template patterns (not concrete IRIs) render
+            // after them via the probe walk.
+            //
+            // Each DISTINCT description is rendered once: an endpoint bound at two doors,
+            // or both exactly and by template (the calendar shape), is described once, and
+            // an endpoint bound ONLY by template (urn:file:{path}) is not invisible. Two
+            // DIFFERENT descriptions under one id (a mounted peer's copy, a second door
+            // with another contract) are both rendered — their contracts are separate
+            // nodes (ledger #948) — but the endpoint node is the id's, so its own triples
+            // (title, summary, ik:requires, the flat inputs) are the union of the copies.
+            // That merge is marked on the node rather than left silent (ledger #17).
             ("catalog", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
                 let renderer = self
@@ -3470,8 +3477,7 @@ impl Kernel {
                     .as_ref()
                     .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
                 let turtle = ReprType::new("text/turtle");
-                let mut body = String::new();
-                let mut rendered_ids = BTreeSet::new();
+                let mut described: Vec<Description> = Vec::new();
                 let mut templates = Vec::new();
                 // The kernel's own operations come first (see [`Self::described`]),
                 // so the catalog opens with the resources that make the rest of it
@@ -3490,29 +3496,31 @@ impl Kernel {
                     // of the reachability algebra, at the face that computes reach).
                     if let Some(resolved) = crate::select::probe(&space, iri) {
                         let description = resolved.endpoint.describe();
-                        rendered_ids.insert(description.id.clone());
-                        if let Ok(repr) = renderer.render(&description, &turtle) {
-                            if let Ok(text) = String::from_utf8(repr.bytes) {
-                                body.push_str(text.trim_end());
-                                body.push('\n');
-                            }
+                        if !described.contains(&description) {
+                            described.push(description);
                         }
                     }
                 }
                 for entry in templates {
-                    let Some(described) = crate::select::describe_entry(&space, &entry) else {
+                    let Some(entry) = crate::select::describe_entry(&space, &entry) else {
                         continue;
                     };
-                    if !rendered_ids.insert(described.description.id.clone()) {
-                        continue;
+                    if !described.contains(&entry.description) {
+                        described.push(entry.description);
                     }
-                    if let Ok(repr) = renderer.render(&described.description, &turtle) {
+                }
+                let mut body = String::new();
+                let mut copies: BTreeMap<&str, usize> = BTreeMap::new();
+                for description in &described {
+                    *copies.entry(description.id.as_str()).or_default() += 1;
+                    if let Ok(repr) = renderer.render(description, &turtle) {
                         if let Ok(text) = String::from_utf8(repr.bytes) {
                             body.push_str(text.trim_end());
                             body.push('\n');
                         }
                     }
                 }
+                body.push_str(&shared_id_marks(&copies));
                 Ok(Representation::new(
                     ReprType::new("text/turtle").with_param("charset", "utf-8"),
                     body.into_bytes(),
@@ -4010,8 +4018,48 @@ fn scope_notes(scope: &Scope) -> Vec<(String, String)> {
     notes
 }
 
-/// The reserved kernel-behavior namespace prefix.
+/// The reserved kernel-behavior namespace prefix, in the spelling the kernel emits.
 pub(crate) const KERNEL_NS: &str = "urn:kernel:";
+
+/// The operation `target` names in the kernel's own namespace, or `None` if it is
+/// outside it. **Every test for "is this the kernel's namespace" goes through here**,
+/// so dispatch, the alias walk's reservation, the refusal of a space's rewrite into
+/// the namespace, the describing walks and `urn:kernel:explain` all agree.
+///
+/// The `urn:kernel:` prefix is compared ASCII-case-insensitively: RFC 8141 makes the
+/// `urn` scheme and the namespace identifier case-insensitive, so `URN:KERNEL:cut`
+/// is the same name as `urn:kernel:cut` and must not fall through to the root space
+/// (ledger #91). The operation after it is compared exactly as written, because the
+/// namespace-specific string is case-sensitive: `urn:kernel:Cut` names no operation.
+pub(crate) fn kernel_op(target: &str) -> Option<&str> {
+    let head = target.get(..KERNEL_NS.len())?;
+    head.eq_ignore_ascii_case(KERNEL_NS)
+        .then(|| &target[KERNEL_NS.len()..])
+}
+
+/// The marks `urn:kernel:catalog` appends for every description id that more than one
+/// DIFFERENT description carries (ledger #17): one `rdfs:comment` on the id's endpoint
+/// node, `urn:ikigai:endpoint:{id}` (the id through [`crate::encode_name`], as the
+/// vocabulary's renderer names it), saying the node's own triples are a union. Empty
+/// when every id is carried by one description. `rdfs:comment` rather than an `ik:` term:
+/// a reader DESCRIBE-ing the node sees it, and no vocabulary term had to be invented for
+/// it. The id is never put in the literal, so nothing in it needs escaping.
+fn shared_id_marks(copies: &BTreeMap<&str, usize>) -> String {
+    let mut marks = String::new();
+    for (id, n) in copies.iter().filter(|(_, n)| **n > 1) {
+        if marks.is_empty() {
+            marks.push_str("\n@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n");
+        }
+        marks.push_str(&format!(
+            "\n<urn:ikigai:endpoint:{}> rdfs:comment \"{n} different descriptions carry this \
+             endpoint id in this kernel (a mounted copy, or a second door with another \
+             contract). The triples on this node (title, summary, ik:requires, flat inputs) \
+             are their union; each contract is exact on its own ik:action node.\" .\n",
+            crate::encode_name(id)
+        ));
+    }
+    marks
+}
 
 /// The seal table for `root` with `host` sealed besides core, or a panic naming
 /// the refusal — the constructors and [`Kernel::with_sealed`] build here.

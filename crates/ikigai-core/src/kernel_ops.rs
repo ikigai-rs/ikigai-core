@@ -216,7 +216,10 @@ fn catalog() -> Description {
              description id (urn:ikigai:endpoint:{id}), not by the IRI it is bound at, so \
              searching this graph for a resolvable IRI finds an endpoint only when its id \
              happens to contain that IRI; the doors are in `urn:kernel:actions` (each match \
-             IRI carries its pattern) and `urn:kernel:topology` (ik:pattern).",
+             IRI carries its pattern) and `urn:kernel:topology` (ik:pattern). Each distinct \
+             description is rendered once; when different descriptions share an id, their \
+             contracts stay separate and the shared endpoint node carries an rdfs:comment \
+             saying its own triples are their union.",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)
@@ -519,7 +522,7 @@ pub(crate) struct KernelOps;
 
 impl Space for KernelOps {
     fn resolve(&self, request: &Request, _scope: &Scope) -> Resolution {
-        let Some(op) = request.target.as_str().strip_prefix(KERNEL_NS) else {
+        let Some(op) = crate::kernel::kernel_op(request.target.as_str()) else {
             return Resolution::Miss;
         };
         match description(op) {

@@ -464,3 +464,55 @@ fn the_catalog_names_an_endpoint_by_its_id_and_the_manifold_by_its_door() {
         "{summary}"
     );
 }
+
+const RDFS_COMMENT: &str = "http://www.w3.org/2000/01/rdf-schema#comment";
+
+/// The `rdfs:comment`s on `toUpper`'s endpoint node.
+fn shared_id_comments(all: &[Triple]) -> Vec<String> {
+    all.iter()
+        .filter(|t| {
+            subject(t) == "urn:ikigai:endpoint:toUpper" && t.predicate.as_str() == RDFS_COMMENT
+        })
+        .map(object)
+        .collect()
+}
+
+/// Ledger #17: two DIFFERENT descriptions under one id share the endpoint node
+/// `urn:ikigai:endpoint:{id}` (their contracts do not, above), so the node's own triples
+/// are a union: here the local copy's node says `ik:requires urn:cap:peer:only`, which
+/// only the peer needs. The catalog marks that node instead of merging silently.
+#[test]
+fn the_catalog_marks_an_endpoint_node_two_different_descriptions_share() {
+    let node = "urn:ikigai:endpoint:toUpper";
+    let catalog = source(&mounted(peer_contract()), "urn:kernel:catalog", &[]);
+    let all = triples(&catalog);
+    // The merge itself, which the mark is about.
+    assert!(
+        all.iter().any(|t| subject(t) == node
+            && t.predicate.as_str() == format!("{IK}requires")
+            && object(t) == "urn:cap:peer:only"),
+        "{catalog}"
+    );
+    let marks = shared_id_comments(&all);
+    assert_eq!(marks.len(), 1, "{catalog}");
+    assert!(
+        marks[0].starts_with("2 different descriptions"),
+        "{}",
+        marks[0]
+    );
+}
+
+/// The same description at two doors is one description: rendered once, and no mark.
+#[test]
+fn the_catalog_renders_an_identical_description_once_and_marks_nothing() {
+    let catalog = source(&mounted(local_contract()), "urn:kernel:catalog", &[]);
+    assert_eq!(
+        catalog.matches("ik:id \"toUpper\"").count(),
+        1,
+        "an identical copy is rendered once: {catalog}"
+    );
+    assert!(
+        shared_id_comments(&triples(&catalog)).is_empty(),
+        "{catalog}"
+    );
+}
