@@ -2605,7 +2605,7 @@ impl Kernel {
                 match self.cache.store_outcome(
                     key,
                     request.target.as_str().to_string(),
-                    representation.clone(),
+                    std::borrow::Cow::Borrowed(&representation),
                     taken,
                     self.elapsed_since(started),
                 ) {
@@ -3071,7 +3071,7 @@ impl Kernel {
                 match self.cache.store_outcome(
                     key,
                     request.target.as_str().to_string(),
-                    representation.clone(),
+                    std::borrow::Cow::Borrowed(&representation),
                     taken,
                     self.elapsed_since(started),
                 ) {
