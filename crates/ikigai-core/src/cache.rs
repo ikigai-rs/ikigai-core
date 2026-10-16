@@ -46,6 +46,7 @@
 //!   in between may have been forgotten, and the store is declined rather than
 //!   guessed at.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -546,18 +547,23 @@ impl ReprCache {
         taken: CutSnapshot,
         cost_millis: Option<u64>,
     ) -> bool {
-        self.store_outcome(key, target, representation, taken, cost_millis)
+        self.store_outcome(key, target, Cow::Owned(representation), taken, cost_millis)
             .is_ok()
     }
 
     /// [`store`](Self::store), saying WHICH of the two declines it was — the
     /// kernel's answer to "why was this read not cached" needs the difference
     /// (`crate::uncached`).
+    ///
+    /// The kernel lends the answer it is about to hand back (`Cow::Borrowed`), and it
+    /// is copied only once the policy has ADMITTED it: an answer over the byte budget
+    /// used to be cloned in full and then thrown away, so it cost twice its size
+    /// (ledger #1734, measured 832 MB against 509 MB on a store dump).
     pub(crate) fn store_outcome(
         &self,
         key: CacheKey,
         target: String,
-        representation: Representation,
+        representation: Cow<'_, Representation>,
         taken: CutSnapshot,
         cost_millis: Option<u64>,
     ) -> Result<(), Declined> {
@@ -577,18 +583,31 @@ impl ReprCache {
             .map(|thread| (thread.clone(), state.generation_of(thread)))
             .collect();
         state.tick += 1;
+        // The candidate's facts are exactly what `CacheEntry::facts` would report for
+        // the entry below, read off the borrowed answer: nothing is copied until the
+        // policy says it will be kept.
+        let candidate = EntryFacts {
+            target: &target,
+            media_type: &representation.repr_type.media_type,
+            bytes: representation.bytes.len(),
+            cost_millis,
+            hits: 0,
+            threads: edges.len(),
+            stored_tick: state.tick,
+            last_used_tick: state.tick,
+        };
+        if !self.policy.admit(&candidate) {
+            return Err(Declined::Policy);
+        }
         let entry = CacheEntry {
             target,
-            representation,
+            representation: representation.into_owned(),
             edges,
             cost_millis,
             hits: 0,
             stored_tick: state.tick,
             last_used_tick: state.tick,
         };
-        if !self.policy.admit(&entry.facts()) {
-            return Err(Declined::Policy);
-        }
         let bytes = entry.bytes();
         if let Some(replaced) = state.entries.insert(key, entry) {
             state.bytes = state.bytes.saturating_sub(replaced.bytes());
