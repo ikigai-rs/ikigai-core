@@ -1,7 +1,9 @@
 # The layer family as a layer host would emit it (design: ikigai-devtools
 # claude/research/collab-layer-v1-2026-10-10.md, sections 2, 4 and 5): the participants
-# graph, two layers and the manifest mounting them, a thread in the message layer
-# `talk`, and one offer in the task layer `tasks-bobby` with each kind of report on it.
+# graph, two layers (each with its shapes, egress context, feed and entry bound, one
+# shared by decision) and the manifests mounting them, the grants they state, a thread in
+# the message layer `talk`, and one offer in the task layer `tasks-bobby` with each kind
+# of report on it.
 # Every node asserts the types it really has, so tests/layers.rs can judge each
 # rdfs:domain and rdfs:range the vocabulary declares against them: a property that
 # would type a node into a family it is not in fails there. Skolemized, no blank nodes.
@@ -12,6 +14,7 @@
 @prefix foaf:    <http://xmlns.com/foaf/0.1/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix sioc:    <http://rdfs.org/sioc/ns#> .
 
 # ---- participants (urn:layers:participants) ----------------------------------
 
@@ -28,14 +31,33 @@
 
 # ---- layers (urn:layer:{layer}) and a manifest (urn:collab:{name}) -------------
 
-<urn:layer:talk>        a ik:Layer ; ik:layerModel "channel" .
-<urn:layer:tasks-bobby> a ik:Layer ; ik:layerModel "tuplespace" .
-<urn:collab:bobby>      a ik:Collaboration ; rdfs:label "bobby" .
+<urn:layer:talk>        a ik:Layer ; ik:layerModel "channel" ;
+    dcterms:conformsTo <urn:layer:talk:shapes> ;
+    ik:egressContext <urn:layer:talk:context> ;
+    sioc:feed <urn:layer:talk:feed> ;
+    ik:maxEntryBytes "16384"^^xsd:positiveInteger ;
+    ik:sharedWith <urn:collab:bobby> , <urn:collab:chris> .
+<urn:layer:tasks-bobby> a ik:Layer ; ik:layerModel "tuplespace" ;
+    dcterms:conformsTo <urn:layer:tasks-bobby:shapes> ;
+    ik:egressContext <urn:layer:tasks-bobby:context> ;
+    sioc:feed <urn:layer:tasks-bobby:feed> ;
+    ik:maxEntryBytes "16384"^^xsd:positiveInteger .
+<urn:collab:bobby>      a ik:Collaboration ; rdfs:label "bobby" ;
+    dcterms:hasPart <urn:layer:talk> , <urn:layer:tasks-bobby> .
+<urn:collab:chris>      a ik:Collaboration ; rdfs:label "chris" ;
+    dcterms:hasPart <urn:layer:talk> .
+
+# ---- the grants a manifest states (in its own face, urn:collab:{name}) ---------
+
+<urn:collab:participant:bobby>       ik:holds <urn:cap:layer:say:talk> , <urn:cap:layer:read:talk> .
+<urn:collab:participant:bobby-gonk>  ik:holds <urn:cap:layer:take:tasks-bobby> .
+<urn:collab:participant:plasma-gonk> ik:holds <urn:cap:layer:out:tasks-bobby> .
 
 # ---- the message layer: a question, its answer, and a correction ---------------
 
 <urn:layer:talk:entry:01k0000000000000000000000a> a ik:Question ;
     ik:body "Which repo should the first task land in?" ;
+    dcterms:subject <urn:layer:tasks-bobby:offer:01k0000000000000000000000d> ;
     prov:wasAttributedTo <urn:collab:participant:bobby> ;
     dcterms:created "2026-10-10T12:00:00Z"^^xsd:dateTime ;
     ik:seq 1 .

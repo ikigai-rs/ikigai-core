@@ -1508,6 +1508,139 @@ mod tests {
         assert_eq!(ctx["sampleTriple"], "ik:sampleTriple");
     }
 
+    /// The terms ledger #1293 and #1214 asked for, as decided (the decision table is in
+    /// the pull request of that arc): every one is a claim several kinds of
+    /// subject make, so every one declares NO domain, pinned on a declaration line as the
+    /// families above pin theirs. ★ The declined requests are pinned too, as ABSENCES:
+    /// each has a borrowed home the vocabulary's comments name (void-ext for value kinds,
+    /// dcterms:subject for what an entry is about, the region links for memo counts),
+    /// and a second term for the same fact is a second spelling a reader has to union.
+    #[test]
+    fn the_terms_ledger_1293_and_1214_add_declare_no_domain() {
+        let subjects: std::collections::BTreeSet<String> = oxttl::TurtleParser::new()
+            .for_reader(VOCABULARY.as_bytes())
+            .map(|t| t.expect("valid turtle").subject.to_string())
+            .collect();
+        for (term, range, why) in [
+            (
+                "regionCount",
+                "xsd:nonNegativeInteger",
+                "any derivation over a tiled input states it",
+            ),
+            (
+                "principal",
+                "rdfs:Resource",
+                "a request, an answer about its caller and a log entry carry it",
+            ),
+            (
+                "holds",
+                "rdfs:Resource",
+                "a person, an agent, a machine and a capability all hold scopes",
+            ),
+            (
+                "egressContext",
+                "rdfs:Resource",
+                "any resource with a bounded JSON face may name one",
+            ),
+            (
+                "maxEntryBytes",
+                "xsd:positiveInteger",
+                "any resource admitting writes under a size bound may state one",
+            ),
+            (
+                "sharedWith",
+                "ik:Collaboration",
+                "a domain would type anything shared the same way a layer",
+            ),
+        ] {
+            assert!(
+                subjects.contains(&format!("<{NS}{term}>")),
+                "ik:{term} is declared"
+            );
+            let block = VOCABULARY
+                .split("\n\n")
+                .find(|b| {
+                    b.trim_start()
+                        .starts_with(&format!("ik:{term} a rdf:Property"))
+                })
+                .unwrap_or_else(|| panic!("ik:{term} is declared as a property"));
+            assert!(
+                !block
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("rdfs:domain")),
+                "ik:{term} must declare no domain — {why}:\n{block}"
+            );
+            assert!(
+                block
+                    .lines()
+                    .any(|l| l.trim_start() == format!("rdfs:range {range} ;")),
+                "ik:{term} has range {range}:\n{block}"
+            );
+        }
+        for declined in [
+            "draftEmptyPreview",
+            "memoRegions",
+            "principalId",
+            "valueKind",
+            "objectKind",
+            "feed",
+            "shapes",
+        ] {
+            assert!(
+                !subjects.contains(&format!("<{NS}{declined}>")),
+                "ik:{declined} was declined (ledger #1293, #1214): its fact has a home \
+                 already, named in the vocabulary's comments"
+            );
+        }
+        // The counts coerce to the datatype their range names, so an emitter types its
+        // literal to match (ikigai-browse already writes ^^xsd:nonNegativeInteger).
+        let ctx: serde_json::Value = serde_json::from_str(CONTEXT).unwrap();
+        let ctx = &ctx["@context"];
+        assert_eq!(ctx["regionCount"]["@type"], "xsd:nonNegativeInteger");
+        assert_eq!(ctx["maxEntryBytes"]["@type"], "xsd:positiveInteger");
+        for iri_valued in ["principal", "holds", "egressContext", "sharedWith"] {
+            assert_eq!(ctx[iri_valued]["@type"], "@id", "{iri_valued}");
+        }
+    }
+
+    /// Every `ik:` term an `rdfs:comment` cites is declared. ik:RouteRequest's comment
+    /// cited ik:principal and ik:principalId for two years with neither in the graph
+    /// (ledger #71): a term a comment names reads as defined to a person and is
+    /// invisible to every validator, which is the shape a consumer trusts and nothing
+    /// checks. `ik:<var>` is a placeholder, not a name, and is skipped by construction.
+    #[test]
+    fn every_ik_term_a_comment_cites_is_declared() {
+        let declared: std::collections::BTreeSet<String> = oxttl::TurtleParser::new()
+            .for_reader(VOCABULARY.as_bytes())
+            .map(|t| t.expect("valid turtle").subject.to_string())
+            .collect();
+        let comment = format!("{}comment", "http://www.w3.org/2000/01/rdf-schema#");
+        let mut missing = std::collections::BTreeSet::new();
+        for t in oxttl::TurtleParser::new().for_reader(VOCABULARY.as_bytes()) {
+            let t = t.expect("valid turtle");
+            let oxrdf::Term::Literal(text) = &t.object else {
+                continue;
+            };
+            if t.predicate.as_str() != comment {
+                continue;
+            }
+            for (at, _) in text.value().match_indices("ik:") {
+                let name: String = text.value()[at + 3..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                if !name.is_empty() && !declared.contains(&format!("<{NS}{name}>")) {
+                    missing.insert(format!("ik:{name} (cited by {})", t.subject));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "cited in a comment and never declared:\n{}",
+            missing.into_iter().collect::<Vec<_>>().join("\n")
+        );
+    }
+
     #[test]
     fn a_range_the_generator_never_enumerated_still_coerces() {
         let ctx: serde_json::Value = serde_json::from_str(CONTEXT).unwrap();
