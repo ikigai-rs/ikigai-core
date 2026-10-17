@@ -1,0 +1,80 @@
+# A principals graph (ledger #1821): the participants graph a layer host already reads,
+# generalized. A person, an agent acting for her, a machine acting for her, and a blinded
+# principal in one poll; the credentials that authenticate them; the grants that say what
+# a door admits each for, including a shared default whose grantee is a class; and a
+# record of one authentication. Every node asserts the types it really has, so
+# tests/principals.rs can judge each rdfs:domain and rdfs:range the vocabulary declares
+# against them. Skolemized, no blank nodes.
+#
+# The credential, grant, method and poll IRIs are illustrative (urn:example:): this
+# vocabulary names the terms, not the IRI schemes a door mints them under.
+
+@prefix ik:      <https://ikigai-rs.dev/ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix foaf:    <http://xmlns.com/foaf/0.1/> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+# ---- principals: one IRI each, whatever the credential -------------------------
+
+<urn:collab:participant:ada>       a foaf:Person ; rdfs:label "Ada" ;
+    ik:authenticatedBy <urn:example:credential:passkey:laptop> ,
+                       <urn:example:credential:passkey:phone> .
+<urn:collab:participant:ada-agent> a prov:SoftwareAgent ;
+    prov:actedOnBehalfOf <urn:collab:participant:ada> ;
+    ik:authenticatedBy <urn:example:credential:token:agent> .
+<urn:collab:participant:ada-gonk>  a ik:Machine ;
+    prov:actedOnBehalfOf <urn:collab:participant:ada> ;
+    ik:authenticatedBy <urn:example:credential:cert:gonk> .
+<urn:example:principal:blind:poll-7:x1> a ik:BlindedPrincipal .
+
+# ---- credentials: each authenticates a principal and is not it ----------------
+
+<urn:example:credential:passkey:laptop> a ik:Credential ;
+    rdfs:label "laptop" ;
+    ik:authMethod <urn:example:auth:passkey> , <urn:example:auth:session> ;
+    prov:wasAttributedTo <urn:collab:participant:ada> ;
+    dcterms:created "2026-10-17T09:00:00Z"^^xsd:dateTime .
+<urn:example:credential:passkey:phone> a ik:Credential ;
+    rdfs:label "phone" ;
+    ik:authMethod <urn:example:auth:passkey> ;
+    prov:invalidatedAtTime "2026-10-17T11:00:00Z"^^xsd:dateTime .
+<urn:example:credential:token:agent> a ik:Credential ;
+    ik:authMethod <urn:example:auth:bearer> ;
+    ik:notAfter "2027-01-15T00:00:00Z"^^xsd:dateTime .
+<urn:example:credential:cert:gonk> a ik:Credential ;
+    ik:authMethod <urn:example:auth:mtls> ;
+    ik:notAfter "2027-10-17T00:00:00Z"^^xsd:dateTime .
+
+# ---- grants: what a door admits for one grantee -------------------------------
+
+<urn:example:grant:ada> a ik:Grant ;
+    ik:grantee <urn:collab:participant:ada> ;
+    ik:scope <urn:cap:store:read> , <urn:cap:layer:say:talk> ;
+    prov:wasAttributedTo <urn:collab:participant:ada> ;
+    dcterms:created "2026-10-17T09:05:00Z"^^xsd:dateTime .
+<urn:example:grant:ada-agent> a ik:Grant ;
+    ik:grantee <urn:collab:participant:ada-agent> ;
+    ik:scope <urn:cap:store:read> ;
+    ik:notAfter "2026-11-17T00:00:00Z"^^xsd:dateTime .
+<urn:example:grant:ada-gonk> a ik:Grant ;
+    ik:grantee <urn:collab:participant:ada-gonk> ;
+    ik:scope <urn:cap:net:*> .
+<urn:example:grant:poll-7> a ik:Grant ;
+    ik:grantee <urn:example:principal:blind:poll-7:x1> ;
+    ik:scope <urn:cap:layer:say:poll-7> .
+
+# A shared default is a STATED grant whose grantee is a class, never an implicit fallback.
+<urn:example:grant:default> a ik:Grant ;
+    ik:grantee <urn:example:class:trusted-credential> ;
+    ik:scope <urn:cap:store:read> .
+<urn:example:class:trusted-credential> a rdfs:Class ;
+    rdfs:label "any credential this door trusts" .
+
+# ---- one authentication, as a record -------------------------------------------
+
+<urn:example:authentication:1> a prov:Activity ;
+    ik:authMethod <urn:example:auth:passkey> ;
+    prov:used <urn:example:credential:passkey:laptop> ;
+    prov:wasAssociatedWith <urn:collab:participant:ada> .
