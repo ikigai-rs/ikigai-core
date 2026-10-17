@@ -1068,7 +1068,7 @@ ik:Collaboration a rdfs:Class ;
 ik:Machine a rdfs:Class ;
     rdfs:subClassOf prov:SoftwareAgent ;
     rdfs:label "Machine" ;
-    rdfs:comment "A machine principal: a running host, such as a gonk, that acts under its own identity (its own client certificate, so its own principal) on behalf of a person, stated with prov:actedOnBehalfOf. Distinct from the person, and from the person's LLM agent, which is a prov:SoftwareAgent but not a machine: a machine's writes are a host's automation, so a reader can tell them from what a person or an agent said. A subclass of prov:SoftwareAgent, so a PROV-aware reader still sees the agent." .
+    rdfs:comment "A machine principal: a running host, such as a gonk, that acts under its own identity (its own client certificate, an ik:Credential it is ik:authenticatedBy, so its own principal) on behalf of a person, stated with prov:actedOnBehalfOf. Distinct from the person, and from the person's LLM agent, which is a prov:SoftwareAgent but not a machine: a machine's writes are a host's automation, so a reader can tell them from what a person or an agent said. A subclass of prov:SoftwareAgent, so a PROV-aware reader still sees the agent." .
 
 ik:Message a rdfs:Class ;
     rdfs:subClassOf prov:Entity ;
@@ -1156,6 +1156,78 @@ ik:inReplyTo a rdf:Property ;
     rdfs:range rdfs:Resource ;
     rdfs:label "inReplyTo" ;
     rdfs:comment "The entry this one answers: on an ik:Message, the earlier entry of the same layer (often an ik:Question) it replies to. Threads are built from it; it changes nothing about the entry it names. No domain: a reply can be any kind of entry. The range is rdfs:Resource rather than ik:Message, because an entry in another kind of layer may be answered too and a class range would type it a message." .
+
+# ---- principals, credentials and grants (who a door admits, and for what) ---
+# A PRINCIPAL is the IRI a capability names: one person, one agent, one machine, each
+# one IRI assigned when it is enrolled and never derived from a key, so a person keeps
+# one IRI across every device and every way they sign in. The PRINCIPALS GRAPH says who
+# each principal is, and it generalizes the layer host's participants.ttl, which has
+# this shape already: each principal typed by its kind, a person (foaf:Person), an
+# agent acting for a person (prov:SoftwareAgent), a machine (ik:Machine, above) or an
+# ik:BlindedPrincipal, and linked to whom it acts for by prov:actedOnBehalfOf. A layer
+# host's participants are principals of this graph, and their IRIs do not change.
+#
+# ★ Acting for someone is a LOOKUP in this graph, never a second capability scope. A
+# capability names one principal, the most specific actor (the agent, not the person
+# it acts for), and whoever needs the chain reads prov:actedOnBehalfOf here: a grant
+# loader that checks an agent's grant against its person's, or an audit that resolves
+# who an entry was for.
+#
+# A principal is ik:authenticatedBy any number of ik:Credential nodes (a passkey per
+# device, a pinned certificate, a bearer token), and holds ik:Grant nodes that say what
+# a door admits it for (ik:grantee, ik:scope, ik:notAfter). A door turns a proof into a
+# credential, the credential names a principal, and the principal's grant bounds the
+# capability the door mints for each request; the kernel's capability check stays the
+# only authorization. Ledger #1821.
+#
+# ⚠ Standard terms were checked first, and each term below that is minted says which
+# one it declines and why. The short form: borrowing a term borrows its domain and its
+# range (the oa:bodyValue lesson above). sec:authentication and sec:expiration (the W3C
+# security vocabulary) range over or apply to verification methods, which a bearer token
+# is not; odrl:assignee carries a domain of ODRL rules and policies, which a grant is
+# not. Where a standard term fits, it is used as it is: foaf:Person, prov:SoftwareAgent,
+# prov:actedOnBehalfOf, prov:wasAttributedTo and dcterms:created.
+
+ik:BlindedPrincipal a rdfs:Class ;
+    rdfs:subClassOf prov:Agent ;
+    rdfs:label "BlindedPrincipal" ;
+    rdfs:comment "A principal that names one person within ONE context only (a poll, a ballot, a survey) and cannot be linked across contexts: it proves the person is eligible there without saying who they are, and the same person in two contexts is two blinded principals that nothing relates. It carries no prov:actedOnBehalfOf, deliberately, and an audit of the context records only its IRI. ⚠ How one is constructed is NOT decided yet: either a tag the host derives with a keyed hash after authenticating the person (one per person per context, though the host itself could compute the mapping), or an eligibility token issued by blind signature (the host cannot link a redemption to its issuance). This class names what either construction yields; its IRI scheme is settled with the construction. A subclass of prov:Agent, so a PROV-aware reader sees an agent, and not of foaf:Person: who stands behind it is what it exists to withhold." .
+
+ik:Credential a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Credential" ;
+    rdfs:comment "Something that authenticates a principal and is not the principal: a passkey, a pinned client certificate, a bearer token. A principal is ik:authenticatedBy any number of them (one per device, one per way of signing in), so revoking a lost device's credential leaves the principal, its grants and its other credentials alone, and rotation adds the new credential under the SAME principal before revoking the old one. A credential is named by what identifies it, never the reverse: the principal is assigned at enrollment, not derived from a key. Its validity is ik:notAfter; the method that proves it is ik:authMethod, a property rather than a subclass (see there). Minted rather than borrowed: a sec:VerificationMethod (W3C security vocabulary) is key material that verifies a proof, which a passkey or a certificate is and a bearer token is not, so a credential that IS key material may be typed sec:VerificationMethod as well, and this class is not its subclass; and a W3C Verifiable Credential is a set of claims an issuer signs about a subject, a different thing under the same word. A subclass of prov:Entity: a credential is enrolled by someone (prov:wasAttributedTo) and may be revoked at a recorded time (prov:invalidatedAtTime)." .
+
+ik:Grant a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Grant" ;
+    rdfs:comment "What a door admits for one grantee: its ik:grantee, the capability scopes it confers (ik:scope, one per triple) and optionally when it stops (ik:notAfter). A door clamps it by its own ceiling and mints the capability for each request from the result, naming the principal, so a grant is authority only through the kernel's capability check. An unknown, empty or expired grant is no authority, and a shared default is stated as a grant whose ik:grantee is a class, never left implicit. A subclass of prov:Entity: a grant is issued by someone (prov:wasAttributedTo) at a time (dcterms:created), and prov:wasAttributedTo's own domain would make it one anyway. Minted rather than borrowed from ODRL: an odrl:Permission is the ability to perform an action on an asset, inside a policy whose evaluation model (duties, prohibitions, conflict strategies) a grant does not have, and a capability IRI is not split into an action and a target; it is matched whole or, in its wildcard form, by prefix." .
+
+ik:authenticatedBy a rdf:Property ;
+    rdfs:range ik:Credential ;
+    rdfs:label "authenticatedBy" ;
+    rdfs:comment "Links a principal to an ik:Credential that authenticates it. Multi-valued: one per device, one per way of signing in. The credential is not the principal, so revoking one removes this link and leaves the principal, its grants and its history unchanged. The range is the class: whatever this names is a credential. No domain: the subject is a foaf:Person, a prov:SoftwareAgent, an ik:Machine or an ik:BlindedPrincipal, and this vocabulary declares only its own classes as a domain (the ik:annotates precedent). Minted rather than sec:authentication, whose range, sec:VerificationMethod, would type a bearer token as key material." .
+
+ik:authMethod a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "authMethod" ;
+    rdfs:comment "How a credential is proved, as an IRI naming one authentication method (a pinned client certificate over mutual TLS, a passkey assertion, a session a passkey login minted, a bearer token, a signed request). On an ik:Credential, a method that can prove it (multi-valued); on a record of one authentication, the method that did. A PROPERTY and not a subclass of ik:Credential, for three reasons. The method is not the credential's kind: one key can be proved two ways (signing a request, binding a token), and a session proves the passkey credential that minted it. Methods are plug-ins added by the doors that verify them, and a subclass per method could only arrive through a vocabulary publish. And the set of method IRIs is defined in the code that verifies them, as ik:severity's values are, rather than copied here where the copy could disagree. No domain: a credential and a record of an authentication both carry it." .
+
+ik:grantee a rdf:Property ;
+    rdfs:domain ik:Grant ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "grantee" ;
+    rdfs:comment "The principal an ik:Grant is for, by IRI, or a class for a shared default grant (\"any credential this door trusts\"), so a default is a stated grant rather than an implicit fallback. Exactly one per grant. The one property of this family with a domain: only a grant has a grantee. The range is rdfs:Resource rather than prov:Agent, because a class can be the grantee and an agent range would type the class an agent (the ik:addressedTo precedent). Minted rather than odrl:assignee, whose domain (an odrl:Rule or odrl:Policy) would type every grant an ODRL rule or policy." .
+
+ik:scope a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "scope" ;
+    rdfs:comment "A capability scope the subject confers, as a capability IRI, one triple per scope: a plain scope such as urn:cap:store:read, or the wildcard form urn:cap:net:* (\"some grant under this prefix\"). On an ik:Grant, what it admits its grantee for. The converse of ik:requires, which names a scope an action needs; the kernel's satisfaction predicate relates the two, so a grant's scopes and an action's requirements are the same kind of IRI. No domain: a door's own ceiling and a minted capability hold scopes too, and a domain would type each of them a grant. Not odrl:scope, which ODRL deprecates and which names the extent of an asset or party, not an authority." .
+
+ik:notAfter a rdf:Property ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "notAfter" ;
+    rdfs:comment "When the subject stops being valid: on an ik:Grant, the last instant it admits anything; on an ik:Credential, the last instant it authenticates. After it, a door treats the subject as absent. Optional: absent states no bound of its own, and a door's own lifetime rules still apply. Named for the X.509 validity field it mirrors. A scheduled bound, distinct from prov:invalidatedAtTime, which records when an entity WAS invalidated (a revocation, before its bound or after). Minted rather than sec:expiration, whose domain (a proof or a verification method) would type a grant as one. No domain: grants and credentials both carry it." .
 
 # ---- processes (a plan as a graph) -------------------------------------------
 # A plan is a DAG of requests with single-assignment names: each ik:Step issues one
