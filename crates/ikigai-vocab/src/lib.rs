@@ -552,7 +552,7 @@ mod tests {
     use ikigai_core::{ArgSpec, Space};
 
     fn sample() -> Description {
-        Description::new("toUpper")
+        Description::new("to-upper")
             .title("Upper-case")
             .summary("Upper-cases its input.")
             .verb(Verb::Source)
@@ -583,7 +583,7 @@ mod tests {
         let ttl = to_turtle(&sample());
         assert!(ttl.starts_with("@prefix ik: <https://ikigai-rs.dev/ns#> ."));
         assert!(ttl.contains("a ik:Endpoint"));
-        assert!(ttl.contains("ik:id \"toUpper\""));
+        assert!(ttl.contains("ik:id \"to-upper\""));
         assert!(ttl.contains("ik:verb \"Source\", \"Meta\""));
         assert!(ttl.contains("ik:output \"text/plain;charset=utf-8\""));
         assert!(ttl.contains("ik:inputName \"in\""));
@@ -659,15 +659,15 @@ mod tests {
         // content-addressed IRI, beside the endpoint-level view of the same inputs: a
         // contract node must carry its whole contract, or two copies of an id with
         // different inputs would merge at a shared input node (ledger #948).
-        let d = Description::new("toUpper")
+        let d = Description::new("to-upper")
             .verb(Verb::Source)
             .input(ArgSpec::new("in").summary("the string"))
             .output("text/plain");
         let ttl = to_turtle(&d);
-        let contract = d.action_specs()[0].contract_iri("toUpper");
+        let contract = d.action_specs()[0].contract_iri("to-upper");
         assert!(ttl.contains(&format!("<{contract}> a ik:Action")), "{ttl}");
         assert!(
-            ttl.contains("ik:input <urn:ikigai:endpoint:toUpper:input:in>"),
+            ttl.contains("ik:input <urn:ikigai:endpoint:to-upper:input:in>"),
             "{ttl}"
         );
         assert!(

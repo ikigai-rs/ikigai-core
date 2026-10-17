@@ -69,7 +69,7 @@ yet), **mutable** (what answers an IRI can change), **non-reproducible**
 (depends on who published what, when), and **over-broad** (a wildcard import is
 a wildcard capability).
 
-- **Loose** — a bare IRI (`"urn:example:toUpper"`): resolve whatever currently
+- **Loose** — a bare IRI (`"urn:example:to-upper"`): resolve whatever currently
   answers. Fine *within your own trust boundary*.
 - **Tight** — an object that pins and/or scopes:
   - `version` (range) or `content` (`blake3:…`, exact + tamper-evident) — *pinning*;

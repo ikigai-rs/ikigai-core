@@ -847,7 +847,7 @@ mod tests {
             // a plain (non-transreptor) endpoint — must be ignored
             .bind(
                 Exact::new("urn:test:to-upper"),
-                FnEndpoint::new("toUpper", |_inv| {
+                FnEndpoint::new("to-upper", |_inv| {
                     Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
                 }),
             )

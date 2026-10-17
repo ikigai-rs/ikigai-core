@@ -898,7 +898,7 @@ mod tests {
     #[test]
     fn action_specs_normalize_both_authoring_forms() {
         // flat single-verb: the flat fields ARE the (synthesized) action
-        let flat = Description::new("toUpper")
+        let flat = Description::new("to-upper")
             .verb(Verb::Source)
             .verb(Verb::Meta) // Meta is universal, never a selectable action
             .input(ArgSpec::new("in"))
@@ -933,12 +933,12 @@ mod tests {
 
     #[test]
     fn builds_a_description() {
-        let d = Description::new("toUpper")
+        let d = Description::new("to-upper")
             .title("Upper-case")
             .verb(Verb::Source)
             .input(ArgSpec::new("in").summary("the string").optional())
             .output("text/plain");
-        assert_eq!(d.id, "toUpper");
+        assert_eq!(d.id, "to-upper");
         assert_eq!(d.verbs, vec![Verb::Source]);
         assert_eq!(d.inputs[0].name, "in");
         assert!(!d.inputs[0].required);
@@ -963,7 +963,7 @@ mod tests {
 
     #[test]
     fn kind_defaults_to_endpoint_and_is_omitted_from_json() {
-        let d = Description::new("toUpper").output("text/plain");
+        let d = Description::new("to-upper").output("text/plain");
         assert_eq!(d.kind, EndpointKind::Endpoint);
         assert!(d.transreption().is_none());
         // A plain endpoint's JSON carries no `kind` key — the engine's contract is unchanged.
@@ -1047,7 +1047,7 @@ mod tests {
 
     #[test]
     fn requires_is_empty_by_default_and_omitted_from_json() {
-        let d = Description::new("toUpper").output("text/plain");
+        let d = Description::new("to-upper").output("text/plain");
         assert!(d.requires.is_empty());
         // A no-authority endpoint carries no `requires` key — JSON contract unchanged.
         let json = serde_json::to_string(&d).unwrap();
@@ -1069,7 +1069,7 @@ mod tests {
     fn a_plain_descriptions_json_is_byte_identical_to_before_these_fields() {
         // Belt-and-suspenders: an endpoint using neither new field serializes with exactly
         // the pre-existing keys — so the engine's machine contract is untouched.
-        let d = Description::new("toUpper")
+        let d = Description::new("to-upper")
             .title("Upper-case")
             .verb(Verb::Source)
             .input(ArgSpec::new("in"))

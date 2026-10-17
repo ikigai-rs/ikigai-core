@@ -129,7 +129,7 @@ fn must_encode(c: char) -> bool {
 /// ```
 /// use ikigai_core::encode_name;
 ///
-/// assert_eq!(encode_name("toUpper"), "toUpper");
+/// assert_eq!(encode_name("to-upper"), "to-upper");
 /// assert_eq!(encode_name("naïve"), "naïve");
 /// assert_eq!(encode_name("50% off"), "50%25%20off");
 /// // An id that is a full IRI with an IPv6 host: the brackets are encoded in a NAME.
@@ -369,10 +369,10 @@ impl ActionSpec {
     ///     .input(ArgSpec::new("locale").optional())
     ///     .requires("urn:cap:a")
     ///     .input(ArgSpec::new("in"));
-    /// assert_eq!(a.contract_id("toUpper"), b.contract_id("toUpper"));
-    /// assert_ne!(a.contract_id("toUpper"), a.contract_id("toLower"));
+    /// assert_eq!(a.contract_id("to-upper"), b.contract_id("to-upper"));
+    /// assert_ne!(a.contract_id("to-upper"), a.contract_id("to-lower"));
     /// // Tagged, never a bare digest: the text form names its algorithm.
-    /// assert!(a.contract_id("toUpper").to_string().starts_with("b3:"));
+    /// assert!(a.contract_id("to-upper").to_string().starts_with("b3:"));
     /// ```
     pub fn contract_id(&self, endpoint_id: &str) -> ContentId {
         let mut h = blake3::Hasher::new();

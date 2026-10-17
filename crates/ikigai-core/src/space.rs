@@ -2418,7 +2418,7 @@ mod tests {
         assert_eq!(
             entries,
             vec![
-                SpaceEntry::new("urn:test:to-upper", "toUpper"),
+                SpaceEntry::new("urn:test:to-upper", "to-upper"),
                 SpaceEntry::new("urn:demo:echo/{message}", "echo"),
             ]
         );

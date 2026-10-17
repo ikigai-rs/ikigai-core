@@ -79,12 +79,11 @@
 //!
 //! A constructor's `snake_case` name and its resource name therefore agree up to
 //! the separator: the kernel's own operations describe themselves as `kernel-cut`,
-//! `kernel-catalog`, `kernel-actions`. The exceptions are visible and known:
-//! [`builtins`] still
-//! carries the `lowerCamelCase` ids `toUpper`, `reverseList` and `echo` from before
-//! the convention settled, and those are live MCP tool names — renaming them moves
-//! an agent's tool list, so they ride one coordinated ecosystem-wide wave rather
-//! than leaking out of an unrelated change.
+//! `kernel-catalog`, `kernel-actions`, and [`builtins::to_upper`] builds
+//! `to-upper`. The [`builtins`] once carried the `lowerCamelCase` ids `toUpper`
+//! and `reverseList` from before the convention settled; they were renamed in one
+//! coordinated ecosystem-wide wave because the ids are live MCP tool names, and
+//! renaming one moves an agent's tool list.
 //!
 //! # Lock poisoning
 //!
