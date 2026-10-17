@@ -4818,7 +4818,7 @@ mod tests {
         let cap = Capability::root();
         let rep = block_on(kernel.issue(Request::new(Verb::Meta, iri("urn:test:to-upper")), &cap))
             .unwrap();
-        assert_eq!(rep.bytes, b"toUpper");
+        assert_eq!(rep.bytes, b"to-upper");
     }
 
     /// A Turtle-only meta renderer (like `ikigai-vocab`'s): emits `text/turtle` for the
@@ -4964,7 +4964,7 @@ mod tests {
         assert_eq!(rep.repr_type.media_type, "text/turtle");
         assert!(String::from_utf8(rep.bytes)
             .unwrap()
-            .contains("ik:id \"toUpper\""));
+            .contains("ik:id \"to-upper\""));
     }
 
     #[test]
@@ -4976,7 +4976,7 @@ mod tests {
         let body = String::from_utf8(rep.bytes).unwrap();
         assert!(body.starts_with("RDFXML("), "transreptor ran: {body}");
         assert!(
-            body.contains("ik:id \"toUpper\""),
+            body.contains("ik:id \"to-upper\""),
             "over the canonical turtle: {body}"
         );
     }
@@ -4988,7 +4988,7 @@ mod tests {
         assert_eq!(rep.repr_type.media_type, "text/turtle");
         assert!(String::from_utf8(rep.bytes)
             .unwrap()
-            .contains("ik:id \"toUpper\""));
+            .contains("ik:id \"to-upper\""));
     }
 
     /// A stub PROJECTION (`text/turtle → text/x-summary`, declared `.lossy()`): a
@@ -5156,8 +5156,8 @@ mod tests {
                 .unwrap();
         let body = String::from_utf8(rep.bytes).unwrap();
         assert!(
-            body.contains("toUpper"),
-            "catalog should describe toUpper: {body}"
+            body.lines().any(|l| l == "to-upper"),
+            "catalog should describe to-upper: {body}"
         );
         assert!(
             body.contains("echo"),
@@ -5493,7 +5493,7 @@ mod tests {
         let body = String::from_utf8(rep.bytes).unwrap();
         assert!(body.contains("urn:demo:greet"), "{body}");
         assert!(
-            !body.contains("toUpper"),
+            !body.contains("to-upper"),
             "untyped endpoint isn't an action: {body}"
         );
         assert_eq!(rep.repr_type.media_type, "text/plain");
@@ -5935,7 +5935,7 @@ mod tests {
                 "catalog omits `{id}`: {turtle}"
             );
         }
-        assert!(turtle.contains("\"toUpper\""), "catalog lost the space");
+        assert!(turtle.contains("\"to-upper\""), "catalog lost the space");
 
         // …and so does enumeration, which is what `list` reads.
         let entries = kernel.entries().expect("enumerable root");
@@ -6076,7 +6076,7 @@ mod tests {
 
     #[test]
     fn incoming_provenance_flows_cacheability_down_the_pipe() {
-        // A cacheable endpoint (toUpper opts into caching via builtins) issued with
+        // A cacheable endpoint (to-upper opts into caching via builtins) issued with
         // an *uncacheable* upstream provenance must itself become uncacheable —
         // cacheability is no greater than the piped input's.
         let space =
@@ -6979,7 +6979,7 @@ mod tests {
 
     // --- ledger #1029: rows sharing a name print in one order -----------------
 
-    /// A fresh kernel holding several entries under ONE name — `toUpper` read with
+    /// A fresh kernel holding several entries under ONE name — `to-upper` read with
     /// different inputs (so different sizes), and `urn:test:typed`, which answers
     /// one byte in the media type its `as` argument names (so the rows differ ONLY
     /// in media type) — and its cache readout.
@@ -9987,7 +9987,7 @@ mod tests {
     }
 
     /// A second endpoint to bind under `urn:test:to-upper`, distinguishable from
-    /// `toUpper` by id in every face.
+    /// `to-upper` by id in every face.
     fn shout() -> FnEndpoint {
         FnEndpoint::new("shout", |_inv| {
             Ok(Representation::new(ReprType::new("text/plain"), b"!".to_vec()).cacheable())
@@ -10012,15 +10012,15 @@ mod tests {
             Request::new(Verb::Source, iri("urn:kernel:validate"))
                 .with_arg(
                     "action",
-                    ArgRef::Inline(b"urn:ikigai:endpoint:toUpper:action:source".to_vec()),
+                    ArgRef::Inline(b"urn:ikigai:endpoint:to-upper:action:source".to_vec()),
                 )
                 .with_arg("args", ArgRef::Inline(b"in=x".to_vec()))
         };
 
         // All four faces describe the first root, and all four are cached.
-        assert!(text(catalog()).unwrap().contains("toUpper"));
+        assert!(text(catalog()).unwrap().lines().any(|l| l == "to-upper"));
         assert!(text(actions()).unwrap().contains("urn:test:to-upper"));
-        assert_eq!(text(meta()).unwrap(), "toUpper");
+        assert_eq!(text(meta()).unwrap(), "to-upper");
         let report = text(validate()).unwrap();
         assert!(report.contains("sh:conforms true"), "{report}");
         for req in [catalog(), actions(), meta(), validate()] {
@@ -10042,7 +10042,7 @@ mod tests {
         );
         assert_eq!(
             text(meta()).unwrap(),
-            "toUpper",
+            "to-upper",
             "stale until the thread is cut"
         );
         assert!(kernel.is_cached(&catalog(), &cap));
@@ -10059,12 +10059,12 @@ mod tests {
         }
         let body = text(catalog()).unwrap();
         assert!(body.contains("shout") && body.contains("echo"), "{body}");
-        assert!(!body.contains("toUpper"), "{body}");
+        assert!(!body.lines().any(|l| l == "to-upper"), "{body}");
         assert!(text(actions()).unwrap().contains("urn:test:echo"));
         assert_eq!(text(meta()).unwrap(), "shout");
         let err = text(validate()).unwrap_err();
         assert!(
-            err.to_string().contains("no endpoint with id `toUpper`"),
+            err.to_string().contains("no endpoint with id `to-upper`"),
             "{err}"
         );
     }

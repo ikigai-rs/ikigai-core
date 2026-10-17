@@ -601,7 +601,7 @@ mod tests {
             assert_eq!(resolved.endpoint.name(), entry.endpoint);
         }
         // A name outside the namespace, and an unserved name inside it, both miss.
-        for miss in ["urn:example:toUpper", "urn:kernel:nonesuch"] {
+        for miss in ["urn:example:to-upper", "urn:kernel:nonesuch"] {
             let iri = crate::iri::Iri::parse(miss).expect("valid IRI");
             assert!(
                 matches!(

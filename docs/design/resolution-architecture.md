@@ -115,7 +115,7 @@ choosing is **how much isolation you pay for**.
 1. **Inline closure / function endpoints (lightest).** Bind a function to an
    IRI; manifest and self-description are *inferred* from the function (name →
    IRI, signature → `ArgSpec`s). No artifact, no WIT, no hand-written contract.
-   We already do this for Rust: `FnEndpoint::new("toUpper", |inv| …)`.
+   We already do this for Rust: `FnEndpoint::new("to-upper", |inv| …)`.
 2. **Lightweight scripted module.** A file of functions hosted by an embedded
    runtime (RustPython, a JS engine). Exposed by convention
    (`greet` in module `personal` → `urn:personal:greet`) or a one-line map.
@@ -252,7 +252,7 @@ transreptors.
 ## 5. Typed argument pull + transreption ("witgen-like")
 
 A pure function should be able to operate on the entire resolvable universe
-without knowing it exists. `toUpper` stays `fn(in: String) -> String` forever;
+without knowing it exists. `to-upper` stays `fn(in: String) -> String` forever;
 what changes is that *"give me `in` as a String"* becomes a **resolution**.
 
 - **Arguments are references-or-values.** `ArgRef` carries `Inline(bytes)` |
@@ -267,14 +267,14 @@ what changes is that *"give me `in` as a String"* becomes a **resolution**.
   3. **transrept** the representation to the declared type (the §4 path-find);
   4. **cache** the result by content-id.
 
-So `toUpper "hello"`, `toUpper urn:data:page`, `toUpper file://foo.txt`, and
-`toUpper https://example.com` *all work* — `toUpper` stays pure; the substrate
-pulls and transrepts whatever arrived into the string it asked for. `toUpper`
+So `to-upper "hello"`, `to-upper urn:data:page`, `to-upper file://foo.txt`, and
+`to-upper https://example.com` *all work* — `to-upper` stays pure; the substrate
+pulls and transrepts whatever arrived into the string it asked for. `to-upper`
 never learns any of it happened.
 
 **The witgen analogy.** The input contract *is* the interface. A proc-macro
 reads the signature and declared types and emits the pull glue
-(`#[ikigai::endpoint] fn toUpper(in: String) -> String`), exactly as wit-bindgen
+(`#[ikigai::endpoint] fn to_upper(in: String) -> String`), exactly as wit-bindgen
 generates marshaling from a WIT interface. One contract drives **routing,
 transreption, and binding generation**.
 
@@ -282,9 +282,9 @@ transreption, and binding generation**.
 reference arg before `invoke`) is convenient but wrong as the *primitive*:
 
 - **Lazy** — an endpoint that doesn't read an arg never pays to resolve it.
-- **Capability-gated** — a pull is an ocap-checked resolution. `toUpper https://…`
+- **Capability-gated** — a pull is an ocap-checked resolution. `to-upper https://…`
   only works if the invocation's capability permits the network; a sandboxed
-  `toUpper` with no net capability simply *can't* pull a URL. This is ocap
+  `to-upper` with no net capability simply *can't* pull a URL. This is ocap
   applied to **inputs**, and it only works because the pull is explicit. Eager
   coercion would be the kernel fetching arbitrary URLs on the function's behalf
   — the ambient authority we're avoiding.

@@ -274,13 +274,13 @@ subtitle = "Closure-backed endpoints — the simplest kind"
 [[file.note]]
 anchor = "fn to_upper_impl"
 bullets = [
-  "Pure, idempotent, perfectly cacheable functions — the M1 demonstration of resolution and the pure-cache test. `toUpper` / `reverseList` read the `in` argument.",
+  "Pure, idempotent, perfectly cacheable functions — the M1 demonstration of resolution and the pure-cache test. `to-upper` / `reverse-list` read the `in` argument.",
   "`echo` instead reads a `message` grammar binding — so the builtins exercise both input channels.",
 ]
 [[file.note]]
 anchor = "pub fn to_upper()"
 bullets = [
-  "`to_upper()` builds the `toUpper` resource — a `lowerCamelCase` name from before the convention settled on `kebab-case` nouns. These three are live MCP tool names, so they wait for one coordinated rename rather than drifting one crate at a time.",
+  "`to_upper()` builds the `to-upper` resource: the constructor's `snake_case` name and the resource's `kebab-case` noun agree up to the separator. It and `reverse-list` were `toUpper` and `reverseList` until one coordinated rename, since the ids are live MCP tool names.",
   "Each now carries a full `Description` (verbs, the `in` argument, output type), so `describe` and the contract-driven REPL routing have something to read.",
 ]
 

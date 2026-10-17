@@ -3,11 +3,28 @@
 //! pure-cache test: the same call with the same value has the same identity.
 //!
 //! Each `snake_case` constructor builds an endpoint whose identifier matches its
-//! name — e.g. [`to_upper`] builds the `toUpper` endpoint, which a host binds at a
-//! name of its own choosing (`urn:example:toUpper` in these docs). These three ids
-//! predate the naming convention the crate now states (short nouns in `kebab-case`,
-//! see the [crate docs](crate)); they are live MCP tool names, so they wait for one
-//! coordinated ecosystem-wide rename rather than drifting here alone.
+//! name up to the separator, per the crate's naming convention (short nouns in
+//! `kebab-case`, see the [crate docs](crate)): [`to_upper`] builds `to-upper`,
+//! [`reverse_list`] builds `reverse-list`, and [`echo`] builds `echo`. A host binds
+//! each at a name of its own choosing (`urn:example:to-upper` in these docs).
+//!
+//! ```
+//! use ikigai_core::builtins;
+//! use ikigai_core::Endpoint;
+//!
+//! for (endpoint, id) in [
+//!     (builtins::to_upper(), "to-upper"),
+//!     (builtins::reverse_list(), "reverse-list"),
+//!     (builtins::echo(), "echo"),
+//! ] {
+//!     assert_eq!(endpoint.name(), id);
+//!     assert_eq!(endpoint.describe().id, id);
+//! }
+//! ```
+//!
+//! Earlier releases named the first two `toUpper` and `reverseList`. The id is what
+//! the MCP projection turns into an agent's tool name, so that rename moved those
+//! tools.
 //!
 //! Recursive `$a{<iri>}` transclusion (`compose`) lives in the `ikigai-fn` module
 //! crate, not here — it is a host-facing function, and the kernel only needs the
@@ -45,10 +62,10 @@ fn echo_impl(inv: &Invocation<'_>) -> Result<Representation> {
 
 const TEXT_PLAIN_UTF8: &str = "text/plain;charset=utf-8";
 
-/// `toUpper`: upper-cases the UTF-8 string in the `in` argument.
+/// `to-upper`: upper-cases the UTF-8 string in the `in` argument.
 pub fn to_upper() -> FnEndpoint {
-    FnEndpoint::new("toUpper", to_upper_impl).with_description(
-        Description::new("toUpper")
+    FnEndpoint::new("to-upper", to_upper_impl).with_description(
+        Description::new("to-upper")
             .title("Upper-case")
             .summary("Upper-cases the UTF-8 text supplied in the `in` argument.")
             .verb(Verb::Source)
@@ -58,10 +75,10 @@ pub fn to_upper() -> FnEndpoint {
     )
 }
 
-/// `reverseList`: reverses the order of newline-separated items in `in`.
+/// `reverse-list`: reverses the order of newline-separated items in `in`.
 pub fn reverse_list() -> FnEndpoint {
-    FnEndpoint::new("reverseList", reverse_list_impl).with_description(
-        Description::new("reverseList")
+    FnEndpoint::new("reverse-list", reverse_list_impl).with_description(
+        Description::new("reverse-list")
             .title("Reverse list")
             .summary("Reverses the order of newline-separated items in the `in` argument.")
             .verb(Verb::Source)

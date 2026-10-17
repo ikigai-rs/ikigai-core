@@ -212,7 +212,7 @@ impl MetaRenderer for IdRenderer {
 #[test]
 fn meta_reports_the_backing_endpoints_self_description() {
     // Self-description that lied would break the catalog, selection and the MCP
-    // projection downstream. Describing `urn:fn:toUpper` describes `toUpper`.
+    // projection downstream. Describing `urn:fn:toUpper` describes `to-upper`.
     let kernel = Kernel::with_meta_renderer(
         backing_space(Arc::new(Mutex::new(String::new()))),
         Arc::new(IdRenderer),
@@ -223,7 +223,7 @@ fn meta_reports_the_backing_endpoints_self_description() {
         &Capability::root(),
     ))
     .unwrap();
-    assert_eq!(described.bytes, b"toUpper");
+    assert_eq!(described.bytes, b"to-upper");
 }
 
 // ------------------------------- decision 3: one cache entry, one golden thread
@@ -758,7 +758,7 @@ fn meta_reports_the_backing_name_through_a_nested_alias() {
         &Capability::root(),
     ))
     .unwrap();
-    assert_eq!(described.bytes, b"toUpper");
+    assert_eq!(described.bytes, b"to-upper");
 }
 
 #[test]

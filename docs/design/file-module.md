@@ -183,5 +183,5 @@ transrept-to-bytes; one cfg-gated crate, native fs + wasm localStorage.
   version lifts into the type graph.
 - **Remote (#36).** Files over QUIC need remote auth + crypto-attenuation before
   exposure.
-- **Typed-argument pull.** `toUpper file:///x.txt` pulls a file reference *through*
+- **Typed-argument pull.** `to-upper file:///x.txt` pulls a file reference *through*
   the capability check — the file module is what makes that real and safe.

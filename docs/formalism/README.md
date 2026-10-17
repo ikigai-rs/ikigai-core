@@ -2193,3 +2193,19 @@ it refuses is allocated once, not twice; what gets cached is unchanged. **PR 215
 (it uses none of this). **Vocabulary:** eight additive terms, `ik:BlindedPrincipal`, `ik:Credential`, `ik:Grant`,
 `ik:authenticatedBy`, `ik:authMethod`, `ik:grantee`, `ik:scope` and `ik:notAfter`, plus `ik:Machine`'s comment and
 `owl:versionInfo`; `/ns` needs a manual deploy after the publish.
+
+**Unreleased** (held for the next breaking release, ledger [#11](http://localhost:1062/l/default/item/11)).
+**Renamed:** the builtins' ids follow the crate's naming convention, a short noun in `kebab-case` that agrees with the
+constructor's `snake_case` name up to the separator.
+
+| constructor | old id | new id |
+| --- | --- | --- |
+| `builtins::to_upper()` | `toUpper` | `to-upper` |
+| `builtins::reverse_list()` | `reverseList` | `reverse-list` |
+| `builtins::echo()` | `echo` | `echo` (unchanged) |
+
+Both the `Endpoint::name()` and the `Description::id` move. **What a consumer observes:** nothing resolves by an id, so
+every bound IRI answers as before, but the id is what the MCP projection turns into a tool name (`toUpper__source`
+becomes `to-upper__source`), what `Meta` and the catalog report (`ik:id "to-upper"`), and what an action IRI carries
+(`urn:ikigai:endpoint:to-upper:action:source`). Anything matching on the old ids or tool names breaks; there is no
+alias, because an id is not an IRI. The docs' example IRI is now `urn:example:to-upper`. **Vocabulary:** unchanged.
