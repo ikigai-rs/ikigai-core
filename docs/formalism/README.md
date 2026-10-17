@@ -2166,3 +2166,30 @@ observes:** a typed query that fits nothing answers nothing again, as before 0.1
 types=urn:no:Such` can say that no authorized action fits; a typed query with a fit keeps 0.1.102's answer (the fitted
 matches, then the argument-free ones, the kernel's own among them). An empty present set is unchanged: no type filter. No
 API change. ikigai-vocab's core floor stays 0.1.101 (it uses none of this). **Vocabulary:** only `owl:versionInfo`.
+
+**0.1.104** carries eight PRs on top of 0.1.103. **PR 208**: docs and doctests only (the cache key's parts, a
+`Description` on the wire wants a self-describing format, a transreptor's declaration is a cross product, a grammar
+matches the shape and validates in `invoke`, the catalog names an endpoint by its description id, the chain's entry
+node); no behavior change. **PR 209** (ledger [#527](http://localhost:1062/l/default/item/527)): a test pins that a host
+corridor binding the same name as a confined space answers inside the confinement; gate-header notes. **PR 210**
+(ledger [#91](http://localhost:1062/l/default/item/91), [#17](http://localhost:1062/l/default/item/17)): the
+`urn:kernel:` prefix is the kernel's in any ASCII case (RFC 8141), the operation after it exact; and the catalog renders
+each distinct description once and marks an endpoint node whose id several different descriptions share. **What a
+consumer observes:** `URN:KERNEL:actions` is the manifold, not a root door; a catalog with a duplicated identical
+description loses the duplicate. **PR 211** (ledger [#52](http://localhost:1062/l/default/item/52),
+[#73](http://localhost:1062/l/default/item/73), [#369](http://localhost:1062/l/default/item/369),
+[#967](http://localhost:1062/l/default/item/967), [#792](http://localhost:1062/l/default/item/792)): additive API,
+`describe_entry` and `EntryDescription` (`#[non_exhaustive]`), `Kernel::canonical`, `Kernel::try_new` and
+`try_with_sealed`, and `urn:kernel:uncached target=`. **PR 212** (ledger [#1583](http://localhost:1062/l/default/item/1583)):
+shared capability vectors for the Python and Deno faces; tests only. **PR 213** (ledger
+[#1579](http://localhost:1062/l/default/item/1579)): `Description` gains `contract_caching` (`UntilRebind` by default,
+today's behavior; `MaxAge`; `Volatile`), honored wherever the kernel caches something derived from a description. It is
+serde-skipped and out of `Description`'s equality, so JSON contracts and the catalog's dedup are unchanged. A new public
+field on a struct that is not `#[non_exhaustive]`: a consumer building `Description` by a struct literal without
+`..Default::default()` stops compiling, and none in the ecosystem does (checked 2026-10-17). **PR 214** (ledger
+[#1734](http://localhost:1062/l/default/item/1734)): the cache decides admission before copying an answer, so an answer
+it refuses is allocated once, not twice; what gets cached is unchanged. **PR 215** (ledger
+[#1821](http://localhost:1062/l/default/item/1821)): the principal vocabulary. ikigai-vocab's core floor stays 0.1.101
+(it uses none of this). **Vocabulary:** eight additive terms, `ik:BlindedPrincipal`, `ik:Credential`, `ik:Grant`,
+`ik:authenticatedBy`, `ik:authMethod`, `ik:grantee`, `ik:scope` and `ik:notAfter`, plus `ik:Machine`'s comment and
+`owl:versionInfo`; `/ns` needs a manual deploy after the publish.
