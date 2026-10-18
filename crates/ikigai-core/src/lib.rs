@@ -160,8 +160,8 @@ pub use declare::{
     MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
 };
 pub use describe::{
-    ActionSpec, ArgSpec, Arguments, ContractCaching, Description, EndpointKind, GroupKind,
-    InputGroup, InputSource, ListSeparator, OutputFrom, Transreption, ValueNote,
+    ActionSpec, ArgSpec, Arguments, ContractCaching, DefaultValue, Description, EndpointKind,
+    GroupKind, InputGroup, InputSource, ListSeparator, OutputFrom, Transreption, ValueNote,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use endpoint::SyncIssuer;
@@ -174,9 +174,9 @@ pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
-    ALIAS_MISS_NOTE, ALIAS_NOTE, ANSWERED_NOTE, BINDINGS_THREAD, DEFAULT_MAX_DEPTH, DENIED_NOTE,
-    DEPTH_NOTE, FAILED_NOTE, LEVEL_NOTE, LIMITED_NOTE, META_LOSSY_ARG, SCOPE_CLOCK_NOTE,
-    SCOPE_MISS_NOTE, SCOPE_NOTE, SEALED_NOTE, UNCACHED_NOTE,
+    ALIAS_MISS_NOTE, ALIAS_NOTE, ANSWERED_NOTE, BINDINGS_THREAD, DEFAULTED_NOTE, DEFAULT_MAX_DEPTH,
+    DENIED_NOTE, DEPTH_NOTE, FAILED_NOTE, LEVEL_NOTE, LIMITED_NOTE, META_LOSSY_ARG,
+    SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE, SEALED_NOTE, UNCACHED_NOTE,
 };
 pub use listen::{
     CutBatch, CutEvent, CutListener, ListenSpec, CAP_LISTEN, INVALIDATED_NAMED, LISTEN_CAPACITY,

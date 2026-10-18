@@ -458,6 +458,11 @@ pub const LEVEL_NOTE: &str = "level";
 /// ```
 pub const UNCACHED_NOTE: &str = "uncached";
 
+/// The trace-note key naming the inputs the kernel filled from their declared defaults
+/// before invoking (ledger #19), comma-joined: so a trace, or `urn:kernel:explain`, tells
+/// a caller's value from the contract's. Absent when nothing was filled.
+pub const DEFAULTED_NOTE: &str = "defaulted";
+
 /// The [`TraceEvent::notes`] key under which the kernel reports the **chain's
 /// clock** — the instant a temporal corridor's derived clock
 /// ([`Scope::with_named_at`]) read as the event was recorded, in milliseconds since
@@ -709,12 +714,29 @@ pub(crate) struct Floor {
     /// The union of every `requires` the endpoint declares, deduplicated in
     /// declaration order — the floor of an undeclared verb.
     every: Vec<String>,
+    /// Each declared verb's declared defaults, `(input, lexical form)` for every by-value
+    /// input with one: what the kernel injects into a request that leaves the input out
+    /// (ledger #19). Kept beside the floor because it is read from the same description
+    /// at the same moment, so the prefill costs no `describe()` of its own.
+    defaults: Vec<(Verb, Vec<(String, String)>)>,
 }
 
 impl Floor {
     pub(crate) fn of(description: &Description) -> Self {
-        let declared: Vec<(Verb, Vec<String>)> = description
-            .action_specs()
+        let specs = description.action_specs();
+        let defaults = specs
+            .iter()
+            .map(|spec| {
+                let filled = spec
+                    .inputs
+                    .iter()
+                    .filter(|i| i.source == crate::describe::InputSource::Argument)
+                    .filter_map(|i| i.default.clone().map(|d| (i.name.clone(), d)))
+                    .collect();
+                (spec.verb, filled)
+            })
+            .collect();
+        let declared: Vec<(Verb, Vec<String>)> = specs
             .into_iter()
             .map(|spec| (spec.verb, spec.requires))
             .collect();
@@ -733,7 +755,30 @@ impl Floor {
                 .flat_map(|a| &a.requires)
                 .for_each(&mut add);
         }
-        Floor { declared, every }
+        Floor {
+            declared,
+            every,
+            defaults,
+        }
+    }
+
+    /// The defaults a request with `verb` is prefilled with: the verb's own declared
+    /// defaults; for an undeclared `Exists`, `Source`'s (it runs what a reader runs, as
+    /// the floor's table says); none for `Meta` (nothing is invoked) or any other
+    /// undeclared verb (no contract states a default for it).
+    pub(crate) fn defaults(&self, verb: Verb) -> &[(String, String)] {
+        let own = |v: Verb| {
+            self.defaults
+                .iter()
+                .find(|(declared, _)| *declared == v)
+                .map(|(_, d)| d.as_slice())
+        };
+        match (verb, own(verb)) {
+            (Verb::Meta, _) => &[],
+            (_, Some(defaults)) => defaults,
+            (Verb::Exists, None) => own(Verb::Source).unwrap_or(&[]),
+            _ => &[],
+        }
     }
 
     /// The scopes a request with `verb` must hold — see the table on [`Floor`].
@@ -855,6 +900,7 @@ impl FloorMemo {
     /// from the memo when it has seen this endpoint and its entry is still within the
     /// description's [`ContractCaching`] bound at `now` (the kernel's clock), else from
     /// `describe()`, memoized for as long as that bound allows.
+    #[cfg(test)]
     fn unsatisfied(
         &self,
         endpoint: &Arc<dyn Endpoint>,
@@ -862,6 +908,27 @@ impl FloorMemo {
         capability: &Capability,
         now: Option<Time>,
     ) -> Option<String> {
+        self.admit(endpoint, request, capability, now).0
+    }
+
+    /// [`unsatisfied`](Self::unsatisfied), and the declared defaults the request leaves
+    /// out (`Floor::defaults`), which the kernel injects before the request's identity is
+    /// taken (ledger #19). One memo read for both.
+    fn admit(
+        &self,
+        endpoint: &Arc<dyn Endpoint>,
+        request: &Request,
+        capability: &Capability,
+        now: Option<Time>,
+    ) -> (Option<String>, Vec<(String, String)>) {
+        let missing = |floor: &Floor| -> Vec<(String, String)> {
+            floor
+                .defaults(request.verb)
+                .iter()
+                .filter(|(name, _)| !request.args.contains_key(name))
+                .cloned()
+                .collect()
+        };
         let key = Self::key(endpoint);
         let mut stale = false;
         {
@@ -879,14 +946,17 @@ impl FloorMemo {
                     Some(until) => now.is_some_and(|now| now < until),
                 };
                 if fresh {
-                    return entry.floor.unsatisfied(request, capability);
+                    return (
+                        entry.floor.unsatisfied(request, capability),
+                        missing(&entry.floor),
+                    );
                 }
                 stale = true;
             }
         }
         let description = endpoint.describe();
         let floor = Floor::of(&description);
-        let lacking = floor.unsatisfied(request, capability);
+        let lacking = (floor.unsatisfied(request, capability), missing(&floor));
         let until = match description.contract_caching.expiry_at(now) {
             Expiry::Never => None,
             Expiry::At(deadline) => Some(deadline),
@@ -2040,7 +2110,7 @@ impl Kernel {
         // simply not holding. Carrying the hop on the denial event is what stops
         // that from being invisible.
         let mut notes = vec![(DENIED_NOTE.to_string(), lacking.to_string())];
-        notes.extend(provenance_notes(trace, alias, answered, levels));
+        notes.extend(provenance_notes(trace, alias, answered, levels, &[]));
         notes.extend(scope_notes(scope));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
@@ -2173,7 +2243,7 @@ impl Kernel {
             LIMITED_NOTE.to_string(),
             request.target.as_str().to_string(),
         )];
-        notes.extend(provenance_notes(trace, alias, answered, levels));
+        notes.extend(provenance_notes(trace, alias, answered, levels, &[]));
         notes.extend(scope_notes(scope));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
@@ -2529,7 +2599,14 @@ impl Kernel {
         // are the operations whose SUBJECT includes the chain (the topology, an
         // explanation, `validate` by `endpoint=`; `kernel_ops::depends_on_chain`):
         // they are keyed by the chain's fingerprint, as any scoped resolution is.
-        if let Some(op) = kernel_op(request.target.as_str()) {
+        if let Some(op) = kernel_op(request.target.as_str()).map(str::to_owned) {
+            // The operation's declared defaults, injected before its identity is taken,
+            // exactly as for an endpoint below (ledger #19).
+            let verb = request.verb;
+            let defaulted = crate::kernel_ops::description(&op)
+                .map(|description| prefill(&mut request, Floor::of(&description).defaults(verb)))
+                .unwrap_or_default();
+            let op = op.as_str();
             let mut key = CacheKey::new(request.id(), capability_key(capability));
             // The chain this answer is a function of, for its key and its trace event:
             // the caller's for the operations whose subject it is, else the empty one
@@ -2556,6 +2633,7 @@ impl Kernel {
             let record = |cache_hit: bool, mut notes: Vec<(String, String)>| {
                 if trace.is_some() {
                     let mut all = alias_notes(alias.as_ref());
+                    all.extend(defaulted_note(&defaulted));
                     all.append(&mut notes);
                     let span = trace.as_ref().map(TraceScope::next_span);
                     self.trace_record(
@@ -2769,8 +2847,22 @@ impl Kernel {
             return Err(Error::Unresolved(request.target.clone()));
         }
 
+        // The floor and the declared defaults, from one read of the per-endpoint memo
+        // (below, for what the floor is). The defaults the request leaves out are
+        // injected NOW, before the identity is taken (ledger #19): as the inline argument
+        // a caller spelling the value out would send, so a call with and without the
+        // default spelled out is one request, one cache key, one trace, and the endpoint
+        // reads the declared default rather than a `MissingArgument`. Only by-value
+        // inputs, only the ones left out (a caller's value always wins, an empty one
+        // included), and never on `Meta`.
+        let (lacking, defaults) =
+            self.floors
+                .admit(&resolved.endpoint, &request, capability, started);
+        let defaulted = prefill(&mut request, &defaults);
+
         // Identity is settled: the id keys the representation cache, and it is
-        // derived from the target AFTER every rewrite has been accounted for.
+        // derived from the target AFTER every rewrite has been accounted for, and from
+        // the arguments after the declared defaults are in.
         let id = request.id();
 
         // The baseline capability floor: **declared = enforced**. Every `requires`
@@ -2794,10 +2886,7 @@ impl Kernel {
         // own declaration, not the root's. The declaration comes from the
         // per-endpoint memo: `describe()` runs once per bound endpoint, not once per
         // request, and a cut of `urn:kernel:bindings` forgets it (ledger #22, #510).
-        if let Some(lacking) =
-            self.floors
-                .unsatisfied(&resolved.endpoint, &request, capability, started)
-        {
+        if let Some(lacking) = lacking {
             self.trace_denial(
                 &trace, &request, capability, span, parent, &lacking, alias, answered, levels,
                 &scope,
@@ -2830,7 +2919,7 @@ impl Kernel {
                     parent,
                     started,
                     true,
-                    provenance_notes(&trace, alias, answered, levels),
+                    provenance_notes(&trace, alias, answered, levels, &defaulted),
                     &scope,
                 );
                 self.record_resolution(&request, started, true);
@@ -2937,7 +3026,9 @@ impl Kernel {
                     }
                     if trace.is_some() {
                         let mut notes = vec![(FAILED_NOTE.to_string(), error.kind().to_string())];
-                        notes.extend(provenance_notes(&trace, alias, answered, levels));
+                        notes.extend(provenance_notes(
+                            &trace, alias, answered, levels, &defaulted,
+                        ));
                         notes.append(&mut invocation.take_trace_notes());
                         self.trace_record(
                             &trace, &request, capability, span, parent, started, false, notes,
@@ -3025,7 +3116,7 @@ impl Kernel {
             trace_notes = invocation.take_trace_notes();
             // The rewrite and the answering space are provenance of the invocation,
             // so they lead the endpoint's own notes rather than being appended after.
-            let mut notes = provenance_notes(&trace, alias, answered, levels);
+            let mut notes = provenance_notes(&trace, alias, answered, levels, &defaulted);
             notes.append(&mut trace_notes);
             trace_notes = notes;
             representation.with_expiry(effective).with_threads(threads)
@@ -3033,7 +3124,7 @@ impl Kernel {
         if request.verb == Verb::Meta {
             // The Meta arm takes no invocation, so it never reached the note-merging
             // above; the rewrite and the answerer still have to show on the event.
-            trace_notes = provenance_notes(&trace, alias, answered, levels);
+            trace_notes = provenance_notes(&trace, alias, answered, levels, &defaulted);
         }
 
         // Store an idempotent result unless it's volatile (`Always`). A time-based
@@ -4106,15 +4197,38 @@ impl Kernel {
         // this answer "not cached" under the logical name while the serving path
         // correctly serves one entry for both. Conservative in the safe direction:
         // it under-reports a hit, never invents one.
-        let id = match self.canonicalize(&request.target) {
+        let mut probed = match self.canonicalize(&request.target) {
             Err(_) => return false,
-            Ok(None) => request.id(),
+            Ok(None) => request.clone(),
             Ok(Some(hop)) => {
                 let mut canonical = request.clone();
                 canonical.target = hop.canonical().clone();
-                canonical.id()
+                canonical
             }
         };
+        // ★ And with the declared defaults in, as the serving path keys it (ledger #19):
+        // otherwise a call that leaves a defaulted input out would probe a key no entry
+        // is ever stored under. The contract is read by a `Meta` resolution, which the
+        // overlay family answers without spending budget (a `RateLimit` never limits
+        // self-description), and from the same per-endpoint memo the floor reads.
+        let defaults = match kernel_op(probed.target.as_str()) {
+            Some(op) => crate::kernel_ops::description(op)
+                .map(|description| Floor::of(&description).defaults(probed.verb).to_vec())
+                .unwrap_or_default(),
+            None => {
+                let meta = Request::new(Verb::Meta, probed.target.clone());
+                match scope.resolve_in(&meta, &self.root, &self.seals) {
+                    Ok(Resolution::Hit(resolved)) if !resolved.endpoint.is_limiter() => {
+                        self.floors
+                            .admit(&resolved.endpoint, &probed, capability, self.now_stamp())
+                            .1
+                    }
+                    _ => Vec::new(),
+                }
+            }
+        };
+        prefill(&mut probed, &defaults);
+        let id = probed.id();
         // Read-only probe: an entry that is cut (a thread bumped) or expired (its
         // deadline passed) is not "cached", matching what `valid_cached` would
         // serve. Keyed by capability too, so the probe answers "cached *for this
@@ -4268,6 +4382,7 @@ fn provenance_notes(
     alias: Option<&AliasHop>,
     answered: Option<&Iri>,
     levels: &LevelPath,
+    defaulted: &[String],
 ) -> Vec<(String, String)> {
     if trace.is_none() {
         return Vec::new();
@@ -4277,7 +4392,32 @@ fn provenance_notes(
     if !levels.is_empty() {
         notes.push((LEVEL_NOTE.to_string(), levels.to_string()));
     }
+    notes.extend(defaulted_note(defaulted));
     notes
+}
+
+/// Inject the `defaults` the request leaves out (`(input, lexical form)`, from
+/// `Floor::defaults`) as inline arguments, the form a caller spelling them out sends;
+/// the names injected, in order (ledger #19).
+fn prefill(request: &mut Request, defaults: &[(String, String)]) -> Vec<String> {
+    let mut filled = Vec::new();
+    for (name, value) in defaults {
+        if !request.args.contains_key(name) {
+            request
+                .args
+                .insert(name.clone(), ArgRef::Inline(value.clone().into_bytes()));
+            filled.push(name.clone());
+        }
+    }
+    filled
+}
+
+/// The [`DEFAULTED_NOTE`] naming the inputs the kernel filled from their declared
+/// defaults, so a trace or an explanation can tell a caller's value from the contract's.
+/// Nothing when nothing was filled, so an event without defaults is byte-identical to
+/// before.
+fn defaulted_note(defaulted: &[String]) -> Option<(String, String)> {
+    (!defaulted.is_empty()).then(|| (DEFAULTED_NOTE.to_string(), defaulted.join(",")))
 }
 
 /// The trace notes disclosing the resolution chain — and, when the chain carries a
@@ -7910,6 +8050,90 @@ mod tests {
             matches!(err, Error::Denied(_)),
             "a reader must not pass the write action's floor: {err:?}"
         );
+    }
+
+    /// Ledger #19: a declared default is injected before the endpoint runs, so it reads
+    /// the default rather than `MissingArgument`, a caller's value (an empty one included)
+    /// wins, and the call with and without the default spelled out is ONE cache entry.
+    #[test]
+    fn a_declared_default_is_injected_and_is_one_cache_identity() {
+        use crate::describe::ArgSpec;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let join = FnEndpoint::new("join", move |inv: &Invocation<'_>| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let sep = inv.inline_str("separator")?.to_string();
+            Ok(
+                Representation::new(ReprType::new("text/plain"), format!("[{sep}]").into_bytes())
+                    .cacheable(),
+            )
+        })
+        .with_description(
+            Description::new("join")
+                .verb(Verb::Source)
+                .input(ArgSpec::new("separator").default_value(" "))
+                .input(ArgSpec::new("path").binding().optional()),
+        );
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:demo:join"), join),
+        ));
+        let root = Capability::root();
+        let read = |args: &[(&str, &str)]| {
+            let mut request = Request::new(Verb::Source, iri("urn:demo:join"));
+            for (name, value) in args {
+                request = request.with_arg(*name, ArgRef::Inline(value.as_bytes().to_vec()));
+            }
+            String::from_utf8(block_on(kernel.issue(request, &root)).unwrap().bytes).unwrap()
+        };
+        // Left out: the endpoint reads the declared default (on main: MissingArgument).
+        assert_eq!(read(&[]), "[ ]");
+        // Spelled out: the same request, served from the one entry.
+        assert_eq!(read(&[("separator", " ")]), "[ ]");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one computation"
+        );
+        let bare = Request::new(Verb::Source, iri("urn:demo:join"));
+        assert!(
+            kernel.is_cached(&bare, &root),
+            "the probe keys it as served"
+        );
+        // A caller's value always wins, an empty one included.
+        assert_eq!(read(&[("separator", ",")]), "[,]");
+        assert_eq!(read(&[("separator", "")]), "[]");
+    }
+
+    /// The kernel's own operations prefill too, and the trace names what was filled.
+    #[test]
+    fn a_kernel_operation_prefills_its_defaults_and_the_trace_says_so() {
+        let kernel = meta_kernel();
+        let rec = Rec::new();
+        kernel.set_tracer(rec.clone());
+        let root = Capability::root();
+        let bare = Request::new(Verb::Source, iri("urn:kernel:catalog"));
+        let _ = block_on(kernel.issue(bare, &root));
+        let actions = || Request::new(Verb::Source, iri("urn:kernel:actions"));
+        let spelled = actions().with_arg("as", ArgRef::Inline(b"text/plain".to_vec()));
+        let first = block_on(kernel.issue(actions(), &root)).unwrap();
+        assert!(
+            kernel.is_cached(&spelled, &root),
+            "one identity for both spellings"
+        );
+        let second = block_on(kernel.issue(spelled, &root)).unwrap();
+        assert_eq!(first.bytes, second.bytes);
+        let events = rec.events();
+        let filled: Vec<_> = events
+            .iter()
+            .filter(|e| e.target == "urn:kernel:actions")
+            .map(|e| {
+                e.notes
+                    .iter()
+                    .find(|(k, _)| k == DEFAULTED_NOTE)
+                    .map(|(_, v)| v.clone())
+            })
+            .collect();
+        assert_eq!(filled, [Some("as".to_string()), None], "{events:?}");
     }
 
     /// A tracer that keeps every event, for the denial tests below.
