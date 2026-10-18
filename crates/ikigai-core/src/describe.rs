@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::FailureClass;
 use crate::repr::{Expiry, Time};
 use crate::verb::Verb;
 
@@ -798,6 +799,96 @@ impl InputGroup {
     }
 }
 
+/// The failure classes an action says it can produce (ledger #1546, #200; the
+/// retry-authority note, section 3): what the manifold says about how a tool can fail, so
+/// an agent can plan around a rate limit and a budget owner can see whether a retry budget
+/// means anything for it.
+///
+/// **What it is NOT for: runtime decisions.** An overlay decides from the error it
+/// RECEIVED ([`Error::class`](crate::Error::class)), never from a declaration, and the
+/// kernel never rewrites an error to fit one: it only notes a mismatch on the trace
+/// ([`UNDECLARED_FAILURE_NOTE`](crate::UNDECLARED_FAILURE_NOTE)). So every runtime path is
+/// unchanged for the many actions that state nothing.
+///
+/// **Implied classes need no declaration**: [`Permanent`](FailureClass::Permanent) for
+/// every action (the kernel's own unresolved, missing-argument, invalid-argument and
+/// depth refusals can reach any of them), and [`Denied`](FailureClass::Denied) for an
+/// action whose `requires` is non-empty. See [`ActionSpec::admits_failure`].
+///
+/// Serialized as the list of class words, and omitted when unstated, so the JSON contract
+/// of every action that states nothing is unchanged:
+///
+/// ```
+/// use ikigai_core::{ActionSpec, FailureClass, Failures, Verb};
+///
+/// let quiet = ActionSpec::new(Verb::Source);
+/// assert_eq!(quiet.failures, Failures::Unstated);
+/// assert!(serde_json::to_value(&quiet).unwrap().get("failures").is_none());
+///
+/// let limited = ActionSpec::new(Verb::Source)
+///     .fails(FailureClass::RetryAfter)
+///     .fails(FailureClass::Transient);
+/// let json = serde_json::to_value(&limited).unwrap();
+/// assert_eq!(json["failures"], serde_json::json!(["retry-after", "transient"]));
+/// let back: ActionSpec = serde_json::from_value(json).unwrap();
+/// assert_eq!(back, limited);
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Failures {
+    /// Nothing said: the default, and every action written before 0.1.108.
+    #[default]
+    Unstated,
+    /// Exactly these classes, plus the implied ones. An empty list says "only the implied
+    /// ones".
+    Only(Vec<FailureClass>),
+}
+
+impl Failures {
+    /// Whether nothing was said (the serde skip test).
+    pub fn is_unstated(&self) -> bool {
+        matches!(self, Failures::Unstated)
+    }
+
+    /// The declared classes, in declaration order; `None` when unstated.
+    pub fn classes(&self) -> Option<&[FailureClass]> {
+        match self {
+            Failures::Unstated => None,
+            Failures::Only(classes) => Some(classes),
+        }
+    }
+
+    /// Add `class` to the declaration (an unstated one becomes `Only([class])`); a class
+    /// already declared is not repeated.
+    fn add(&mut self, class: FailureClass) {
+        match self {
+            Failures::Unstated => *self = Failures::Only(vec![class]),
+            Failures::Only(classes) => {
+                if !classes.contains(&class) {
+                    classes.push(class);
+                }
+            }
+        }
+    }
+}
+
+impl Serialize for Failures {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.classes().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Failures {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(
+            match Option::<Vec<FailureClass>>::deserialize(deserializer)? {
+                None => Failures::Unstated,
+                Some(classes) => Failures::Only(classes),
+            },
+        )
+    }
+}
+
 /// One verb's contract on an endpoint: the inputs it reads, the outputs it can produce,
 /// and the capability scopes invoking it requires. The **action** — an (endpoint, verb)
 /// pair — is the unit of selection: a calendar endpoint's `Source` (read, under a read
@@ -854,6 +945,11 @@ pub struct ActionSpec {
     /// see [`OutputFrom`]. Omitted from serialized output when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_from: Option<OutputFrom>,
+    /// The failure classes this verb can produce beyond the implied ones (ledger #1546):
+    /// see [`Failures`]. Omitted from serialized output when unstated, and an action that
+    /// states nothing keeps its contract IRI.
+    #[serde(default, skip_serializing_if = "Failures::is_unstated")]
+    pub failures: Failures,
 }
 
 impl ActionSpec {
@@ -868,6 +964,7 @@ impl ActionSpec {
             groups: Vec::new(),
             arguments: Arguments::Closed,
             output_from: None,
+            failures: Failures::Unstated,
         }
     }
 
@@ -875,6 +972,48 @@ impl ActionSpec {
     pub fn summary(mut self, summary: impl Into<String>) -> Self {
         self.summary = summary.into();
         self
+    }
+
+    /// Declare a failure class this verb can produce (builder): see [`Failures`]. The first
+    /// call turns an unstated declaration into `Only([class])`; each later one adds a
+    /// class. Declaring an implied class ([`Permanent`](FailureClass::Permanent), or
+    /// [`Denied`](FailureClass::Denied) beside a `requires`) is allowed and changes the
+    /// contract's digest, though not what it admits.
+    pub fn fails(mut self, class: FailureClass) -> Self {
+        self.failures.add(class);
+        self
+    }
+
+    /// Whether this action's declaration admits an error of `class`: `None` when it states
+    /// no failure classes (nothing to compare against), else `Some(true)` exactly when the
+    /// class is declared or implied ([`Permanent`](FailureClass::Permanent) always,
+    /// [`Denied`](FailureClass::Denied) when `requires` is non-empty). The ONE predicate
+    /// the kernel's [`UNDECLARED_FAILURE_NOTE`](crate::UNDECLARED_FAILURE_NOTE) and a
+    /// conformance check read.
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, FailureClass, Verb};
+    ///
+    /// let fetch = ActionSpec::new(Verb::Source)
+    ///     .requires("urn:cap:net:*")
+    ///     .fails(FailureClass::RetryAfter);
+    /// assert_eq!(fetch.admits_failure(FailureClass::RetryAfter), Some(true));
+    /// assert_eq!(fetch.admits_failure(FailureClass::Permanent), Some(true)); // implied
+    /// assert_eq!(fetch.admits_failure(FailureClass::Denied), Some(true)); // it requires a scope
+    /// assert_eq!(fetch.admits_failure(FailureClass::Unknown), Some(false));
+    /// // An action that states nothing admits nothing and refuses nothing.
+    /// assert_eq!(ActionSpec::new(Verb::Source).admits_failure(FailureClass::Unknown), None);
+    /// // Without a `requires`, a denial is not implied.
+    /// let open = ActionSpec::new(Verb::Source).fails(FailureClass::Transient);
+    /// assert_eq!(open.admits_failure(FailureClass::Denied), Some(false));
+    /// ```
+    pub fn admits_failure(&self, class: FailureClass) -> Option<bool> {
+        let declared = self.failures.classes()?;
+        Some(
+            class == FailureClass::Permanent
+                || (class == FailureClass::Denied && !self.requires.is_empty())
+                || declared.contains(&class),
+        )
     }
 
     /// Declare an input (builder).
@@ -1094,6 +1233,12 @@ pub struct Description {
     /// #45): see [`OutputFrom`]. Omitted from serialized output when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_from: Option<OutputFrom>,
+    /// The failure classes the flat form can produce beyond the implied ones (ledger
+    /// #1546), for every verb this flat form stands for: see [`Failures`]. Set with
+    /// [`fails`](Self::fails), so a single-verb endpoint declares without moving to an
+    /// explicit [`ActionSpec`]. Omitted from serialized output when unstated.
+    #[serde(default, skip_serializing_if = "Failures::is_unstated")]
+    pub failures: Failures,
     /// How long a kernel may keep what it derives from this description before it calls
     /// `describe()` again — see [`ContractCaching`]. Defaults to
     /// [`UntilRebind`](ContractCaching::UntilRebind), a static contract. Set it with
@@ -1126,6 +1271,7 @@ impl PartialEq for Description {
             groups,
             arguments,
             output_from,
+            failures,
             contract_caching: _,
         } = self;
         *id == other.id
@@ -1140,6 +1286,7 @@ impl PartialEq for Description {
             && *groups == other.groups
             && *arguments == other.arguments
             && *output_from == other.output_from
+            && *failures == other.failures
     }
 }
 
@@ -1423,6 +1570,28 @@ impl Description {
         self
     }
 
+    /// Declare a failure class the flat form can produce (builder): see [`Failures`] and
+    /// [`ActionSpec::fails`]. Like the flat `requires`, it applies to every verb with no
+    /// explicit [`ActionSpec`]; an explicit spec REPLACES it for its verb.
+    ///
+    /// ```
+    /// use ikigai_core::{Description, FailureClass, Verb};
+    ///
+    /// let fetch = Description::new("fetch")
+    ///     .verb(Verb::Source)
+    ///     .fails(FailureClass::RetryAfter)
+    ///     .fails(FailureClass::Transient);
+    /// let source = &fetch.action_specs()[0];
+    /// assert_eq!(
+    ///     source.failures.classes(),
+    ///     Some(&[FailureClass::RetryAfter, FailureClass::Transient][..])
+    /// );
+    /// ```
+    pub fn fails(mut self, class: FailureClass) -> Self {
+        self.failures.add(class);
+        self
+    }
+
     /// Declare a per-verb contract (builder). The verb is added to
     /// [`verbs`](Self::verbs) if not already declared.
     pub fn action(mut self, action: ActionSpec) -> Self {
@@ -1457,6 +1626,7 @@ impl Description {
                         groups: self.groups.clone(),
                         arguments: self.arguments.clone(),
                         output_from: self.output_from.clone(),
+                        failures: self.failures.clone(),
                     })
             })
             .collect()

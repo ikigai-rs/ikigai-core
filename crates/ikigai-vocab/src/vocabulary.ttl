@@ -265,6 +265,43 @@ ik:requires a rdf:Property ;
     rdfs:label "requires" ;
     rdfs:comment "A capability scope the subject requires to be invoked — an endpoint, one of its ik:Action nodes, or an ik:Process (the union over its steps, which the plan validator checks before any step runs). A capability IRI such as urn:cap:personal:calendar:write, or the wildcard form urn:cap:net:* (\"holds some grant under this prefix\"). Declared = enforced: the kernel refuses a dispatch whose capability does not satisfy it (ikigai-core 0.1.49+), selection projects a capability-scoped catalog from it, and urn:kernel:validate pre-flights against it — one predicate, three uses. A legacy descriptive label (\"cap:net\") is still emitted, as a literal; it joins nothing." .
 
+ik:mayFail a rdf:Property ;
+    rdfs:range ik:FailureClass ;
+    rdfs:label "mayFail" ;
+    rdfs:comment "A failure class the subject says it can produce beyond the implied ones (repeated per class) — on an endpoint (its flat form), one of its ik:Action nodes, or an ik:Process (the union over its steps, as ik:requires is). Implied, so never needed: ik:PermanentFailure for every action, and ik:DeniedFailure for one that declares ik:requires. Absent means the subject states nothing, which is not the same as stating that it fails only in the implied ways; an action that states nothing keeps its content-addressed contract IRI. For the manifold and for conformance, never a runtime decision: a retry overlay decides from the class of the error it received, and the kernel only notes a mismatch on the trace (undeclared-failure). No domain, for the reason ik:requires has none (ikigai-core 0.1.108, ledger #1546)." .
+
+ik:FailureClass a rdfs:Class ;
+    rdfs:label "FailureClass" ;
+    rdfs:comment "Who may repeat a failure, and when: one of seven closed classes, each a retry rule. An error's class is a pure function of its kind (ikigai_core::Error::class). The value of ik:mayFail." .
+
+ik:TransientFailure a ik:FailureClass , owl:NamedIndividual ;
+    rdfs:label "transient" ;
+    rdfs:comment "The same request may succeed now (a timeout waiting on something else, an unavailable dependency). Repeated by an overlay holding retry budget, for an idempotent verb." .
+
+ik:RetryAfterFailure a ik:FailureClass , owl:NamedIndividual ;
+    rdfs:label "retry-after" ;
+    rdfs:comment "The same request may succeed, not before a stated time (a rate limit, a saturated store that knows when a slot frees). Repeated by an overlay holding budget AND time, when the delay fits its deadline; otherwise by the caller. At an HTTP edge, 429 with Retry-After." .
+
+ik:OverBudgetFailure a ik:FailureClass , owl:NamedIndividual ;
+    rdfs:label "over-budget" ;
+    rdfs:comment "The input exceeds a bound someone holds, and under the same bound it costs the same and fails the same (a query past its time budget, a decompression past its size bound, fuel run out). Repeated by nobody in the chain: only a holder of a larger bound, with a new request." .
+
+ik:DeniedFailure a ik:FailureClass , owl:NamedIndividual ;
+    rdfs:label "denied" ;
+    rdfs:comment "The caller's capability does not cover it. Repeated by nobody: a different authority is a different request. Implied for an action that declares ik:requires." .
+
+ik:RefusedFailure a ik:FailureClass , owl:NamedIndividual ;
+    rdfs:label "refused" ;
+    rdfs:comment "A remote authority refused the credential the endpoint presented (an origin's 401 or 403). Repeated only by the credential's holder, normally the endpoint itself, once, after renewing it; a second refusal is terminal." .
+
+ik:PermanentFailure a ik:FailureClass , owl:NamedIndividual ;
+    rdfs:label "permanent" ;
+    rdfs:comment "The request or the current state is wrong (not found, a conflict, a bad argument, an unsupported verb). Repeated by nobody: a change of request or state clears it. Implied for every action." .
+
+ik:UnknownFailure a ik:FailureClass , owl:NamedIndividual ;
+    rdfs:label "unknown" ;
+    rdfs:comment "The endpoint could not say (an opaque endpoint error). Repeated by nobody automatically; the class exists so a declaration can say honestly that an action can fail opaquely." .
+
 # ---- topology (urn:kernel:topology — the arrangement as a resource) ----------
 # The resolution arrangement is itself a resource (the formalism's §8.2: doors,
 # corridors and the rules of resolution are resources among resources).

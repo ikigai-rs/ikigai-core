@@ -22,6 +22,7 @@
     "Endpoint": "ik:Endpoint",
     "EndpointSpace": "ik:EndpointSpace",
     "Explanation": "ik:Explanation",
+    "FailureClass": "ik:FailureClass",
     "Fallback": "ik:Fallback",
     "File": "ik:File",
     "Finding": "ik:Finding",
@@ -290,6 +291,10 @@
     "maxHops": {
       "@id": "ik:maxHops",
       "@type": "xsd:integer"
+    },
+    "mayFail": {
+      "@id": "ik:mayFail",
+      "@type": "@id"
     },
     "mediaType": "ik:mediaType",
     "member": {

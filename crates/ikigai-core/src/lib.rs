@@ -161,7 +161,8 @@ pub use declare::{
 };
 pub use describe::{
     ActionSpec, ArgSpec, Arguments, ContractCaching, DefaultValue, Description, EndpointKind,
-    GroupKind, InputGroup, InputSource, ListSeparator, OutputFrom, Transreption, ValueNote,
+    Failures, GroupKind, InputGroup, InputSource, ListSeparator, OutputFrom, Transreption,
+    ValueNote,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use endpoint::SyncIssuer;
@@ -177,6 +178,7 @@ pub use kernel::{
     ALIAS_MISS_NOTE, ALIAS_NOTE, ANSWERED_NOTE, BINDINGS_THREAD, DEFAULTED_NOTE, DEFAULT_MAX_DEPTH,
     DENIED_NOTE, DEPTH_NOTE, FAILED_NOTE, LEVEL_NOTE, LIMITED_NOTE, META_LOSSY_ARG,
     SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE, SEALED_NOTE, UNCACHED_NOTE,
+    UNDECLARED_FAILURE_NOTE,
 };
 pub use listen::{
     CutBatch, CutEvent, CutListener, ListenSpec, CAP_LISTEN, INVALIDATED_NAMED, LISTEN_CAPACITY,

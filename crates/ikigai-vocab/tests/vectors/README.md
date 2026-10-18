@@ -78,6 +78,16 @@ encodings; then the argument set (closed 0, open 1 + summary, envelope 2 + carri
 `core/argspec-shape` door pin it, and `to-upper` is the renamed builtin's id. Every
 variable-length field is length-prefixed as in v1 (`ikigai_core`'s `contract.rs`, `Canon`).
 
+**Stated failure classes** (ledger #1546, ikigai-core 0.1.108): an action's `failures` (a
+list of class words: `transient`, `retry-after`, `over-budget`, `denied`, `refused`,
+`permanent`, `unknown`) puts it in the v2 form, and is fed LAST and only when present: the
+byte `1`, then the words as a set of items (each length-prefixed, sorted by encoding,
+deduplicated). An absent `failures` feeds nothing, so every contract that states none keeps
+its digest, v1 or v2; an empty list (`[]`, "only the implied classes") is stated and moves
+it. The `failures/*` contracts pin that, declaration order included, and the
+`core/failure-classes` door pins the `ik:mayFail` triples, flat and per verb, each a
+vocabulary individual (`ik:RetryAfterFailure`; `ikigai_vocab::failure_class_iri`).
+
 ## Lenient in, canonical out
 
 Postel's law (ledger #1107, decided 2026-10-10). A percent escape is `%` and exactly two
