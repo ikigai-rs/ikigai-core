@@ -248,6 +248,48 @@ fn source_name(source: InputSource) -> &'static str {
     }
 }
 
+/// The vocabulary individual for a failure class (ledger #1546): `ik:{Word}Failure`, the
+/// class's [word](ikigai_core::FailureClass::word) in UpperCamelCase, as a full IRI. The
+/// value of `ik:mayFail`; one function, so every emitter names a class the same way.
+///
+/// ```
+/// use ikigai_core::FailureClass;
+/// use ikigai_vocab::failure_class_iri;
+///
+/// assert_eq!(
+///     failure_class_iri(FailureClass::RetryAfter),
+///     "https://ikigai-rs.dev/ns#RetryAfterFailure"
+/// );
+/// assert_eq!(
+///     failure_class_iri(FailureClass::Transient),
+///     "https://ikigai-rs.dev/ns#TransientFailure"
+/// );
+/// ```
+pub fn failure_class_iri(class: ikigai_core::FailureClass) -> String {
+    format!("{NS}{}", failure_class_local(class))
+}
+
+/// `RetryAfterFailure` for `retry-after`: derived from the word rather than matched, so a
+/// class added to core has a name here the day it exists (a test checks every class has a
+/// term in the vocabulary).
+fn failure_class_local(class: ikigai_core::FailureClass) -> String {
+    let mut local = String::new();
+    for part in class.word().split('-') {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            local.extend(first.to_uppercase());
+            local.push_str(chars.as_str());
+        }
+    }
+    local.push_str("Failure");
+    local
+}
+
+/// `ik:mayFail`'s object in this module's Turtle: the prefixed name.
+fn failure_class_term(class: ikigai_core::FailureClass) -> String {
+    format!("ik:{}", failure_class_local(class))
+}
+
 /// A capability scope is an IRI when it looks like one (`urn:…`, `http(s)://…`) — emitted
 /// as a resource so selection can join on it — else a legacy descriptive label (literal).
 fn cap_term(scope: &str) -> String {
@@ -500,6 +542,16 @@ pub fn to_turtle(description: &Description) -> String {
             .join(", ");
         predicates.push(format!("ik:requires {reqs}"));
     }
+    if let Some(classes) = description.failures.classes() {
+        if !classes.is_empty() {
+            let terms = classes
+                .iter()
+                .map(|c| failure_class_term(*c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            predicates.push(format!("ik:mayFail {terms}"));
+        }
+    }
     if let Some(t) = description.transreption() {
         if !t.from.is_empty() {
             let from = t.from.iter().map(|m| lit(m)).collect::<Vec<_>>().join(", ");
@@ -565,6 +617,9 @@ pub fn to_turtle(description: &Description) -> String {
         }
         for cap in &action.requires {
             preds.push(format!("ik:requires {}", cap_term(cap)));
+        }
+        for class in action.failures.classes().unwrap_or_default() {
+            preds.push(format!("ik:mayFail {}", failure_class_term(*class)));
         }
         for input in &action.inputs {
             let name = name_fragment(&input.name);
@@ -881,6 +936,76 @@ mod tests {
         assert_eq!(ttl.matches("ik:class").count(), 2, "{ttl}");
         // No `requires` triple when none declared.
         assert!(!to_turtle(&sample()).contains("ik:requires"));
+    }
+
+    /// Ledger #1546: stated failure classes are `ik:mayFail` triples on the contract node
+    /// (and on the endpoint node for the flat form), naming the vocabulary's individuals;
+    /// an unstated declaration emits nothing, and "only the implied ones" (an empty list)
+    /// emits nothing either, though its contract IRI differs.
+    #[test]
+    fn projects_declared_failure_classes() {
+        use ikigai_core::{ActionSpec, FailureClass, Failures};
+        let flat = Description::new("fetch")
+            .verb(Verb::Source)
+            .fails(FailureClass::RetryAfter)
+            .fails(FailureClass::Transient);
+        let ttl = to_turtle(&flat);
+        let contract = flat.action_specs()[0].contract_iri("fetch");
+        let triples: Vec<(String, String, String)> = oxttl::TurtleParser::new()
+            .for_reader(ttl.as_bytes())
+            .map(|t| {
+                let t = t.expect("parses");
+                (
+                    t.subject.to_string(),
+                    t.predicate.to_string(),
+                    t.object.to_string(),
+                )
+            })
+            .collect();
+        let may_fail = |subject: &str| -> Vec<String> {
+            triples
+                .iter()
+                .filter(|(s, p, _)| s == subject && p == "<https://ikigai-rs.dev/ns#mayFail>")
+                .map(|(_, _, o)| o.clone())
+                .collect()
+        };
+        let expected = [
+            "<https://ikigai-rs.dev/ns#RetryAfterFailure>".to_string(),
+            "<https://ikigai-rs.dev/ns#TransientFailure>".to_string(),
+        ];
+        assert_eq!(may_fail(&format!("<{contract}>")), expected, "{ttl}");
+        assert_eq!(may_fail("<urn:ikigai:endpoint:fetch>"), expected, "{ttl}");
+
+        // Per verb: the explicit action carries its own, the endpoint node none.
+        let explicit = Description::new("cal")
+            .action(ActionSpec::new(Verb::Sink).fails(FailureClass::Refused))
+            .action(ActionSpec::new(Verb::Source));
+        let ttl = to_turtle(&explicit);
+        assert_eq!(ttl.matches("ik:mayFail").count(), 1, "{ttl}");
+        assert!(ttl.contains("ik:mayFail ik:RefusedFailure"), "{ttl}");
+
+        // Unstated, and stated-empty, emit no triple.
+        assert!(!to_turtle(&sample()).contains("ik:mayFail"));
+        let mut empty = Description::new("fetch").verb(Verb::Source);
+        empty.failures = Failures::Only(vec![]);
+        assert!(!to_turtle(&empty).contains("ik:mayFail"));
+    }
+
+    /// Every failure class core knows has its individual in the vocabulary, typed
+    /// ik:FailureClass, so `failure_class_iri` never names a term the vocabulary lacks.
+    #[test]
+    fn every_failure_class_is_a_vocabulary_individual() {
+        for class in ikigai_core::FailureClass::ALL {
+            let local = failure_class_local(class);
+            let declaration = format!("ik:{local} a ik:FailureClass , owl:NamedIndividual ;");
+            assert!(VOCABULARY.contains(&declaration), "{class}: {declaration}");
+            let label = format!("rdfs:label \"{}\"", class.word());
+            let at = VOCABULARY.find(&declaration).unwrap();
+            assert!(
+                VOCABULARY[at..].lines().nth(1).unwrap().contains(&label),
+                "{class}: labeled with its word"
+            );
+        }
     }
 
     /// Ledger #15: a group and a dependency are triples on the contract, skolemized under

@@ -1026,6 +1026,43 @@
           }
         ]
       }
+    },
+    {
+      "name": "core/failure-classes",
+      "pattern": "urn:core:failure-classes",
+      "description": {
+        "id": "failure-classes",
+        "title": "",
+        "summary": "declared failure classes, flat and per verb (ledger #1546)",
+        "verbs": [
+          "Source",
+          "Sink",
+          "Meta"
+        ],
+        "inputs": [],
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:net:*"
+        ],
+        "failures": [
+          "retry-after",
+          "transient"
+        ],
+        "actions": [
+          {
+            "verb": "Sink",
+            "requires": [
+              "urn:cap:net:write"
+            ],
+            "failures": [
+              "refused",
+              "over-budget"
+            ]
+          }
+        ]
+      }
     }
   ],
   "contracts": [
@@ -1530,6 +1567,69 @@
           "application/octet-stream"
         ],
         "output_from": "origin"
+      }
+    },
+    {
+      "name": "failures/stated",
+      "id": "httpGet",
+      "action": {
+        "verb": "Source",
+        "outputs": [
+          "application/octet-stream"
+        ],
+        "requires": [
+          "urn:cap:net:*"
+        ],
+        "failures": [
+          "retry-after",
+          "transient",
+          "refused"
+        ]
+      }
+    },
+    {
+      "name": "failures/stated-in-another-order",
+      "id": "httpGet",
+      "action": {
+        "verb": "Source",
+        "outputs": [
+          "application/octet-stream"
+        ],
+        "requires": [
+          "urn:cap:net:*"
+        ],
+        "failures": [
+          "refused",
+          "transient",
+          "retry-after"
+        ]
+      }
+    },
+    {
+      "name": "failures/only-the-implied",
+      "id": "httpGet",
+      "action": {
+        "verb": "Source",
+        "outputs": [
+          "application/octet-stream"
+        ],
+        "requires": [
+          "urn:cap:net:*"
+        ],
+        "failures": []
+      }
+    },
+    {
+      "name": "failures/unstated",
+      "id": "httpGet",
+      "action": {
+        "verb": "Source",
+        "outputs": [
+          "application/octet-stream"
+        ],
+        "requires": [
+          "urn:cap:net:*"
+        ]
       }
     }
   ],

@@ -117,7 +117,8 @@ impl Canon {
 /// Whether an action uses any construct the v1 form cannot carry, so its digest is taken
 /// under [`CONTRACT_FORM_V2`].
 fn uses_v2(spec: &ActionSpec) -> bool {
-    !spec.groups.is_empty()
+    !spec.failures.is_unstated()
+        || !spec.groups.is_empty()
         || !spec.arguments.is_closed()
         || spec.output_from.is_some()
         || spec.inputs.iter().any(|i| {
@@ -489,6 +490,25 @@ impl ActionSpec {
     /// keeps its v1 digest, so no existing contract IRI moves and a face that predates v2
     /// agrees on every contract it can express.
     ///
+    /// **Stated failure classes** (ledger #1546, 0.1.108) put a contract in the v2 form too,
+    /// and are appended LAST and only when stated: the byte `1`, then the class
+    /// [words](crate::FailureClass::word) as a set of items (sorted by encoding,
+    /// deduplicated). So every contract that states none, v1 or v2, keeps its digest:
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, FailureClass, Failures, Verb};
+    ///
+    /// let quiet = ActionSpec::new(Verb::Source).requires("urn:cap:x");
+    /// let mut stated = quiet.clone();
+    /// stated.failures = Failures::Only(vec![]);
+    /// // Stating even "only the implied ones" is a different contract…
+    /// assert_ne!(quiet.contract_id("fetch"), stated.contract_id("fetch"));
+    /// // …and the order classes were declared in is not part of it.
+    /// let ab = quiet.clone().fails(FailureClass::RetryAfter).fails(FailureClass::Transient);
+    /// let ba = quiet.clone().fails(FailureClass::Transient).fails(FailureClass::RetryAfter);
+    /// assert_eq!(ab.contract_id("fetch"), ba.contract_id("fetch"));
+    /// ```
+    ///
     /// The endpoint id is part of the contract: two endpoints with different ids and
     /// identical specs are two tools, and the contract node must say which one it
     /// belongs to.
@@ -563,6 +583,21 @@ impl ActionSpec {
                 feed_str(&mut h, name);
             }
             Some(crate::describe::OutputFrom::Origin) => feed_u8(&mut h, 2),
+        }
+        // The failure classes (ledger #1546) are fed ONLY when stated, after everything
+        // else: an action that states none keeps the v2 digest it had before 0.1.108. The
+        // stream stays unambiguous because every field before this one is self-delimiting,
+        // so no unstated stream is a prefix-extension of another contract's stated one.
+        if let Some(classes) = self.failures.classes() {
+            feed_u8(&mut h, 1);
+            Canon::feed_items(
+                &mut h,
+                classes.iter().map(|class| {
+                    let mut c = Canon::default();
+                    c.str(class.word());
+                    c
+                }),
+            );
         }
         ContentId::from_hasher(h)
     }

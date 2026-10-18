@@ -254,6 +254,50 @@ pub const DEPTH_NOTE: &str = "depth";
 /// a failed `urn:kernel:*` operation.
 pub const FAILED_NOTE: &str = "failed";
 
+/// The trace-note key for a failure whose [class](crate::Error::class) the failing
+/// action's declaration does not admit (ledger #1546, decision 6): `("undeclared-failure",
+/// class word)`, beside the event's [`FAILED_NOTE`].
+///
+/// The kernel is a SENSOR here, never an enforcer: the error is returned exactly as the
+/// endpoint produced it, because an error rewritten to fit a declaration loses what its
+/// caller needs to act on. Noted only while the resolution is traced, only for an action
+/// that STATES its failure classes (an unstated one has nothing to compare against), and
+/// by the one predicate a conformance check reads,
+/// [`ActionSpec::admits_failure`](crate::ActionSpec::admits_failure).
+///
+/// ```
+/// use std::sync::{Arc, Mutex};
+/// use futures::executor::block_on;
+/// use ikigai_core::{
+///     Capability, Description, EndpointSpace, Error, Exact, FailureClass, FnEndpoint, Iri,
+///     Kernel, Request, TraceEvent, Tracer, Verb, FAILED_NOTE, UNDECLARED_FAILURE_NOTE,
+/// };
+///
+/// struct Collect(Mutex<Vec<TraceEvent>>);
+/// impl Tracer for Collect {
+///     fn record(&self, event: TraceEvent) {
+///         self.0.lock().unwrap().push(event);
+///     }
+/// }
+///
+/// // It says it can be rate-limited, and fails opaquely instead.
+/// let fetch = FnEndpoint::new("fetch", |_| Err(Error::Endpoint("boom".into())))
+///     .with_description(Description::new("fetch").verb(Verb::Source).fails(FailureClass::RetryAfter));
+/// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:fetch"), fetch)));
+/// let tracer = Arc::new(Collect(Mutex::new(Vec::new())));
+/// let read = Request::new(Verb::Source, Iri::parse("urn:fetch").unwrap());
+/// let err = block_on(kernel.issue_traced(read, &Capability::root(), tracer.clone())).unwrap_err();
+///
+/// // The error is the endpoint's, untouched…
+/// assert_eq!(err, Error::Endpoint("boom".into()));
+/// // …and the trace says the declaration did not admit it.
+/// let events = tracer.0.lock().unwrap();
+/// let notes = &events[0].notes;
+/// assert!(notes.contains(&(FAILED_NOTE.to_string(), "endpoint".to_string())));
+/// assert!(notes.contains(&(UNDECLARED_FAILURE_NOTE.to_string(), "unknown".to_string())));
+/// ```
+pub const UNDECLARED_FAILURE_NOTE: &str = "undeclared-failure";
+
 /// The nesting budget a [`Kernel`] starts with: a sub-request more than this many
 /// levels below the host's own request is refused (see
 /// [`Kernel::with_max_depth`]). NetKernel ships 40 and defaults to 32 for a counter
@@ -854,6 +898,25 @@ impl Floor {
 /// What the floor memo answers for one resolution: the first scope the capability
 /// lacks, the by-value defaults the request leaves out, and the binding defaults the
 /// matched name leaves out.
+/// The class of `error` when the action `description` declares for `verb` STATES its
+/// failure classes and does not admit it ([`ActionSpec::admits_failure`]); `None` when it
+/// admits it, states nothing, or the verb has no action (Meta, an undeclared verb).
+fn undeclared_failure(
+    description: &Description,
+    verb: Verb,
+    error: &Error,
+) -> Option<crate::FailureClass> {
+    let class = error.class();
+    let action = description
+        .action_specs()
+        .into_iter()
+        .find(|action| action.verb == verb)?;
+    match action.admits_failure(class) {
+        Some(false) => Some(class),
+        Some(true) | None => None,
+    }
+}
+
 struct Admission {
     lacking: Option<String>,
     defaults: Vec<(String, String)>,
@@ -3329,6 +3392,17 @@ impl Kernel {
                     }
                     if trace.is_some() {
                         let mut notes = vec![(FAILED_NOTE.to_string(), error.kind().to_string())];
+                        // A sensor, not an enforcer (ledger #1546, decision 6): the error
+                        // below is returned as it came. Read only while traced, and only on
+                        // a failure, so `describe()` costs nothing on the paths that matter.
+                        if let Some(class) =
+                            undeclared_failure(&resolved.endpoint.describe(), request.verb, &error)
+                        {
+                            notes.push((
+                                UNDECLARED_FAILURE_NOTE.to_string(),
+                                class.word().to_string(),
+                            ));
+                        }
                         notes.extend(provenance_notes(
                             &trace, alias, answered, levels, &defaulted,
                         ));
