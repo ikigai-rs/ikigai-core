@@ -189,7 +189,7 @@ fn both_misses_are_cached_on_the_attached_thread() {
 /// thread on a refusal would be a promise nobody keeps.
 #[test]
 fn every_other_error_stays_uncached_whatever_thread_is_attached() {
-    let refusals: [Case; 8] = [
+    let refusals: [Case; 12] = [
         ("denied", || Error::Denied("no".into())),
         ("timeout", || Error::Timeout("slow".into())),
         ("unavailable", || Error::Unavailable("down".into())),
@@ -203,6 +203,19 @@ fn every_other_error_stays_uncached_whatever_thread_is_attached() {
         ("depth-exceeded", || Error::DepthExceeded {
             depth: 64,
             target: Iri::parse(VERSION).unwrap(),
+        }),
+        // Ledger #1546: the four classes of refusal added in 0.1.108 are refusals too.
+        ("retry-after", || Error::RetryAfter {
+            delay: Some(std::time::Duration::from_secs(1)),
+            detail: "limited".into(),
+        }),
+        ("over-budget", || Error::OverBudget {
+            detail: "past its budget".into(),
+        }),
+        ("refused", || Error::Refused("401".into())),
+        ("unsupported", || Error::Unsupported {
+            verb: None,
+            detail: "no clock".into(),
         }),
     ];
     for (kind, error) in refusals {
