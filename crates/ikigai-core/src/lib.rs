@@ -148,7 +148,7 @@ pub use capability::{
     is_deny_scope, principal_scope, Capability, PrincipalError, MAX_PRINCIPAL_LEN,
     PRINCIPAL_SCOPE_PREFIX,
 };
-pub use check::{ProposedArgs, Violation, ViolationKind, ViolationPath};
+pub use check::{ProposedArgs, Violation, ViolationKind, ViolationPath, GIVEN_TWICE};
 pub use confine::Confine;
 pub use content::{ContentId, ContentIdError};
 pub use contract::{
@@ -161,7 +161,7 @@ pub use declare::{
 };
 pub use describe::{
     ActionSpec, ArgSpec, ContractCaching, Description, EndpointKind, GroupKind, InputGroup,
-    InputSource, Transreption,
+    InputSource, ListSeparator, Transreption,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use endpoint::SyncIssuer;

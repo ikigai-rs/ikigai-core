@@ -24,8 +24,48 @@ pub struct Request {
     // No `skip_serializing_if`: it would omit an empty map, which a
     // non-self-describing binary codec (postcard, used by the IPC wire) can't
     // round-trip. `default` still fills a missing field in self-describing formats.
-    #[serde(default)]
+    //
+    // Decoded by `unique_args`, never serde's map impl, which keeps the LAST of a repeated
+    // key: a peer that hand-builds bytes with `graph` twice was narrowed to one graph with
+    // no error (ledger #1731). No conforming encoder can emit a repeat (a map has one
+    // value per key), so this changes no valid encoding: a malformed one is refused.
+    #[serde(default, deserialize_with = "unique_args")]
     pub args: BTreeMap<String, ArgRef>,
+}
+
+/// Decode a request's argument map, refusing a repeated name rather than keeping the last
+/// value of it (ledger #1731). The refusal reads as every face's: `invalid argument
+/// `{name}`: given twice; …` ([`GIVEN_TWICE`](crate::GIVEN_TWICE)).
+fn unique_args<'de, D>(deserializer: D) -> Result<BTreeMap<String, ArgRef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Unique;
+    impl<'de> serde::de::Visitor<'de> for Unique {
+        type Value = BTreeMap<String, ArgRef>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a map of argument names to values, each name once")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut args = BTreeMap::new();
+            while let Some((name, value)) = map.next_entry::<String, ArgRef>()? {
+                if args.contains_key(&name) {
+                    return Err(serde::de::Error::custom(format!(
+                        "invalid argument `{name}`: {}",
+                        crate::GIVEN_TWICE
+                    )));
+                }
+                args.insert(name, value);
+            }
+            Ok(args)
+        }
+    }
+    deserializer.deserialize_map(Unique)
 }
 
 impl Request {
@@ -183,6 +223,42 @@ mod tests {
                 assert_ne!(ids[i], ids[j], "ids {i} and {j} collided");
             }
         }
+    }
+
+    /// Ledger #1731: serde's map impl keeps the LAST of a repeated key, so a hand-built
+    /// request carrying `graph` twice was silently narrowed to one graph. Refused now, in a
+    /// self-describing format and on the postcard wire alike.
+    #[test]
+    fn a_repeated_argument_name_is_refused_at_decode() {
+        let json = r#"{"verb":"Source","target":"urn:r:1","args":{"graph":{"Inline":[65]},"graph":{"Inline":[66]}}}"#;
+        let err = serde_json::from_str::<Request>(json).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid argument `graph`: given twice"),
+            "{err}"
+        );
+
+        // The postcard wire: encode a one-argument request, then splice a second entry
+        // with the same key into the map (count byte 1 → 2), as a hand-built peer could.
+        let one = Request::new(Verb::Source, iri("urn:r:1"))
+            .with_arg("graph", ArgRef::Inline(b"A".to_vec()));
+        let bytes = postcard::to_stdvec(&one).unwrap();
+        let entry =
+            postcard::to_stdvec(&("graph".to_string(), ArgRef::Inline(b"B".to_vec()))).unwrap();
+        let count_at = bytes.len() - entry.len() - 1;
+        assert_eq!(bytes[count_at], 1, "the args map count: {bytes:?}");
+        let mut doubled = bytes.clone();
+        doubled[count_at] = 2;
+        doubled.extend_from_slice(&entry);
+        assert!(postcard::from_bytes::<Request>(&bytes).is_ok());
+        let err = postcard::from_bytes::<Request>(&doubled).unwrap_err();
+        // postcard keeps only its own error kind, so the message is not carried: what is
+        // pinned is that the bytes are refused rather than narrowed.
+        let _ = err;
+        // Two distinct names still decode.
+        let two = one.with_arg("query", ArgRef::Inline(b"q".to_vec()));
+        let back: Request = postcard::from_bytes(&postcard::to_stdvec(&two).unwrap()).unwrap();
+        assert_eq!(back, two);
     }
 
     #[test]

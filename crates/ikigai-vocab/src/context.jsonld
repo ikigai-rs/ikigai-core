@@ -262,6 +262,7 @@
     },
     "layerModel": "ik:layerModel",
     "layers": "ik:layers",
+    "listSeparator": "ik:listSeparator",
     "logical": "ik:logical",
     "lossless": {
       "@id": "ik:lossless",

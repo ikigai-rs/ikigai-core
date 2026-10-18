@@ -117,7 +117,11 @@ impl Canon {
 /// Whether an action uses any construct the v1 form cannot carry, so its digest is taken
 /// under [`CONTRACT_FORM_V2`].
 fn uses_v2(spec: &ActionSpec) -> bool {
-    !spec.groups.is_empty() || spec.inputs.iter().any(|i| !i.needs.is_empty())
+    !spec.groups.is_empty()
+        || spec
+            .inputs
+            .iter()
+            .any(|i| !i.needs.is_empty() || i.list.is_some())
 }
 
 /// One input in the v2 form: v1's fields, then the input-level additions.
@@ -134,6 +138,7 @@ fn input_v2(input: &ArgSpec) -> Canon {
     c.option(input.default.as_deref());
     c.set(input.one_of.iter().map(String::as_str));
     c.set(input.needs.iter().map(String::as_str));
+    c.option(input.list.map(|l| l.word()));
     c
 }
 
@@ -439,9 +444,10 @@ impl ActionSpec {
     /// differently never share one.
     ///
     /// **Two forms, chosen by content** (ledger #1547). A contract using a construct v1
-    /// cannot carry (an input's `needs`, an [`InputGroup`](crate::InputGroup)) is hashed
-    /// under `ikigai:contract:v2` instead: the same fields, each input encoded whole with its
-    /// `needs` set appended and the inputs sorted by their encodings, then the outputs and
+    /// cannot carry (an input's `needs` or `list`, an [`InputGroup`](crate::InputGroup)) is
+    /// hashed under `ikigai:contract:v2` instead: the same fields, each input encoded whole
+    /// with its `needs` set and `list` separator appended and the inputs sorted by their
+    /// encodings, then the outputs and
     /// scopes as in v1, then the groups, each as its kind word, member set and pipe member,
     /// sorted by their encodings. A contract that uses none of them keeps its v1 digest,
     /// so no existing contract IRI moves and a face that predates v2 agrees on every
@@ -702,6 +708,24 @@ mod tests {
             ActionSpec {
                 inputs: vec![
                     ArgSpec::new("a").optional().needs(["b"]),
+                    ArgSpec::new("b").optional(),
+                ],
+                ..base.clone()
+            },
+            ActionSpec {
+                inputs: vec![
+                    ArgSpec::new("a")
+                        .optional()
+                        .list(crate::describe::ListSeparator::Comma),
+                    ArgSpec::new("b").optional(),
+                ],
+                ..base.clone()
+            },
+            ActionSpec {
+                inputs: vec![
+                    ArgSpec::new("a")
+                        .optional()
+                        .list(crate::describe::ListSeparator::Newline),
                     ArgSpec::new("b").optional(),
                 ],
                 ..base.clone()
