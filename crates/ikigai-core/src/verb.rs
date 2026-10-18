@@ -87,7 +87,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cacheability_matches_read_only() {
+    fn cacheability_matches_idempotency() {
         for v in [Verb::Source, Verb::Exists, Verb::Meta] {
             assert!(v.is_cacheable() && !v.is_mutating());
         }
