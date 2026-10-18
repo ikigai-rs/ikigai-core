@@ -207,6 +207,9 @@ fn every_process_term_appears_in_a_fixture() {
         let (_, g) = Graph::load(name);
         used.extend(used_terms(&g.0));
     }
+    // `ik:Stage` is entailed, never asserted (every step and fork is one by its subclass
+    // axiom), so no fixture names it; `tests/stages.rs` exercises it by entailment.
+    used.insert("Stage".to_string());
     let unexercised: Vec<_> = process_terms.difference(&used).collect();
     assert!(
         unexercised.is_empty(),

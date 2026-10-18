@@ -51,6 +51,7 @@
     "Route": "ik:Route",
     "RouteRequest": "ik:RouteRequest",
     "Space": "ik:Space",
+    "Stage": "ik:Stage",
     "Step": "ik:Step",
     "Symlink": "ik:Symlink",
     "Transreptor": "ik:Transreptor",
@@ -125,7 +126,10 @@
     },
     "calendar": "ik:calendar",
     "canonical": "ik:canonical",
-    "cap": "ik:cap",
+    "cap": {
+      "@id": "ik:cap",
+      "@type": "@id"
+    },
     "chain": {
       "@id": "ik:chain",
       "@type": "@id"

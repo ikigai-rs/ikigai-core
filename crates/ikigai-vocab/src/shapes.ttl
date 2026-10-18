@@ -3,7 +3,8 @@
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
 
-# SHACL shapes for the process vocabulary (ik:Process / ik:Step / ik:Argument / ik:Fork).
+# SHACL shapes for the process vocabulary (ik:Process / ik:Step / ik:Argument / ik:Fork,
+# and ik:Stage, what a step and a fork share).
 # They say formally what vocabulary.ttl says in prose, so a plan can be REFUSED before a
 # single step runs. Bundled as `ikigai_vocab::SHAPES`; served as `urn:ikigai:shapes` by a
 # later arc; exercised for real by ikigai-shacl (this crate parses them for syntax only —
@@ -71,16 +72,22 @@
     sh:nodeKind sh:IRI ;
     sh:message "ik:requires on a process is a capability IRI (legacy labels are not accepted on plans)" .
 
-# Single assignment: a name is bound at most once per plan — by a step's ik:binds or by
-# a parameter's ik:inputName, which are the same namespace (urn:plan:{id}:var:{name}).
+# Single assignment: a name is bound at most once per plan — by a step's or a fork's
+# ik:binds or by a parameter's ik:inputName, which are the same namespace
+# (urn:plan:{id}:var:{name}). A plan's forks are the ones its steps are branches of,
+# directly or through a fork that is itself a branch (ik:forkOf+); every fork has a
+# branch, and every branch chain ends at a step, so that reaches all of them. DISTINCT,
+# because two steps under one fork reach it twice.
 <urn:ikigai:shape:process:single-assignment> a sh:SPARQLConstraint ;
     sh:message "name {?value} is bound more than once in this plan (single assignment)" ;
     sh:prefixes <https://ikigai-rs.dev/ns#> ;
     sh:select """
         SELECT $this ?value WHERE {
             {
-                SELECT $this ?value (COUNT(?binder) AS ?n) WHERE {
+                SELECT $this ?value (COUNT(DISTINCT ?binder) AS ?n) WHERE {
                     { $this ik:step ?binder . ?binder ik:binds ?value }
+                    UNION
+                    { $this ik:step ?s . ?s ik:forkOf+ ?binder . ?binder ik:binds ?value }
                     UNION
                     { $this ik:input ?binder . ?binder ik:inputName ?value }
                 }
@@ -90,8 +97,9 @@
         }
     """ .
 
-# Every structural edge — a step's pipe or map upstream, a fork's upstream, the result —
-# points at a step of THIS plan or at a fork some step of this plan is a branch of.
+# Every structural edge — a step's pipe or map upstream, a fork's upstream or map
+# upstream, the result — points at a step of THIS plan or at a fork of it (one its steps
+# are branches of, directly or through forks that are branches: ik:forkOf+).
 <urn:ikigai:shape:process:local-edges> a sh:SPARQLConstraint ;
     sh:message "{?value} is not a step or fork of this plan" ;
     sh:prefixes <https://ikigai-rs.dev/ns#> ;
@@ -99,11 +107,11 @@
         SELECT $this ?value WHERE {
             { $this ik:step ?s . ?s ik:pipeFrom|ik:mapOver ?value }
             UNION
-            { $this ik:step ?s . ?s ik:forkOf ?f . ?f ik:upstream ?value }
+            { $this ik:step ?s . ?s ik:forkOf+ ?f . ?f ik:upstream|ik:mapOver ?value }
             UNION
             { $this ik:result ?value }
             FILTER NOT EXISTS { $this ik:step ?value }
-            FILTER NOT EXISTS { $this ik:step ?b . ?b ik:forkOf ?value }
+            FILTER NOT EXISTS { $this ik:step ?b . ?b ik:forkOf+ ?value }
         }
     """ .
 
@@ -121,6 +129,8 @@
             FILTER NOT EXISTS {
                 { $this ik:step ?b . ?b ik:binds ?name }
                 UNION
+                { $this ik:step ?s . ?s ik:forkOf+ ?f . ?f ik:binds ?name }
+                UNION
                 { $this ik:input ?p . ?p ik:inputName ?name }
                 FILTER (STR(?value) = CONCAT(STR($this), ":var:", ?name))
             }
@@ -128,35 +138,88 @@
     """ .
 
 # The structural half of acyclicity: no step reaches itself through pipe, map, or fork
-# edges. A cycle closed through an argument reference (ik:ref -> var -> binds) is NOT
-# caught here — see the header; the validator arc checks the whole graph.
+# edges. Every one of them points from a stage toward what feeds it (a branch's
+# ik:forkOf toward the fork whose input it takes, which is the fork's ik:upstream or
+# ik:mapOver, or, for a fork that is itself a branch, its own ik:forkOf), so a walk over
+# all five reaching the start is a real data cycle. A cycle closed through an argument
+# reference (ik:ref -> var -> binds) is NOT caught here — see the header; the validator
+# arc checks the whole graph.
 <urn:ikigai:shape:process:edge-cycle> a sh:SPARQLConstraint ;
     sh:message "step {?value} reaches itself through pipe/map/fork edges" ;
     sh:prefixes <https://ikigai-rs.dev/ns#> ;
     sh:select """
         SELECT $this ?value WHERE {
             $this ik:step ?value .
-            ?value (ik:pipeFrom|ik:mapOver|(ik:forkOf/ik:upstream))+ ?value .
+            ?value (ik:pipeFrom|ik:mapOver|ik:forkOf|ik:upstream)+ ?value .
         }
     """ .
 
 # ---- Step --------------------------------------------------------------------
 
+# ---- Stage (what a step and a fork share) -------------------------------------
+#
+# A stage may bind a name, be mapped over, be a fork's branch and carry a position in the
+# join. These property shapes and the order-with-fork constraint are listed by BOTH the
+# step and the fork shape, rather than targeting ik:Stage (SHACL's sh:targetClass follows
+# rdfs:subClassOf only when the vocabulary is in the data graph, and a plan graph alone
+# does not carry it) and rather than through an sh:node (a nested shape's violation is
+# reported as ONE sh:NodeConstraintComponent result on the outer shape, so a report would
+# lose which property broke which rule).
+
+<urn:ikigai:shape:stage:binds> a sh:PropertyShape ;
+    sh:path ik:binds ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:string ;
+    sh:pattern "^[A-Za-z_][A-Za-z0-9_-]*$" ;
+    sh:message "a stage binds at most one name, an identifier (letters, digits, _ and -)" .
+
+<urn:ikigai:shape:stage:mapOver> a sh:PropertyShape ;
+    sh:path ik:mapOver ;
+    sh:maxCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:message "a stage maps over at most one upstream" .
+
+<urn:ikigai:shape:stage:forkOf> a sh:PropertyShape ;
+    sh:path ik:forkOf ;
+    sh:maxCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:class ik:Fork ;
+    sh:message "a stage is a branch of at most one fork" .
+
+<urn:ikigai:shape:stage:order> a sh:PropertyShape ;
+    sh:path ik:order ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 1 ;
+    sh:message "a branch's ik:order is a positive integer" .
+
+# ik:order and ik:forkOf come together: a branch has a position, and only a branch does.
+<urn:ikigai:shape:stage:order-with-fork> a sh:SPARQLConstraint ;
+    sh:message "ik:order and ik:forkOf must both be present or both absent" ;
+    sh:prefixes <https://ikigai-rs.dev/ns#> ;
+    sh:select """
+        SELECT $this WHERE {
+            { $this ik:forkOf ?f . FILTER NOT EXISTS { $this ik:order ?o } }
+            UNION
+            { $this ik:order ?o . FILTER NOT EXISTS { $this ik:forkOf ?f } }
+        }
+    """ .
+
 <urn:ikigai:shape:step> a sh:NodeShape ;
     rdfs:label "Step" ;
-    rdfs:comment "One request: exactly one verb from the five, exactly one target IRI, at most one name, fed by at most one of pipe / map / fork, with distinctly named arguments." ;
+    rdfs:comment "One request: exactly one verb from the five, exactly one target IRI, at most one name, fed by at most one of pipe / map / fork, with distinctly named arguments; and a stage." ;
     sh:targetClass ik:Step ;
     sh:nodeKind sh:IRI ;
     sh:property <urn:ikigai:shape:step:verb> ,
                 <urn:ikigai:shape:step:resolves> ,
-                <urn:ikigai:shape:step:binds> ,
                 <urn:ikigai:shape:step:argument> ,
                 <urn:ikigai:shape:step:pipeFrom> ,
-                <urn:ikigai:shape:step:mapOver> ,
-                <urn:ikigai:shape:step:forkOf> ,
-                <urn:ikigai:shape:step:order> ;
+                <urn:ikigai:shape:stage:binds> ,
+                <urn:ikigai:shape:stage:mapOver> ,
+                <urn:ikigai:shape:stage:forkOf> ,
+                <urn:ikigai:shape:stage:order> ;
     sh:sparql <urn:ikigai:shape:step:one-feed> ,
-              <urn:ikigai:shape:step:order-with-fork> ,
+              <urn:ikigai:shape:stage:order-with-fork> ,
               <urn:ikigai:shape:step:distinct-arguments> .
 
 <urn:ikigai:shape:step:verb> a sh:PropertyShape ;
@@ -174,13 +237,6 @@
     sh:nodeKind sh:IRI ;
     sh:message "a step resolves exactly one IRI" .
 
-<urn:ikigai:shape:step:binds> a sh:PropertyShape ;
-    sh:path ik:binds ;
-    sh:maxCount 1 ;
-    sh:datatype xsd:string ;
-    sh:pattern "^[A-Za-z_][A-Za-z0-9_-]*$" ;
-    sh:message "a step binds at most one name, an identifier (letters, digits, _ and -)" .
-
 <urn:ikigai:shape:step:argument> a sh:PropertyShape ;
     sh:path ik:argument ;
     sh:nodeKind sh:IRI ;
@@ -193,26 +249,6 @@
     sh:nodeKind sh:IRI ;
     sh:message "a step pipes from at most one upstream" .
 
-<urn:ikigai:shape:step:mapOver> a sh:PropertyShape ;
-    sh:path ik:mapOver ;
-    sh:maxCount 1 ;
-    sh:nodeKind sh:IRI ;
-    sh:message "a step maps over at most one upstream" .
-
-<urn:ikigai:shape:step:forkOf> a sh:PropertyShape ;
-    sh:path ik:forkOf ;
-    sh:maxCount 1 ;
-    sh:nodeKind sh:IRI ;
-    sh:class ik:Fork ;
-    sh:message "a step is a branch of at most one fork" .
-
-<urn:ikigai:shape:step:order> a sh:PropertyShape ;
-    sh:path ik:order ;
-    sh:maxCount 1 ;
-    sh:datatype xsd:integer ;
-    sh:minInclusive 1 ;
-    sh:message "a branch's ik:order is a positive integer" .
-
 # A step's input arrives one way: piped, mapped, or as a branch of a fork — never two.
 <urn:ikigai:shape:step:one-feed> a sh:SPARQLConstraint ;
     sh:message "a step is fed by at most one of ik:pipeFrom, ik:mapOver, ik:forkOf" ;
@@ -222,18 +258,6 @@
             { $this ik:pipeFrom ?a . $this ik:mapOver ?b }
             UNION { $this ik:pipeFrom ?a . $this ik:forkOf ?b }
             UNION { $this ik:mapOver ?a . $this ik:forkOf ?b }
-        }
-    """ .
-
-# ik:order and ik:forkOf come together: a branch has a position, and only a branch does.
-<urn:ikigai:shape:step:order-with-fork> a sh:SPARQLConstraint ;
-    sh:message "ik:order and ik:forkOf must both be present or both absent" ;
-    sh:prefixes <https://ikigai-rs.dev/ns#> ;
-    sh:select """
-        SELECT $this WHERE {
-            { $this ik:forkOf ?f . FILTER NOT EXISTS { $this ik:order ?o } }
-            UNION
-            { $this ik:order ?o . FILTER NOT EXISTS { $this ik:forkOf ?f } }
         }
     """ .
 
@@ -298,13 +322,32 @@
 
 <urn:ikigai:shape:fork> a sh:NodeShape ;
     rdfs:label "Fork" ;
-    rdfs:comment "Branches over at most one upstream, joined in distinct ascending order; at least one branch." ;
+    rdfs:comment "Branches over one input (an upstream, a map upstream, or the input of the fork it is a branch of, never two), joined in distinct ascending order; at least one branch; and a stage, so it may bind a name, be mapped, and be a branch." ;
     sh:targetClass ik:Fork ;
     sh:nodeKind sh:IRI ;
     sh:property <urn:ikigai:shape:fork:upstream> ,
-                <urn:ikigai:shape:fork:join> ;
-    sh:sparql <urn:ikigai:shape:fork:has-branch> ,
+                <urn:ikigai:shape:fork:join> ,
+                <urn:ikigai:shape:stage:binds> ,
+                <urn:ikigai:shape:stage:mapOver> ,
+                <urn:ikigai:shape:stage:forkOf> ,
+                <urn:ikigai:shape:stage:order> ;
+    sh:sparql <urn:ikigai:shape:fork:one-feed> ,
+              <urn:ikigai:shape:stage:order-with-fork> ,
+              <urn:ikigai:shape:fork:has-branch> ,
               <urn:ikigai:shape:fork:distinct-order> .
+
+# A fork's input arrives one way: its upstream, mapped over its upstream, or as a branch
+# of another fork — never two.
+<urn:ikigai:shape:fork:one-feed> a sh:SPARQLConstraint ;
+    sh:message "a fork is fed by at most one of ik:upstream, ik:mapOver, ik:forkOf" ;
+    sh:prefixes <https://ikigai-rs.dev/ns#> ;
+    sh:select """
+        SELECT $this WHERE {
+            { $this ik:upstream ?a . $this ik:mapOver ?b }
+            UNION { $this ik:upstream ?a . $this ik:forkOf ?b }
+            UNION { $this ik:mapOver ?a . $this ik:forkOf ?b }
+        }
+    """ .
 
 <urn:ikigai:shape:fork:upstream> a sh:PropertyShape ;
     sh:path ik:upstream ;
@@ -320,7 +363,7 @@
     sh:message "ik:join names a join the engine performs (today: newline)" .
 
 <urn:ikigai:shape:fork:has-branch> a sh:SPARQLConstraint ;
-    sh:message "a fork has at least one branch (a step with ik:forkOf naming it)" ;
+    sh:message "a fork has at least one branch (a step or fork with ik:forkOf naming it)" ;
     sh:prefixes <https://ikigai-rs.dev/ns#> ;
     sh:select """
         SELECT $this WHERE {
@@ -347,13 +390,18 @@
 
 <urn:ikigai:shape:parameter> a sh:NodeShape ;
     rdfs:label "Parameter" ;
-    rdfs:comment "A declared input of a plan — the ArgSpec node an endpoint would carry: name, arrival mode, required flag, optional class / default / enumeration." ;
+    rdfs:comment "A declared input of a plan — the ArgSpec node an endpoint would carry: name, arrival mode, required flag, optional class / default / enumeration (empty, or with value notes) / list separator / examples / dependencies." ;
     sh:nodeKind sh:IRI ;
     sh:property <urn:ikigai:shape:parameter:inputName> ,
                 <urn:ikigai:shape:parameter:source> ,
                 <urn:ikigai:shape:parameter:required> ,
                 <urn:ikigai:shape:parameter:class> ,
-                <urn:ikigai:shape:parameter:default> .
+                <urn:ikigai:shape:parameter:default> ,
+                <urn:ikigai:shape:parameter:listSeparator> ,
+                <urn:ikigai:shape:parameter:example> ,
+                <urn:ikigai:shape:parameter:enumerated> ,
+                <urn:ikigai:shape:parameter:valueNote> ,
+                <urn:ikigai:shape:parameter:needs> .
 
 <urn:ikigai:shape:parameter:inputName> a sh:PropertyShape ;
     sh:path ik:inputName ;
@@ -384,6 +432,31 @@
     sh:path ik:default ;
     sh:maxCount 1 ;
     sh:nodeKind sh:Literal .
+
+<urn:ikigai:shape:parameter:listSeparator> a sh:PropertyShape ;
+    sh:path ik:listSeparator ;
+    sh:maxCount 1 ;
+    sh:in ( "comma" "whitespace" "comma-or-whitespace" "newline" ) ;
+    sh:message "ik:listSeparator is comma, whitespace, comma-or-whitespace or newline" .
+
+<urn:ikigai:shape:parameter:example> a sh:PropertyShape ;
+    sh:path ik:example ;
+    sh:nodeKind sh:Literal .
+
+<urn:ikigai:shape:parameter:enumerated> a sh:PropertyShape ;
+    sh:path ik:enumerated ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:boolean .
+
+<urn:ikigai:shape:parameter:valueNote> a sh:PropertyShape ;
+    sh:path ik:valueNote ;
+    sh:nodeKind sh:IRI ;
+    sh:message "ik:valueNote names a value node (a skos:Concept skolemized under the input)" .
+
+<urn:ikigai:shape:parameter:needs> a sh:PropertyShape ;
+    sh:path ik:needs ;
+    sh:nodeKind sh:IRI ;
+    sh:message "ik:needs names another input node of the same contract" .
 
 # sh:prefixes target: SHACL-SPARQL resolves the `ik:` prefix in the queries above from
 # these declarations rather than from the Turtle prologue.

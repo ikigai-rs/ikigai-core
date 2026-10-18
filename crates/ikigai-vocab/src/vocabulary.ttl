@@ -177,7 +177,7 @@ ik:missingOptional a rdf:Property ;
 ik:default a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "default" ;
-    rdfs:comment "The value an input assumes when omitted." .
+    rdfs:comment "The value an input assumes when omitted, in its lexical form: injected by the kernel when the caller leaves the input out (ikigai-core 0.1.105+), as the inline argument a caller spelling it out would send, so the call with and without it is one request." .
 
 ik:oneOf a rdf:Property ;
     rdfs:range xsd:string ;
@@ -688,13 +688,13 @@ ik:target a rdf:Property ;
 ik:order a rdf:Property ;
     rdfs:range xsd:integer ;
     rdfs:label "order" ;
-    rdfs:comment "A position in an ordered set, ascending — what makes an order deterministic in an unordered graph. On an ik:Route: its match priority (routes are tried in ascending order and the first match wins). On an ik:Step that is a branch of an ik:Fork: the branch's position in the join. No domain: the property is the same fact on both." .
+    rdfs:comment "A position in an ordered set, ascending — what makes an order deterministic in an unordered graph. On an ik:Route: its match priority (routes are tried in ascending order and the first match wins). On a branch of an ik:Fork (a step or a fork, any ik:Stage): the branch's position in the join. No domain, on purpose: a domain of ik:Stage would type every route as a plan stage under RDFS entailment; the property is the same fact on both." .
 
 ik:cap a rdf:Property ;
     rdfs:domain ik:Route ;
-    rdfs:range xsd:string ;
+    rdfs:range rdfs:Resource ;
     rdfs:label "cap" ;
-    rdfs:comment "A capability scope the route resolves its request under — the per-route ceiling (the multi-tenant seam: a public server with a route granting a specific authority). Multi-valued. Absent means the server's default capability applies." .
+    rdfs:comment "A capability scope the route resolves its request under — the per-route ceiling (the multi-tenant seam: a public server with a route granting a specific authority). Multi-valued. An IRI (ik:cap <urn:cap:…>), so a JSON or YAML route table's \"cap\" values are IRIs under the JSON-LD context. A route loader reads a literal and an IRI alike (ikigai-cli 0.1.64+, which also refuses a route whose cap triples read as none), so a Turtle table that still authors literals keeps loading, merely range-inconsistent. Absent means the server's default capability applies." .
 
 ik:cors a rdf:Property ;
     rdfs:domain ik:Route ;
@@ -1329,7 +1329,12 @@ ik:Process a rdfs:Class ;
     rdfs:label "Process" ;
     rdfs:comment "A plan: a DAG of ik:Step requests with declared ik:input parameters, the ik:requires union its steps need, and exactly one ik:result. Named urn:plan:{plan-id}; its steps, names and forks are skolemized under that IRI. A resource in its own right — stored, diffed, signed, transrepted, and validated before any step runs." .
 
+ik:Stage a rdfs:Class ;
+    rdfs:label "Stage" ;
+    rdfs:comment "A node of a plan's dataflow: an ik:Step or an ik:Fork. What can bind a name (ik:binds), be mapped over its upstream (ik:mapOver), be a fork's branch (ik:forkOf) and sit at a position in a join (ik:order). Entailed, never asserted: a plan graph types its nodes as steps and forks, and the subclass axioms make each a stage." .
+
 ik:Step a rdfs:Class ;
+    rdfs:subClassOf ik:Stage ;
     rdfs:label "Step" ;
     rdfs:comment "One request in a plan: exactly one ik:verb against exactly one ik:resolves IRI, with ik:argument nodes, fed by at most one of ik:pipeFrom / ik:mapOver (or by the ik:Fork it is a branch of), and optionally binding its representation to a name with ik:binds. Named urn:plan:{plan-id}:step:{n}." .
 
@@ -1338,8 +1343,9 @@ ik:Argument a rdfs:Class ;
     rdfs:comment "A named argument of a step: ik:inputName plus exactly one of ik:value (by value, a literal) or ik:ref (by reference, an IRI — a bound name of the same plan, or any resource). Named urn:plan:{plan-id}:step:{n}:arg:{name}." .
 
 ik:Fork a rdfs:Class ;
+    rdfs:subClassOf ik:Stage ;
     rdfs:label "Fork" ;
-    rdfs:comment "A set of branches run over one ik:upstream representation and joined in ik:order, as the text face's `( a ; b )`. The branches are the ik:Step nodes whose ik:forkOf names this fork; each carries its ik:order. Named urn:plan:{plan-id}:fork:{n}. A fork can stand where a step can: as a ik:pipeFrom / ik:mapOver upstream, or as the plan's ik:result." .
+    rdfs:comment "A set of branches run over one input and joined in ik:order, as the text face's `( a ; b )`. The input is the fork's ik:upstream, or each item of its ik:mapOver (`a .. ( b ; c )`), or, when the fork is itself a branch of another fork (ik:forkOf, `a | ( ( b ; c ) ; d )`), that fork's input. The branches are the stages, steps or forks, whose ik:forkOf names this fork; each carries its ik:order. Named urn:plan:{plan-id}:fork:{n}. A fork can stand where a step can: as a ik:pipeFrom / ik:mapOver upstream, as a branch, as the plan's ik:result, and binding its joined representation to a name (ik:binds, `report = @stored | ( a ; b )`)." .
 
 ik:step a rdf:Property ;
     rdfs:domain ik:Process ;
@@ -1366,10 +1372,10 @@ ik:argument a rdf:Property ;
     rdfs:comment "Links a step to one of its named arguments (the `key=value` and `key=@name` words of the text face). The piped or mapped input is not an argument and is not recorded as one: which argument it fills is decided at run time from the target's contract (see ik:pipeFrom)." .
 
 ik:binds a rdf:Property ;
-    rdfs:domain ik:Step ;
+    rdfs:domain ik:Stage ;
     rdfs:range xsd:string ;
     rdfs:label "binds" ;
-    rdfs:comment "The single-assignment name a step's representation is bound to (`name = …` in the text face); at most one per step, and each name bound at most once per plan — across steps and the plan's own ik:input parameters, which are names too. The bound value is the plan-local resource urn:plan:{plan-id}:var:{name}, which is what an ik:ref cites. Optional: an unnamed step is consumed only through pipe, map, or fork edges." .
+    rdfs:comment "The single-assignment name a stage's representation (a step's, or a fork's join) is bound to (`name = …` in the text face); at most one per stage, and each name bound at most once per plan — across steps, forks and the plan's own ik:input parameters, which are names too. The bound value is the plan-local resource urn:plan:{plan-id}:var:{name}, which is what an ik:ref cites. Optional: an unnamed step is consumed only through pipe, map, or fork edges." .
 
 ik:pipeFrom a rdf:Property ;
     rdfs:domain ik:Step ;
@@ -1378,16 +1384,16 @@ ik:pipeFrom a rdf:Property ;
     rdfs:comment "The step or fork of the same plan whose whole representation is this step's piped input (the text face's `|`). At most one per step, and exclusive with ik:mapOver. The edge says WHERE the input comes from, not WHICH argument it fills: that is resolved when the step runs, from the target's contract — for a Sink or Delete always `content`; for a Source the one declared argument the step leaves unnamed, or the one REQUIRED argument among several unnamed, else the step is refused as ambiguous. So the routing is not in the plan, and the same plan on two hosts whose contracts differ can execute differently. When the routing must not move, bind the upstream to a name (ik:binds) and pass it as a named ik:argument by ik:ref instead of piping it." .
 
 ik:mapOver a rdf:Property ;
-    rdfs:domain ik:Step ;
+    rdfs:domain ik:Stage ;
     rdfs:range rdfs:Resource ;
     rdfs:label "mapOver" ;
-    rdfs:comment "The step or fork of the same plan whose representation this step is mapped over (the text face's `..`): the step runs once per newline-separated item, each item as its input, and the per-item outputs are rejoined with newlines — the kernel's list convention. At most one per step, and exclusive with ik:pipeFrom. Which argument each item fills is resolved at run time exactly as for ik:pipeFrom, and is not in the plan." .
+    rdfs:comment "The step or fork of the same plan whose representation this stage is mapped over (the text face's `..`): the stage (a step, or a fork with all its branches) runs once per newline-separated item, each item as its input, and the per-item outputs are rejoined with newlines — the kernel's list convention. At most one per stage, and exclusive with ik:pipeFrom on a step and with ik:upstream on a fork. Which argument each item fills is resolved at run time exactly as for ik:pipeFrom, and is not in the plan." .
 
 ik:forkOf a rdf:Property ;
-    rdfs:domain ik:Step ;
+    rdfs:domain ik:Stage ;
     rdfs:range ik:Fork ;
     rdfs:label "forkOf" ;
-    rdfs:comment "The fork this step is a branch of; the step then carries ik:order and takes the fork's ik:upstream representation as its input. A branch that is itself a pipeline is the chain of steps whose head carries ik:forkOf; the chain's last step is what the fork joins." .
+    rdfs:comment "The fork this stage is a branch of; the stage then carries ik:order and takes the fork's input as its own. A branch is a step or a fork (a fork as a branch's head: `a | ( ( b ; c ) ; d )`). A branch that is itself a pipeline is the chain of stages whose head carries ik:forkOf; the chain's last stage is what the fork joins." .
 
 ik:value a rdf:Property ;
     rdfs:domain ik:Argument ;
