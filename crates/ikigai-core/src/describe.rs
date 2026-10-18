@@ -27,8 +27,13 @@ pub enum InputSource {
 /// mean "enumerated, and empty" while an absent `one_of` means "open-valued" (ledger #41),
 /// and a plain `skip_serializing_if` on `one_of` cannot see the flag that tells the two
 /// apart. Every other field serializes exactly as its attributes below say.
+///
+/// `#[non_exhaustive]` since 0.1.105 (ledger #1547): build one with [`ArgSpec::new`] and the
+/// builders, so a field added later is never a flag day. The fields stay public, so reading
+/// and assigning one still compiles anywhere.
 #[derive(Clone, Debug, Eq, Serialize, Deserialize)]
 #[serde(from = "ArgSpecWire", into = "ArgSpecWire")]
+#[non_exhaustive]
 pub struct ArgSpec {
     /// The argument name.
     pub name: String,
@@ -806,7 +811,11 @@ impl InputGroup {
 /// spec whose `requires` is empty declares that the verb needs no authority, and the flat
 /// `requires` sitting beside it is dead for that verb. Restate on each explicit spec
 /// whatever it still needs — and state no more, since the kernel enforces what is declared.
+///
+/// `#[non_exhaustive]` since 0.1.105 (ledger #1547): build one with [`ActionSpec::new`] and
+/// the builders; the fields stay public for reading and assignment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ActionSpec {
     /// The verb this contract applies to.
     pub verb: Verb,
