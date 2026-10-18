@@ -118,10 +118,11 @@ impl Canon {
 /// under [`CONTRACT_FORM_V2`].
 fn uses_v2(spec: &ActionSpec) -> bool {
     !spec.groups.is_empty()
+        || !spec.arguments.is_closed()
         || spec
             .inputs
             .iter()
-            .any(|i| !i.needs.is_empty() || i.list.is_some())
+            .any(|i| !i.needs.is_empty() || i.list.is_some() || !i.values.is_empty())
 }
 
 /// One input in the v2 form: v1's fields, then the input-level additions.
@@ -139,7 +140,33 @@ fn input_v2(input: &ArgSpec) -> Canon {
     c.set(input.one_of.iter().map(String::as_str));
     c.set(input.needs.iter().map(String::as_str));
     c.option(input.list.map(|l| l.word()));
+    // The value notes, a map sorted by value: each value, its meaning, its tag set and its
+    // needs set.
+    c.u64(input.values.len() as u64);
+    for (value, note) in &input.values {
+        c.str(value);
+        c.str(&note.summary);
+        c.set(note.tags.iter().map(String::as_str));
+        c.set(note.needs.iter().map(String::as_str));
+    }
     c
+}
+
+/// An action's argument set in the v2 form: closed 0, open 1 and its summary, envelope 2
+/// and its carrier.
+fn arguments_v2(h: &mut blake3::Hasher, arguments: &crate::describe::Arguments) {
+    use crate::describe::Arguments;
+    match arguments {
+        Arguments::Closed => feed_u8(h, 0),
+        Arguments::Open(summary) => {
+            feed_u8(h, 1);
+            feed_str(h, summary);
+        }
+        Arguments::Envelope(carrier) => {
+            feed_u8(h, 2);
+            feed_str(h, carrier);
+        }
+    }
 }
 
 /// One input group in the v2 form: its kind, its member set and its pipe member.
@@ -444,14 +471,15 @@ impl ActionSpec {
     /// differently never share one.
     ///
     /// **Two forms, chosen by content** (ledger #1547). A contract using a construct v1
-    /// cannot carry (an input's `needs` or `list`, an [`InputGroup`](crate::InputGroup)) is
-    /// hashed under `ikigai:contract:v2` instead: the same fields, each input encoded whole
-    /// with its `needs` set and `list` separator appended and the inputs sorted by their
-    /// encodings, then the outputs and
+    /// cannot carry (an input's `needs`, `list` or value notes, an
+    /// [`InputGroup`](crate::InputGroup), an open or envelope argument set) is hashed under
+    /// `ikigai:contract:v2` instead: the same fields, each input encoded whole with its
+    /// `needs` set, `list` separator and value notes (sorted by value: meaning, tag set,
+    /// needs set) appended and the inputs sorted by their encodings, then the outputs and
     /// scopes as in v1, then the groups, each as its kind word, member set and pipe member,
-    /// sorted by their encodings. A contract that uses none of them keeps its v1 digest,
-    /// so no existing contract IRI moves and a face that predates v2 agrees on every
-    /// contract it can express.
+    /// sorted by their encodings, then the argument set. A contract that uses none of them
+    /// keeps its v1 digest, so no existing contract IRI moves and a face that predates v2
+    /// agrees on every contract it can express.
     ///
     /// The endpoint id is part of the contract: two endpoints with different ids and
     /// identical specs are two tools, and the contract node must say which one it
@@ -519,6 +547,7 @@ impl ActionSpec {
         feed_set(&mut h, &self.outputs);
         feed_set(&mut h, &self.requires);
         Canon::feed_items(&mut h, self.groups.iter().map(group_v2));
+        arguments_v2(&mut h, &self.arguments);
         ContentId::from_hasher(h)
     }
 
@@ -726,6 +755,40 @@ mod tests {
                     ArgSpec::new("a")
                         .optional()
                         .list(crate::describe::ListSeparator::Newline),
+                    ArgSpec::new("b").optional(),
+                ],
+                ..base.clone()
+            },
+            base.clone().open_arguments("others"),
+            base.clone().open_arguments("other others"),
+            base.clone().envelope("a"),
+            base.clone().envelope("b"),
+            ActionSpec {
+                inputs: vec![
+                    ArgSpec::new("a")
+                        .optional()
+                        .one_of(["x", "y"])
+                        .value("x", crate::describe::ValueNote::new().tag("t")),
+                    ArgSpec::new("b").optional(),
+                ],
+                ..base.clone()
+            },
+            ActionSpec {
+                inputs: vec![
+                    ArgSpec::new("a")
+                        .optional()
+                        .one_of(["x", "y"])
+                        .value("x", crate::describe::ValueNote::new().summary("s")),
+                    ArgSpec::new("b").optional(),
+                ],
+                ..base.clone()
+            },
+            ActionSpec {
+                inputs: vec![
+                    ArgSpec::new("a")
+                        .optional()
+                        .one_of(["x", "y"])
+                        .value("x", crate::describe::ValueNote::new().needs(["b"])),
                     ArgSpec::new("b").optional(),
                 ],
                 ..base.clone()

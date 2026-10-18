@@ -15,7 +15,7 @@
 
 use std::fmt;
 
-use crate::describe::{ActionSpec, ArgSpec, GroupKind, InputGroup, InputSource};
+use crate::describe::{ActionSpec, ArgSpec, Arguments, GroupKind, InputGroup, InputSource};
 use crate::request::Request;
 
 /// The detail of every refusal of a name given more than once that is not a list
@@ -150,6 +150,9 @@ pub enum ViolationKind {
     Needs,
     /// A name given more than once that is not a list argument (ledger #387).
     GivenTwice,
+    /// An [`Envelope`](Arguments::Envelope) action given its body twice: as the carrier
+    /// and as the fields that belong inside it.
+    Envelope,
 }
 
 impl ViolationKind {
@@ -165,6 +168,7 @@ impl ViolationKind {
             ViolationKind::AtMostOne => "at-most-one",
             ViolationKind::Needs => "needs",
             ViolationKind::GivenTwice => "given-twice",
+            ViolationKind::Envelope => "envelope",
         }
     }
 
@@ -186,6 +190,8 @@ impl ViolationKind {
             ViolationKind::Needs => "http://www.w3.org/ns/shacl#OrConstraintComponent",
             // A non-list input is `sh:maxCount 1`; a list drops it.
             ViolationKind::GivenTwice => "http://www.w3.org/ns/shacl#MaxCountConstraintComponent",
+            // The carrier, or its fields: one of the two.
+            ViolationKind::Envelope => "http://www.w3.org/ns/shacl#XoneConstraintComponent",
         }
     }
 }
@@ -206,6 +212,13 @@ pub enum ViolationPath {
     /// An [`InputGroup`], by its node segment ([`InputGroup::node_segment`]:
     /// `group:{kind}:{m1},{m2}`).
     Group(String),
+    /// One value of an enumerated input, which a [`ValueNote`](crate::ValueNote) describes.
+    Value {
+        /// The input's name.
+        input: String,
+        /// The value.
+        value: String,
+    },
 }
 
 impl ViolationPath {
@@ -218,6 +231,11 @@ impl ViolationPath {
                 format!("{contract}:input:{}", crate::encode_name(name))
             }
             ViolationPath::Group(segment) => format!("{contract}:{segment}"),
+            ViolationPath::Value { input, value } => format!(
+                "{contract}:input:{}:value:{}",
+                crate::encode_name(input),
+                crate::encode_name(value)
+            ),
         }
     }
 
@@ -227,6 +245,7 @@ impl ViolationPath {
         match self {
             ViolationPath::Input(name) => format!("input:{name}"),
             ViolationPath::Group(segment) => segment.clone(),
+            ViolationPath::Value { input, value } => format!("input:{input}:value:{value}"),
         }
     }
 }
@@ -353,9 +372,13 @@ impl ActionSpec {
     /// input is given; a value (each item, for a list) is one of the input's `one_of`, when
     /// it declares one; a value (each item) is plausible for its declared XSD datatype
     /// (`xsd:boolean`, `xsd:integer`, `xsd:dateTime`; an entity class is not statically
-    /// checkable); a given input's `needs` are given; every [`InputGroup`] holds (a member
-    /// is given when its value is not blank); every name is declared. A binding is part of
-    /// the resource's name, so it is never missing from a proposed call.
+    /// checkable); a given input's `needs` are given, and so are those of each given value's
+    /// [`ValueNote`](crate::ValueNote); every [`InputGroup`] holds (a member is given when
+    /// its value is not blank); every name is declared, unless the action's
+    /// [`Arguments`] are open. On an [`Envelope`](Arguments::Envelope) action, the fields'
+    /// rules apply when the call proposes fields, and the carrier's otherwise; both at once
+    /// is a violation. A binding is part of the resource's name, so it is never missing
+    /// from a proposed call.
     ///
     /// ```
     /// use ikigai_core::{ActionSpec, ArgSpec, ProposedArgs, Verb, ViolationKind};
@@ -378,7 +401,40 @@ impl ActionSpec {
     pub fn check(&self, proposed: &ProposedArgs) -> Vec<Violation> {
         let mut violations = Vec::new();
         let (effective, repeated) = self.joined(proposed);
+        // An envelope's fields are checked when the caller proposes them, and only its
+        // carrier otherwise; giving both is giving the body twice.
+        let (carrier, fields_given) = match &self.arguments {
+            Arguments::Envelope(carrier) => {
+                let fields_given = self
+                    .inputs
+                    .iter()
+                    .any(|i| i.name != *carrier && given(effective.get(&i.name)));
+                (Some(carrier.as_str()), fields_given)
+            }
+            _ => (None, false),
+        };
+        if let Some(carrier) = carrier {
+            if fields_given && given(effective.get(carrier)) {
+                violations.push(Violation::new(
+                    ViolationKind::Envelope,
+                    Some(ViolationPath::Input(carrier.to_string())),
+                    format!(
+                        "the body is given twice: as `{carrier}` and as the fields that belong \
+                         inside it; give one"
+                    ),
+                ));
+            }
+        }
         for input in &self.inputs {
+            // Which of an envelope's inputs this call is about: the fields, or the carrier.
+            let skipped = match carrier {
+                Some(carrier) if fields_given => input.name == carrier,
+                Some(carrier) => input.name != carrier && input.source == InputSource::Argument,
+                None => false,
+            };
+            if skipped {
+                continue;
+            }
             if repeated.contains(&input.name.as_str()) {
                 violations.push(Violation::at_input(
                     ViolationKind::GivenTwice,
@@ -396,15 +452,40 @@ impl ActionSpec {
                 continue;
             }
             let Some(value) = value else { continue };
-            match input.list {
+            let items = match input.list {
                 // A list: every item is checked, and each bad one is reported.
-                Some(separator) => violations.extend(
-                    separator
-                        .split(value)
-                        .into_iter()
-                        .filter_map(|item| check_value(input, item)),
-                ),
-                None => violations.extend(check_value(input, value)),
+                Some(separator) => separator.split(value),
+                None => vec![value],
+            };
+            for item in &items {
+                violations.extend(check_value(input, item));
+            }
+            // A value's own dependencies (a ValueNote's `needs`), per distinct item.
+            let mut seen: Vec<&str> = Vec::new();
+            for item in items {
+                if seen.contains(&item) {
+                    continue;
+                }
+                seen.push(item);
+                let Some(note) = input.values.get(item) else {
+                    continue;
+                };
+                let missing: Vec<&str> = note
+                    .needs
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|needed| !given(effective.get(needed)))
+                    .collect();
+                if !missing.is_empty() {
+                    violations.push(Violation::new(
+                        ViolationKind::Needs,
+                        Some(ViolationPath::Value {
+                            input: input.name.clone(),
+                            value: item.to_string(),
+                        }),
+                        format!("`{}={item}` needs {}", input.name, quoted(&missing)),
+                    ));
+                }
             }
             let missing: Vec<&str> = input
                 .needs
@@ -425,9 +506,10 @@ impl ActionSpec {
                 .iter()
                 .filter_map(|g| check_group(g, &effective)),
         );
+        let open = matches!(self.arguments, Arguments::Open(_));
         let mut unknown: Vec<&str> = Vec::new();
         for (name, _) in proposed.pairs() {
-            if !self.inputs.iter().any(|i| i.name == name) && !unknown.contains(&name) {
+            if !open && !self.inputs.iter().any(|i| i.name == name) && !unknown.contains(&name) {
                 unknown.push(name);
                 violations.push(Violation::new(
                     ViolationKind::Unknown,
@@ -644,6 +726,84 @@ mod tests {
         assert_eq!(twice[0].1.as_deref(), Some("input:query"));
         // An unknown name is reported once, however often it is given.
         assert_eq!(words("x=1&x=2").len(), 1);
+    }
+
+    /// Ledger #607, #358: an open action admits any name; an envelope checks its fields
+    /// when the call proposes them, its carrier otherwise, and refuses both at once.
+    #[test]
+    fn an_argument_set_decides_which_names_are_inputs() {
+        let closed = ActionSpec::new(Verb::Source).input(ArgSpec::new("src"));
+        let open = closed.clone().open_arguments("each fills a {name} marker");
+        let title = ProposedArgs::parse("src=urn:x&title=y");
+        assert_eq!(closed.check(&title)[0].kind, ViolationKind::Unknown);
+        assert!(open.check(&title).is_empty());
+        // Open still refuses a repeat of a declared name.
+        assert_eq!(
+            open.check(&ProposedArgs::parse("src=a&src=b"))[0].kind,
+            ViolationKind::GivenTwice
+        );
+
+        let intake = ActionSpec::new(Verb::Sink)
+            .input(ArgSpec::new("content"))
+            .input(ArgSpec::new("email"))
+            .input(ArgSpec::new("topic").one_of(["a", "b"]).optional())
+            .envelope("content");
+        // The carrier alone: its rules only (the fields are inside it).
+        assert!(intake
+            .check(&ProposedArgs::parse("content=email%3Dx"))
+            .is_empty());
+        // The fields alone: their rules, and the carrier is not missing.
+        assert!(intake
+            .check(&ProposedArgs::parse("email=x&topic=a"))
+            .is_empty());
+        let missing = intake.check(&ProposedArgs::parse("topic=a"));
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert_eq!(missing[0].kind, ViolationKind::Missing);
+        assert_eq!(missing[0].path, Some(ViolationPath::Input("email".into())));
+        // Neither: the carrier is missing.
+        assert_eq!(
+            intake.check(&ProposedArgs::new())[0].path,
+            Some(ViolationPath::Input("content".into()))
+        );
+        // Both: the body twice.
+        let both = intake.check(&ProposedArgs::parse("content=x&email=y"));
+        assert_eq!(both[0].kind, ViolationKind::Envelope, "{both:?}");
+    }
+
+    /// Ledger #708: a value's dependency is checked when that value is given, and the
+    /// violation names the value's node.
+    #[test]
+    fn a_value_note_needs_its_inputs_when_the_value_is_given() {
+        use crate::describe::{ListSeparator, ValueNote};
+        let finding = ActionSpec::new(Verb::Sink)
+            .input(
+                ArgSpec::new("decision")
+                    .one_of(["publish", "retract"])
+                    .value("retract", ValueNote::new().needs(["revises"])),
+            )
+            .input(ArgSpec::new("revises").optional())
+            .input(
+                ArgSpec::new("flags")
+                    .optional()
+                    .list(ListSeparator::Comma)
+                    .one_of(["x", "y"])
+                    .value("y", ValueNote::new().needs(["revises"])),
+            );
+        assert!(finding
+            .check(&ProposedArgs::parse("decision=publish"))
+            .is_empty());
+        let bad = finding.check(&ProposedArgs::parse("decision=retract"));
+        assert_eq!(bad.len(), 1, "{bad:?}");
+        assert_eq!(bad[0].kind, ViolationKind::Needs);
+        let path = bad[0].path.clone().unwrap();
+        assert_eq!(path.word(), "input:decision:value:retract");
+        assert_eq!(path.node_iri("urn:c"), "urn:c:input:decision:value:retract");
+        // A list's items each bring their own, once per distinct item.
+        let listed = finding.check(&ProposedArgs::parse("decision=publish&flags=y,x,y"));
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(finding
+            .check(&ProposedArgs::parse("decision=retract&revises=urn:f"))
+            .is_empty());
     }
 
     #[test]

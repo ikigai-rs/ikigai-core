@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -63,6 +64,127 @@ pub struct ArgSpec {
     /// one call). Ledger #497, #357, #387. Omitted from serialized output when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list: Option<ListSeparator>,
+    /// What particular `one_of` values mean (ledger #708): a meaning, producer-owned tags,
+    /// and inputs a value needs (browse's `decision=retract` needs `revises`). Keyed by
+    /// value; every key is one of `one_of`, which stays the set and the source of truth.
+    /// Omitted from serialized output when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, ValueNote>,
+}
+
+/// What one value of an enumerated input means (see [`ArgSpec::value`]): so a consumer
+/// reads a value's role from the contract instead of parsing another crate's summary
+/// prose, or mapping roles by position.
+///
+/// `tags` are free strings owned by the PRODUCER and documented in its crate (browse's
+/// `revision`, `supports`, `refutes`, `serious`): a closed core vocabulary of roles would
+/// put a module's domain into the kernel. `needs` names inputs of the same action that must
+/// be given when this value is.
+///
+/// ```
+/// use ikigai_core::{ArgSpec, Description, ProposedArgs, ValueNote, Verb};
+///
+/// let finding = Description::new("finding")
+///     .verb(Verb::Sink)
+///     .input(
+///         ArgSpec::new("decision")
+///             .one_of(["publish", "decline", "retract"])
+///             .value(
+///                 "retract",
+///                 ValueNote::new()
+///                     .summary("withdraw a published decision")
+///                     .tag("revision")
+///                     .needs(["revises"]),
+///             ),
+///     )
+///     .input(ArgSpec::new("revises").optional());
+/// assert!(finding.validate().is_ok());
+/// let sink = &finding.action_specs()[0];
+/// assert!(sink.check(&ProposedArgs::parse("decision=publish")).is_empty());
+/// assert!(!sink.check(&ProposedArgs::parse("decision=retract")).is_empty());
+/// assert!(sink.check(&ProposedArgs::parse("decision=retract&revises=urn:d:1")).is_empty());
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ValueNote {
+    /// What the value means. Omitted when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+    /// Producer-owned tags (a set). Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Inputs that must be given when this value is. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
+}
+
+impl ValueNote {
+    /// A note saying nothing yet.
+    pub fn new() -> Self {
+        ValueNote::default()
+    }
+
+    /// Say what the value means (builder).
+    pub fn summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = summary.into();
+        self
+    }
+
+    /// Add a producer-owned tag (builder).
+    pub fn tag(mut self, tag: impl Into<String>) -> Self {
+        let tag = tag.into();
+        if !self.tags.contains(&tag) {
+            self.tags.push(tag);
+        }
+        self
+    }
+
+    /// Declare inputs this value needs (builder).
+    pub fn needs(mut self, inputs: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.needs.extend(inputs.into_iter().map(Into::into));
+        self
+    }
+}
+
+/// Which named arguments an action takes, relative to its declared inputs (ledger #607,
+/// #358). The default, [`Closed`](Self::Closed), is today's meaning and is omitted from the
+/// JSON contract.
+///
+/// ```
+/// use ikigai_core::{ActionSpec, ArgSpec, Arguments, ProposedArgs, Verb};
+///
+/// let compose = ActionSpec::new(Verb::Source)
+///     .input(ArgSpec::new("src"))
+///     .open_arguments("each fills a {name} marker in the body");
+/// assert!(compose.check(&ProposedArgs::parse("src=urn:x&title=y")).is_empty());
+/// assert_eq!(
+///     serde_json::to_value(&compose.arguments).unwrap(),
+///     serde_json::json!({"open": "each fills a {name} marker in the body"})
+/// );
+/// assert!(Arguments::Closed.is_closed());
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum Arguments {
+    /// Only the declared inputs (an undeclared name is a violation).
+    #[default]
+    Closed,
+    /// The declared inputs, plus any other name; the string says what the others mean
+    /// (`compose`: each fills a `{name}` marker). JSON `{"open": "…"}`.
+    Open(String),
+    /// The declared inputs other than the named CARRIER are fields of the carrier's body:
+    /// they arrive inside it, never as named arguments (`ikigai-intake`'s form fields
+    /// inside `content`). A projection renders the fields as the body's properties and
+    /// the carrier as none. JSON `{"envelope": "content"}`.
+    Envelope(String),
+}
+
+impl Arguments {
+    /// Whether this is the default [`Closed`](Self::Closed) set.
+    pub fn is_closed(&self) -> bool {
+        matches!(self, Arguments::Closed)
+    }
 }
 
 /// How a list-valued argument's items are separated in its one value (see
@@ -155,6 +277,7 @@ impl ArgSpec {
             one_of: Vec::new(),
             needs: Vec::new(),
             list: None,
+            values: BTreeMap::new(),
         }
     }
 
@@ -229,6 +352,13 @@ impl ArgSpec {
     /// ```
     pub fn list(mut self, separator: ListSeparator) -> Self {
         self.list = Some(separator);
+        self
+    }
+
+    /// Say what one of the `one_of` values means (builder): see [`ValueNote`]. A second
+    /// note for the same value replaces the first.
+    pub fn value(mut self, value: impl Into<String>, note: ValueNote) -> Self {
+        self.values.insert(value.into(), note);
         self
     }
 
@@ -423,6 +553,10 @@ pub struct ActionSpec {
     /// serialized output when empty, so existing JSON contracts are unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<InputGroup>,
+    /// Which named arguments this verb takes beyond its declared inputs (ledger #607,
+    /// #358): see [`Arguments`]. Omitted from serialized output when closed.
+    #[serde(default, skip_serializing_if = "Arguments::is_closed")]
+    pub arguments: Arguments,
 }
 
 impl ActionSpec {
@@ -435,6 +569,7 @@ impl ActionSpec {
             outputs: Vec::new(),
             requires: Vec::new(),
             groups: Vec::new(),
+            arguments: Arguments::Closed,
         }
     }
 
@@ -465,6 +600,20 @@ impl ActionSpec {
     /// Declare a relation between this verb's inputs (builder): see [`InputGroup`].
     pub fn group(mut self, group: InputGroup) -> Self {
         self.groups.push(group);
+        self
+    }
+
+    /// Accept any named argument beyond the declared inputs (builder):
+    /// [`Arguments::Open`], `summary` saying what the others mean.
+    pub fn open_arguments(mut self, summary: impl Into<String>) -> Self {
+        self.arguments = Arguments::Open(summary.into());
+        self
+    }
+
+    /// Declare the inputs other than `carrier` to be fields of the carrier's body
+    /// (builder): [`Arguments::Envelope`].
+    pub fn envelope(mut self, carrier: impl Into<String>) -> Self {
+        self.arguments = Arguments::Envelope(carrier.into());
         self
     }
 
@@ -633,6 +782,10 @@ pub struct Description {
     /// existing JSON contracts are unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<InputGroup>,
+    /// Which named arguments the flat form takes beyond its inputs (ledger #607, #358):
+    /// see [`Arguments`]. Omitted from serialized output when closed.
+    #[serde(default, skip_serializing_if = "Arguments::is_closed")]
+    pub arguments: Arguments,
     /// How long a kernel may keep what it derives from this description before it calls
     /// `describe()` again — see [`ContractCaching`]. Defaults to
     /// [`UntilRebind`](ContractCaching::UntilRebind), a static contract. Set it with
@@ -663,6 +816,7 @@ impl PartialEq for Description {
             requires,
             actions,
             groups,
+            arguments,
             contract_caching: _,
         } = self;
         *id == other.id
@@ -675,6 +829,7 @@ impl PartialEq for Description {
             && *requires == other.requires
             && *actions == other.actions
             && *groups == other.groups
+            && *arguments == other.arguments
     }
 }
 
@@ -938,6 +1093,19 @@ impl Description {
         self
     }
 
+    /// Accept any named argument beyond the flat inputs (builder): [`Arguments::Open`].
+    pub fn open_arguments(mut self, summary: impl Into<String>) -> Self {
+        self.arguments = Arguments::Open(summary.into());
+        self
+    }
+
+    /// Declare the flat inputs other than `carrier` to be fields of the carrier's body
+    /// (builder): [`Arguments::Envelope`].
+    pub fn envelope(mut self, carrier: impl Into<String>) -> Self {
+        self.arguments = Arguments::Envelope(carrier.into());
+        self
+    }
+
     /// Declare a per-verb contract (builder). The verb is added to
     /// [`verbs`](Self::verbs) if not already declared.
     pub fn action(mut self, action: ActionSpec) -> Self {
@@ -970,6 +1138,7 @@ impl Description {
                         outputs: self.outputs.clone(),
                         requires: self.requires.clone(),
                         groups: self.groups.clone(),
+                        arguments: self.arguments.clone(),
                     })
             })
             .collect()
@@ -1165,7 +1334,10 @@ impl Description {
     ///   than two members, a member that is not a declared by-value input, is declared
     ///   required or has a default, or a `pipe` that is not a member (or, on a Sink or
     ///   Delete, is not `content`); a `needs` naming an undeclared input or itself, or on a
-    ///   defaulted input.
+    ///   defaulted input; a [`ValueNote`] (`values`) for a value outside `one_of`, needing
+    ///   an undeclared input, or needing anything on the input's default value; an
+    ///   [`Envelope`](Arguments::Envelope) (`arguments`) whose carrier is not a declared
+    ///   by-value input.
     ///
     /// `[` and `]` are admitted: an id may be a full IRI with an IPv6 host, and a name's
     /// brackets are encoded (`http://[::1]/x` is `urn:ikigai:endpoint:http://%5B::1%5D/x`).
@@ -1252,6 +1424,7 @@ impl Description {
             let flat = ActionSpec {
                 inputs: self.inputs.clone(),
                 groups: self.groups.clone(),
+                arguments: self.arguments.clone(),
                 ..ActionSpec::new(Verb::Source)
             };
             validate_relations(&self.id, None, &flat)?;
@@ -1334,6 +1507,17 @@ fn validate_relations(id: &str, verb: Option<Verb>, spec: &ActionSpec) -> crate:
             }
         }
     }
+    if let Arguments::Envelope(carrier) = &spec.arguments {
+        match input(carrier) {
+            Some(arg) if arg.source == InputSource::Argument => {}
+            _ => {
+                return refuse(
+                    "arguments",
+                    format!("the envelope's carrier `{carrier}` is not a declared by-value input"),
+                )
+            }
+        }
+    }
     for arg in &spec.inputs {
         for needed in &arg.needs {
             if input(needed).is_none() {
@@ -1347,6 +1531,40 @@ fn validate_relations(id: &str, verb: Option<Verb>, spec: &ActionSpec) -> crate:
             }
             if needed == &arg.name {
                 return refuse("needs", format!("input `{}` needs itself", arg.name));
+            }
+        }
+        for (value, note) in &arg.values {
+            if !arg.one_of.contains(value) {
+                return refuse(
+                    "values",
+                    format!(
+                        "input `{}` describes the value `{value}`, which is not one of its \
+                         one_of",
+                        arg.name
+                    ),
+                );
+            }
+            for needed in &note.needs {
+                if input(needed).is_none() {
+                    return refuse(
+                        "values",
+                        format!(
+                            "value `{value}` of input `{}` needs `{needed}`, which is not a \
+                             declared input",
+                            arg.name
+                        ),
+                    );
+                }
+            }
+            if !note.needs.is_empty() && arg.default.as_deref() == Some(value.as_str()) {
+                return refuse(
+                    "values",
+                    format!(
+                        "value `{value}` of input `{}` is its default and needs another \
+                         input: the kernel's default would make the dependency unconditional",
+                        arg.name
+                    ),
+                );
             }
         }
         if !arg.needs.is_empty() && arg.default.is_some() {
@@ -1636,6 +1854,98 @@ mod tests {
                 "expected `{field}`: {err:?}"
             );
         }
+    }
+
+    /// Ledger #708, #358: a value note describes a declared value and needs declared
+    /// inputs; an envelope's carrier is a declared by-value input.
+    #[test]
+    fn validate_refuses_a_value_note_or_envelope_the_contract_cannot_honor() {
+        let decision = |note_value: &str, note: ValueNote| {
+            Description::new("finding")
+                .verb(Verb::Sink)
+                .input(
+                    ArgSpec::new("decision")
+                        .one_of(["publish", "retract"])
+                        .value(note_value, note),
+                )
+                .input(ArgSpec::new("revises").optional())
+        };
+        decision(
+            "retract",
+            ValueNote::new().needs(["revises"]).tag("revision"),
+        )
+        .validate()
+        .expect("a real note validates");
+        for (field, d) in [
+            ("values", decision("withdraw", ValueNote::new())),
+            (
+                "values",
+                decision("retract", ValueNote::new().needs(["nope"])),
+            ),
+            (
+                "values",
+                Description::new("x").verb(Verb::Source).input(
+                    ArgSpec::new("mode")
+                        .one_of(["a", "b"])
+                        .default_value("a")
+                        .value("a", ValueNote::new().needs(["mode"])),
+                ),
+            ),
+            (
+                "arguments",
+                Description::new("x")
+                    .verb(Verb::Sink)
+                    .input(ArgSpec::new("email"))
+                    .envelope("content"),
+            ),
+            (
+                "arguments",
+                Description::new("x")
+                    .verb(Verb::Sink)
+                    .input(ArgSpec::new("content").binding())
+                    .envelope("content"),
+            ),
+        ] {
+            let err = d.validate().expect_err("must be refused");
+            assert!(
+                matches!(&err, crate::Error::InvalidArgument { name, .. } if name == field),
+                "expected `{field}`: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_notes_and_argument_sets_spell_their_json() {
+        let d = Description::new("intake")
+            .verb(Verb::Sink)
+            .input(ArgSpec::new("content"))
+            .input(
+                ArgSpec::new("topic").one_of(["a", "b"]).value(
+                    "b",
+                    ValueNote::new()
+                        .summary("the second")
+                        .tag("t")
+                        .needs(["content"]),
+                ),
+            )
+            .envelope("content");
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(
+            json["arguments"],
+            serde_json::json!({"envelope": "content"})
+        );
+        assert_eq!(
+            json["inputs"][1]["values"],
+            serde_json::json!({"b": {"summary": "the second", "tags": ["t"], "needs": ["content"]}})
+        );
+        assert_eq!(serde_json::from_value::<Description>(json).unwrap(), d);
+        // Closed and no notes: no keys at all.
+        let plain = serde_json::to_string(&Description::new("x").input(ArgSpec::new("a"))).unwrap();
+        assert!(
+            !plain.contains("arguments") && !plain.contains("values"),
+            "{plain}"
+        );
+        assert_eq!(d.action_specs()[0].arguments, d.arguments);
     }
 
     #[test]

@@ -207,6 +207,10 @@
       "@type": "@id"
     },
     "entryState": "ik:entryState",
+    "envelope": {
+      "@id": "ik:envelope",
+      "@type": "@id"
+    },
     "evidence": {
       "@id": "ik:evidence",
       "@type": "@id"
@@ -312,6 +316,7 @@
       "@id": "ik:opaque",
       "@type": "xsd:boolean"
     },
+    "openArguments": "ik:openArguments",
     "order": {
       "@id": "ik:order",
       "@type": "xsd:integer"
@@ -465,6 +470,7 @@
       "@id": "ik:suppressedItems",
       "@type": "xsd:nonNegativeInteger"
     },
+    "tag": "ik:tag",
     "target": "ik:target",
     "template": "ik:template",
     "textScale": {
@@ -494,6 +500,10 @@
       "@type": "@id"
     },
     "value": "ik:value",
+    "valueNote": {
+      "@id": "ik:valueNote",
+      "@type": "@id"
+    },
     "var": "ik:var",
     "vendor": "ik:vendor",
     "verb": "ik:verb",
