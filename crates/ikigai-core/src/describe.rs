@@ -22,7 +22,13 @@ pub enum InputSource {
 }
 
 /// A specification of one named input an endpoint accepts.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Serialized through a private wire mirror for one reason: `"one_of": []` must
+/// mean "enumerated, and empty" while an absent `one_of` means "open-valued" (ledger #41),
+/// and a plain `skip_serializing_if` on `one_of` cannot see the flag that tells the two
+/// apart. Every other field serializes exactly as its attributes below say.
+#[derive(Clone, Debug, Eq, Serialize, Deserialize)]
+#[serde(from = "ArgSpecWire", into = "ArgSpecWire")]
 pub struct ArgSpec {
     /// The argument name.
     pub name: String,
@@ -47,10 +53,24 @@ pub struct ArgSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     /// The closed set of accepted values, when the argument is an enumeration (e.g.
-    /// `mode=added|removed`). Empty = open-valued. Omitted from serialized output when
-    /// empty, so existing JSON contracts are unchanged.
+    /// `mode=added|removed`). Empty and not [`enumerated`](Self::enumerated) = open-valued;
+    /// empty AND enumerated = accepts no value (ledger #41). Omitted from serialized output
+    /// when open-valued, so existing JSON contracts are unchanged; written as
+    /// `"one_of": []` when enumerated and empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub one_of: Vec<String>,
+    /// Whether the input declared an enumeration at all, so an EMPTY one is "accepts no
+    /// value" rather than "open-valued" (ledger #41: an enumeration built from
+    /// configuration, with nothing configured). Set by [`one_of`](Self::one_of) whatever it
+    /// is given; a non-empty `one_of` implies it ([`is_enumerated`](Self::is_enumerated)).
+    /// Carried on the wire by `"one_of": []`, never as a key of its own.
+    #[serde(skip)]
+    pub enumerated: bool,
+    /// Example values, each one the contract itself accepts (ledger #357): a lexical form
+    /// an agent or a test can copy (a hex color, an inline JSON or an IRI) where `class`
+    /// can only say `xsd:string`. Omitted from serialized output when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
     /// The inputs this one needs: when this input is given, each named input must be
     /// given too (validate's own `endpoint` needs `verb`). Names of inputs of the same
     /// action. Omitted from serialized output when empty, so existing JSON contracts are
@@ -70,6 +90,102 @@ pub struct ArgSpec {
     /// Omitted from serialized output when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, ValueNote>,
+}
+
+/// [`ArgSpec`]'s JSON form: the same fields, with `one_of` written whenever the input is
+/// enumerated (so an empty enumeration is `"one_of": []`) and read back into the flag.
+#[derive(Clone, Serialize, Deserialize)]
+struct ArgSpecWire {
+    name: String,
+    summary: String,
+    required: bool,
+    #[serde(default)]
+    source: InputSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    one_of: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    examples: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    needs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    list: Option<ListSeparator>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    values: BTreeMap<String, ValueNote>,
+}
+
+impl From<ArgSpecWire> for ArgSpec {
+    fn from(wire: ArgSpecWire) -> Self {
+        ArgSpec {
+            name: wire.name,
+            summary: wire.summary,
+            required: wire.required,
+            source: wire.source,
+            class: wire.class,
+            default: wire.default,
+            enumerated: wire.one_of.is_some(),
+            one_of: wire.one_of.unwrap_or_default(),
+            examples: wire.examples,
+            needs: wire.needs,
+            list: wire.list,
+            values: wire.values,
+        }
+    }
+}
+
+impl From<ArgSpec> for ArgSpecWire {
+    fn from(spec: ArgSpec) -> Self {
+        ArgSpecWire {
+            one_of: spec.is_enumerated().then_some(spec.one_of),
+            name: spec.name,
+            summary: spec.summary,
+            required: spec.required,
+            source: spec.source,
+            class: spec.class,
+            default: spec.default,
+            examples: spec.examples,
+            needs: spec.needs,
+            list: spec.list,
+            values: spec.values,
+        }
+    }
+}
+
+// Every field, with the enumeration compared as what it MEANS (`is_enumerated`), so a
+// non-empty `one_of` assigned by hand equals one set by the builder. Destructured
+// exhaustively, so a field added later is a compile error here.
+impl PartialEq for ArgSpec {
+    fn eq(&self, other: &Self) -> bool {
+        let ArgSpec {
+            name,
+            summary,
+            required,
+            source,
+            class,
+            default,
+            one_of,
+            enumerated: _,
+            examples,
+            needs,
+            list,
+            values,
+        } = self;
+        *name == other.name
+            && *summary == other.summary
+            && *required == other.required
+            && *source == other.source
+            && *class == other.class
+            && *default == other.default
+            && *one_of == other.one_of
+            && self.is_enumerated() == other.is_enumerated()
+            && *examples == other.examples
+            && *needs == other.needs
+            && *list == other.list
+            && *values == other.values
+    }
 }
 
 /// What one value of an enumerated input means (see [`ArgSpec::value`]): so a consumer
@@ -187,6 +303,35 @@ impl Arguments {
     }
 }
 
+/// Where an action's output TYPE comes from when it is not one the action can state in
+/// advance (ledger #45, #301): a pass-through. With it set, `outputs` reads as "at least
+/// these", never "only these".
+///
+/// ```
+/// use ikigai_core::{ActionSpec, ArgSpec, OutputFrom, Verb};
+///
+/// let compose = ActionSpec::new(Verb::Source)
+///     .input(ArgSpec::new("src"))
+///     .output_from(OutputFrom::Input("src".to_string()));
+/// assert_eq!(
+///     serde_json::to_value(&compose).unwrap()["output_from"],
+///     serde_json::json!({"input": "src"})
+/// );
+/// let fetch = ActionSpec::new(Verb::Source).output_from(OutputFrom::Origin);
+/// assert_eq!(serde_json::to_value(&fetch).unwrap()["output_from"], serde_json::json!("origin"));
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum OutputFrom {
+    /// The type of the resource the named input names or determines (`compose`'s `src`;
+    /// a binding too: browse's raw file face by its `path`).
+    Input(String),
+    /// Decided at resolve time by something outside the kernel (an HTTP origin's
+    /// Content-Type, the branch a conditional took).
+    Origin,
+}
+
 /// How a list-valued argument's items are separated in its one value (see
 /// [`ArgSpec::list`]).
 ///
@@ -275,6 +420,8 @@ impl ArgSpec {
             class: None,
             default: None,
             one_of: Vec::new(),
+            enumerated: false,
+            examples: Vec::new(),
             needs: Vec::new(),
             list: None,
             values: BTreeMap::new(),
@@ -303,9 +450,52 @@ impl ArgSpec {
     }
 
     /// Declare the closed set of accepted values (builder) — e.g. `["added", "removed"]`
-    /// for a `mode=` argument.
+    /// for a `mode=` argument. Declaring an EMPTY set is meaningful: the input accepts no
+    /// value (ledger #41), which is what an enumeration built from configuration says when
+    /// nothing is configured.
+    ///
+    /// ```
+    /// use ikigai_core::{ArgSpec, ProposedArgs, ActionSpec, Verb};
+    ///
+    /// let none: Vec<String> = Vec::new(); // e.g. no LLM provider configured
+    /// let provider = ArgSpec::new("provider").optional().one_of(none);
+    /// assert!(provider.is_enumerated());
+    /// assert_eq!(serde_json::to_value(&provider).unwrap()["one_of"], serde_json::json!([]));
+    /// // Open-valued is still the absence of the key.
+    /// assert!(serde_json::to_value(ArgSpec::new("x")).unwrap().get("one_of").is_none());
+    /// let action = ActionSpec::new(Verb::Source).input(provider);
+    /// assert!(!action.check(&ProposedArgs::parse("provider=ollama")).is_empty());
+    /// ```
     pub fn one_of(mut self, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.one_of = values.into_iter().map(Into::into).collect();
+        self.enumerated = true;
+        self
+    }
+
+    /// Whether the input declares an enumeration: a non-empty `one_of`, or an empty one
+    /// declared on purpose (see [`enumerated`](Self::enumerated)).
+    pub fn is_enumerated(&self) -> bool {
+        self.enumerated || !self.one_of.is_empty()
+    }
+
+    /// Add an example value (builder): see [`examples`](Self::examples).
+    /// [`Description::validate`] refuses an example the contract itself would refuse, so a
+    /// stale example is a bind-time error rather than a misleading hint.
+    ///
+    /// ```
+    /// use ikigai_core::{ArgSpec, Description, Verb};
+    ///
+    /// let contrast = Description::new("contrast")
+    ///     .verb(Verb::Source)
+    ///     .input(ArgSpec::new("from").example("#336699"));
+    /// assert!(contrast.validate().is_ok());
+    /// let stale = Description::new("pick")
+    ///     .verb(Verb::Source)
+    ///     .input(ArgSpec::new("mode").one_of(["a", "b"]).example("c"));
+    /// assert!(stale.validate().is_err());
+    /// ```
+    pub fn example(mut self, value: impl Into<String>) -> Self {
+        self.examples.push(value.into());
         self
     }
 
@@ -557,6 +747,10 @@ pub struct ActionSpec {
     /// #358): see [`Arguments`]. Omitted from serialized output when closed.
     #[serde(default, skip_serializing_if = "Arguments::is_closed")]
     pub arguments: Arguments,
+    /// Where this verb's output type comes from when it is a pass-through (ledger #45):
+    /// see [`OutputFrom`]. Omitted from serialized output when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_from: Option<OutputFrom>,
 }
 
 impl ActionSpec {
@@ -570,6 +764,7 @@ impl ActionSpec {
             requires: Vec::new(),
             groups: Vec::new(),
             arguments: Arguments::Closed,
+            output_from: None,
         }
     }
 
@@ -614,6 +809,12 @@ impl ActionSpec {
     /// (builder): [`Arguments::Envelope`].
     pub fn envelope(mut self, carrier: impl Into<String>) -> Self {
         self.arguments = Arguments::Envelope(carrier.into());
+        self
+    }
+
+    /// Declare where this verb's output type comes from (builder): see [`OutputFrom`].
+    pub fn output_from(mut self, from: OutputFrom) -> Self {
+        self.output_from = Some(from);
         self
     }
 
@@ -786,6 +987,10 @@ pub struct Description {
     /// see [`Arguments`]. Omitted from serialized output when closed.
     #[serde(default, skip_serializing_if = "Arguments::is_closed")]
     pub arguments: Arguments,
+    /// Where the flat form's output type comes from when it is a pass-through (ledger
+    /// #45): see [`OutputFrom`]. Omitted from serialized output when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_from: Option<OutputFrom>,
     /// How long a kernel may keep what it derives from this description before it calls
     /// `describe()` again — see [`ContractCaching`]. Defaults to
     /// [`UntilRebind`](ContractCaching::UntilRebind), a static contract. Set it with
@@ -817,6 +1022,7 @@ impl PartialEq for Description {
             actions,
             groups,
             arguments,
+            output_from,
             contract_caching: _,
         } = self;
         *id == other.id
@@ -830,6 +1036,7 @@ impl PartialEq for Description {
             && *actions == other.actions
             && *groups == other.groups
             && *arguments == other.arguments
+            && *output_from == other.output_from
     }
 }
 
@@ -1106,6 +1313,13 @@ impl Description {
         self
     }
 
+    /// Declare where the flat form's output type comes from (builder): see
+    /// [`OutputFrom`].
+    pub fn output_from(mut self, from: OutputFrom) -> Self {
+        self.output_from = Some(from);
+        self
+    }
+
     /// Declare a per-verb contract (builder). The verb is added to
     /// [`verbs`](Self::verbs) if not already declared.
     pub fn action(mut self, action: ActionSpec) -> Self {
@@ -1139,6 +1353,7 @@ impl Description {
                         requires: self.requires.clone(),
                         groups: self.groups.clone(),
                         arguments: self.arguments.clone(),
+                        output_from: self.output_from.clone(),
                     })
             })
             .collect()
@@ -1425,6 +1640,7 @@ impl Description {
                 inputs: self.inputs.clone(),
                 groups: self.groups.clone(),
                 arguments: self.arguments.clone(),
+                output_from: self.output_from.clone(),
                 ..ActionSpec::new(Verb::Source)
             };
             validate_relations(&self.id, None, &flat)?;
@@ -1518,7 +1734,36 @@ fn validate_relations(id: &str, verb: Option<Verb>, spec: &ActionSpec) -> crate:
             }
         }
     }
+    if let Some(OutputFrom::Input(name)) = &spec.output_from {
+        if input(name).is_none() {
+            return refuse(
+                "output_from",
+                format!("the output type comes from `{name}`, which is not a declared input"),
+            );
+        }
+    }
     for arg in &spec.inputs {
+        // Every example passes the contract's own rules for its input, so a stale example
+        // is refused at bind rather than handed to an agent.
+        for example in &arg.examples {
+            let probe = ActionSpec::new(Verb::Source).input(ArgSpec {
+                required: false,
+                needs: Vec::new(),
+                values: BTreeMap::new(),
+                ..arg.clone()
+            });
+            let proposed =
+                crate::check::ProposedArgs::new().with(arg.name.clone(), example.clone());
+            if let Some(violation) = probe.check(&proposed).into_iter().next() {
+                return refuse(
+                    "examples",
+                    format!(
+                        "input `{}`'s example `{example}` is one the contract refuses: {violation}",
+                        arg.name
+                    ),
+                );
+            }
+        }
         for needed in &arg.needs {
             if input(needed).is_none() {
                 return refuse(
@@ -1912,6 +2157,91 @@ mod tests {
                 "expected `{field}`: {err:?}"
             );
         }
+    }
+
+    /// Ledger #41: an empty enumeration is a state of its own, on the wire and in equality.
+    #[test]
+    fn an_empty_enumeration_is_not_an_open_one() {
+        let none: Vec<String> = Vec::new();
+        let empty = ArgSpec::new("provider").one_of(none);
+        let open = ArgSpec::new("provider");
+        assert!(empty.is_enumerated() && !open.is_enumerated());
+        assert_ne!(empty, open);
+        let json = serde_json::to_value(&empty).unwrap();
+        assert_eq!(json["one_of"], serde_json::json!([]));
+        let back: ArgSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(back, empty);
+        assert!(back.is_enumerated());
+        let open_back: ArgSpec =
+            serde_json::from_value(serde_json::to_value(&open).unwrap()).unwrap();
+        assert!(!open_back.is_enumerated());
+        // A non-empty `one_of` assigned by hand means what the builder's does.
+        let mut by_hand = ArgSpec::new("m");
+        by_hand.one_of = vec!["a".to_string()];
+        assert_eq!(by_hand, ArgSpec::new("m").one_of(["a"]));
+    }
+
+    /// Ledger #357, #45: examples are checked against their own contract; an output's
+    /// source is a declared input.
+    #[test]
+    fn validate_refuses_a_stale_example_or_an_undeclared_output_source() {
+        let ok = Description::new("x")
+            .verb(Verb::Source)
+            .input(
+                ArgSpec::new("graph")
+                    .list(ListSeparator::Comma)
+                    .one_of(["a", "b"])
+                    .example("a,b"),
+            )
+            .input(
+                ArgSpec::new("n")
+                    .class("http://www.w3.org/2001/XMLSchema#integer")
+                    .example("5"),
+            )
+            .output_from(OutputFrom::Input("graph".to_string()));
+        ok.validate().expect("a real contract validates");
+        let none: Vec<String> = Vec::new();
+        for (field, d) in [
+            (
+                "examples",
+                Description::new("x").verb(Verb::Source).input(
+                    ArgSpec::new("graph")
+                        .list(ListSeparator::Comma)
+                        .one_of(["a"])
+                        .example("a,c"),
+                ),
+            ),
+            (
+                "examples",
+                Description::new("x").verb(Verb::Source).input(
+                    ArgSpec::new("n")
+                        .class("http://www.w3.org/2001/XMLSchema#integer")
+                        .example("five"),
+                ),
+            ),
+            (
+                "examples",
+                Description::new("x")
+                    .verb(Verb::Source)
+                    .input(ArgSpec::new("p").one_of(none).example("ollama")),
+            ),
+            (
+                "output_from",
+                Description::new("x")
+                    .verb(Verb::Source)
+                    .output_from(OutputFrom::Input("src".to_string())),
+            ),
+        ] {
+            let err = d.validate().expect_err("must be refused");
+            assert!(
+                matches!(&err, crate::Error::InvalidArgument { name, .. } if name == field),
+                "expected `{field}`: {err:?}"
+            );
+        }
+        assert_eq!(
+            ok.action_specs()[0].output_from,
+            Some(OutputFrom::Input("graph".to_string()))
+        );
     }
 
     #[test]

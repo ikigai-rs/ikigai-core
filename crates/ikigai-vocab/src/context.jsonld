@@ -207,6 +207,10 @@
       "@type": "@id"
     },
     "entryState": "ik:entryState",
+    "enumerated": {
+      "@id": "ik:enumerated",
+      "@type": "xsd:boolean"
+    },
     "envelope": {
       "@id": "ik:envelope",
       "@type": "@id"
@@ -215,6 +219,7 @@
       "@id": "ik:evidence",
       "@type": "@id"
     },
+    "example": "ik:example",
     "explanation": "ik:explanation",
     "family": "ik:family",
     "fileName": "ik:fileName",
@@ -334,6 +339,10 @@
       "@type": "@id"
     },
     "output": "ik:output",
+    "outputFrom": {
+      "@id": "ik:outputFrom",
+      "@type": "@id"
+    },
     "params": "ik:params",
     "passcode": "ik:passcode",
     "path": "ik:path",

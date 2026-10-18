@@ -119,10 +119,14 @@ impl Canon {
 fn uses_v2(spec: &ActionSpec) -> bool {
     !spec.groups.is_empty()
         || !spec.arguments.is_closed()
-        || spec
-            .inputs
-            .iter()
-            .any(|i| !i.needs.is_empty() || i.list.is_some() || !i.values.is_empty())
+        || spec.output_from.is_some()
+        || spec.inputs.iter().any(|i| {
+            !i.needs.is_empty()
+                || i.list.is_some()
+                || !i.values.is_empty()
+                || !i.examples.is_empty()
+                || (i.is_enumerated() && i.one_of.is_empty())
+        })
 }
 
 /// One input in the v2 form: v1's fields, then the input-level additions.
@@ -149,6 +153,9 @@ fn input_v2(input: &ArgSpec) -> Canon {
         c.set(note.tags.iter().map(String::as_str));
         c.set(note.needs.iter().map(String::as_str));
     }
+    // An EMPTY enumeration (a non-empty one_of already says enumerated), and the examples.
+    c.u8(u8::from(input.is_enumerated() && input.one_of.is_empty()));
+    c.set(input.examples.iter().map(String::as_str));
     c
 }
 
@@ -471,13 +478,14 @@ impl ActionSpec {
     /// differently never share one.
     ///
     /// **Two forms, chosen by content** (ledger #1547). A contract using a construct v1
-    /// cannot carry (an input's `needs`, `list` or value notes, an
-    /// [`InputGroup`](crate::InputGroup), an open or envelope argument set) is hashed under
-    /// `ikigai:contract:v2` instead: the same fields, each input encoded whole with its
-    /// `needs` set, `list` separator and value notes (sorted by value: meaning, tag set,
-    /// needs set) appended and the inputs sorted by their encodings, then the outputs and
-    /// scopes as in v1, then the groups, each as its kind word, member set and pipe member,
-    /// sorted by their encodings, then the argument set. A contract that uses none of them
+    /// cannot carry (an input's `needs`, `list`, value notes, examples or EMPTY enumeration,
+    /// an [`InputGroup`](crate::InputGroup), an open or envelope argument set, an
+    /// `output_from`) is hashed under `ikigai:contract:v2` instead: the same fields, each
+    /// input encoded whole with its `needs` set, `list` separator, value notes (sorted by
+    /// value: meaning, tag set, needs set), empty-enumeration flag and example set appended
+    /// and the inputs sorted by their encodings, then the outputs and scopes as in v1, then
+    /// the groups, each as its kind word, member set and pipe member, sorted by their
+    /// encodings, then the argument set, then `output_from`. A contract that uses none of them
     /// keeps its v1 digest, so no existing contract IRI moves and a face that predates v2
     /// agrees on every contract it can express.
     ///
@@ -548,6 +556,14 @@ impl ActionSpec {
         feed_set(&mut h, &self.requires);
         Canon::feed_items(&mut h, self.groups.iter().map(group_v2));
         arguments_v2(&mut h, &self.arguments);
+        match &self.output_from {
+            None => feed_u8(&mut h, 0),
+            Some(crate::describe::OutputFrom::Input(name)) => {
+                feed_u8(&mut h, 1);
+                feed_str(&mut h, name);
+            }
+            Some(crate::describe::OutputFrom::Origin) => feed_u8(&mut h, 2),
+        }
         ContentId::from_hasher(h)
     }
 
@@ -755,6 +771,24 @@ mod tests {
                     ArgSpec::new("a")
                         .optional()
                         .list(crate::describe::ListSeparator::Newline),
+                    ArgSpec::new("b").optional(),
+                ],
+                ..base.clone()
+            },
+            base.clone()
+                .output_from(crate::describe::OutputFrom::Origin),
+            base.clone()
+                .output_from(crate::describe::OutputFrom::Input("a".to_string())),
+            ActionSpec {
+                inputs: vec![
+                    ArgSpec::new("a").optional().example("x"),
+                    ArgSpec::new("b").optional(),
+                ],
+                ..base.clone()
+            },
+            ActionSpec {
+                inputs: vec![
+                    ArgSpec::new("a").optional().one_of(Vec::<String>::new()),
                     ArgSpec::new("b").optional(),
                 ],
                 ..base.clone()

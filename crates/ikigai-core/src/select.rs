@@ -677,6 +677,11 @@ pub(crate) fn select_actions_bounded(
             if !query.present.is_empty() && !spec_satisfiable(&action, query.present) {
                 continue;
             }
+            // An action nobody can call is not offered (ledger #41): a required input, or
+            // every member of a required group, whose enumeration is declared and empty.
+            if !callable(&action) {
+                continue;
+            }
             let missing_optional = action
                 .inputs
                 .iter()
@@ -843,6 +848,32 @@ fn spec_satisfiable(action: &crate::describe::ActionSpec, present: &[&str]) -> b
     has_required
 }
 
+/// Whether any call could satisfy `action`'s contract: false when a required by-value
+/// input, or every member of an [`ExactlyOne`](crate::GroupKind::ExactlyOne) or
+/// [`AtLeastOne`](crate::GroupKind::AtLeastOne) group, declares an EMPTY enumeration and so
+/// accepts no value (ledger #41).
+fn callable(action: &crate::describe::ActionSpec) -> bool {
+    let accepts_nothing =
+        |input: &crate::describe::ArgSpec| input.is_enumerated() && input.one_of.is_empty();
+    let required_dead = action
+        .inputs
+        .iter()
+        .any(|i| i.required && i.source == InputSource::Argument && accepts_nothing(i));
+    let group_dead = action.groups.iter().any(|g| {
+        matches!(
+            g.kind,
+            crate::GroupKind::ExactlyOne | crate::GroupKind::AtLeastOne
+        ) && g.members.iter().all(|m| {
+            action
+                .inputs
+                .iter()
+                .find(|i| i.name == *m)
+                .is_some_and(accepts_nothing)
+        })
+    });
+    !required_dead && !group_dead
+}
+
 /// Convenience: select actions over an `Arc<dyn Space>` root (as a kernel holds).
 pub fn select_action_in(root: &Arc<dyn Space>, present: &[&str]) -> Vec<ActionMatch> {
     select_action(root.as_ref(), present)
@@ -941,6 +972,39 @@ mod tests {
             ..greet.clone()
         };
         assert!(!spec_satisfiable(&loose, &[PERSON]));
+    }
+
+    /// Ledger #41: an action whose required input accepts no value is not offered.
+    #[test]
+    fn an_action_nobody_can_call_is_not_offered() {
+        use crate::describe::{ActionSpec, ArgSpec, InputGroup};
+        let none: Vec<String> = Vec::new();
+        let dead =
+            ActionSpec::new(Verb::Source).input(ArgSpec::new("provider").one_of(none.clone()));
+        assert!(!callable(&dead));
+        let optional = ActionSpec::new(Verb::Source)
+            .input(ArgSpec::new("provider").optional().one_of(none.clone()));
+        assert!(callable(&optional));
+        let group = ActionSpec::new(Verb::Source)
+            .input(ArgSpec::new("a").optional().one_of(none.clone()))
+            .input(ArgSpec::new("b").optional().one_of(none.clone()))
+            .group(InputGroup::at_least_one(["a", "b"]));
+        assert!(!callable(&group));
+        let live = ActionSpec::new(Verb::Source).input(ArgSpec::new("provider").one_of(["ollama"]));
+        assert!(callable(&live));
+
+        let space = EndpointSpace::new().bind(
+            crate::grammar::Exact::new("urn:demo:ask"),
+            FnEndpoint::new("ask", |_| {
+                Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
+            })
+            .with_description(
+                Description::new("ask")
+                    .verb(Verb::Source)
+                    .input(ArgSpec::new("provider").one_of(none)),
+            ),
+        );
+        assert!(select_actions(&space, &ActionQuery::default()).is_empty());
     }
 
     #[test]
