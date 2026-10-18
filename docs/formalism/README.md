@@ -2337,3 +2337,31 @@ the publish.
 8. Route tables: author `ik:cap <urn:cap:…>` as an IRI (Turtle); JSON and YAML tables need no edit. Needs ikigai-cli
    0.1.64 or later.
 9. Optional: delete your hand-applied default fallbacks; the kernel applies the declared default.
+
+**0.1.106** carries one PR on top of 0.1.105, **PR 227** (ledger [#1547](http://localhost:1062/l/default/item/1547), a
+follow-up: Brian's option (b) of 2026-10-18, which amends the design note's section 1.10). One behavior change.
+
+- ⚠ **A default on an OPTIONAL binding.** 0.1.105's `Description::validate` refused a default on every binding ("a
+  binding never has a default"), and three modules declare exactly that for a name segment their grammar can omit:
+  ikigai-ledger's `{ledger}` (`…:items` is `…:default:items`), gonk's `ledger`, `op` and `name`, and ikigai-org's
+  `{period}`. Now a binding that is optional (`.binding().optional()`, or `.binding().default_value(..)`, since a
+  default already implies optional) may declare one, held to its `one_of` and class like any default, and a REQUIRED
+  binding with a default is still refused. The kernel fills the binding: when the matched name leaves that segment out,
+  the endpoint's `inv.bindings` carries the declared default, from the same per-endpoint floor memo as the by-value
+  defaults (the same verb rule, no extra `describe()`), and the `defaulted` trace note names it after the by-value
+  arguments. **The cache identity does not change.** `Request::id()` is the target and the arguments; the bindings
+  were never in it, since the grammar derives them from the target. So a filled binding moves no key, and the short and
+  the spelled-out name stay two requests and two cache entries, as they were on 0.1.105 for ledger, whose grammar
+  already inserts `default` itself. One identity for both is a rewrite: an alias, or a space reporting
+  `Resolved::canonical`. Pins: `kernel::tests::an_omitted_optional_binding_is_filled_from_its_default`,
+  `kernel::tests::a_filled_binding_changes_no_identity`, `describe::tests::validate_refuses_a_default_the_kernel_could_not_honor`
+  (crates/ikigai-core/src).
+
+No API changes, and no contract digest moves: `default` was already a v1 field on every input, bindings included.
+**Vocabulary:** `ik:default`'s comment states the binding case; the JSON-LD context is unchanged; `owl:versionInfo`.
+`/ns` needs a manual deploy after the publish. ikigai-vocab's core floor stays 0.1.105 (it uses nothing new).
+
+**Migrating to 0.1.106.** Bump `ikigai-core` and `ikigai-vocab` to `"0.1.106"`. A module whose optional segment
+declares a default now passes `validate` (and conformance's DECLARATIONS once conformance stops refusing it), and needs
+no other edit: a grammar that already fills the binding itself (ledger's) keeps doing so, and the kernel's fill is a
+no-op for it.
