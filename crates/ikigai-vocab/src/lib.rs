@@ -299,6 +299,13 @@ fn input_predicates(owner: &str, input: &ikigai_core::ArgSpec) -> String {
             lit(value)
         ));
     }
+    if let Some(separator) = input.list {
+        node.push_str(&format!(
+            " ;
+    ik:listSeparator {}",
+            lit(separator.word())
+        ));
+    }
     for needed in &input.needs {
         node.push_str(&format!(
             " ;
@@ -804,6 +811,15 @@ mod tests {
             "{ttl}"
         );
         assert!(parse_count(&ttl) > 0);
+        let listed = to_turtle(
+            &Description::new("q")
+                .verb(Verb::Source)
+                .input(ArgSpec::new("graph").list(ikigai_core::ListSeparator::CommaOrWhitespace)),
+        );
+        assert!(
+            listed.contains("ik:listSeparator \"comma-or-whitespace\""),
+            "{listed}"
+        );
         // A member name with a comma cannot run two lists together.
         let odd = InputGroup::exactly_one(["a,b", "c"]).node_segment();
         assert_ne!(odd, InputGroup::exactly_one(["a", "b,c"]).node_segment());

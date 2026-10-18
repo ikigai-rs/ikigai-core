@@ -56,6 +56,90 @@ pub struct ArgSpec {
     /// unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
+    /// When the value is a LIST in one argument (`proposals=minor,info`, `graph=A B`), the
+    /// separator its items are split on: `one_of` and `class` then apply to EACH item, and
+    /// this is the one argument a caller may give more than once (the repeats are joined
+    /// with the separator's canonical character, so `graph=A graph=B` and `graph="A,B"` are
+    /// one call). Ledger #497, #357, #387. Omitted from serialized output when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<ListSeparator>,
+}
+
+/// How a list-valued argument's items are separated in its one value (see
+/// [`ArgSpec::list`]).
+///
+/// ```
+/// use ikigai_core::ListSeparator;
+///
+/// assert_eq!(ListSeparator::Comma.split("minor, info,,"), ["minor", "info"]);
+/// assert_eq!(ListSeparator::CommaOrWhitespace.split("urn:a, urn:b  urn:c"), ["urn:a", "urn:b", "urn:c"]);
+/// assert_eq!(ListSeparator::Newline.split("a\r\nb\n\n"), ["a", "b"]);
+/// // Repeats are joined with the canonical character.
+/// assert_eq!(ListSeparator::CommaOrWhitespace.join(["urn:a", "urn:b"]), "urn:a,urn:b");
+/// assert_eq!(ListSeparator::Whitespace.join(["a", "b"]), "a b");
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum ListSeparator {
+    /// `,` (items trimmed): `proposals=minor,info`.
+    Comma,
+    /// Runs of whitespace: `graph="A B"`.
+    Whitespace,
+    /// `,` or whitespace, runs collapsed: `graph=A,B C`.
+    CommaOrWhitespace,
+    /// Line breaks (items trimmed): the `..` map convention, so a list argument can take a
+    /// map stage's joined output.
+    Newline,
+}
+
+impl ListSeparator {
+    /// The separator's word, as the JSON contract and `ik:listSeparator` spell it:
+    /// `comma`, `whitespace`, `comma-or-whitespace` or `newline`.
+    pub fn word(self) -> &'static str {
+        match self {
+            ListSeparator::Comma => "comma",
+            ListSeparator::Whitespace => "whitespace",
+            ListSeparator::CommaOrWhitespace => "comma-or-whitespace",
+            ListSeparator::Newline => "newline",
+        }
+    }
+
+    /// The character repeats are joined with: `,` for [`Comma`](Self::Comma) and
+    /// [`CommaOrWhitespace`](Self::CommaOrWhitespace), a space for
+    /// [`Whitespace`](Self::Whitespace), `\n` for [`Newline`](Self::Newline).
+    pub fn canonical(self) -> char {
+        match self {
+            ListSeparator::Comma | ListSeparator::CommaOrWhitespace => ',',
+            ListSeparator::Whitespace => ' ',
+            ListSeparator::Newline => '\n',
+        }
+    }
+
+    /// The items of `value`, empty items dropped.
+    pub fn split(self, value: &str) -> Vec<&str> {
+        let items: Vec<&str> = match self {
+            ListSeparator::Comma => value.split(',').map(str::trim).collect(),
+            ListSeparator::Whitespace => value.split_whitespace().collect(),
+            ListSeparator::CommaOrWhitespace => value
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .collect(),
+            ListSeparator::Newline => value.lines().map(str::trim).collect(),
+        };
+        items.into_iter().filter(|item| !item.is_empty()).collect()
+    }
+
+    /// `items` joined with the [`canonical`](Self::canonical) character.
+    pub fn join<'a>(self, items: impl IntoIterator<Item = &'a str>) -> String {
+        let mut out = String::new();
+        for (n, item) in items.into_iter().enumerate() {
+            if n > 0 {
+                out.push(self.canonical());
+            }
+            out.push_str(item);
+        }
+        out
+    }
 }
 
 impl ArgSpec {
@@ -70,6 +154,7 @@ impl ArgSpec {
             default: None,
             one_of: Vec::new(),
             needs: Vec::new(),
+            list: None,
         }
     }
 
@@ -119,6 +204,31 @@ impl ArgSpec {
     /// ```
     pub fn needs(mut self, inputs: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.needs.extend(inputs.into_iter().map(Into::into));
+        self
+    }
+
+    /// Declare the value a list whose items are separated by `separator` (builder): its
+    /// `one_of` and `class` apply to each item, and it is the one kind of argument a caller
+    /// may give more than once.
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, ArgSpec, ListSeparator, ProposedArgs, Verb};
+    ///
+    /// let file = ActionSpec::new(Verb::Source).input(
+    ///     ArgSpec::new("proposals")
+    ///         .optional()
+    ///         .list(ListSeparator::Comma)
+    ///         .one_of(["critical", "major", "minor", "info"]),
+    /// );
+    /// assert!(file.check(&ProposedArgs::parse("proposals=minor,info")).is_empty());
+    /// let bad = file.check(&ProposedArgs::parse("proposals=minor,bogus"));
+    /// assert_eq!(bad.len(), 1);
+    /// assert!(bad[0].message.contains("`bogus`"), "{}", bad[0]);
+    /// // Repeated, it is joined: one call.
+    /// assert!(file.check(&ProposedArgs::parse("proposals=minor&proposals=info")).is_empty());
+    /// ```
+    pub fn list(mut self, separator: ListSeparator) -> Self {
+        self.list = Some(separator);
         self
     }
 

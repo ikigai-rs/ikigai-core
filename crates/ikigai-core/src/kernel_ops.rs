@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::describe::{ArgSpec, Description, InputGroup};
+use crate::describe::{ArgSpec, Description, InputGroup, ListSeparator};
 use crate::endpoint::{Endpoint, Invocation};
 use crate::error::{Error, Result};
 use crate::grammar::Bindings;
@@ -137,7 +137,8 @@ fn actions() -> Description {
         .input(
             ArgSpec::new("types")
                 .summary("present RDF class IRIs, comma- or space-separated")
-                .optional(),
+                .optional()
+                .list(ListSeparator::CommaOrWhitespace),
         )
         .input(
             ArgSpec::new("verb")
@@ -295,7 +296,8 @@ fn explain() -> Description {
                     "answer for a capability attenuated from the asker's to these scopes \
                      (comma- or space-separated); a scope the asker does not hold is refused",
                 )
-                .optional(),
+                .optional()
+                .list(ListSeparator::CommaOrWhitespace),
         )
         .input(face())
         .output(TEXT_PLAIN_UTF8)

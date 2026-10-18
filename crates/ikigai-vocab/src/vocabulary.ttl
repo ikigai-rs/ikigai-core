@@ -105,7 +105,7 @@ ik:output a rdf:Property ;
 ik:input a rdf:Property ;
     rdfs:range rdfs:Resource ;
     rdfs:label "input" ;
-    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, ik:oneOf and ik:needs. No domain: emitted on all three." .
+    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, ik:oneOf, ik:listSeparator and ik:needs. No domain: emitted on all three." .
 
 ik:inputName a rdf:Property ;
     rdfs:range xsd:string ;
@@ -182,6 +182,11 @@ ik:oneOf a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "oneOf" ;
     rdfs:comment "One accepted value of an enumerated input (repeated per value); absent = open-valued." .
+
+ik:listSeparator a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "listSeparator" ;
+    rdfs:comment "On an input node: the value is a list in one argument, its items separated by \"comma\", \"whitespace\", \"comma-or-whitespace\" (either, runs collapsed) or \"newline\" (the .. map convention); empty items are dropped. ik:oneOf and ik:class then apply to EACH item, and a list is the one argument a caller may give more than once: every adapter joins the repeats with the separator's canonical character (a comma, a space, a line break) before building the request, so the repeated and the joined spelling are one call. Absent: one value." .
 
 ik:needs a rdf:Property ;
     rdfs:range rdfs:Resource ;

@@ -18,6 +18,11 @@ use std::fmt;
 use crate::describe::{ActionSpec, ArgSpec, GroupKind, InputGroup, InputSource};
 use crate::request::Request;
 
+/// The detail of every refusal of a name given more than once that is not a list
+/// argument (ledger #387, #1731): the display form the cli's entry points, ikigai-mcp and
+/// [`Request`]'s decoder share, so a typed-error display reads the same from every face.
+pub const GIVEN_TWICE: &str = "given twice; an argument takes one value, so name it once";
+
 /// A proposed set of named arguments, in the order they were given, repeats kept.
 ///
 /// Built from the `key=value&key=value` text `urn:kernel:validate` takes
@@ -143,6 +148,8 @@ pub enum ViolationKind {
     AtMostOne,
     /// A given input whose declared dependency (`needs`) is not given.
     Needs,
+    /// A name given more than once that is not a list argument (ledger #387).
+    GivenTwice,
 }
 
 impl ViolationKind {
@@ -157,6 +164,7 @@ impl ViolationKind {
             ViolationKind::AtLeastOne => "at-least-one",
             ViolationKind::AtMostOne => "at-most-one",
             ViolationKind::Needs => "needs",
+            ViolationKind::GivenTwice => "given-twice",
         }
     }
 
@@ -176,6 +184,8 @@ impl ViolationKind {
             ViolationKind::AtMostOne => "http://www.w3.org/ns/shacl#SPARQLConstraintComponent",
             // `sh:or ( [ sh:path a ; sh:maxCount 0 ] [ sh:path b ; sh:minCount 1 ] )`.
             ViolationKind::Needs => "http://www.w3.org/ns/shacl#OrConstraintComponent",
+            // A non-list input is `sh:maxCount 1`; a list drops it.
+            ViolationKind::GivenTwice => "http://www.w3.org/ns/shacl#MaxCountConstraintComponent",
         }
     }
 }
@@ -338,8 +348,10 @@ impl ActionSpec {
     /// (each input in declaration order, then the names the contract does not declare).
     /// Empty exactly when the arguments conform.
     ///
-    /// The rules: a required by-value input is given; a value is one of the input's
-    /// `one_of`, when it declares one; a value is plausible for its declared XSD datatype
+    /// The rules: a name that is not a [list](ArgSpec::list) is given once (a list's
+    /// repeats are joined, as [`join_repeats`](Self::join_repeats) does); a required by-value
+    /// input is given; a value (each item, for a list) is one of the input's `one_of`, when
+    /// it declares one; a value (each item) is plausible for its declared XSD datatype
     /// (`xsd:boolean`, `xsd:integer`, `xsd:dateTime`; an entity class is not statically
     /// checkable); a given input's `needs` are given; every [`InputGroup`] holds (a member
     /// is given when its value is not blank); every name is declared. A binding is part of
@@ -365,8 +377,16 @@ impl ActionSpec {
     /// ```
     pub fn check(&self, proposed: &ProposedArgs) -> Vec<Violation> {
         let mut violations = Vec::new();
+        let (effective, repeated) = self.joined(proposed);
         for input in &self.inputs {
-            let value = proposed.get(&input.name);
+            if repeated.contains(&input.name.as_str()) {
+                violations.push(Violation::at_input(
+                    ViolationKind::GivenTwice,
+                    input,
+                    format!("`{}` is {GIVEN_TWICE}", input.name),
+                ));
+            }
+            let value = effective.get(&input.name);
             if input.required && input.source != InputSource::Binding && value.is_none() {
                 violations.push(Violation::at_input(
                     ViolationKind::Missing,
@@ -376,35 +396,21 @@ impl ActionSpec {
                 continue;
             }
             let Some(value) = value else { continue };
-            if !input.one_of.is_empty() && !input.one_of.iter().any(|v| v == value) {
-                violations.push(Violation::at_input(
-                    ViolationKind::NotOneOf,
-                    input,
-                    format!(
-                        "`{value}` is not an accepted value of `{}` (one of: {})",
-                        input.name,
-                        input.one_of.join(", ")
-                    ),
-                ));
-                continue;
-            }
-            if let Some(class) = &input.class {
-                if !plausible(class, value) {
-                    violations.push(Violation::at_input(
-                        ViolationKind::Implausible,
-                        input,
-                        format!(
-                            "`{value}` does not look like a {class} for `{}`",
-                            input.name
-                        ),
-                    ));
-                }
+            match input.list {
+                // A list: every item is checked, and each bad one is reported.
+                Some(separator) => violations.extend(
+                    separator
+                        .split(value)
+                        .into_iter()
+                        .filter_map(|item| check_value(input, item)),
+                ),
+                None => violations.extend(check_value(input, value)),
             }
             let missing: Vec<&str> = input
                 .needs
                 .iter()
                 .map(String::as_str)
-                .filter(|needed| !given(proposed.get(needed)))
+                .filter(|needed| !given(effective.get(needed)))
                 .collect();
             if given(Some(value)) && !missing.is_empty() {
                 violations.push(Violation::at_input(
@@ -414,9 +420,15 @@ impl ActionSpec {
                 ));
             }
         }
-        violations.extend(self.groups.iter().filter_map(|g| check_group(g, proposed)));
+        violations.extend(
+            self.groups
+                .iter()
+                .filter_map(|g| check_group(g, &effective)),
+        );
+        let mut unknown: Vec<&str> = Vec::new();
         for (name, _) in proposed.pairs() {
-            if !self.inputs.iter().any(|i| i.name == name) {
+            if !self.inputs.iter().any(|i| i.name == name) && !unknown.contains(&name) {
+                unknown.push(name);
                 violations.push(Violation::new(
                     ViolationKind::Unknown,
                     None,
@@ -426,6 +438,109 @@ impl ActionSpec {
         }
         violations
     }
+
+    /// The proposed arguments with each name given once: the repeats of a LIST argument
+    /// joined with its separator's canonical character, so `graph=A graph=B` and
+    /// `graph=A,B` are one call (one [`Request::id`], one cache key). A repeat of any other
+    /// name is refused as [`InvalidArgument`](crate::Error::InvalidArgument) with the
+    /// detail [`GIVEN_TWICE`], the form every cli entry point already uses (ledger #387).
+    ///
+    /// The one rule every adapter that can see a repeated name (the engine's `k=v k=v`, an
+    /// HTTP query string, an MCP array) applies BEFORE it builds a [`Request`], which holds
+    /// one value per name.
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, ArgSpec, Error, ListSeparator, ProposedArgs, Verb};
+    ///
+    /// let sparql = ActionSpec::new(Verb::Source)
+    ///     .input(ArgSpec::new("graph").optional().list(ListSeparator::CommaOrWhitespace))
+    ///     .input(ArgSpec::new("query"));
+    /// let joined = sparql
+    ///     .join_repeats(&ProposedArgs::parse("graph=urn:a&query=q&graph=urn:b"))
+    ///     .unwrap();
+    /// assert_eq!(joined.get("graph"), Some("urn:a,urn:b"));
+    /// let err = sparql
+    ///     .join_repeats(&ProposedArgs::parse("query=a&query=b"))
+    ///     .unwrap_err();
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "invalid argument `query`: given twice; an argument takes one value, so name it once"
+    /// );
+    /// assert!(matches!(err, Error::InvalidArgument { .. }));
+    /// ```
+    pub fn join_repeats(&self, proposed: &ProposedArgs) -> crate::Result<ProposedArgs> {
+        let (joined, repeated) = self.joined(proposed);
+        match repeated.first() {
+            Some(name) => Err(crate::Error::InvalidArgument {
+                name: (*name).to_string(),
+                detail: GIVEN_TWICE.to_string(),
+            }),
+            None => Ok(joined),
+        }
+    }
+
+    /// One value per name, in first-seen order: a list argument's repeats joined, any
+    /// other name's FIRST value kept; and the names that were repeated without being a list.
+    fn joined<'a>(&self, proposed: &'a ProposedArgs) -> (ProposedArgs, Vec<&'a str>) {
+        let mut order: Vec<&str> = Vec::new();
+        for (name, _) in proposed.pairs() {
+            if !order.contains(&name) {
+                order.push(name);
+            }
+        }
+        let mut joined = ProposedArgs::new();
+        let mut repeated = Vec::new();
+        for name in order {
+            let values: Vec<&str> = proposed
+                .pairs()
+                .filter(|(k, _)| *k == name)
+                .map(|(_, v)| v)
+                .collect();
+            let list = self
+                .inputs
+                .iter()
+                .find(|i| i.name == name)
+                .and_then(|i| i.list);
+            let value = match (list, values.as_slice()) {
+                (_, [one]) => (*one).to_string(),
+                (Some(separator), many) => separator.join(many.iter().copied()),
+                (None, [first, ..]) => {
+                    repeated.push(name);
+                    (*first).to_string()
+                }
+                (None, []) => unreachable!("a name in the order was given"),
+            };
+            joined = joined.with(name, value);
+        }
+        (joined, repeated)
+    }
+}
+
+/// One value (a whole value, or one item of a list) against its input's `one_of` and
+/// declared class.
+fn check_value(input: &ArgSpec, value: &str) -> Option<Violation> {
+    if !input.one_of.is_empty() && !input.one_of.iter().any(|v| v == value) {
+        return Some(Violation::at_input(
+            ViolationKind::NotOneOf,
+            input,
+            format!(
+                "`{value}` is not an accepted value of `{}` (one of: {})",
+                input.name,
+                input.one_of.join(", ")
+            ),
+        ));
+    }
+    let class = input.class.as_deref()?;
+    (!plausible(class, value)).then(|| {
+        Violation::at_input(
+            ViolationKind::Implausible,
+            input,
+            format!(
+                "`{value}` does not look like a {class} for `{}`",
+                input.name
+            ),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -479,6 +594,79 @@ mod tests {
     fn a_node_iri_encodes_the_input_name_as_the_catalog_does() {
         let path = ViolationPath::Input("100% sure".to_string());
         assert_eq!(path.node_iri("urn:c"), "urn:c:input:100%25%20sure");
+    }
+
+    /// Ledger #497, #387: a list's items are checked one by one, its repeats are joined,
+    /// and any other repeat is refused, where validate used to keep the first value and the
+    /// engine the last.
+    #[test]
+    fn a_list_checks_each_item_and_joins_its_repeats() {
+        use crate::describe::ListSeparator;
+        let spec = ActionSpec::new(Verb::Source)
+            .input(
+                ArgSpec::new("proposals")
+                    .optional()
+                    .list(ListSeparator::Comma)
+                    .one_of(["critical", "major", "minor", "info"]),
+            )
+            .input(
+                ArgSpec::new("graph")
+                    .optional()
+                    .list(ListSeparator::CommaOrWhitespace)
+                    .class("http://www.w3.org/2001/XMLSchema#integer"),
+            )
+            .input(ArgSpec::new("query").optional());
+        let words = |args: &str| -> Vec<(ViolationKind, Option<String>, String)> {
+            spec.check(&ProposedArgs::parse(args))
+                .into_iter()
+                .map(|v| (v.kind, v.path.map(|p| p.word()), v.message))
+                .collect()
+        };
+        let bad = words("proposals=minor,bogus");
+        assert_eq!(bad.len(), 1, "{bad:?}");
+        assert_eq!(bad[0].0, ViolationKind::NotOneOf);
+        assert_eq!(bad[0].1.as_deref(), Some("input:proposals"));
+        assert!(bad[0].2.contains("`bogus`") && !bad[0].2.contains("`minor`"));
+        assert!(words("graph=1 2,3").is_empty());
+        assert_eq!(words("graph=1,x")[0].0, ViolationKind::Implausible);
+        // The repeated spelling is the joined one.
+        assert!(words("graph=1&graph=2").is_empty());
+        assert_eq!(
+            spec.join_repeats(&ProposedArgs::parse("graph=1&graph=2"))
+                .unwrap()
+                .get("graph"),
+            Some("1,2")
+        );
+        // A repeat of a name that is not a list: given twice, once.
+        let twice = words("query=a&query=b&query=c");
+        assert_eq!(twice.len(), 1, "{twice:?}");
+        assert_eq!(twice[0].0, ViolationKind::GivenTwice);
+        assert_eq!(twice[0].1.as_deref(), Some("input:query"));
+        // An unknown name is reported once, however often it is given.
+        assert_eq!(words("x=1&x=2").len(), 1);
+    }
+
+    #[test]
+    fn the_repeated_and_the_joined_spelling_are_one_request() {
+        use crate::arg::ArgRef;
+        use crate::describe::ListSeparator;
+        use crate::iri::Iri;
+        let spec = ActionSpec::new(Verb::Source)
+            .input(ArgSpec::new("graph").list(ListSeparator::CommaOrWhitespace));
+        let request = |proposed: &ProposedArgs| {
+            let joined = spec.join_repeats(proposed).unwrap();
+            joined
+                .pairs()
+                .fold(
+                    Request::new(Verb::Source, Iri::parse("urn:q").unwrap()),
+                    |r, (k, v)| r.with_arg(k, ArgRef::Inline(v.as_bytes().to_vec())),
+                )
+                .id()
+        };
+        assert_eq!(
+            request(&ProposedArgs::parse("graph=urn:a&graph=urn:b")),
+            request(&ProposedArgs::parse("graph=urn:a,urn:b"))
+        );
     }
 
     #[test]
