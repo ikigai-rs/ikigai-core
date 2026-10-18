@@ -906,6 +906,126 @@
           "Meta"
         ]
       }
+    },
+    {
+      "name": "core/argspec-shape",
+      "pattern": "urn:core:argspec-shape",
+      "description": {
+        "id": "argspec-shape",
+        "title": "",
+        "summary": "every construct the ArgSpec release added",
+        "verbs": [
+          "Source",
+          "Sink",
+          "Delete",
+          "Meta"
+        ],
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": false,
+            "source": "argument"
+          },
+          {
+            "name": "in",
+            "summary": "",
+            "required": false,
+            "source": "argument"
+          },
+          {
+            "name": "proposals",
+            "summary": "",
+            "required": false,
+            "source": "argument",
+            "list": "comma",
+            "one_of": [
+              "minor",
+              "info"
+            ],
+            "values": {
+              "info": {
+                "summary": "informational only",
+                "tags": [
+                  "quiet"
+                ]
+              }
+            },
+            "examples": [
+              "minor,info"
+            ]
+          },
+          {
+            "name": "provider",
+            "summary": "",
+            "required": false,
+            "source": "argument",
+            "one_of": []
+          },
+          {
+            "name": "endpoint",
+            "summary": "",
+            "required": false,
+            "source": "argument",
+            "needs": [
+              "in"
+            ]
+          }
+        ],
+        "groups": [
+          {
+            "kind": "exactly-one",
+            "members": [
+              "content",
+              "in"
+            ],
+            "pipe": "content"
+          }
+        ],
+        "output_from": {
+          "input": "in"
+        },
+        "outputs": [
+          "text/plain"
+        ],
+        "actions": [
+          {
+            "verb": "Sink",
+            "inputs": [
+              {
+                "name": "content",
+                "summary": "",
+                "required": true,
+                "source": "argument"
+              },
+              {
+                "name": "email",
+                "summary": "",
+                "required": true,
+                "source": "argument"
+              }
+            ],
+            "arguments": {
+              "envelope": "content"
+            }
+          },
+          {
+            "verb": "Delete",
+            "inputs": [
+              {
+                "name": "key",
+                "summary": "",
+                "required": true,
+                "source": "argument"
+              }
+            ],
+            "arguments": {
+              "open": "anything else is a label"
+            },
+            "output_from": "origin"
+          }
+        ]
+      }
     }
   ],
   "contracts": [
@@ -1117,6 +1237,299 @@
       "id": "a?b",
       "action": {
         "verb": "Source"
+      }
+    },
+    {
+      "name": "to-upper (the renamed builtin id)",
+      "id": "to-upper",
+      "action": {
+        "verb": "Source",
+        "inputs": [
+          {
+            "name": "in",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          }
+        ],
+        "outputs": [
+          "text/plain;charset=utf-8"
+        ]
+      }
+    },
+    {
+      "name": "v2/group",
+      "id": "kernel-cut",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "thread",
+            "summary": "",
+            "required": false,
+            "source": "argument"
+          },
+          {
+            "name": "content",
+            "summary": "",
+            "required": false,
+            "source": "argument"
+          }
+        ],
+        "groups": [
+          {
+            "kind": "exactly-one",
+            "members": [
+              "content",
+              "thread"
+            ],
+            "pipe": "content"
+          }
+        ]
+      }
+    },
+    {
+      "name": "v2/group-members-are-a-set (same digest as v2/group)",
+      "id": "kernel-cut",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": false,
+            "source": "argument"
+          },
+          {
+            "name": "thread",
+            "summary": "",
+            "required": false,
+            "source": "argument"
+          }
+        ],
+        "groups": [
+          {
+            "kind": "exactly-one",
+            "members": [
+              "thread",
+              "content",
+              "thread"
+            ],
+            "pipe": "content"
+          }
+        ]
+      }
+    },
+    {
+      "name": "v2/at-most-one-group",
+      "id": "pick",
+      "action": {
+        "verb": "Source",
+        "inputs": [
+          {
+            "name": "a",
+            "summary": "",
+            "required": false,
+            "source": "argument"
+          },
+          {
+            "name": "b",
+            "summary": "",
+            "required": false,
+            "source": "argument"
+          }
+        ],
+        "groups": [
+          {
+            "kind": "at-most-one",
+            "members": [
+              "a",
+              "b"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "v2/needs",
+      "id": "kernel-validate",
+      "action": {
+        "verb": "Source",
+        "inputs": [
+          {
+            "name": "endpoint",
+            "summary": "",
+            "required": false,
+            "source": "argument",
+            "needs": [
+              "verb"
+            ]
+          },
+          {
+            "name": "verb",
+            "summary": "",
+            "required": false,
+            "source": "argument"
+          }
+        ]
+      }
+    },
+    {
+      "name": "v2/list",
+      "id": "sparql-select",
+      "action": {
+        "verb": "Source",
+        "inputs": [
+          {
+            "name": "graph",
+            "summary": "",
+            "required": false,
+            "source": "argument",
+            "list": "comma-or-whitespace",
+            "class": "http://www.w3.org/2001/XMLSchema#anyURI"
+          }
+        ]
+      }
+    },
+    {
+      "name": "v2/enumerated-empty",
+      "id": "llm-ask",
+      "action": {
+        "verb": "Source",
+        "inputs": [
+          {
+            "name": "provider",
+            "summary": "",
+            "required": false,
+            "source": "argument",
+            "one_of": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "v2/value-notes",
+      "id": "finding",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "decision",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "one_of": [
+              "publish",
+              "retract"
+            ],
+            "values": {
+              "retract": {
+                "summary": "withdraw a published decision",
+                "tags": [
+                  "revision"
+                ],
+                "needs": [
+                  "revises"
+                ]
+              }
+            }
+          },
+          {
+            "name": "revises",
+            "summary": "",
+            "required": false,
+            "source": "argument"
+          }
+        ]
+      }
+    },
+    {
+      "name": "v2/examples",
+      "id": "a11y-contrast",
+      "action": {
+        "verb": "Source",
+        "inputs": [
+          {
+            "name": "from",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "examples": [
+              "#336699"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "v2/open-arguments",
+      "id": "compose",
+      "action": {
+        "verb": "Source",
+        "inputs": [
+          {
+            "name": "src",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          }
+        ],
+        "arguments": {
+          "open": "each fills a {name} marker in the body"
+        }
+      }
+    },
+    {
+      "name": "v2/envelope",
+      "id": "intake",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          },
+          {
+            "name": "email",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          }
+        ],
+        "arguments": {
+          "envelope": "content"
+        }
+      }
+    },
+    {
+      "name": "v2/output-from-input",
+      "id": "compose",
+      "action": {
+        "verb": "Source",
+        "inputs": [
+          {
+            "name": "src",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          }
+        ],
+        "output_from": {
+          "input": "src"
+        }
+      }
+    },
+    {
+      "name": "v2/output-from-origin",
+      "id": "httpGet",
+      "action": {
+        "verb": "Source",
+        "outputs": [
+          "application/octet-stream"
+        ],
+        "output_from": "origin"
       }
     }
   ],

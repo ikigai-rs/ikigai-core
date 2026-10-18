@@ -62,6 +62,22 @@ face that stops at the 0.1.100 set writes `urn:ikigai:endpoint:a#b`, which parse
 wrong resource. `tests/contract_vectors.rs` also parses every door's Turtle back, and every door
 must parse.
 
+## Two digest forms (ledger #1547)
+
+A contract that uses none of the ArgSpec release's constructs is digested exactly as before,
+under `ikigai:contract:v1` (the file's `form`); every row that predates the release is
+byte-identical, the `toUpper` fixture ids included, and is the proof of that. A contract that
+uses ANY of them (an input's `needs`, `list`, `values`, `examples` or an empty `"one_of": []`;
+an action's `groups`, an open or envelope `arguments`, `output_from`) is digested under
+`ikigai:contract:v2` (`form_v2`): v1's fields, each input encoded whole with its `needs` set,
+`list` word, value notes (sorted by value: summary, tag set, needs set), empty-enumeration flag
+and example set appended, the inputs sorted by their encodings; then the outputs and scopes as
+in v1; then the groups, each its kind word, member set and pipe member, sorted by their
+encodings; then the argument set (closed 0, open 1 + summary, envelope 2 + carrier); then
+`output_from` (none 0, input 1 + name, origin 2). The `v2/*` contracts and the
+`core/argspec-shape` door pin it, and `to-upper` is the renamed builtin's id. Every
+variable-length field is length-prefixed as in v1 (`ikigai_core`'s `contract.rs`, `Canon`).
+
 ## Lenient in, canonical out
 
 Postel's law (ledger #1107, decided 2026-10-10). A percent escape is `%` and exactly two
@@ -140,3 +156,41 @@ cargo test -p ikigai-vocab --test capability_vectors -- --ignored
 
 A face picks the new vectors up by copying the file again; devtools' `vector-drift` compares the
 copies with this one.
+
+# Shared validation vectors
+
+`validation_vectors.json` is what ikigai-core's ONE checker, `ActionSpec::check`, answers for a
+contract and a proposed argument set (ledger #1547). ikigai-python's and ikigai-deno's `serve`
+enforce the same rules (required, `one_of` per item, class plausibility, given-twice and list
+joining, groups, `needs`, the empty enumeration, open and envelope argument sets), and
+ikigai-mcp's tool-call check until it calls core; each pins itself against a VERBATIM copy of
+this file, so four implementations stay one.
+
+It cannot drift from core: `tests/validation_vectors.rs` recomputes every row from
+`validation_cases.json` and fails if the committed file differs by a byte.
+
+| field | what it is |
+|---|---|
+| `action` | the serde shape of `ikigai_core::ActionSpec` (the contract checked) |
+| `args` | the proposed `[name, value]` pairs, in order, repeats kept |
+| `conforms` | whether the call conforms (no violation) |
+| `violations[]` | in the checker's order: `kind` (`missing`, `not-one-of`, `implausible`, `unknown`, `exactly-one`, `at-least-one`, `at-most-one`, `needs`, `given-twice`, `envelope`) and `path` (`input:{name}`, `group:{kind}:{members}` with the members sorted, `input:{name}:value:{value}`, or `null` for a name the contract does not declare) |
+
+Rules worth knowing before porting, each a row: a binding is never missing; a group member is
+GIVEN only with a non-blank value (`exactly-one/a-blank-member-is-not-given`); a list's repeats
+are joined with its separator's canonical character before anything else, and a repeat of any
+other name is one `given-twice`; an undeclared name is reported once however often it is given;
+`needs` is one-way; an empty enumeration refuses every value; an open action admits any name but
+still refuses a repeated declared one; an envelope checks its fields when the call proposes any,
+its carrier otherwise, and both at once is `envelope`.
+
+## Adding a case
+
+Edit `validation_cases.json`, then regenerate and commit both files.
+
+```text
+cargo test -p ikigai-vocab --test validation_vectors -- --ignored
+```
+
+A face picks the new vectors up by copying the file again; devtools' `vector-drift` should
+compare the copies with this one (it does not know this pair yet).

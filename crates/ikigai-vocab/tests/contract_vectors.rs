@@ -44,7 +44,10 @@ const VERBS: [Verb; 5] = [
 const ABOUT: &str = "Contract vectors computed by ikigai-core and ikigai-vocab from \
      tests/vectors/contract_cases.json (crates/ikigai-vocab/tests/contract_vectors.rs, \
      which fails if this file differs from what it computes). Verbs are spelled as \
-     ikigai_core::Verb serializes them; a parse that core refuses is null.";
+     ikigai_core::Verb serializes them; a parse that core refuses is null. A contract \
+     using no construct of the ArgSpec release is digested under `form`; one using any \
+     (groups, needs, lists, an empty enumeration, value notes, examples, an open or \
+     envelope argument set, output_from) under `form_v2`.";
 
 fn verb_name(verb: Verb) -> String {
     format!("{verb:?}")
@@ -157,6 +160,7 @@ fn compute() -> String {
     let doc = sorted(json!({
         "about": ABOUT,
         "form": "ikigai:contract:v1",
+        "form_v2": "ikigai:contract:v2",
         "doors": doors,
         "contracts": contracts,
         "matches": matches,
@@ -453,7 +457,62 @@ fn the_hostile_door_encodes_or_falls_back_and_never_injects() {
     }
 }
 
-/// Regenerate `contract_vectors.json`. Ignored so a normal run only CHECKS; run it with
+/// Ledger #1547: the rows that predate the ArgSpec release keep their v1 digests (the
+/// file's v1 rows are the proof), the v2 constructs move a digest, and set semantics hold
+/// under v2 too.
+#[test]
+fn the_dual_form_keeps_v1_digests_and_digests_the_new_constructs_under_v2() {
+    let doc: Value = serde_json::from_str(&compute()).unwrap();
+    let contract = |name: &str| -> String {
+        doc["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no contract case {name}"))["contract"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        contract("v2/group"),
+        contract("v2/group-members-are-a-set (same digest as v2/group)")
+    );
+    // The same contract with its group taken away is a v1 contract with another IRI.
+    let mut bare: Value = doc["contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "v2/group")
+        .unwrap()["action"]
+        .clone();
+    bare.as_object_mut().unwrap().remove("groups");
+    let bare: ActionSpec = serde_json::from_value(bare).unwrap();
+    assert_ne!(bare.contract_iri("kernel-cut"), contract("v2/group"));
+    let door = doc["doors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "core/argspec-shape")
+        .expect("the argspec-shape door");
+    let ttl = door["turtle"].as_str().unwrap();
+    for term in [
+        "ik:group",
+        "ik:pipe",
+        "ik:needs",
+        "ik:listSeparator",
+        "ik:enumerated true",
+        "ik:valueNote",
+        "ik:example",
+        "ik:envelope",
+        "ik:openArguments",
+        "ik:outputFrom ik:Origin",
+    ] {
+        assert!(ttl.contains(term), "{term} in {ttl}");
+    }
+}
+
+/// Regenerate `contract_vectors.json`./// Regenerate `contract_vectors.json`. Ignored so a normal run only CHECKS; run it with
 /// `-- --ignored` after editing the cases.
 #[test]
 #[ignore = "writes tests/vectors/contract_vectors.json; run with -- --ignored to regenerate"]
