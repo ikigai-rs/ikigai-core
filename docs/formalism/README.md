@@ -2365,3 +2365,28 @@ No API changes, and no contract digest moves: `default` was already a v1 field o
 declares a default now passes `validate` (and conformance's DECLARATIONS once conformance stops refusing it), and needs
 no other edit: a grammar that already fills the binding itself (ledger's) keeps doing so, and the kernel's fill is a
 no-op for it.
+
+**0.1.107** carries one PR on top of 0.1.106, **PR 229** (ledger [#1884](http://localhost:1062/l/default/item/1884)): a
+performance fix with no behavior change to what is served.
+
+- **The cache-status probe no longer resolves a name the kernel has served.** 0.1.105's `Kernel::is_cached_in`
+  prefilled the declared defaults by resolving a `Meta` for the target, because the per-endpoint floor memo that holds
+  them is keyed by the endpoint's allocation and only a resolution produces one. A mount answers a `Meta` resolution
+  by asking its peer (ledger [#1146](http://localhost:1062/l/default/item/1146)), and ikigai-cli's `Resolver::issue_as`
+  probes before every read, so every hot mounted read paid one peer round trip again, the one ledger
+  [#1577](http://localhost:1062/l/default/item/1577) had removed. Now the issue path records, per name, verb and chain,
+  the defaults it has just prefilled from, kept as long as the description's `ContractCaching` allows (never, for a
+  volatile contract), and cleared with the floor memo by a cut of `urn:kernel:bindings`. The probe prefills from that
+  record and resolves a `Meta` only for a name not served in that chain since the bindings changed. Only the issue path
+  writes it, so the probe keys a request exactly as the last served read of that name was keyed; a peer's changed
+  default reaches the probe with the next served read. A `Meta` probe prefills nothing. Pins:
+  `kernel::tests::a_hot_mounted_read_does_not_ask_the_peer_from_the_cache_probe`,
+  `kernel::tests::the_probe_keys_a_mounted_read_as_the_issue_path_served_it`,
+  `kernel::tests::the_probe_memo_honors_the_contract_caching_bound` (crates/ikigai-core/src).
+
+No API changes, and no contract digest moves. **Vocabulary:** `owl:versionInfo` only; `/ns` needs a manual deploy after
+the publish. ikigai-vocab's core floor stays 0.1.105.
+
+**Migrating to 0.1.107.** Bump `ikigai-core` and `ikigai-vocab` to `"0.1.107"`; nothing else changes. ikigai-cli's
+`the_cache_probe_asks_a_mounts_peer_once_per_resolver_read` counts one `Meta` per resolver read on 0.1.106 and will
+count one for all of them once its lock reaches 0.1.107.
