@@ -169,7 +169,7 @@ pub use endpoint::{
     AsyncFnEndpoint, BoxFuture, Dependencies, Endpoint, FnEndpoint, Invocation, InvokeFuture,
     Issuer, Spawner,
 };
-pub use error::{Error, Result};
+pub use error::{Error, FailureClass, Result};
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
