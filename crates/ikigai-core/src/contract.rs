@@ -60,6 +60,92 @@ pub const CONTRACT_PREFIX: &str = "urn:ikigai:contract:";
 /// old digest can never be mistaken for a new one.
 const CONTRACT_FORM: &str = "ikigai:contract:v1";
 
+/// The domain tag of the second canonical form (ledger #1547): v1's fields followed by the
+/// constructs the ArgSpec release added. Chosen BY CONTENT: a contract that uses none of
+/// them is still hashed under v1, so no existing contract IRI moves, and a v1 and a v2
+/// encoding can never collide because the tags differ.
+const CONTRACT_FORM_V2: &str = "ikigai:contract:v2";
+
+/// A canonical byte encoding with the framing of `crate::hashing` (every variable-length
+/// field length-prefixed), for the v2 form's items: each input and each group is encoded
+/// whole, and the encodings are sorted, so the set's order is total over every field.
+#[derive(Default)]
+struct Canon(Vec<u8>);
+
+impl Canon {
+    fn u8(&mut self, v: u8) {
+        self.0.push(v);
+    }
+    fn u64(&mut self, v: u64) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn str(&mut self, s: &str) {
+        self.u64(s.len() as u64);
+        self.0.extend_from_slice(s.as_bytes());
+    }
+    fn option(&mut self, value: Option<&str>) {
+        match value {
+            None => self.u8(0),
+            Some(v) => {
+                self.u8(1);
+                self.str(v);
+            }
+        }
+    }
+    fn set<'a>(&mut self, values: impl IntoIterator<Item = &'a str>) {
+        let mut sorted: Vec<&str> = values.into_iter().collect();
+        sorted.sort();
+        sorted.dedup();
+        self.u64(sorted.len() as u64);
+        for v in sorted {
+            self.str(v);
+        }
+    }
+    /// Feed a set of encoded items: sorted, deduplicated, count-prefixed, each
+    /// length-prefixed.
+    fn feed_items(h: &mut blake3::Hasher, items: impl IntoIterator<Item = Canon>) {
+        let mut items: Vec<Vec<u8>> = items.into_iter().map(|c| c.0).collect();
+        items.sort();
+        items.dedup();
+        feed_u64(h, items.len() as u64);
+        for item in items {
+            crate::hashing::feed_bytes(h, &item);
+        }
+    }
+}
+
+/// Whether an action uses any construct the v1 form cannot carry, so its digest is taken
+/// under [`CONTRACT_FORM_V2`].
+fn uses_v2(spec: &ActionSpec) -> bool {
+    !spec.groups.is_empty() || spec.inputs.iter().any(|i| !i.needs.is_empty())
+}
+
+/// One input in the v2 form: v1's fields, then the input-level additions.
+fn input_v2(input: &ArgSpec) -> Canon {
+    let mut c = Canon::default();
+    c.str(&input.name);
+    c.str(&input.summary);
+    c.u8(u8::from(input.required));
+    c.u8(match input.source {
+        InputSource::Argument => 0,
+        InputSource::Binding => 1,
+    });
+    c.option(input.class.as_deref());
+    c.option(input.default.as_deref());
+    c.set(input.one_of.iter().map(String::as_str));
+    c.set(input.needs.iter().map(String::as_str));
+    c
+}
+
+/// One input group in the v2 form: its kind, its member set and its pipe member.
+fn group_v2(group: &crate::describe::InputGroup) -> Canon {
+    let mut c = Canon::default();
+    c.str(group.kind.word());
+    c.set(group.members.iter().map(String::as_str));
+    c.option(group.pipe.as_deref());
+    c
+}
+
 /// A verb's lower-case name, as the IRIs spell it.
 pub(crate) fn verb_segment(verb: Verb) -> String {
     format!("{verb:?}").to_lowercase()
@@ -352,6 +438,15 @@ impl ActionSpec {
     /// DECLARED in never changes its identity, and two contracts that would render
     /// differently never share one.
     ///
+    /// **Two forms, chosen by content** (ledger #1547). A contract using a construct v1
+    /// cannot carry (an input's `needs`, an [`InputGroup`](crate::InputGroup)) is hashed
+    /// under `ikigai:contract:v2` instead: the same fields, each input encoded whole with its
+    /// `needs` set appended and the inputs sorted by their encodings, then the outputs and
+    /// scopes as in v1, then the groups, each as its kind word, member set and pipe member,
+    /// sorted by their encodings. A contract that uses none of them keeps its v1 digest,
+    /// so no existing contract IRI moves and a face that predates v2 agrees on every
+    /// contract it can express.
+    ///
     /// The endpoint id is part of the contract: two endpoints with different ids and
     /// identical specs are two tools, and the contract node must say which one it
     /// belongs to.
@@ -375,6 +470,9 @@ impl ActionSpec {
     /// assert!(a.contract_id("to-upper").to_string().starts_with("b3:"));
     /// ```
     pub fn contract_id(&self, endpoint_id: &str) -> ContentId {
+        if uses_v2(self) {
+            return self.contract_id_v2(endpoint_id);
+        }
         let mut h = blake3::Hasher::new();
         feed_str(&mut h, CONTRACT_FORM);
         feed_str(&mut h, endpoint_id);
@@ -401,6 +499,20 @@ impl ActionSpec {
         }
         feed_set(&mut h, &self.outputs);
         feed_set(&mut h, &self.requires);
+        ContentId::from_hasher(h)
+    }
+
+    /// The v2 canonical form (see [`contract_id`](Self::contract_id)).
+    fn contract_id_v2(&self, endpoint_id: &str) -> ContentId {
+        let mut h = blake3::Hasher::new();
+        feed_str(&mut h, CONTRACT_FORM_V2);
+        feed_str(&mut h, endpoint_id);
+        feed_str(&mut h, &verb_segment(self.verb));
+        feed_str(&mut h, &self.summary);
+        Canon::feed_items(&mut h, self.inputs.iter().map(input_v2));
+        feed_set(&mut h, &self.outputs);
+        feed_set(&mut h, &self.requires);
+        Canon::feed_items(&mut h, self.groups.iter().map(group_v2));
         ContentId::from_hasher(h)
     }
 
@@ -570,6 +682,51 @@ mod tests {
             assert_ne!(v.contract_id("e"), id, "{v:?}");
         }
         assert_ne!(base.contract_id("f"), id);
+    }
+
+    /// Ledger #1547: a contract using a construct v1 cannot carry is hashed under v2, every
+    /// such construct moves the digest, and a contract using none keeps its v1 digest.
+    #[test]
+    fn the_v2_form_is_chosen_by_content_and_covers_every_new_construct() {
+        use crate::describe::InputGroup;
+        let base = ActionSpec::new(Verb::Source)
+            .input(ArgSpec::new("a").optional())
+            .input(ArgSpec::new("b").optional());
+        assert!(!uses_v2(&base));
+        let grouped = base.clone().group(InputGroup::exactly_one(["a", "b"]));
+        let variants = [
+            grouped.clone(),
+            base.clone().group(InputGroup::at_least_one(["a", "b"])),
+            base.clone()
+                .group(InputGroup::exactly_one(["a", "b"]).pipe("a")),
+            ActionSpec {
+                inputs: vec![
+                    ArgSpec::new("a").optional().needs(["b"]),
+                    ArgSpec::new("b").optional(),
+                ],
+                ..base.clone()
+            },
+        ];
+        let mut seen = vec![base.contract_id("e")];
+        for v in &variants {
+            assert!(uses_v2(v), "{v:?}");
+            let id = v.contract_id("e");
+            assert!(!seen.contains(&id), "{v:?} collides");
+            seen.push(id);
+        }
+        // Members are a set: order is not identity.
+        assert_eq!(
+            grouped.contract_id("e"),
+            base.clone()
+                .group(InputGroup::exactly_one(["b", "a", "b"]))
+                .contract_id("e")
+        );
+        // Declaration order of inputs is not identity under v2 either.
+        let reordered = ActionSpec::new(Verb::Source)
+            .input(ArgSpec::new("b").optional())
+            .input(ArgSpec::new("a").optional())
+            .group(InputGroup::exactly_one(["a", "b"]));
+        assert_eq!(grouped.contract_id("e"), reordered.contract_id("e"));
     }
 
     #[test]

@@ -160,7 +160,8 @@ pub use declare::{
     MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
 };
 pub use describe::{
-    ActionSpec, ArgSpec, ContractCaching, Description, EndpointKind, InputSource, Transreption,
+    ActionSpec, ArgSpec, ContractCaching, Description, EndpointKind, GroupKind, InputGroup,
+    InputSource, Transreption,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use endpoint::SyncIssuer;

@@ -105,7 +105,7 @@ ik:output a rdf:Property ;
 ik:input a rdf:Property ;
     rdfs:range rdfs:Resource ;
     rdfs:label "input" ;
-    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, and ik:oneOf. No domain: emitted on all three." .
+    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, ik:oneOf and ik:needs. No domain: emitted on all three." .
 
 ik:inputName a rdf:Property ;
     rdfs:range xsd:string ;
@@ -182,6 +182,38 @@ ik:oneOf a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "oneOf" ;
     rdfs:comment "One accepted value of an enumerated input (repeated per value); absent = open-valued." .
+
+ik:needs a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "needs" ;
+    rdfs:comment "An input of the same contract that must be given whenever the subject is: on an input node, a dependency between inputs (urn:kernel:validate's endpoint needs verb). The value is that input's node. No domain: an input node today, and the same fact on a value node." .
+
+ik:InputGroup a rdfs:Class ;
+    rdfs:label "InputGroup" ;
+    rdfs:comment "A relation between several inputs of one contract that independent inputs cannot state: exactly one, at least one, or at most one of its ik:member inputs is given (ik:groupKind). Every member is declared optional, so a reader that does not know groups sees a loose but true contract and never refuses a valid call. Skolemized under its contract as {contract}:group:{kind}:{member},{member}, the members percent-encoded names, sorted." .
+
+ik:group a rdf:Property ;
+    rdfs:range ik:InputGroup ;
+    rdfs:label "group" ;
+    rdfs:comment "A relation between the subject's inputs (an ik:InputGroup): on an ik:Action, for that contract; on an ik:Endpoint, for its flat inputs. No domain: emitted on both." .
+
+ik:groupKind a rdf:Property ;
+    rdfs:domain ik:InputGroup ;
+    rdfs:range xsd:string ;
+    rdfs:label "groupKind" ;
+    rdfs:comment "How an ik:InputGroup relates its members: \"exactly-one\", \"at-least-one\" or \"at-most-one\". A member is given when the call carries it with a value that is not blank." .
+
+ik:member a rdf:Property ;
+    rdfs:domain ik:InputGroup ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "member" ;
+    rdfs:comment "One input node of an ik:InputGroup (repeated per member; a set, so order carries no meaning)." .
+
+ik:pipe a rdf:Property ;
+    rdfs:domain ik:InputGroup ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "pipe" ;
+    rdfs:comment "The member of an ik:InputGroup a piped, positional or stdin value fills when none of the members is named: a group member is optional, so without it an endpoint whose intake moved into a group could not be piped into. On a Sink or Delete always the content input (the pipe lands there). Absent: the group's inputs are named-only." .
 
 ik:requires a rdf:Property ;
     rdfs:range rdfs:Resource ;

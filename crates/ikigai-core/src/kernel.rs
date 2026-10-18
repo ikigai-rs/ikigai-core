@@ -3359,11 +3359,29 @@ impl Kernel {
         match (op, request.verb) {
             // Cut a golden thread. The thread is the sunk content — so
             // `sink urn:kernel:cut <thread>` works — or an explicit `thread` arg.
+            //
+            // Exactly one of the two, as the contract's input group says, and a blank value
+            // counts as neither (ledger #1853): the engine sends `content` empty when a
+            // `sink` has no body, so a bare `sink urn:kernel:cut` used to cut the EMPTY
+            // thread name and answer `cut `.
             ("cut", Verb::Sink) => {
                 require_cap("urn:cap:kernel:cut")?;
-                let thread = kernel_arg(request, "thread")
-                    .or_else(|| kernel_arg(request, "content"))
-                    .ok_or_else(|| Error::MissingArgument("thread".to_string()))?;
+                let given =
+                    |name| kernel_arg(request, name).filter(|v| crate::check::given(Some(v)));
+                let thread = match (given("thread"), given("content")) {
+                    (Some(thread), None) | (None, Some(thread)) => thread,
+                    (None, None) => {
+                        return Err(Error::MissingArgument("thread (or content)".to_string()))
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(Error::InvalidArgument {
+                            name: "thread".to_string(),
+                            detail: "exactly one of `thread` or `content` names the thread; \
+                                     got both"
+                                .to_string(),
+                        })
+                    }
+                };
                 self.cut(thread);
                 Ok(kernel_text(format!("cut {thread}\n")))
             }
@@ -3895,12 +3913,26 @@ impl Kernel {
             // function of (action, args, capability) — cacheable; the cache key
             // carries the capability fingerprint.
             ("validate", Verb::Source) => {
-                let (description, verb) = match (
-                    kernel_arg(request, "action"),
-                    kernel_arg(request, "endpoint"),
-                ) {
-                    (Some(action), _) => self.validate_target(action)?,
+                // Exactly one of `action` or `endpoint`, and `endpoint` needs `verb`: the
+                // contract's group and dependency, enforced here in the same terms, so
+                // validate never blesses a call it refuses (ledger #15). The verb is read
+                // BEFORE the endpoint is resolved, so a missing one is MissingArgument
+                // whatever the endpoint names.
+                let given =
+                    |name| kernel_arg(request, name).filter(|v| crate::check::given(Some(v)));
+                let (description, verb) = match (given("action"), given("endpoint")) {
+                    (Some(_), Some(_)) => {
+                        return Err(Error::InvalidArgument {
+                            name: "action".to_string(),
+                            detail: "exactly one of `action` or `endpoint` (with `verb`) \
+                                     names the action; got both"
+                                .to_string(),
+                        })
+                    }
+                    (Some(action), None) => self.validate_target(action)?,
                     (None, Some(endpoint)) => {
+                        let verb_name = given("verb")
+                            .ok_or_else(|| Error::MissingArgument("verb".to_string()))?;
                         let iri = Iri::parse(endpoint).map_err(|e| {
                             Error::Endpoint(format!("validate: bad endpoint IRI: {e}"))
                         })?;
@@ -3918,8 +3950,6 @@ impl Kernel {
                         let Some(resolved) = resolved else {
                             return Err(Error::Unresolved(Iri::parse(endpoint).expect("parsed")));
                         };
-                        let verb_name = kernel_arg(request, "verb")
-                            .ok_or_else(|| Error::MissingArgument("verb".to_string()))?;
                         (resolved.endpoint.describe(), parse_verb(verb_name)?)
                     }
                     (None, None) => {
@@ -5795,6 +5825,112 @@ mod tests {
         // No kernel authority at all: only the two self-limiting resources.
         let none = kernel_manifold(&kernel, &Capability::scoped(Vec::<String>::new()));
         assert_eq!(none, UNGATED.map(str::to_string).to_vec(), "{none:?}");
+    }
+
+    /// Ledger #15: `urn:kernel:validate` blessed calls the kernel's own operations refuse
+    /// (an empty `kernel-validate` call, an empty `kernel-cut`), because a contract of
+    /// independent inputs could not say "exactly one of". Over every kernel operation and
+    /// every subset of its by-value inputs: validate conforms IF AND ONLY IF invoking the
+    /// operation does not fail with `MissingArgument` or `InvalidArgument`.
+    #[test]
+    fn validate_conforms_iff_the_kernel_operation_accepts_the_call() {
+        let kernel = meta_kernel();
+        let root = Capability::root();
+        let value = |input: &crate::describe::ArgSpec| {
+            input
+                .one_of
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "urn:test:to-upper".to_string())
+        };
+        let mut checked = 0;
+        for op in crate::kernel_ops::OPS {
+            let description = crate::kernel_ops::description(op).expect("listed op");
+            for spec in description.action_specs() {
+                let inputs: Vec<&crate::describe::ArgSpec> = spec
+                    .inputs
+                    .iter()
+                    .filter(|i| i.source == crate::describe::InputSource::Argument)
+                    .collect();
+                assert!(inputs.len() <= 8, "{op}: too many inputs to enumerate");
+                for mask in 0u32..(1 << inputs.len()) {
+                    let chosen: Vec<&crate::describe::ArgSpec> = inputs
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| mask & (1 << i) != 0)
+                        .map(|(_, input)| *input)
+                        .collect();
+                    let args: Vec<String> = chosen
+                        .iter()
+                        .map(|input| format!("{}={}", input.name, value(input)))
+                        .collect();
+                    let report = block_on(
+                        kernel.issue(
+                            Request::new(Verb::Source, iri("urn:kernel:validate"))
+                                .with_arg(
+                                    "action",
+                                    ArgRef::Inline(spec.contract_iri(&description.id).into_bytes()),
+                                )
+                                .with_arg("args", ArgRef::Inline(args.join("&").into_bytes())),
+                            &root,
+                        ),
+                    )
+                    .expect("validate answers");
+                    let conforms = String::from_utf8(report.bytes)
+                        .unwrap()
+                        .contains("sh:conforms true");
+                    let mut request = Request::new(spec.verb, iri(&format!("{KERNEL_NS}{op}")));
+                    for input in &chosen {
+                        request = request
+                            .with_arg(&input.name, ArgRef::Inline(value(input).into_bytes()));
+                    }
+                    let outcome = block_on(kernel.issue(request, &root));
+                    let refused = matches!(
+                        outcome,
+                        Err(Error::MissingArgument(_) | Error::InvalidArgument { .. })
+                    );
+                    assert_eq!(
+                        conforms,
+                        !refused,
+                        "{op} ({:?}) with [{}]: validate says conforms={conforms}, the \
+                         operation answered {outcome:?}",
+                        spec.verb,
+                        args.join(" ")
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 30, "the corpus ran: {checked}");
+    }
+
+    /// Ledger #1853: a bare `sink urn:kernel:cut` reached the kernel with `content` empty
+    /// (the engine sends an empty body) and cut the EMPTY thread name, answering `cut `.
+    #[test]
+    fn a_cut_names_exactly_one_thread_and_a_blank_one_is_none() {
+        let kernel = meta_kernel();
+        let root = Capability::root();
+        let cut = |args: &[(&str, &str)]| {
+            let mut request = Request::new(Verb::Sink, iri("urn:kernel:cut"));
+            for (name, value) in args {
+                request = request.with_arg(*name, ArgRef::Inline(value.as_bytes().to_vec()));
+            }
+            block_on(kernel.issue(request, &root))
+        };
+        for blank in [&[("content", "")][..], &[("content", " \n")], &[]] {
+            let err = cut(blank).expect_err("a blank cut is refused");
+            assert!(
+                matches!(err, Error::MissingArgument(_)),
+                "{blank:?}: {err:?}"
+            );
+        }
+        // `sink urn:kernel:cut thread=x` from the engine carries an empty body too.
+        let named = cut(&[("thread", "urn:x"), ("content", "")]).unwrap();
+        assert_eq!(named.bytes, b"cut urn:x\n");
+        let sunk = cut(&[("content", "urn:y")]).unwrap();
+        assert_eq!(sunk.bytes, b"cut urn:y\n");
+        let both = cut(&[("thread", "urn:x"), ("content", "urn:y")]).expect_err("both");
+        assert!(matches!(both, Error::InvalidArgument { .. }), "{both:?}");
     }
 
     #[test]

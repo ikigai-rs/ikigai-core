@@ -50,6 +50,12 @@ pub struct ArgSpec {
     /// empty, so existing JSON contracts are unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub one_of: Vec<String>,
+    /// The inputs this one needs: when this input is given, each named input must be
+    /// given too (validate's own `endpoint` needs `verb`). Names of inputs of the same
+    /// action. Omitted from serialized output when empty, so existing JSON contracts are
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
 }
 
 impl ArgSpec {
@@ -63,6 +69,7 @@ impl ArgSpec {
             class: None,
             default: None,
             one_of: Vec::new(),
+            needs: Vec::new(),
         }
     }
 
@@ -94,6 +101,27 @@ impl ArgSpec {
         self
     }
 
+    /// Declare inputs this one needs (builder): when it is given, each of `inputs` must be
+    /// given too. Callable more than once; the names accumulate.
+    ///
+    /// ```
+    /// use ikigai_core::{ArgSpec, Description, ProposedArgs, Verb};
+    ///
+    /// let d = Description::new("probe")
+    ///     .verb(Verb::Source)
+    ///     .input(ArgSpec::new("endpoint").optional().needs(["verb"]))
+    ///     .input(ArgSpec::new("verb").optional());
+    /// let source = &d.action_specs()[0];
+    /// assert!(source.check(&ProposedArgs::parse("endpoint=urn:x&verb=source")).is_empty());
+    /// assert!(!source.check(&ProposedArgs::parse("endpoint=urn:x")).is_empty());
+    /// // Needing is one-way: `verb` alone needs nothing.
+    /// assert!(source.check(&ProposedArgs::parse("verb=source")).is_empty());
+    /// ```
+    pub fn needs(mut self, inputs: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.needs.extend(inputs.into_iter().map(Into::into));
+        self
+    }
+
     /// Mark the argument optional (builder).
     pub fn optional(mut self) -> Self {
         self.required = false;
@@ -113,6 +141,131 @@ impl ArgSpec {
     fn iri_positions(&self) -> impl Iterator<Item = (&'static str, &str)> {
         std::iter::once(("input name", self.name.as_str()))
             .chain(self.class.as_deref().map(|c| ("input class", c)))
+    }
+}
+
+/// How an [`InputGroup`] relates its members.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum GroupKind {
+    /// Exactly one member is given (`urn:kernel:cut`'s `thread` or `content`).
+    ExactlyOne,
+    /// At least one member is given.
+    AtLeastOne,
+    /// At most one member is given: mutually exclusive, both optional.
+    AtMostOne,
+}
+
+impl GroupKind {
+    /// The kind's word, as the JSON contract and `ik:groupKind` spell it:
+    /// `exactly-one`, `at-least-one` or `at-most-one`.
+    pub fn word(self) -> &'static str {
+        match self {
+            GroupKind::ExactlyOne => "exactly-one",
+            GroupKind::AtLeastOne => "at-least-one",
+            GroupKind::AtMostOne => "at-most-one",
+        }
+    }
+}
+
+/// A relation between an action's inputs that independent [`ArgSpec`]s cannot state
+/// (ledger #15): "exactly one of `thread` or `content`", "at least one of these".
+///
+/// Declared on the ACTION, never on an input, because it is about several inputs at
+/// once. Every member is a by-value input of the same action and is **declared
+/// optional**: a reader that predates groups (an old engine, an old Python peer) then
+/// sees the loose-but-honest contract it saw before, never a false refusal, and a group
+/// only ever ADDS a constraint for a reader that knows it. A member is GIVEN when the
+/// call carries it with a non-empty value: a Sink's engine always sends `content`, empty
+/// when there is no body, so an empty value cannot count as choosing it.
+///
+/// `members` is a set (the builders sort and deduplicate it), so declaration order is not
+/// identity and cannot carry meaning. That is why the member a pipe fills is named
+/// explicitly by [`pipe`](Self::pipe) rather than being "the first".
+///
+/// ```
+/// use ikigai_core::{ArgSpec, Description, InputGroup, ProposedArgs, Verb};
+///
+/// let cut = Description::new("cut")
+///     .verb(Verb::Sink)
+///     .input(ArgSpec::new("thread").optional())
+///     .input(ArgSpec::new("content").optional())
+///     .group(InputGroup::exactly_one(["thread", "content"]).pipe("content"));
+/// assert!(cut.validate().is_ok());
+/// let sink = &cut.action_specs()[0];
+/// assert!(sink.check(&ProposedArgs::parse("thread=urn:x")).is_empty());
+/// assert!(sink.check(&ProposedArgs::parse("content=urn:x")).is_empty());
+/// // None, or both, is a violation: the false green of ledger #15 is gone.
+/// assert!(!sink.check(&ProposedArgs::new()).is_empty());
+/// assert!(!sink.check(&ProposedArgs::parse("thread=urn:x&content=urn:y")).is_empty());
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct InputGroup {
+    /// How the members relate.
+    pub kind: GroupKind,
+    /// The member input names, a set (sorted and deduplicated by the builders).
+    pub members: Vec<String>,
+    /// The member a pipe, a positional value or a batch's stdin fills, when none of the
+    /// members is named (Source only; on a Sink or Delete the pipe always lands in
+    /// `content`, so this is `content` or absent there). A group with no `pipe` leaves the
+    /// action named-only for these inputs. Omitted from serialized output when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipe: Option<String>,
+}
+
+impl InputGroup {
+    fn of(kind: GroupKind, members: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let mut members: Vec<String> = members.into_iter().map(Into::into).collect();
+        members.sort();
+        members.dedup();
+        InputGroup {
+            kind,
+            members,
+            pipe: None,
+        }
+    }
+
+    /// Exactly one of `members` is given.
+    pub fn exactly_one(members: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        InputGroup::of(GroupKind::ExactlyOne, members)
+    }
+
+    /// At least one of `members` is given.
+    pub fn at_least_one(members: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        InputGroup::of(GroupKind::AtLeastOne, members)
+    }
+
+    /// At most one of `members` is given.
+    pub fn at_most_one(members: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        InputGroup::of(GroupKind::AtMostOne, members)
+    }
+
+    /// Name the member a pipe fills when no member is named (builder).
+    pub fn pipe(mut self, member: impl Into<String>) -> Self {
+        self.pipe = Some(member.into());
+        self
+    }
+
+    /// The group node's segment under its contract IRI: `group:{kind}:{m1},{m2}`, each
+    /// member a NAME ([`encode_name`](crate::encode_name), with `,` encoded as `%2C` too so
+    /// the list is unambiguous), the members sorted. Stable, so a catalog holding the group
+    /// diffs, and the node a validation report's `sh:resultPath` names.
+    pub fn node_segment(&self) -> String {
+        let mut members: Vec<String> = self
+            .members
+            .iter()
+            .map(|m| crate::encode_name(m).replace(',', "%2C"))
+            .collect();
+        members.sort();
+        members.dedup();
+        format!("group:{}:{}", self.kind.word(), members.join(","))
+    }
+
+    /// Whether `name` is a member.
+    pub fn has(&self, name: &str) -> bool {
+        self.members.iter().any(|m| m == name)
     }
 }
 
@@ -156,6 +309,10 @@ pub struct ActionSpec {
     /// REPLACING the description's flat `requires` for this verb.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
+    /// Relations between this verb's inputs (ledger #15): see [`InputGroup`]. Omitted from
+    /// serialized output when empty, so existing JSON contracts are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<InputGroup>,
 }
 
 impl ActionSpec {
@@ -167,6 +324,7 @@ impl ActionSpec {
             inputs: Vec::new(),
             outputs: Vec::new(),
             requires: Vec::new(),
+            groups: Vec::new(),
         }
     }
 
@@ -192,6 +350,75 @@ impl ActionSpec {
     pub fn requires(mut self, capability: impl Into<String>) -> Self {
         self.requires.push(capability.into());
         self
+    }
+
+    /// Declare a relation between this verb's inputs (builder): see [`InputGroup`].
+    pub fn group(mut self, group: InputGroup) -> Self {
+        self.groups.push(group);
+        self
+    }
+
+    /// The pipe members of every [`ExactlyOne`](GroupKind::ExactlyOne) or
+    /// [`AtLeastOne`](GroupKind::AtLeastOne) group none of whose members is in `named`:
+    /// the slots a piped, positional or stdin value can fill beside the required inputs.
+    ///
+    /// For the engine's routing rule (a Source's piped value fills the one REQUIRED
+    /// argument left unnamed): a group member is declared optional, so without this a
+    /// piped-or-named intake moved into a group would leave every pipeline. The engine's
+    /// "required set" is the unnamed required inputs plus these.
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, ArgSpec, InputGroup, Verb};
+    ///
+    /// let lift = ActionSpec::new(Verb::Source)
+    ///     .input(ArgSpec::new("content").optional())
+    ///     .input(ArgSpec::new("in").optional())
+    ///     .group(InputGroup::exactly_one(["content", "in"]).pipe("content"));
+    /// assert_eq!(lift.pipe_slots(&[]), ["content"]);
+    /// // Named `in=`: the group is satisfied, and no slot is left for a value.
+    /// assert!(lift.pipe_slots(&["in"]).is_empty());
+    /// assert_eq!(lift.excluded_by_groups(&["in"]), ["content"]);
+    /// ```
+    pub fn pipe_slots(&self, named: &[&str]) -> Vec<&str> {
+        let mut slots: Vec<&str> = Vec::new();
+        for group in &self.groups {
+            if !matches!(group.kind, GroupKind::ExactlyOne | GroupKind::AtLeastOne) {
+                continue;
+            }
+            if group.members.iter().any(|m| named.contains(&m.as_str())) {
+                continue;
+            }
+            if let Some(pipe) = group.pipe.as_deref() {
+                if !slots.contains(&pipe) {
+                    slots.push(pipe);
+                }
+            }
+        }
+        slots
+    }
+
+    /// The members of every [`ExactlyOne`](GroupKind::ExactlyOne) or
+    /// [`AtMostOne`](GroupKind::AtMostOne) group that already has a member in `named`,
+    /// other than the named ones: inputs a value must NOT be routed into, because giving
+    /// one would break the group. The engine drops these from its "remaining arguments" so
+    /// a positional value after `in=` is refused as "every declared argument is already
+    /// set" rather than routed into `content` and then refused as "got both".
+    pub fn excluded_by_groups(&self, named: &[&str]) -> Vec<&str> {
+        let mut excluded: Vec<&str> = Vec::new();
+        for group in &self.groups {
+            if !matches!(group.kind, GroupKind::ExactlyOne | GroupKind::AtMostOne) {
+                continue;
+            }
+            if !group.members.iter().any(|m| named.contains(&m.as_str())) {
+                continue;
+            }
+            for member in &group.members {
+                if !named.contains(&member.as_str()) && !excluded.contains(&member.as_str()) {
+                    excluded.push(member);
+                }
+            }
+        }
+        excluded
     }
 
     /// Every string in this spec that an emitter puts in an IRI position, paired with
@@ -291,6 +518,11 @@ pub struct Description {
     /// omitted from serialized output when empty, so existing JSON contracts are unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionSpec>,
+    /// Relations between the flat inputs (ledger #15), for every verb this flat form
+    /// stands for: see [`InputGroup`]. Omitted from serialized output when empty, so
+    /// existing JSON contracts are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<InputGroup>,
     /// How long a kernel may keep what it derives from this description before it calls
     /// `describe()` again — see [`ContractCaching`]. Defaults to
     /// [`UntilRebind`](ContractCaching::UntilRebind), a static contract. Set it with
@@ -320,6 +552,7 @@ impl PartialEq for Description {
             kind,
             requires,
             actions,
+            groups,
             contract_caching: _,
         } = self;
         *id == other.id
@@ -331,6 +564,7 @@ impl PartialEq for Description {
             && *kind == other.kind
             && *requires == other.requires
             && *actions == other.actions
+            && *groups == other.groups
     }
 }
 
@@ -587,6 +821,13 @@ impl Description {
         self
     }
 
+    /// Declare a relation between the flat inputs (builder): see [`InputGroup`]. Like
+    /// the flat `inputs`, it applies to every verb with no explicit [`ActionSpec`].
+    pub fn group(mut self, group: InputGroup) -> Self {
+        self.groups.push(group);
+        self
+    }
+
     /// Declare a per-verb contract (builder). The verb is added to
     /// [`verbs`](Self::verbs) if not already declared.
     pub fn action(mut self, action: ActionSpec) -> Self {
@@ -618,6 +859,7 @@ impl Description {
                         inputs: self.inputs.clone(),
                         outputs: self.outputs.clone(),
                         requires: self.requires.clone(),
+                        groups: self.groups.clone(),
                     })
             })
             .collect()
@@ -807,7 +1049,13 @@ impl Description {
     ///   attempt or a typo, never a name anyone meant;
     /// - a NAME holding a code point outside RFC 3987's `ucschar` (DEL, a C1 control, private
     ///   use, a noncharacter), named by its `U+XXXX`: the emitters encode it, and here it is
-    ///   refused as an authoring mistake (ledger #1351, #1361).
+    ///   refused as an authoring mistake (ledger #1351, #1361);
+    /// - per contract (each explicit action, each verb the flat form stands for), a
+    ///   relation the contract cannot honor (`group`, `needs`): an [`InputGroup`] with fewer
+    ///   than two members, a member that is not a declared by-value input, is declared
+    ///   required or has a default, or a `pipe` that is not a member (or, on a Sink or
+    ///   Delete, is not `content`); a `needs` naming an undeclared input or itself, or on a
+    ///   defaulted input.
     ///
     /// `[` and `]` are admitted: an id may be a full IRI with an IPv6 host, and a name's
     /// brackets are encoded (`http://[::1]/x` is `urn:ikigai:endpoint:http://%5B::1%5D/x`).
@@ -887,8 +1135,122 @@ impl Description {
                 });
             }
         }
+        // The relations between inputs, per contract: each explicit action and each
+        // verb the flat form stands for (or the flat form alone, when it declares no verb).
+        let specs = self.action_specs();
+        if specs.is_empty() {
+            let flat = ActionSpec {
+                inputs: self.inputs.clone(),
+                groups: self.groups.clone(),
+                ..ActionSpec::new(Verb::Source)
+            };
+            validate_relations(&self.id, None, &flat)?;
+        }
+        for spec in &specs {
+            validate_relations(&self.id, Some(spec.verb), spec)?;
+        }
         Ok(())
     }
+}
+
+/// The relation rules of one contract ([`Description::validate`]): each refused as
+/// [`InvalidArgument`](crate::Error::InvalidArgument) naming `group` or `needs`.
+fn validate_relations(id: &str, verb: Option<Verb>, spec: &ActionSpec) -> crate::Result<()> {
+    let refuse = |field: &str, detail: String| {
+        Err(crate::Error::InvalidArgument {
+            name: field.to_string(),
+            detail: format!("endpoint `{}`: {detail}", id.escape_debug()),
+        })
+    };
+    let input = |name: &str| spec.inputs.iter().find(|i| i.name == name);
+    for group in &spec.groups {
+        let what = format!(
+            "{} group of {}",
+            group.kind.word(),
+            group.members.join(", ")
+        );
+        if group.members.len() < 2 {
+            return refuse("group", format!("the {what} needs at least two members"));
+        }
+        for member in &group.members {
+            let Some(arg) = input(member) else {
+                return refuse(
+                    "group",
+                    format!("the {what} names `{member}`, which is not a declared input"),
+                );
+            };
+            if arg.source == InputSource::Binding {
+                return refuse(
+                    "group",
+                    format!("the {what} names `{member}`, a binding (always present)"),
+                );
+            }
+            if arg.required {
+                return refuse(
+                    "group",
+                    format!(
+                        "the {what} names `{member}`, which is declared required: a member is \
+                         declared optional, so a reader that predates groups never refuses a \
+                         valid call"
+                    ),
+                );
+            }
+            if arg.default.is_some() {
+                return refuse(
+                    "group",
+                    format!(
+                        "the {what} names `{member}`, which has a default: a default would \
+                         always give it"
+                    ),
+                );
+            }
+        }
+        if let Some(pipe) = &group.pipe {
+            if !group.has(pipe) {
+                return refuse(
+                    "group",
+                    format!("the {what} pipes into `{pipe}`, which is not a member"),
+                );
+            }
+            if matches!(verb, Some(Verb::Sink | Verb::Delete)) && pipe != "content" {
+                return refuse(
+                    "group",
+                    format!(
+                        "the {what} pipes into `{pipe}`, but a {verb:?}'s pipe always lands in \
+                         `content`",
+                        verb = verb.expect("matched")
+                    ),
+                );
+            }
+        }
+    }
+    for arg in &spec.inputs {
+        for needed in &arg.needs {
+            if input(needed).is_none() {
+                return refuse(
+                    "needs",
+                    format!(
+                        "input `{}` needs `{needed}`, which is not a declared input",
+                        arg.name
+                    ),
+                );
+            }
+            if needed == &arg.name {
+                return refuse("needs", format!("input `{}` needs itself", arg.name));
+            }
+        }
+        if !arg.needs.is_empty() && arg.default.is_some() {
+            return refuse(
+                "needs",
+                format!(
+                    "input `{}` has a default and needs another input: the kernel's default \
+                     would make the dependency unconditional",
+                    arg.name
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1079,6 +1441,122 @@ mod tests {
             !json.contains("class") && !json.contains("requires"),
             "{json}"
         );
+    }
+
+    /// Ledger #15: the relations a contract states must be ones it can honor.
+    #[test]
+    fn validate_refuses_a_relation_the_contract_cannot_honor() {
+        let both = || {
+            Description::new("lift")
+                .verb(Verb::Source)
+                .input(ArgSpec::new("content").optional())
+                .input(ArgSpec::new("in").optional())
+        };
+        both()
+            .group(InputGroup::exactly_one(["content", "in"]).pipe("content"))
+            .validate()
+            .expect("a piped-or-named intake validates");
+        let refused: Vec<(&str, Description)> = vec![
+            ("group", both().group(InputGroup::exactly_one(["content"]))),
+            (
+                "group",
+                both().group(InputGroup::exactly_one(["content", "nope"])),
+            ),
+            (
+                "group",
+                Description::new("x")
+                    .verb(Verb::Source)
+                    .input(ArgSpec::new("a"))
+                    .input(ArgSpec::new("b").optional())
+                    .group(InputGroup::at_least_one(["a", "b"])),
+            ),
+            (
+                "group",
+                Description::new("x")
+                    .verb(Verb::Source)
+                    .input(ArgSpec::new("a").default_value("1"))
+                    .input(ArgSpec::new("b").optional())
+                    .group(InputGroup::at_most_one(["a", "b"])),
+            ),
+            (
+                "group",
+                Description::new("x")
+                    .verb(Verb::Source)
+                    .input(ArgSpec::new("a").binding())
+                    .input(ArgSpec::new("b").optional())
+                    .group(InputGroup::exactly_one(["a", "b"])),
+            ),
+            (
+                "group",
+                both().group(InputGroup::exactly_one(["content", "in"]).pipe("other")),
+            ),
+            (
+                "group",
+                Description::new("x").action(
+                    ActionSpec::new(Verb::Sink)
+                        .input(ArgSpec::new("content").optional())
+                        .input(ArgSpec::new("in").optional())
+                        .group(InputGroup::exactly_one(["content", "in"]).pipe("in")),
+                ),
+            ),
+            (
+                "needs",
+                Description::new("x")
+                    .verb(Verb::Source)
+                    .input(ArgSpec::new("a").optional().needs(["missing"])),
+            ),
+            (
+                "needs",
+                Description::new("x")
+                    .verb(Verb::Source)
+                    .input(ArgSpec::new("a").optional().needs(["a"])),
+            ),
+            (
+                "needs",
+                Description::new("x")
+                    .verb(Verb::Source)
+                    .input(ArgSpec::new("a").default_value("1").needs(["b"]))
+                    .input(ArgSpec::new("b").optional()),
+            ),
+        ];
+        for (field, d) in refused {
+            let err = d.validate().expect_err("must be refused");
+            assert!(
+                matches!(&err, crate::Error::InvalidArgument { name, .. } if name == field),
+                "expected `{field}`: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn groups_and_needs_are_omitted_from_json_when_absent_and_round_trip() {
+        let plain = Description::new("x")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("a"));
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(
+            !json.contains("groups") && !json.contains("needs"),
+            "{json}"
+        );
+        let grouped = Description::new("cut")
+            .verb(Verb::Sink)
+            .input(ArgSpec::new("thread").optional().needs(["content"]))
+            .input(ArgSpec::new("content").optional())
+            .group(InputGroup::exactly_one(["thread", "content"]).pipe("content"));
+        let json = serde_json::to_value(&grouped).unwrap();
+        assert_eq!(
+            json["groups"],
+            serde_json::json!([
+                {"kind": "exactly-one", "members": ["content", "thread"], "pipe": "content"}
+            ])
+        );
+        assert_eq!(json["inputs"][0]["needs"], serde_json::json!(["content"]));
+        assert_eq!(
+            serde_json::from_value::<Description>(json).unwrap(),
+            grouped
+        );
+        // The flat groups ride into every synthesized action.
+        assert_eq!(grouped.action_specs()[0].groups, grouped.groups);
     }
 
     #[test]
