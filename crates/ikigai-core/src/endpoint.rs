@@ -163,6 +163,33 @@ pub trait Issuer: Send + Sync {
         (result, Dependencies::none())
     }
 
+    /// Like [`issue_recording`](Issuer::issue_recording), additionally carrying the run's
+    /// [`IssueContext`](crate::IssueContext): its shared retry pool and its deadline (ledger
+    /// #1546). This is the seam [`Invocation`] calls; the kernel overrides it.
+    ///
+    /// **The default drops the context and delegates**, so every issuer written before
+    /// this method existed behaves exactly as it did, on the reasoning of
+    /// [`issue_at_depth`](Issuer::issue_at_depth): a dropped context restarts the count on
+    /// the far side rather than resolving anything somewhere it should not. Beyond such an
+    /// issuer (a module host bridge, a wire that has no field for it yet) the sub-request
+    /// runs with a fresh pool minted from its own capability and no deadline. Carrying it
+    /// further is a protocol decision: wire v9's `IssueWith` is where it crosses.
+    #[allow(clippy::too_many_arguments)] // the full seam: every fact of a sub-request, named
+    async fn issue_in_context(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<crate::TraceScope>,
+        scope: Scope,
+        depth: u32,
+        context: crate::run::IssueContext,
+    ) -> (Result<Representation>, Dependencies) {
+        let _ = context;
+        self.issue_recording(request, capability, parent, trace, scope, depth)
+            .await
+    }
+
     /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s produced by *another*
     /// kernel — a remote one reached through a mounted `RemoteSpace` — into `trace`,
     /// the [`TraceScope`](crate::TraceScope) of the resolution that forwarded the
@@ -405,6 +432,11 @@ pub struct Invocation<'a> {
     /// is checked against. Private: an endpoint cannot reset it, for the reason it
     /// cannot set its own chain or its own authority.
     depth: u32,
+    /// The run's retry pool and deadline (ledger #1546), inherited by every sub-request.
+    /// Set by the kernel; the only changes an endpoint can make are
+    /// [`with_retries`](Invocation::with_retries) and
+    /// [`with_not_after`](Invocation::with_not_after), which narrow.
+    run: crate::run::IssueContext,
     /// Everything the endpoint records while it runs, shared by every reborrow of
     /// this invocation. See [`Recorded`].
     recorded: Arc<Recorded>,
@@ -651,6 +683,7 @@ impl<'a> Invocation<'a> {
             trace: None,
             scope: Scope::empty(),
             depth: 0,
+            run: crate::run::IssueContext::new(),
             recorded: Arc::new(Recorded::default()),
         }
     }
@@ -680,6 +713,7 @@ impl<'a> Invocation<'a> {
             trace: None,
             scope: Scope::empty(),
             depth: 0,
+            run: crate::run::IssueContext::new(),
             recorded: Arc::new(Recorded::default()),
         }
     }
@@ -747,6 +781,7 @@ impl<'a> Invocation<'a> {
             trace: self.trace.clone(),
             scope: self.scope.clone(),
             depth: self.depth,
+            run: self.run.clone(),
             // Shared, deliberately: see the doc above. The reborrow records INTO
             // this invocation, not beside it.
             recorded: Arc::clone(&self.recorded),
@@ -854,6 +889,7 @@ impl<'a> Invocation<'a> {
             trace: self.trace.clone(),
             scope: self.scope.clone().confined(name, space),
             depth: self.depth,
+            run: self.run.clone(),
             recorded: Arc::clone(&self.recorded),
         }
     }
@@ -913,6 +949,145 @@ impl<'a> Invocation<'a> {
     pub(crate) fn with_depth(mut self, depth: u32) -> Self {
         self.depth = depth;
         self
+    }
+
+    /// Attach the run's context (set by the kernel, admitted against this request's
+    /// capability). Crate-private for the reason [`with_depth`](Self::with_depth) is: an
+    /// endpoint that could replace its pool could refill it.
+    pub(crate) fn with_run(mut self, run: crate::run::IssueContext) -> Self {
+        self.run = run;
+        self
+    }
+
+    /// The run's **retry pool** (ledger #1546): how many failed requests may still be
+    /// re-issued anywhere in this resolution tree. `None` on a kernel with no retry budget
+    /// ([`Kernel::with_retry_budget`](crate::Kernel::with_retry_budget)) and on a detached
+    /// invocation, and then an overlay keeps its own `attempts`, today's behavior.
+    ///
+    /// What an overlay does with it: on a failure whose
+    /// [class](crate::Error::class) it may repeat (transient, for an
+    /// [idempotent](crate::Verb::is_idempotent) verb; retry-after, when the delay fits
+    /// [`time_left`](Self::time_left)), it calls [`RetryBudget::try_spend`](crate::RetryBudget::try_spend)
+    /// and re-issues only on `true`; otherwise it returns the error it received, unchanged,
+    /// so the ancestor that holds the authority can decide.
+    pub fn retry_budget(&self) -> Option<&crate::RetryBudget> {
+        self.run.retry_budget()
+    }
+
+    /// The run's **deadline** on the kernel clock (ledger #1546, decision 7), set by the door
+    /// that issued the run ([`Kernel::issue_with_context`](crate::Kernel::issue_with_context))
+    /// and inherited, never extended, by every sub-request. `None` when no door set one. The
+    /// kernel does not enforce it; a budgeted endpoint bounds its own work by it.
+    pub fn not_after(&self) -> Option<Time> {
+        self.run.not_after()
+    }
+
+    /// How long the run has left: [`not_after`](Self::not_after) less
+    /// [`now`](Self::now), zero once it has passed. `None` without a deadline, or without a
+    /// clock to measure it against.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # use ikigai_core::{Bindings, Capability, FixedClock, Invocation, Iri, Request, Time, Verb};
+    /// # let request = Request::new(Verb::Source, Iri::parse("urn:x").unwrap());
+    /// # let bindings = Bindings::new();
+    /// # let capability = Capability::root();
+    /// let inv = Invocation::detached(&request, &bindings, &capability)
+    ///     .with_clock(Arc::new(FixedClock::at(1_000)));
+    /// assert_eq!(inv.time_left(), None, "no deadline");
+    /// // An endpoint may shorten its run's deadline for what it issues, never extend it.
+    /// let tight = inv.with_not_after(Time::from_millis(1_400));
+    /// assert_eq!(tight.time_left(), Some(Duration::from_millis(400)));
+    /// let later = tight.with_not_after(Time::from_millis(9_000));
+    /// assert_eq!(later.not_after(), Some(Time::from_millis(1_400)));
+    /// let past = inv.with_not_after(Time::from_millis(10));
+    /// assert_eq!(past.time_left(), Some(Duration::ZERO));
+    /// ```
+    pub fn time_left(&self) -> Option<std::time::Duration> {
+        let deadline = self.not_after()?;
+        let now = self.now()?;
+        Some(std::time::Duration::from_millis(
+            deadline.as_millis().saturating_sub(now.as_millis()),
+        ))
+    }
+
+    /// The run's whole context, for an endpoint that forwards a request to another kernel
+    /// and must carry it (a mount over wire v9): its pool's
+    /// [`remaining`](crate::RetryBudget::remaining) count and its deadline are what crosses.
+    pub fn issue_context(&self) -> &crate::IssueContext {
+        &self.run
+    }
+
+    /// **The same invocation, with at most `retries` re-issues left for what it issues**:
+    /// a reborrow like [`with_bindings`](Self::with_bindings) whose sub-requests draw from a
+    /// child of this run's pool, limited to `retries` and spending from the pool above too.
+    /// Narrowing only; with no pool (a kernel with no retry budget) there is nothing to narrow
+    /// and the reborrow has none either. The form "the leaf retries only if the parent says
+    /// so" takes in code: `inv.with_retries(0)` before issuing a parent-owned operation.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     AsyncFnEndpoint, Capability, EndpointSpace, Exact, FnEndpoint, Iri, Kernel, ReprType,
+    ///     Representation, Request, Verb,
+    /// };
+    ///
+    /// let leaf = FnEndpoint::new("leaf", |inv| {
+    ///     let left = inv.retry_budget().map(|p| p.remaining()).unwrap_or(99);
+    ///     Ok(Representation::new(ReprType::new("text/plain"), left.to_string().into_bytes()))
+    /// });
+    /// // A parent that keeps the retry authority for itself.
+    /// let parent = AsyncFnEndpoint::new("parent", |inv| {
+    ///     Box::pin(async move {
+    ///         inv.with_retries(0).source(&Iri::parse("urn:leaf").unwrap()).await
+    ///     })
+    /// });
+    /// let kernel = Kernel::new(Arc::new(
+    ///     EndpointSpace::new()
+    ///         .bind(Exact::new("urn:leaf"), leaf)
+    ///         .bind(Exact::new("urn:parent"), parent),
+    /// ))
+    /// .with_retry_budget(0, 3);
+    /// let read = |t: &str| Request::new(Verb::Source, Iri::parse(t).unwrap());
+    /// let root = Capability::root();
+    /// assert_eq!(block_on(kernel.issue(read("urn:leaf"), &root)).unwrap().bytes, b"3");
+    /// assert_eq!(block_on(kernel.issue(read("urn:parent"), &root)).unwrap().bytes, b"0");
+    /// ```
+    pub fn with_retries(&self, retries: u32) -> Invocation<'_> {
+        let mut run = self.run.clone();
+        if run.retry_budget().is_some() {
+            run = run.with_retry_limit(retries);
+        }
+        self.reborrow_with_run(run)
+    }
+
+    /// **The same invocation, with its run's deadline no later than `deadline`**: a
+    /// reborrow like [`with_bindings`](Self::with_bindings) whose sub-requests, and its own
+    /// [`not_after`](Self::not_after), see the earlier of the two. Narrowing only.
+    pub fn with_not_after(&self, deadline: Time) -> Invocation<'_> {
+        let run = self.run.clone().with_not_after(deadline);
+        self.reborrow_with_run(run)
+    }
+
+    /// A reborrow carrying `run`, sharing everything else (the recording side included).
+    fn reborrow_with_run(&self, run: crate::run::IssueContext) -> Invocation<'_> {
+        Invocation {
+            request: self.request,
+            bindings: self.bindings,
+            capability: self.capability,
+            issuer: self.issuer,
+            spawner: self.spawner.clone(),
+            issuer_arc: self.issuer_arc.clone(),
+            clock: self.clock.clone(),
+            span: self.span,
+            trace: self.trace.clone(),
+            scope: self.scope.clone(),
+            depth: self.depth,
+            run,
+            recorded: Arc::clone(&self.recorded),
+        }
     }
 
     /// Attach an explicit source of "now", so [`now`](Self::now) answers without an
@@ -1146,13 +1321,14 @@ impl<'a> Invocation<'a> {
         // floor is a cache hit two orders of magnitude dearer.
         let requested = request.target.clone();
         let (result, carried) = issuer
-            .issue_recording(
+            .issue_in_context(
                 request,
                 capability,
                 self.span,
                 self.trace.clone(),
                 self.scope.clone(),
                 self.depth + 1,
+                self.run.clone(),
             )
             .await;
         // Recorded on BOTH branches — a failure is a dependency too (see
@@ -1363,9 +1539,11 @@ impl<'a> Invocation<'a> {
                 // …and the nesting depth: a spawned branch is one deeper than
                 // this invocation, exactly as a sequential `issue` would be.
                 let depth = self.depth + 1;
+                // …and the run: one pool and one deadline across the spawn.
+                let run = self.run.clone();
                 spawner.spawn(Box::pin(async move {
                     let outcome = issuer
-                        .issue_recording(request, &capability, parent, trace, scope, depth)
+                        .issue_in_context(request, &capability, parent, trace, scope, depth, run)
                         .await;
                     *slot.lock().expect("fan-out slot") = Some(outcome);
                 }))

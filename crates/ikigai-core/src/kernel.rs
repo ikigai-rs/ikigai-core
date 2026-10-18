@@ -698,6 +698,11 @@ pub struct Kernel {
     /// [`with_max_depth`](Self::with_max_depth) for what it does and does not
     /// bound.
     max_depth: u32,
+    /// The host's retry policy, when it set one ([`with_retry_budget`](Self::with_retry_budget)):
+    /// every request then runs with a shared retry pool narrowed to its capability's
+    /// entitlement. `None` (the default) is today's behavior: no pool, so each retry
+    /// overlay keeps its own `attempts` (ledger #1546, decision 5).
+    retry: Option<crate::run::RetryLimits>,
     /// The declared floor of every endpoint resolved so far, memoized per endpoint
     /// identity — see [`FloorMemo`]. Consulted on every request (the floor runs
     /// before the cache lookup); cleared by a cut of [`BINDINGS_THREAD`].
@@ -1362,6 +1367,10 @@ struct IssueCtx<'f> {
     scope: Scope,
     /// How deep in sub-requests this is, against the kernel's nesting budget.
     depth: u32,
+    /// The run's retry pool and deadline, inherited from the issuing invocation (or
+    /// handed in by a door), admitted against this request's capability before the
+    /// endpoint sees it (ledger #1546).
+    run: crate::run::IssueContext,
     /// Where a FAILED invocation's dependencies are written, so the endpoint that
     /// issued this sub-request can hang a fallback from them (ledger #611).
     failed: Option<&'f mut Dependencies>,
@@ -1377,6 +1386,7 @@ impl IssueCtx<'_> {
             trace: None,
             scope: Scope::empty(),
             depth: 0,
+            run: crate::run::IssueContext::new(),
             failed: None,
         }
     }
@@ -1454,6 +1464,7 @@ impl Kernel {
             aliases: None,
             subclass_closure: BTreeMap::new(),
             max_depth: DEFAULT_MAX_DEPTH,
+            retry: None,
             floors: FloorMemo::default(),
             probes: ProbeMemo::default(),
             scope_names: Mutex::new(BTreeMap::new()),
@@ -2108,6 +2119,58 @@ impl Kernel {
     /// ```
     pub fn with_max_depth(mut self, max_depth: u32) -> Self {
         self.max_depth = max_depth;
+        self
+    }
+
+    /// **Give every run a retry budget that rides authority** (builder; ledger #1546,
+    /// decisions 5 and 8): `base` re-issues for a caller holding no retry grant, up to
+    /// `ceiling` for one holding `urn:cap:retry:<n>` ([`cap_retry`](crate::cap_retry)), and
+    /// the ceiling for root ([`RetryLimits::for_capability`](crate::RetryLimits::for_capability)).
+    ///
+    /// Every request then runs with ONE shared pool for its whole resolution tree
+    /// ([`Invocation::retry_budget`](crate::Invocation::retry_budget)): minted at a top-level
+    /// issue, inherited by every sub-request, and narrowed at each to what that
+    /// sub-request's capability is entitled to. So a composite that hands a subtree a
+    /// capability without the grant hands it at most the base, and with a base of 0 (the
+    /// setting for a host that grants retries), none: the parent kept the authority. A retry
+    /// overlay spends from the pool and, when it is empty, returns the error it received.
+    ///
+    /// **Without this nothing changes** (decision 5): there is no pool, a door's
+    /// [`IssueContext::with_retry_limit`](crate::IssueContext::with_retry_limit) is dropped,
+    /// and every overlay keeps its own `attempts`. A pool is never part of a cache key: it
+    /// changes only whether a FAILURE is repeated, and failures are never cached.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     cap_retry, Capability, EndpointSpace, Exact, FnEndpoint, Iri, Kernel, ReprType,
+    ///     Representation, Request, Verb,
+    /// };
+    ///
+    /// // An endpoint that reports the retries its run may still spend.
+    /// let budget = || {
+    ///     FnEndpoint::new("budget", |inv| {
+    ///         let left = inv.retry_budget().map(|pool| pool.remaining().to_string());
+    ///         let body = left.unwrap_or_else(|| "none".into()).into_bytes();
+    ///         Ok(Representation::new(ReprType::new("text/plain"), body))
+    ///     })
+    /// };
+    /// let space = || Arc::new(EndpointSpace::new().bind(Exact::new("urn:budget"), budget()));
+    /// let read = || Request::new(Verb::Source, Iri::parse("urn:budget").unwrap());
+    /// let left = |kernel: &Kernel, cap: &Capability| block_on(kernel.issue(read(), cap)).unwrap().bytes;
+    ///
+    /// // Configured: base 0, ceiling 3.
+    /// let kernel = Kernel::new(space()).with_retry_budget(0, 3);
+    /// assert_eq!(left(&kernel, &Capability::root()), b"3");
+    /// assert_eq!(left(&kernel, &Capability::scoped([cap_retry(1)])), b"1");
+    /// assert_eq!(left(&kernel, &Capability::scoped(["urn:cap:read"])), b"0");
+    ///
+    /// // Not configured: no pool at all, so the overlays keep their own attempts.
+    /// assert_eq!(left(&Kernel::new(space()), &Capability::root()), b"none");
+    /// ```
+    pub fn with_retry_budget(mut self, base: u32, ceiling: u32) -> Self {
+        self.retry = Some(crate::run::RetryLimits::new(base, ceiling));
         self
     }
 
@@ -2774,6 +2837,80 @@ impl Kernel {
         .await
     }
 
+    /// Issue a request as a **run** a door minted (ledger #1546, decisions 7 and 8): under
+    /// `context`'s deadline and retry limit, both inherited by every sub-request and both
+    /// only ever narrowed on the way down. [`issue`](Self::issue) is this with
+    /// [`IssueContext::new`](crate::IssueContext::new).
+    ///
+    /// The deadline is READ, not enforced, by the kernel: an endpoint sees it as
+    /// [`Invocation::not_after`](crate::Invocation::not_after) and
+    /// [`time_left`](crate::Invocation::time_left), and a budgeted module takes the least of
+    /// its own bound and what the run has left. The retry limit narrows the pool the kernel
+    /// mints from the capability ([`with_retry_budget`](Self::with_retry_budget)); on a
+    /// kernel with no retry budget it is dropped. A door that serves one principal's several
+    /// requests as ONE run passes clones of one context, and they share its pool.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     Capability, EndpointSpace, Exact, FixedClock, FnEndpoint, IssueContext, Iri, Kernel,
+    ///     ReprType, Representation, Request, Time, Verb,
+    /// };
+    ///
+    /// // An endpoint that reports how long its run has left.
+    /// let left = FnEndpoint::new("left", |inv| {
+    ///     let ms = inv.time_left().map(|d| d.as_millis().to_string()).unwrap_or_default();
+    ///     Ok(Representation::new(ReprType::new("text/plain"), ms.into_bytes()))
+    /// });
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:left"), left)))
+    ///     .with_clock(Arc::new(FixedClock::at(1_000)));
+    /// let run = IssueContext::new().with_not_after(Time::from_millis(1_250));
+    /// let read = Request::new(Verb::Source, Iri::parse("urn:left").unwrap());
+    /// let answer = block_on(kernel.issue_with_context(read, &Capability::root(), run)).unwrap();
+    /// assert_eq!(answer.bytes, b"250");
+    /// ```
+    pub async fn issue_with_context(
+        &self,
+        request: Request,
+        capability: &Capability,
+        context: crate::run::IssueContext,
+    ) -> Result<Representation> {
+        let trace = self.global_scope();
+        self.issue_inner(
+            request,
+            capability,
+            IssueCtx {
+                trace,
+                run: context,
+                ..IssueCtx::top()
+            },
+        )
+        .await
+    }
+
+    /// [`issue_with_context`](Self::issue_with_context), recording this resolution into
+    /// `tracer` exactly as [`issue_traced`](Self::issue_traced) does: the form a wire
+    /// server that carries a caller's context and traces per connection calls.
+    pub async fn issue_traced_with_context(
+        &self,
+        request: Request,
+        capability: &Capability,
+        tracer: Arc<dyn Tracer>,
+        context: crate::run::IssueContext,
+    ) -> Result<Representation> {
+        self.issue_inner(
+            request,
+            capability,
+            IssueCtx {
+                trace: Some(TraceScope::new(tracer)),
+                run: context,
+                ..IssueCtx::top()
+            },
+        )
+        .await
+    }
+
     /// Issue a request whose input was produced by an upstream pipe stage, folding
     /// that upstream's [`Provenance`] (expiry + golden threads) into the result's
     /// effective cacheability. So `source <X> | transform` is no more cacheable than
@@ -2838,6 +2975,7 @@ impl Kernel {
             trace,
             scope,
             depth,
+            run,
             failed,
         } = ctx;
         // ★ THE CUT SNAPSHOT, BEFORE ANYTHING ELSE. Everything this request is
@@ -3370,7 +3508,10 @@ impl Kernel {
                 .with_span(span)
                 .with_trace(trace.clone())
                 .with_scope(scope.descend(levels.clone()))
-                .with_depth(depth);
+                .with_depth(depth)
+                // The run's pool, narrowed to what THIS request's capability is entitled
+                // to (minted here when nothing above minted one), and its deadline.
+                .with_run(run.admitted(self.retry.as_ref(), capability));
             let representation = match resolved.endpoint.invoke(&invocation).await {
                 Ok(representation) => representation,
                 // ★ A FAILURE CARRIES ITS DEPENDENCIES (ledger #611). What this
@@ -5221,6 +5362,38 @@ impl Issuer for Kernel {
                     trace,
                     scope,
                     depth,
+                    failed: Some(&mut failed),
+                    ..IssueCtx::top()
+                },
+            )
+            .await;
+        (result, failed)
+    }
+
+    async fn issue_in_context(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<TraceScope>,
+        scope: Scope,
+        depth: u32,
+        context: crate::run::IssueContext,
+    ) -> (Result<Representation>, Dependencies) {
+        // `issue_recording` plus the run's context (ledger #1546): the pool and the
+        // deadline reach the sub-request, which narrows the pool to its own capability's
+        // entitlement in `issue_inner`.
+        let mut failed = Dependencies::none();
+        let result = self
+            .issue_inner(
+                request,
+                capability,
+                IssueCtx {
+                    parent,
+                    trace,
+                    scope,
+                    depth,
+                    run: context,
                     failed: Some(&mut failed),
                     ..IssueCtx::top()
                 },

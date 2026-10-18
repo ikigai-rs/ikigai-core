@@ -128,6 +128,7 @@ pub mod listen;
 mod meta;
 mod repr;
 mod request;
+mod run;
 mod seal;
 mod select;
 mod space;
@@ -186,6 +187,7 @@ pub use listen::{
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};
+pub use run::{cap_retry, IssueContext, RetryBudget, RetryLimits, CAP_RETRY};
 pub use seal::{SealError, SealOwner};
 pub use select::{
     describe_entry, is_auto_invocable, is_lossless_plan, select_action, select_action_in,
