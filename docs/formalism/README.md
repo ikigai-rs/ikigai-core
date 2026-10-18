@@ -2194,9 +2194,34 @@ it refuses is allocated once, not twice; what gets cached is unchanged. **PR 215
 `ik:authenticatedBy`, `ik:authMethod`, `ik:grantee`, `ik:scope` and `ik:notAfter`, plus `ik:Machine`'s comment and
 `owl:versionInfo`; `/ns` needs a manual deploy after the publish.
 
-**Unreleased** (held for the next breaking release, ledger [#11](http://localhost:1062/l/default/item/11)).
-**Renamed:** the builtins' ids follow the crate's naming convention, a short noun in `kebab-case` that agrees with the
-constructor's `snake_case` name up to the separator.
+**0.1.105** carries nine PRs on top of 0.1.104 (PR 217 to PR 225): the builtins' rename (ledger
+[#11](http://localhost:1062/l/default/item/11)) and the ArgSpec shape (ledger
+[#1547](http://localhost:1062/l/default/item/1547); design note
+`ikigai-devtools/claude/research/argspec-shape-2026-10-17.md`). A PATCH on the lockstep line, on the 0.1.73 argument,
+and the most breaking 0.1.x release so far: it is source compatible for every consumer in the ecosystem (no struct
+literal of `ArgSpec` or `ActionSpec` exists outside core, checked 2026-10-17, and every builder keeps its signature), but
+it changes what a consumer observes in ten places without any code of its own changing. Each is marked ⚠ below.
+
+**The PRs.** **PR 217** (ledger [#11](http://localhost:1062/l/default/item/11)): the builtins' ids follow the crate's
+naming convention (the table below). **PR 218**: one checker, `ActionSpec::check(&ProposedArgs) -> Vec<Violation>`;
+`urn:kernel:validate` renders it, and each shape violation names its `sh:sourceConstraintComponent`. **PR 219** (ledger
+[#15](http://localhost:1062/l/default/item/15), [#1853](http://localhost:1062/l/default/item/1853)): `InputGroup`
+(exactly one, at least one, at most one, an optional `pipe` member) and `ArgSpec::needs`; kernel-cut and kernel-validate
+declare and enforce them. **PR 220** (ledger [#497](http://localhost:1062/l/default/item/497),
+[#387](http://localhost:1062/l/default/item/387), [#1731](http://localhost:1062/l/default/item/1731)): `ArgSpec::list`,
+whose `one_of` and `class` apply per item and whose repeats are joined, and `ActionSpec::join_repeats`. **PR 221**
+(ledger [#607](http://localhost:1062/l/default/item/607), [#358](http://localhost:1062/l/default/item/358),
+[#708](http://localhost:1062/l/default/item/708)): open and envelope argument sets (`Arguments`), and per-value notes
+(`ArgSpec::value`, `ValueNote`: a summary, producer-owned tags, the inputs a value needs). **PR 222** (ledger
+[#41](http://localhost:1062/l/default/item/41), [#357](http://localhost:1062/l/default/item/357),
+[#45](http://localhost:1062/l/default/item/45), [#301](http://localhost:1062/l/default/item/301)): the empty enumeration,
+`ArgSpec::example`, `OutputFrom`. **PR 223** (ledger [#19](http://localhost:1062/l/default/item/19)): the kernel injects
+a declared default. **PR 224** (ledger [#32](http://localhost:1062/l/default/item/32),
+[#30](http://localhost:1062/l/default/item/30)): `ik:Stage`, and `ik:cap` is an IRI. **PR 225**: `ArgSpec` and
+`ActionSpec` are `#[non_exhaustive]`, and the shared vectors gain the v2 contract rows and `validation_vectors.json`.
+
+**Renamed** (PR 217): the builtins' ids are a short noun in `kebab-case` that agrees with the constructor's `snake_case`
+name up to the separator.
 
 | constructor | old id | new id |
 | --- | --- | --- |
@@ -2204,37 +2229,111 @@ constructor's `snake_case` name up to the separator.
 | `builtins::reverse_list()` | `reverseList` | `reverse-list` |
 | `builtins::echo()` | `echo` | `echo` (unchanged) |
 
-Both the `Endpoint::name()` and the `Description::id` move. **What a consumer observes:** nothing resolves by an id, so
-every bound IRI answers as before, but the id is what the MCP projection turns into a tool name (`toUpper__source`
-becomes `to-upper__source`), what `Meta` and the catalog report (`ik:id "to-upper"`), and what an action IRI carries
-(`urn:ikigai:endpoint:to-upper:action:source`). Anything matching on the old ids or tool names breaks; there is no
-alias, because an id is not an IRI. The docs' example IRI is now `urn:example:to-upper`. **Vocabulary:** unchanged.
+**The contract digest has two forms, chosen by content**: a contract using none of the new constructs keeps its
+`ikigai:contract:v1` digest, so its contract IRI does not move; one using any of them (a group, `needs`, a list, an open
+or envelope argument set, a value note, an empty enumeration, an example, `output_from`) is digested under
+`ikigai:contract:v2`.
 
-**Unreleased, the ArgSpec shape** (ledger [#1547](http://localhost:1062/l/default/item/1547), the one breaking release
-the rename above rides with; design note `ikigai-devtools/claude/research/argspec-shape-2026-10-17.md`). Eight PRs.
-**PR 218**: one checker, `ActionSpec::check(&ProposedArgs) -> Vec<Violation>`; `urn:kernel:validate` renders it, and each
-shape violation names its `sh:sourceConstraintComponent`. **PR 219** (ledger [#15](http://localhost:1062/l/default/item/15),
-[#1853](http://localhost:1062/l/default/item/1853)): `InputGroup` (exactly one, at least one, at most one, an optional
-`pipe` member) and `ArgSpec::needs`; kernel-cut and kernel-validate declare and enforce them, so validate no longer
-blesses an empty cut or validate call, and a bare `sink urn:kernel:cut` is refused instead of cutting the empty thread.
-**PR 220** (ledger [#497](http://localhost:1062/l/default/item/497), [#387](http://localhost:1062/l/default/item/387),
-[#1731](http://localhost:1062/l/default/item/1731)): `ArgSpec::list`, whose `one_of` and `class` apply per item and whose
-repeats are joined; any other repeated name is `given twice`; a `Request` whose arguments repeat a name fails to decode.
-**PR 221** (ledger [#607](http://localhost:1062/l/default/item/607), [#358](http://localhost:1062/l/default/item/358),
-[#708](http://localhost:1062/l/default/item/708)): open and envelope argument sets, and per-value notes. **PR 222** (ledger
-[#41](http://localhost:1062/l/default/item/41), [#357](http://localhost:1062/l/default/item/357),
-[#45](http://localhost:1062/l/default/item/45)): `"one_of": []` accepts no value, `ArgSpec::example`, `OutputFrom`.
-**PR 223** (ledger [#19](http://localhost:1062/l/default/item/19)): the kernel injects a declared default before the
-request's identity is taken, so the endpoint reads it and the call with or without it is one cache entry. **PR 224**
-(ledger [#32](http://localhost:1062/l/default/item/32), [#30](http://localhost:1062/l/default/item/30)): `ik:Stage`, and
-`ik:cap` is an IRI. **PR 225**: `ArgSpec` and `ActionSpec` are `#[non_exhaustive]`, and the shared vectors gain the
-v2 contract rows and `validation_vectors.json`. **The contract digest has two forms, chosen by content**: a contract
-using none of these constructs keeps its `ikigai:contract:v1` digest, so no existing contract IRI moves; one using any is
-digested under `ikigai:contract:v2`. **What a consumer observes:** an endpoint reads its declared default instead of
-`MissingArgument`; `urn:kernel:validate` reports groups, dependencies, list items, repeats and an empty enumeration; a
-duplicated argument name is refused at decode; kernel-cut's, kernel-validate's, kernel-actions' and kernel-explain's
-contract IRIs move; a struct literal of `ArgSpec` or `ActionSpec` outside core stops compiling (none exists in the
-ecosystem). **Vocabulary:** additive terms `ik:InputGroup`, `ik:group`, `ik:groupKind`, `ik:member`, `ik:pipe`,
-`ik:needs`, `ik:listSeparator`, `ik:valueNote`, `ik:tag`, `ik:openArguments`, `ik:envelope`, `ik:enumerated`,
-`ik:example`, `ik:outputFrom`, `ik:Origin`, `ik:Stage`; the domains of `ik:binds`, `ik:mapOver` and `ik:forkOf` move to
-`ik:Stage`; `ik:cap`'s range becomes `rdfs:Resource` (context `@id`); `/ns` needs a manual deploy after the publish.
+**What a consumer observes:**
+
+- ⚠ **The shape features.** A contract can now say exactly-one-of, at-least-one-of and at-most-one-of
+  (`InputGroup`, with the member a pipe fills), that an input needs another (`ArgSpec::needs`), that a value is a
+  separated list (`ArgSpec::list(ListSeparator::…)`), that an action takes any name (`open_arguments`) or carries its
+  fields in one input (`envelope`), what one `one_of` value means and needs (`ArgSpec::value`), examples of a lexical
+  form (`ArgSpec::example`), and that the output type comes from an input or the origin (`OutputFrom`). Group members
+  are declared optional, so a reader that predates groups sees the looser contract, never a false refusal. What changes
+  unasked: `urn:kernel:validate` (and `ActionSpec::check`) reports group, dependency, list-item, repeat and
+  empty-enumeration violations on contracts that declare them, and kernel-cut and kernel-validate declare them, so
+  validate no longer blesses an empty cut or validate call, and a bare `sink urn:kernel:cut` is refused instead of
+  cutting the empty thread (ledger [#1853](http://localhost:1062/l/default/item/1853)); both given is
+  `InvalidArgument`.
+- ⚠ **The default prefill.** A declared default is injected by the kernel before dispatch, as the inline argument a
+  caller spelling it out would send, and BEFORE the request's identity is taken: the call with or without the default
+  spelled out is one request and one cache entry. Never on `Meta`; an undeclared `Exists` takes `Source`'s defaults. A
+  caller's value always wins, an empty one included. The kernel's own operations and the cache probe (`is_cached_in`,
+  `urn:kernel:cached`) prefill the same way, and `DEFAULTED_NOTE` (`defaulted`) names the filled inputs on the trace.
+  An endpoint that answered `MissingArgument` for an omitted defaulted input now reads the default (no test in the
+  ecosystem asserted the old answer, checked 2026-10-17). `ArgSpec::default_value` takes `impl Into<DefaultValue>`:
+  `&str` and `String` still work; a `bool` or an integer records its lexical form and, when the input declares no
+  class, its XSD datatype.
+- ⚠ **`"one_of": []` means "accepts no value".** An empty enumeration used to be the same as none (any value).
+  `ArgSpec::one_of` with an empty list now sets the enumeration (`ArgSpec::is_enumerated`), the wire writes
+  `"one_of": []` (an absent `one_of` stays open-valued), the checker refuses every value of it, and
+  `urn:kernel:actions` does not offer an action whose required input, or every member of a required group, accepts
+  nothing. A module that builds a `one_of` from configuration and finds none configured now says so truthfully; before,
+  that input accepted anything.
+- ⚠ **A duplicated argument key is refused at decode.** A `Request` whose arguments repeat a name fails to decode, in
+  JSON and on the postcard wire, where serde's map used to keep the last value silently (ledger
+  [#1731](http://localhost:1062/l/default/item/1731)). No valid encoding changes. The checker joins a list argument's
+  repeats with its canonical separator and reports a repeat of any other name as `given twice`, once; `validate` used
+  to keep the first value while the engine kept the last (ledger [#387](http://localhost:1062/l/default/item/387)).
+  kernel-actions' `types` and kernel-explain's `scopes` are comma-or-whitespace lists.
+- ⚠ **`ik:cap` is now an IRI.** Its range moves from `xsd:string` to `rdfs:Resource`, so the JSON-LD context coerces
+  `cap` to `@id`: a JSON or YAML route table's `cap` string now expands as an IRI, and a Turtle table authors
+  `ik:cap <urn:cap:…>`. A host needs a route loader that reads both forms: ikigai-cli 0.1.64 (ledger
+  [#30](http://localhost:1062/l/default/item/30) step 1, on crates.io). A loader older than that reports a route whose
+  caps include an IRI as having NO cap, so the server's default capability applies (design note 4.2): do not run an
+  unlocked build of an older cli against this vocabulary.
+- ⚠ **`ik:Stage`.** The new superclass of `ik:Step` and `ik:Fork`; the domains of `ik:binds`, `ik:mapOver` and
+  `ik:forkOf` move to it, so a fork can bind a name, be mapped over and be a fork's branch, and asserting one of those
+  on a fork no longer entails that the fork is an `ik:Step`. `ik:order` stays domain-free (it is also a route's
+  priority). `shapes.ttl`'s stage property shapes move to `urn:ikigai:shape:stage:*`, listed by both the step and the
+  fork shape. No existing plan graph changes.
+- ⚠ **`to-upper` and `reverse-list`.** Both the `Endpoint::name()` and the `Description::id` move. Nothing resolves by
+  an id, so every bound IRI answers as before, but the id is what the MCP projection turns into a tool name
+  (`toUpper__source` becomes `to-upper__source`), what `Meta` and the catalog report (`ik:id "to-upper"`), and what an
+  action IRI carries (`urn:ikigai:endpoint:to-upper:action:source`). Anything matching on the old ids or tool names
+  breaks; there is no alias, because an id is not an IRI. ikigai-fn's `urn:fn:toUpper` is its own and unchanged here.
+  The docs' example IRI is now `urn:example:to-upper`.
+- ⚠ **`is_auto_invocable` now reads the Source action** (through `action_specs()`, both authoring forms) instead of
+  the flat `inputs`, and counts an exactly-one or at-least-one group as a required slot, as `spec_satisfiable` does. A
+  transreptor that declares its inputs per verb, with a required Source input other than `content` or `as` (or such a
+  group with neither among its members), was auto-selected before and is not now.
+- ⚠ **`Description::validate`'s new refusals.** It refuses, each as `InvalidArgument` naming the field: a group of
+  fewer than two members, or naming an undeclared input, a binding, a required input or one with a default; a group's
+  `pipe` that is not a member, or on a Sink or Delete that is not `content`; an envelope whose carrier is not a declared
+  by-value input; an `output_from` naming an undeclared input; a default on a binding or a required input, or one its
+  own contract refuses; an example its own contract refuses; a `needs` naming an undeclared input or itself; a value
+  note for a value outside `one_of`, or needing an undeclared input; a dependency (`needs` on the input, or on its
+  default value) beside a default. The kernel does not call `validate` at bind; ikigai-conformance's DECLARATIONS check
+  does, so a module whose contract trips one of these fails conformance at its next lock update.
+- ⚠ **The contract IRIs that move.** Under the dual digest, the four kernel operations that now use a v2 construct
+  move: **kernel-cut** and **kernel-validate** (groups, and validate's `endpoint` needs `verb`), **kernel-actions** and
+  **kernel-explain** (list arguments). Every other kernel operation's contract IRI, and every existing contract that
+  adopts nothing, keeps its v1 IRI.
+
+Also: `ArgSpec` and `ActionSpec` are `#[non_exhaustive]` (a field added later is never a flag day again; reads and
+assignments still compile), and a struct literal of either outside core stops compiling. New public API: `ProposedArgs`,
+`Violation`, `ViolationKind`, `ViolationPath`, `InputGroup`, `GroupKind`, `ListSeparator`, `Arguments`, `ValueNote`,
+`OutputFrom`, `DefaultValue`, `ActionSpec::check`, `join_repeats`, `pipe_slots` and `excluded_by_groups`.
+ikigai-vocab's core floor rises to 0.1.105: its `to_turtle` emits the new terms. **Vocabulary:** additive terms
+`ik:InputGroup`, `ik:group`, `ik:groupKind`, `ik:member`, `ik:pipe`, `ik:needs`, `ik:listSeparator`, `ik:valueNote`,
+`ik:tag`, `ik:openArguments`, `ik:envelope`, `ik:enumerated`, `ik:example`, `ik:outputFrom`, `ik:Origin`, `ik:Stage`;
+the domains of `ik:binds`, `ik:mapOver` and `ik:forkOf` move to `ik:Stage`; `ik:cap`'s range becomes `rdfs:Resource`
+(context `@id`); `ik:default`'s comment says the kernel injects it; `owl:versionInfo`. `/ns` needs a manual deploy after
+the publish.
+
+**Migrating to 0.1.105.**
+
+1. Bump `ikigai-core` and `ikigai-vocab` to `"0.1.105"` (and ikigai-conformance and the cli crates when their adopting
+   releases are out). Nothing you wrote stops compiling unless you built an `ArgSpec` or `ActionSpec` with a struct
+   literal: use `ArgSpec::new(..)` and the builders.
+2. Run your tests. What can change without an edit:
+   - a declared default now arrives in the invocation; a test asserting `MissingArgument` for an omitted DEFAULTED
+     argument now sees the default (none exist in the ecosystem today);
+   - a request whose arguments repeat a name is refused at decode; the engine and validate refuse a repeated non-list
+     name;
+   - `to-upper` and `reverse-list` are core's builtin ids;
+   - `urn:kernel:validate` reports group and dependency violations on contracts that declare them;
+   - `Description::validate` (and so conformance's DECLARATIONS) refuses the declarations listed above.
+3. Where you declare a piped-or-named intake as two optional inputs (or one required one): declare both optional and
+   add `.group(InputGroup::exactly_one([..]).pipe(<the piped one>))`.
+4. Where a value is a separated list: `.list(ListSeparator::…)`, and keep `one_of` and `class` (they now apply per
+   element).
+5. Where you parse meaning out of another crate's summary prose: read `values` (tags, needs, summaries).
+6. Where you waived `Check::Outputs` for a pass-through: declare `output_from(..)` and delete the waiver; grep
+   `opt_out_check(.., Check::Outputs` in your repo.
+7. Where a value has a lexical form a fixture was supplying: `.example(..)`.
+8. Route tables: author `ik:cap <urn:cap:…>` as an IRI (Turtle); JSON and YAML tables need no edit. Needs ikigai-cli
+   0.1.64 or later.
+9. Optional: delete your hand-applied default fallbacks; the kernel applies the declared default.
