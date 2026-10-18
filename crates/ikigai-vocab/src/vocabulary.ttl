@@ -177,7 +177,7 @@ ik:missingOptional a rdf:Property ;
 ik:default a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "default" ;
-    rdfs:comment "The value an input assumes when omitted, in its lexical form: injected by the kernel when the caller leaves the input out (ikigai-core 0.1.105+), as the inline argument a caller spelling it out would send, so the call with and without it is one request." .
+    rdfs:comment "The value an input assumes when omitted, in its lexical form: injected by the kernel when the caller leaves the input out (ikigai-core 0.1.105+), as the inline argument a caller spelling it out would send, so the call with and without it is one request. On an optional binding (ikigai-core 0.1.106+) the kernel fills the binding when the matched name leaves that segment out; the shorter name is still its own request, since a request is named by its target. A required binding has no default." .
 
 ik:oneOf a rdf:Property ;
     rdfs:range xsd:string ;
