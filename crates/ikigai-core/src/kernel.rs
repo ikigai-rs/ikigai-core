@@ -658,6 +658,11 @@ pub struct Kernel {
     /// identity — see [`FloorMemo`]. Consulted on every request (the floor runs
     /// before the cache lookup); cleared by a cut of [`BINDINGS_THREAD`].
     floors: FloorMemo,
+    /// The declared defaults the issue path last prefilled each name with, per verb
+    /// and chain, so the cache-status probe keys a request as it would be served
+    /// without resolving it (ledger #1884) — see [`ProbeMemo`]. Cleared with the floor
+    /// memo, by a cut of [`BINDINGS_THREAD`].
+    probes: ProbeMemo,
     /// The sealed prefixes and their owners — core's `urn:kernel:`, the host's
     /// ([`with_sealed`](Self::with_sealed)), every level's in the root
     /// ([`Level::sealing`](crate::Level::sealing)) — checked against the topology
@@ -719,12 +724,17 @@ pub(crate) struct Floor {
     /// input with one: what the kernel injects into a request that leaves the input out
     /// (ledger #19). Kept beside the floor because it is read from the same description
     /// at the same moment, so the prefill costs no `describe()` of its own.
-    defaults: Vec<(Verb, Vec<(String, String)>)>,
+    defaults: Vec<(Verb, Defaults)>,
     /// The same for each declared verb's bindings with a default: what the kernel fills
     /// into the bindings when the matched name leaves that segment out (ledger #1547).
     /// `Description::validate` admits one only on an optional binding.
-    binding_defaults: Vec<(Verb, Vec<(String, String)>)>,
+    binding_defaults: Vec<(Verb, Defaults)>,
 }
+
+/// One verb's declared defaults, `(input, lexical form)`, shared between the floor
+/// that read them and the [`ProbeMemo`] entry the issue path leaves for the probe, so
+/// recording them is a reference count and comparing them is usually a pointer.
+type Defaults = Arc<[(String, String)]>;
 
 impl Floor {
     pub(crate) fn of(description: &Description) -> Self {
@@ -733,15 +743,15 @@ impl Floor {
             specs
                 .iter()
                 .map(|spec| {
-                    let filled = spec
+                    let filled: Vec<(String, String)> = spec
                         .inputs
                         .iter()
                         .filter(|i| i.source == source)
                         .filter_map(|i| i.default.clone().map(|d| (i.name.clone(), d)))
                         .collect();
-                    (spec.verb, filled)
+                    (spec.verb, Defaults::from(filled))
                 })
-                .collect::<Vec<(Verb, Vec<(String, String)>)>>()
+                .collect::<Vec<(Verb, Defaults)>>()
         };
         let defaults = declared_defaults(crate::describe::InputSource::Argument);
         let binding_defaults = declared_defaults(crate::describe::InputSource::Binding);
@@ -786,18 +796,29 @@ impl Floor {
         Self::for_verb(&self.binding_defaults, verb)
     }
 
-    fn for_verb(table: &[(Verb, Vec<(String, String)>)], verb: Verb) -> &[(String, String)] {
+    /// [`defaults`](Self::defaults) as the floor holds them: shared, and `None` where
+    /// no contract states a default for `verb` — what the issue path records for the
+    /// cache-status probe ([`ProbeMemo`], ledger #1884).
+    fn declared_defaults(&self, verb: Verb) -> Option<&Defaults> {
+        Self::entry_for_verb(&self.defaults, verb)
+    }
+
+    fn for_verb(table: &[(Verb, Defaults)], verb: Verb) -> &[(String, String)] {
+        Self::entry_for_verb(table, verb).map_or(&[], |defaults| defaults)
+    }
+
+    fn entry_for_verb(table: &[(Verb, Defaults)], verb: Verb) -> Option<&Defaults> {
         let own = |v: Verb| {
             table
                 .iter()
                 .find(|(declared, _)| *declared == v)
-                .map(|(_, d)| d.as_slice())
+                .map(|(_, d)| d)
         };
         match (verb, own(verb)) {
-            (Verb::Meta, _) => &[],
-            (_, Some(defaults)) => defaults,
-            (Verb::Exists, None) => own(Verb::Source).unwrap_or(&[]),
-            _ => &[],
+            (Verb::Meta, _) => None,
+            (_, Some(defaults)) => Some(defaults),
+            (Verb::Exists, None) => own(Verb::Source),
+            _ => None,
         }
     }
 
@@ -837,6 +858,43 @@ struct Admission {
     lacking: Option<String>,
     defaults: Vec<(String, String)>,
     binding_defaults: Vec<(String, String)>,
+    /// The verb's WHOLE declared defaults (not only the ones this request leaves out),
+    /// and how long the contract they were read from may be kept: what the issue path
+    /// leaves in the [`ProbeMemo`] for the cache-status probe (ledger #1884).
+    declared: Option<Defaults>,
+    keep: Keep,
+}
+
+/// How long a contract read from a description may be kept, from its
+/// [`ContractCaching`] on the kernel's clock — the bound the floor memo honors, stated
+/// once so the probe memo honors the same one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Keep {
+    /// Until the bindings change: a static contract.
+    UntilRebind,
+    /// Until this instant on the kernel's clock.
+    Until(Time),
+    /// Not at all: a volatile contract, or a bound with no clock to measure it.
+    Never,
+}
+
+impl Keep {
+    fn of(caching: ContractCaching, now: Option<Time>) -> Self {
+        match caching.expiry_at(now) {
+            Expiry::Never => Keep::UntilRebind,
+            Expiry::At(deadline) => Keep::Until(deadline),
+            Expiry::Always => Keep::Never,
+        }
+    }
+
+    /// Whether a contract kept this way may still be used at `now`.
+    fn fresh_at(self, now: Option<Time>) -> bool {
+        match self {
+            Keep::UntilRebind => true,
+            Keep::Until(until) => now.is_some_and(|now| now < until),
+            Keep::Never => false,
+        }
+    }
 }
 
 /// The per-endpoint memo of declared floors, keyed by the endpoint's identity, so
@@ -953,8 +1011,10 @@ impl FloorMemo {
         capability: &Capability,
         now: Option<Time>,
     ) -> Admission {
-        let admission = |floor: &Floor| -> Admission {
+        let admission = |floor: &Floor, keep: Keep| -> Admission {
             Admission {
+                declared: floor.declared_defaults(request.verb).cloned(),
+                keep,
                 lacking: floor.unsatisfied(request, capability),
                 defaults: floor
                     .defaults(request.verb)
@@ -987,20 +1047,22 @@ impl FloorMemo {
                     Some(until) => now.is_some_and(|now| now < until),
                 };
                 if fresh {
-                    return admission(&entry.floor);
+                    let keep = entry.until.map_or(Keep::UntilRebind, Keep::Until);
+                    return admission(&entry.floor, keep);
                 }
                 stale = true;
             }
         }
         let description = endpoint.describe();
         let floor = Floor::of(&description);
-        let lacking = admission(&floor);
-        let until = match description.contract_caching.expiry_at(now) {
-            Expiry::Never => None,
-            Expiry::At(deadline) => Some(deadline),
+        let keep = Keep::of(description.contract_caching, now);
+        let lacking = admission(&floor, keep);
+        let until = match keep {
+            Keep::UntilRebind => None,
+            Keep::Until(deadline) => Some(deadline),
             // A contract that may not be kept is not memoized: every dispatch describes.
             // A stale entry it replaces goes, so the next lookup does not find it again.
-            Expiry::Always => {
+            Keep::Never => {
                 if stale {
                     self.entries.write().expect("floor memo lock").remove(&key);
                 }
@@ -1040,6 +1102,170 @@ impl FloorMemo {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.read().expect("floor memo lock").len()
+    }
+}
+
+/// How many names the [`ProbeMemo`] holds before it sweeps: the floor memo's bound,
+/// for the floor memo's reason (a ceiling on memory, not a tuning knob).
+const PROBE_MEMO_BOUND: usize = FLOOR_MEMO_BOUND;
+
+/// How many `(verb, chain)` contracts the [`ProbeMemo`] keeps for one name; past it the
+/// oldest goes. Most names are read in one chain with one verb.
+const PROBE_MEMO_PER_NAME: usize = 8;
+
+/// The declared defaults the issue path last prefilled each NAME with, per verb and
+/// chain: what lets the cache-status probe ([`Kernel::is_cached_in`]) key a request as
+/// it would be served without resolving the name (ledger #1884).
+///
+/// **Why the probe needs it.** The serving path keys a request AFTER prefilling its
+/// declared defaults (ledger #19), so the probe must prefill the same ones or it asks
+/// about a key nothing is stored under. The defaults are the endpoint's, and the floor
+/// memo that holds them is keyed by the endpoint's allocation, which only a resolution
+/// can produce. The probe may not spend an overlay's budget to resolve, so it resolved
+/// a `Meta` (which no overlay limits) — and a mount answers a `Meta` resolution by
+/// asking its peer, by design (ledger #1146). With `Resolver::issue_as` probing before
+/// every read, every hot mounted read paid a peer round trip again, the one ledger
+/// #1577's memo had removed.
+///
+/// **Why it agrees with the issue path.** Only the issue path writes it, with the
+/// defaults it has just prefilled from, read from the same floor at the same moment, so
+/// the probe prefills exactly what the last served read of that name in that chain was
+/// keyed with. An entry is kept as long as the contract it was read from may be
+/// ([`Keep`], from the description's [`ContractCaching`]): a volatile contract is never
+/// recorded and its probe resolves as before. A cut of [`BINDINGS_THREAD`] clears it,
+/// with the floor memo. Keyed by the name as the probe asks it: the kernel's own rewrite
+/// applied, a space's reported canonical NOT, since the probe cannot know that one.
+///
+/// **The one window, stated.** A contract that changes while its name stays bound (a
+/// mount whose peer changes a default) reaches the probe with the next served read of
+/// that name, not before: between the change and that read the probe keys the request
+/// as the previous read was keyed. The issue path itself reads a mount's contract
+/// through the mount's own memo, on its own bound, so no probe is fresher than the read
+/// it reports on; this one is exactly as fresh as the last one.
+///
+/// **Where it cannot answer**, the probe falls back to the `Meta` resolution: a name the
+/// issue path has not served in that chain since the bindings last changed. So a hot
+/// read of a mounted name asks its peer for the contract once, on its first probe, and
+/// never again while the contract may be kept.
+#[derive(Default)]
+struct ProbeMemo {
+    names: RwLock<HashMap<String, Vec<ProbeEntry>>>,
+}
+
+struct ProbeEntry {
+    verb: Verb,
+    /// The chain's fingerprint ([`Scope::fingerprint`]).
+    scope: u64,
+    /// `None` where no contract states a default for the verb.
+    declared: Option<Defaults>,
+    keep: Keep,
+}
+
+impl ProbeEntry {
+    fn is(&self, verb: Verb, scope: u64) -> bool {
+        self.verb == verb && self.scope == scope
+    }
+}
+
+impl ProbeMemo {
+    /// Record what the issue path prefilled `target` with for `verb` in the chain
+    /// `scope`, kept as `keep` says. Unchanged, it costs a read lock: a hot read writes
+    /// nothing.
+    fn record(
+        &self,
+        target: &str,
+        verb: Verb,
+        scope: u64,
+        declared: Option<&Defaults>,
+        keep: Keep,
+        now: Option<Time>,
+    ) {
+        let same = |entry: &ProbeEntry| {
+            entry.keep == keep
+                && match (&entry.declared, declared) {
+                    (None, None) => true,
+                    (Some(held), Some(new)) => Arc::ptr_eq(held, new) || held == new,
+                    _ => false,
+                }
+        };
+        {
+            let names = self.names.read().expect("probe memo lock");
+            let held = names
+                .get(target)
+                .and_then(|entries| entries.iter().find(|e| e.is(verb, scope)));
+            match (held, keep) {
+                // A contract that may not be kept is not recorded, and nothing is held.
+                (None, Keep::Never) => return,
+                (Some(entry), _) if keep != Keep::Never && same(entry) => return,
+                _ => {}
+            }
+        }
+        let mut names = self.names.write().expect("probe memo lock");
+        if keep == Keep::Never {
+            if let Some(entries) = names.get_mut(target) {
+                entries.retain(|e| !e.is(verb, scope));
+                if entries.is_empty() {
+                    names.remove(target);
+                }
+            }
+            return;
+        }
+        if !names.contains_key(target) && names.len() >= PROBE_MEMO_BOUND {
+            // Expired contracts first, then arbitrary names down to the floor memo's
+            // low-water mark (a lost entry costs one fallback probe, nothing more).
+            names.retain(|_, entries| {
+                entries.retain(|e| e.keep.fresh_at(now));
+                !entries.is_empty()
+            });
+            let mut excess = names.len().saturating_sub(FLOOR_MEMO_LOW);
+            names.retain(|_, _| {
+                if excess == 0 {
+                    return true;
+                }
+                excess -= 1;
+                false
+            });
+        }
+        let entry = ProbeEntry {
+            verb,
+            scope,
+            declared: declared.cloned(),
+            keep,
+        };
+        let entries = names.entry(target.to_string()).or_default();
+        match entries.iter_mut().find(|e| e.is(verb, scope)) {
+            Some(held) => *held = entry,
+            None => {
+                if entries.len() >= PROBE_MEMO_PER_NAME {
+                    entries.remove(0);
+                }
+                entries.push(entry);
+            }
+        }
+    }
+
+    /// The defaults the issue path last prefilled `target` with for `verb` in the chain
+    /// `scope`, if it has served that name and the contract may still be kept at `now`:
+    /// `Some(None)` when that contract states none, `None` when the memo cannot say.
+    fn lookup(
+        &self,
+        target: &str,
+        verb: Verb,
+        scope: u64,
+        now: Option<Time>,
+    ) -> Option<Option<Defaults>> {
+        let names = self.names.read().expect("probe memo lock");
+        let entry = names.get(target)?.iter().find(|e| e.is(verb, scope))?;
+        entry.keep.fresh_at(now).then(|| entry.declared.clone())
+    }
+
+    fn clear(&self) {
+        self.names.write().expect("probe memo lock").clear();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.names.read().expect("probe memo lock").len()
     }
 }
 
@@ -1166,6 +1392,7 @@ impl Kernel {
             subclass_closure: BTreeMap::new(),
             max_depth: DEFAULT_MAX_DEPTH,
             floors: FloorMemo::default(),
+            probes: ProbeMemo::default(),
             scope_names: Mutex::new(BTreeMap::new()),
             uncached: Mutex::new(UncachedLog::default()),
             seals,
@@ -2843,9 +3070,13 @@ impl Kernel {
                 )));
             }
         }
+        // The name the cache-status probe asks by, which knows only the kernel's own
+        // rewrite: kept for the probe memo below when a space rewrites it (ledger #1884).
+        let mut probed_as: Option<Iri> = None;
         if let Some(canonical) = resolved.canonical.take() {
             if canonical != request.target {
                 let previous = std::mem::replace(&mut request.target, canonical.clone());
+                probed_as = Some(previous.clone());
                 // Chain the note onto any hop the kernel's own table already took,
                 // so a two-stage rewrite reads `logical -> final`, not `mid -> final`.
                 let logical = alias
@@ -2905,6 +3136,8 @@ impl Kernel {
             lacking,
             defaults,
             binding_defaults,
+            declared,
+            keep,
         } = self.floors.admit(
             &resolved.endpoint,
             &request,
@@ -2912,6 +3145,21 @@ impl Kernel {
             capability,
             started,
         );
+        // What the cache-status probe will prefill this name with, so it keys the next
+        // request for it as this one is keyed WITHOUT resolving it (ledger #1884; see
+        // `ProbeMemo`). Only for a verb whose answer can be cached (the probe answers
+        // "no" for every other one before it looks), and not for a `Meta`, which is never
+        // prefilled.
+        if cacheable_verb && request.verb != Verb::Meta {
+            self.probes.record(
+                probed_as.as_ref().unwrap_or(&request.target).as_str(),
+                request.verb,
+                scope.fingerprint(),
+                declared.as_ref(),
+                keep,
+                started,
+            );
+        }
         let mut defaulted = prefill(&mut request, &defaults);
         let bindings = fill_bindings(&resolved.bindings, &binding_defaults);
         defaulted.extend(binding_defaults.into_iter().map(|(name, _)| name));
@@ -3324,6 +3572,7 @@ impl Kernel {
         // method or by resolving `urn:kernel:cut`, invalidates both.
         if thread.as_str() == BINDINGS_THREAD {
             self.floors.clear();
+            self.probes.clear();
         }
         if !self.listeners.interested(thread.as_str()) {
             self.cache.cut(thread);
@@ -4218,10 +4467,16 @@ impl Kernel {
     }
 
     /// Whether issuing `request` right now would be served from the cache — a
-    /// read-only probe that neither resolves nor mutates. `false` for verbs that
+    /// read-only probe that invokes nothing and stores nothing. `false` for verbs that
     /// aren't cacheable, and for any request whose result isn't already cached
     /// (including one that would be a miss). Lets a caller report cache state
     /// without the observer effect of actually issuing the request.
+    ///
+    /// It keys the request with the declared defaults the serving path would prefill
+    /// (ledger #19), and for a name the kernel has served in this chain since the
+    /// bindings last changed it knows them without resolving anything (ledger #1884).
+    /// Only for any other name does it resolve a `Meta` to read the contract, which a
+    /// mount answers by asking its peer.
     pub fn is_cached(&self, request: &Request, capability: &Capability) -> bool {
         self.is_cached_in(request, capability, &Scope::empty())
     }
@@ -4263,32 +4518,56 @@ impl Kernel {
         };
         // ★ And with the declared defaults in, as the serving path keys it (ledger #19):
         // otherwise a call that leaves a defaulted input out would probe a key no entry
-        // is ever stored under. The contract is read by a `Meta` resolution, which the
-        // overlay family answers without spending budget (a `RateLimit` never limits
-        // self-description), and from the same per-endpoint memo the floor reads.
-        let defaults = match kernel_op(probed.target.as_str()) {
-            Some(op) => crate::kernel_ops::description(op)
-                .map(|description| Floor::of(&description).defaults(probed.verb).to_vec())
-                .unwrap_or_default(),
-            None => {
-                let meta = Request::new(Verb::Meta, probed.target.clone());
-                match scope.resolve_in(&meta, &self.root, &self.seals) {
-                    Ok(Resolution::Hit(resolved)) if !resolved.endpoint.is_limiter() => {
-                        self.floors
-                            .admit(
-                                &resolved.endpoint,
-                                &probed,
-                                &resolved.bindings,
-                                capability,
-                                self.now_stamp(),
-                            )
-                            .defaults
-                    }
-                    _ => Vec::new(),
+        // is ever stored under. A kernel operation's contract is static. An endpoint's
+        // comes from what the issue path last prefilled this name with in this chain
+        // (`ProbeMemo`), which resolves nothing (ledger #1884): a mount answers a `Meta`
+        // resolution by asking its peer, and this probe runs before every resolver read.
+        // Only a name the issue path has not served here falls back to reading the
+        // contract by a `Meta` resolution, which the overlay family answers without
+        // spending budget (a `RateLimit` never limits self-description), through the
+        // same per-endpoint memo the floor reads. A `Meta` is never prefilled.
+        let now = self.now_stamp();
+        match kernel_op(probed.target.as_str()) {
+            Some(op) => {
+                if let Some(description) = crate::kernel_ops::description(op) {
+                    let verb = probed.verb;
+                    prefill(&mut probed, Floor::of(&description).defaults(verb));
                 }
             }
-        };
-        prefill(&mut probed, &defaults);
+            None if probed.verb == Verb::Meta => {}
+            None => match self.probes.lookup(
+                probed.target.as_str(),
+                probed.verb,
+                scope.fingerprint(),
+                now,
+            ) {
+                Some(declared) => {
+                    if let Some(defaults) = declared {
+                        prefill(&mut probed, &defaults);
+                    }
+                }
+                None => {
+                    let meta = Request::new(Verb::Meta, probed.target.clone());
+                    if let Ok(Resolution::Hit(resolved)) =
+                        scope.resolve_in(&meta, &self.root, &self.seals)
+                    {
+                        if !resolved.endpoint.is_limiter() {
+                            let defaults = self
+                                .floors
+                                .admit(
+                                    &resolved.endpoint,
+                                    &probed,
+                                    &resolved.bindings,
+                                    capability,
+                                    now,
+                                )
+                                .defaults;
+                            prefill(&mut probed, &defaults);
+                        }
+                    }
+                }
+            },
+        }
         let id = probed.id();
         // Read-only probe: an entry that is cut (a thread bumped) or expired (its
         // deadline passed) is not "cached", matching what `valid_cached` would
@@ -4297,7 +4576,7 @@ impl Kernel {
         // Does not evict — eviction happens on the serving path.
         self.cache.probe(
             &CacheKey::new(id, capability_key(capability)).in_scope(scope.fingerprint()),
-            self.now_stamp(),
+            now,
         )
     }
 
@@ -11186,5 +11465,220 @@ mod tests {
         assert!(!kernel.is_cached(&validate(), &caller));
         let report = validated();
         assert!(report.contains("sh:conforms false"), "{report}");
+    }
+
+    // ── The cache-status probe over a mount (ledger #1884) ─────────────────────────
+
+    /// What a [`Forwarded`] endpoint currently declares as `separator`'s default: a
+    /// peer's contract, which can change while the name stays bound.
+    type SeparatorDefault = Arc<Mutex<&'static str>>;
+
+    /// A space shaped like ikigai-cli's `MountedRemote`: every resolution hands out a
+    /// FRESH endpoint, so the floor memo (keyed by allocation) never hits, and a `Meta`
+    /// RESOLUTION asks the peer at once (ledger #1146), which is what `metas` counts.
+    struct Mountish {
+        metas: AtomicU32,
+        runs: Arc<AtomicU32>,
+        default: SeparatorDefault,
+        cacheable: bool,
+        caching: ContractCaching,
+    }
+    impl Mountish {
+        fn new(cacheable: bool, caching: ContractCaching) -> Arc<Self> {
+            Arc::new(Mountish {
+                metas: AtomicU32::new(0),
+                runs: Arc::new(AtomicU32::new(0)),
+                default: Arc::new(Mutex::new(" ")),
+                cacheable,
+                caching,
+            })
+        }
+        fn metas(&self) -> u32 {
+            self.metas.load(Ordering::SeqCst)
+        }
+        fn runs(&self) -> u32 {
+            self.runs.load(Ordering::SeqCst)
+        }
+    }
+    impl Space for Mountish {
+        fn resolve(&self, request: &Request, _scope: &Scope) -> Resolution {
+            if request.target.as_str() != "urn:mnt:peer:doc" {
+                return Resolution::Miss;
+            }
+            if request.verb == Verb::Meta {
+                self.metas.fetch_add(1, Ordering::SeqCst);
+            }
+            let endpoint = Forwarded {
+                runs: self.runs.clone(),
+                default: *self.default.lock().expect("default lock"),
+                cacheable: self.cacheable,
+                caching: self.caching,
+            };
+            Resolution::Hit(Resolved::new(Arc::new(endpoint), Bindings::default()))
+        }
+    }
+
+    /// The endpoint a [`Mountish`] resolves to: declares `separator` with the peer's
+    /// current default, answers `[separator]`, and counts its runs.
+    struct Forwarded {
+        runs: Arc<AtomicU32>,
+        default: &'static str,
+        cacheable: bool,
+        caching: ContractCaching,
+    }
+    #[async_trait::async_trait]
+    impl Endpoint for Forwarded {
+        async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            let separator = inv.inline_str("separator")?;
+            let answer = Representation::new(
+                ReprType::new("text/plain"),
+                format!("[{separator}]").into_bytes(),
+            );
+            Ok(if self.cacheable {
+                answer.cacheable()
+            } else {
+                answer
+            })
+        }
+        fn describe(&self) -> Description {
+            let mut description = Description::new("forwarded")
+                .verb(Verb::Source)
+                .input(crate::describe::ArgSpec::new("separator").default_value(self.default));
+            description.contract_caching = self.caching;
+            description
+        }
+    }
+
+    fn mounted_read() -> Request {
+        Request::new(Verb::Source, iri("urn:mnt:peer:doc"))
+    }
+
+    fn mounted_read_with(separator: &str) -> Request {
+        mounted_read().with_arg("separator", ArgRef::Inline(separator.as_bytes().to_vec()))
+    }
+
+    /// Ledger #1884. ikigai-cli's `Resolver::issue_as` probes `is_cached` before every
+    /// read, and since 0.1.105 the probe read the declared defaults through a `Meta`
+    /// resolution, which a mount answers by asking its peer: one peer round trip per hot
+    /// read (on 0.1.106: ten `Meta`s for ten reads). The probe now asks only for a name
+    /// the kernel has not served, so the first read reads the contract and no other does.
+    #[test]
+    fn a_hot_mounted_read_does_not_ask_the_peer_from_the_cache_probe() {
+        const N: u32 = 10;
+        let space = Mountish::new(false, ContractCaching::UntilRebind);
+        let kernel = Kernel::new(space.clone());
+        let root = Capability::root();
+        for _ in 0..N {
+            // The resolver's order: probe, then issue.
+            assert!(!kernel.is_cached(&mounted_read(), &root), "never cached");
+            let answer = block_on(kernel.issue(mounted_read(), &root)).unwrap();
+            assert_eq!(answer.bytes, b"[ ]", "the declared default is filled");
+        }
+        assert_eq!(
+            space.runs(),
+            N,
+            "an uncacheable answer is computed every time"
+        );
+        assert_eq!(
+            space.metas(),
+            1,
+            "only the first probe reads the contract by a Meta resolution"
+        );
+    }
+
+    /// Ledger #1884, the agreement half: the probe prefills exactly what the issue path
+    /// served the name with, so it keys a defaulted read and its spelled-out twin as the
+    /// one entry they are, from either side, and a caller's own value as another entry.
+    /// A binding change forgets what the probe knew.
+    #[test]
+    fn the_probe_keys_a_mounted_read_as_the_issue_path_served_it() {
+        let root = Capability::root();
+        let space = Mountish::new(true, ContractCaching::UntilRebind);
+        let kernel = Kernel::new(space.clone());
+        assert!(!kernel.is_cached(&mounted_read(), &root));
+        assert_eq!(space.metas(), 1, "a name never served is read by a Meta");
+        block_on(kernel.issue(mounted_read(), &root)).unwrap();
+        assert!(kernel.is_cached(&mounted_read(), &root), "keyed as served");
+        assert!(
+            kernel.is_cached(&mounted_read_with(" "), &root),
+            "the spelled-out twin is the same entry"
+        );
+        assert!(
+            !kernel.is_cached(&mounted_read_with(","), &root),
+            "a caller's own value is another entry"
+        );
+        block_on(kernel.issue(mounted_read_with(" "), &root)).unwrap();
+        assert_eq!(space.runs(), 1, "served from the one entry");
+        assert_eq!(
+            space.metas(),
+            1,
+            "and no probe after the first asked the peer"
+        );
+
+        // Served only spelled out: the probe still knows the name's defaults.
+        let space = Mountish::new(true, ContractCaching::UntilRebind);
+        let kernel = Kernel::new(space.clone());
+        block_on(kernel.issue(mounted_read_with(" "), &root)).unwrap();
+        assert!(kernel.is_cached(&mounted_read(), &root));
+        assert_eq!(space.metas(), 0);
+
+        // The peer changes the default while the name stays bound: the next served read
+        // keys under the new one, and the probe follows it from there.
+        *space.default.lock().unwrap() = ",";
+        assert_eq!(
+            block_on(kernel.issue(mounted_read(), &root)).unwrap().bytes,
+            b"[,]"
+        );
+        assert!(kernel.is_cached(&mounted_read(), &root));
+        assert!(kernel.is_cached(&mounted_read_with(","), &root));
+        assert_eq!(space.metas(), 0);
+
+        kernel.bindings_changed();
+        assert_eq!(
+            kernel.probes.len(),
+            0,
+            "a binding change clears the probe memo"
+        );
+        let _ = kernel.is_cached(&mounted_read(), &root);
+        assert_eq!(
+            space.metas(),
+            1,
+            "so the next probe reads the contract again"
+        );
+    }
+
+    /// The probe memo keeps a contract no longer than the description allows: a
+    /// volatile one is never kept, so every probe reads it, and a bounded one is read
+    /// again once its bound runs out on the kernel's clock.
+    #[test]
+    fn the_probe_memo_honors_the_contract_caching_bound() {
+        let root = Capability::root();
+        let space = Mountish::new(false, ContractCaching::Volatile);
+        let kernel = Kernel::new(space.clone());
+        for _ in 0..3 {
+            let _ = kernel.is_cached(&mounted_read(), &root);
+            block_on(kernel.issue(mounted_read(), &root)).unwrap();
+        }
+        assert_eq!(
+            space.metas(),
+            3,
+            "a volatile contract is read on every probe"
+        );
+        assert_eq!(kernel.probes.len(), 0);
+
+        let space = Mountish::new(
+            false,
+            ContractCaching::MaxAge(std::time::Duration::from_secs(5)),
+        );
+        let clock = TestClock::at(1_000_000);
+        let kernel = Kernel::new(space.clone()).with_clock(Arc::new(clock.clone()));
+        block_on(kernel.issue(mounted_read(), &root)).unwrap();
+        clock.set(1_004_999);
+        let _ = kernel.is_cached(&mounted_read(), &root);
+        assert_eq!(space.metas(), 0, "kept within the bound");
+        clock.set(1_005_000);
+        let _ = kernel.is_cached(&mounted_read(), &root);
+        assert_eq!(space.metas(), 1, "read again once the bound runs out");
     }
 }
