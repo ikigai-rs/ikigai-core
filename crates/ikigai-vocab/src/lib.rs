@@ -313,7 +313,70 @@ fn input_predicates(owner: &str, input: &ikigai_core::ArgSpec) -> String {
             name_fragment(needed)
         ));
     }
+    for value in input.values.keys() {
+        node.push_str(&format!(
+            " ;
+    ik:valueNote <{}>",
+            value_node_iri(owner, &input.name, value)
+        ));
+    }
     node
+}
+
+/// The node of one described value of an input: `{owner}:input:{name}:value:{value}`, the
+/// input's node with the value as a NAME under it.
+fn value_node_iri(owner: &str, input: &str, value: &str) -> String {
+    format!(
+        "{owner}:input:{}:value:{}",
+        name_fragment(input),
+        name_fragment(value)
+    )
+}
+
+/// The statements of an input's described values (ledger #708): each a `skos:Concept`
+/// (written as full IRIs, so a description without value notes renders exactly as before
+/// and needs no extra prefix) with its notation, meaning, tags and dependencies.
+fn value_nodes(owner: &str, input: &ikigai_core::ArgSpec) -> Vec<String> {
+    const SKOS: &str = "http://www.w3.org/2004/02/skos/core#";
+    input
+        .values
+        .iter()
+        .map(|(value, note)| {
+            let mut preds = vec![
+                format!("a <{SKOS}Concept>"),
+                format!("<{SKOS}notation> {}", lit(value)),
+            ];
+            if !note.summary.is_empty() {
+                preds.push(format!("<{SKOS}definition> {}", lit(&note.summary)));
+            }
+            for tag in &note.tags {
+                preds.push(format!("ik:tag {}", lit(tag)));
+            }
+            for needed in &note.needs {
+                preds.push(format!(
+                    "ik:needs <{owner}:input:{}>",
+                    name_fragment(needed)
+                ));
+            }
+            format!(
+                "<{}> {} .",
+                value_node_iri(owner, &input.name, value),
+                preds.join(" ;\n    ")
+            )
+        })
+        .collect()
+}
+
+/// The argument-set predicate of an action (or the flat form), if it is not closed.
+fn arguments_predicate(owner: &str, arguments: &ikigai_core::Arguments) -> Option<String> {
+    match arguments {
+        ikigai_core::Arguments::Open(summary) => Some(format!("ik:openArguments {}", lit(summary))),
+        ikigai_core::Arguments::Envelope(carrier) => Some(format!(
+            "ik:envelope <{owner}:input:{}>",
+            name_fragment(carrier)
+        )),
+        _ => None,
+    }
 }
 
 /// One input group's node, hung off `owner` (the endpoint's or the contract's IRI):
@@ -437,6 +500,10 @@ pub fn to_turtle(description: &Description) -> String {
             "<{node_iri}> {} .",
             input_predicates(&endpoint_iri, input)
         ));
+        extra_nodes.extend(value_nodes(&endpoint_iri, input));
+    }
+    if let Some(arguments) = arguments_predicate(&endpoint_iri, &description.arguments) {
+        predicates.push(arguments);
     }
     for group in &description.groups {
         let (iri, statement) = group_node(&endpoint_iri, group);
@@ -478,7 +545,11 @@ pub fn to_turtle(description: &Description) -> String {
                 "<{node_iri}> {} .",
                 input_predicates(&action_iri, input)
             ));
+            extra_nodes.extend(value_nodes(&action_iri, input));
             preds.push(format!("ik:input <{node_iri}>"));
+        }
+        if let Some(arguments) = arguments_predicate(&action_iri, &action.arguments) {
+            preds.push(arguments);
         }
         for group in &action.groups {
             let (iri, statement) = group_node(&action_iri, group);
@@ -819,6 +890,51 @@ mod tests {
         assert!(
             listed.contains("ik:listSeparator \"comma-or-whitespace\""),
             "{listed}"
+        );
+        // Value notes and argument sets (ledger #708, #607, #358).
+        let noted = Description::new("finding")
+            .verb(Verb::Sink)
+            .input(
+                ArgSpec::new("decision")
+                    .one_of(["publish", "retract"])
+                    .value(
+                        "retract",
+                        ikigai_core::ValueNote::new()
+                            .summary("withdraw")
+                            .tag("revision")
+                            .needs(["revises"]),
+                    ),
+            )
+            .input(ArgSpec::new("revises").optional())
+            .open_arguments("anything else");
+        let ttl = to_turtle(&noted);
+        let contract = noted.action_specs()[0].contract_iri("finding");
+        let node = format!("<{contract}:input:decision:value:retract>");
+        assert!(ttl.contains(&format!("ik:valueNote {node}")), "{ttl}");
+        assert!(
+            ttl.contains(&format!(
+                "{node} a <http://www.w3.org/2004/02/skos/core#Concept>"
+            )),
+            "{ttl}"
+        );
+        assert!(ttl.contains("core#notation> \"retract\""), "{ttl}");
+        assert!(ttl.contains("core#definition> \"withdraw\""), "{ttl}");
+        assert!(ttl.contains("ik:tag \"revision\""), "{ttl}");
+        assert!(
+            ttl.contains(&format!("ik:needs <{contract}:input:revises>")),
+            "{ttl}"
+        );
+        assert!(ttl.contains("ik:openArguments \"anything else\""), "{ttl}");
+        assert!(parse_count(&ttl) > 0);
+        let enveloped = to_turtle(
+            &Description::new("intake")
+                .verb(Verb::Sink)
+                .input(ArgSpec::new("content"))
+                .envelope("content"),
+        );
+        assert!(
+            enveloped.contains("ik:envelope <urn:ikigai:endpoint:intake:input:content>"),
+            "{enveloped}"
         );
         // A member name with a comma cannot run two lists together.
         let odd = InputGroup::exactly_one(["a,b", "c"]).node_segment();

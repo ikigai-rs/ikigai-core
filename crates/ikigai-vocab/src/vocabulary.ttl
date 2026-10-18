@@ -4,6 +4,7 @@
 @prefix owl:  <http://www.w3.org/2002/07/owl#> .
 @prefix prov: <http://www.w3.org/ns/prov#> .
 @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
 
 # The ikigai self-description vocabulary. Endpoints project their structured
 # Description to RDF using these terms; the kernel's catalog is a graph of them.
@@ -105,7 +106,7 @@ ik:output a rdf:Property ;
 ik:input a rdf:Property ;
     rdfs:range rdfs:Resource ;
     rdfs:label "input" ;
-    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, ik:oneOf, ik:listSeparator and ik:needs. No domain: emitted on all three." .
+    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, ik:oneOf, ik:valueNote, ik:listSeparator and ik:needs. No domain: emitted on all three." .
 
 ik:inputName a rdf:Property ;
     rdfs:range xsd:string ;
@@ -191,7 +192,27 @@ ik:listSeparator a rdf:Property ;
 ik:needs a rdf:Property ;
     rdfs:range rdfs:Resource ;
     rdfs:label "needs" ;
-    rdfs:comment "An input of the same contract that must be given whenever the subject is: on an input node, a dependency between inputs (urn:kernel:validate's endpoint needs verb). The value is that input's node. No domain: an input node today, and the same fact on a value node." .
+    rdfs:comment "An input of the same contract that must be given whenever the subject is: on an input node, a dependency between inputs (urn:kernel:validate's endpoint needs verb); on an ik:valueNote node, a dependency of one value (decision=retract needs revises). The value is that input's node. No domain: the same fact on both." .
+
+ik:valueNote a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "valueNote" ;
+    rdfs:comment "On an input node: what one of its ik:oneOf values means, as a skos:Concept node skolemized under the input ({input}:value:{value}, the value a percent-encoded name) carrying skos:notation (the value), skos:definition (its meaning, when stated), ik:tag (producer-owned roles) and ik:needs (inputs that must be given when the value is). ik:oneOf stays the set of accepted values; a value with no note has no node. Not ik:value, which is a plan argument's literal and whose domain would type every input node as an ik:Argument." .
+
+ik:tag a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "tag" ;
+    rdfs:comment "A role a producer gives one value of an enumerated input (repeated per tag), so a consumer reads the role from the contract instead of parsing summary prose or relying on order: browse tags its decision words revision, its verdict words supports and refutes, its severities serious. Free strings, owned and documented by the producing module." .
+
+ik:openArguments a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "openArguments" ;
+    rdfs:comment "On an action (or an endpoint, for its flat form): it takes any named argument beyond its declared inputs, and the literal says what the others mean (compose: each fills a {name} marker in the body). Absent: only the declared inputs, and any other name is refused by urn:kernel:validate." .
+
+ik:envelope a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "envelope" ;
+    rdfs:comment "On an action (or an endpoint, for its flat form): the declared inputs other than this one, the CARRIER, are fields of the carrier's body and arrive inside it, never as named arguments (a form's fields inside content). A projection renders the fields as the body's properties and the carrier as none. The value is the carrier's input node." .
 
 ik:InputGroup a rdfs:Class ;
     rdfs:label "InputGroup" ;
