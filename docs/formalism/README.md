@@ -2390,3 +2390,56 @@ the publish. ikigai-vocab's core floor stays 0.1.105.
 **Migrating to 0.1.107.** Bump `ikigai-core` and `ikigai-vocab` to `"0.1.107"`; nothing else changes. ikigai-cli's
 `the_cache_probe_asks_a_mounts_peer_once_per_resolver_read` counts one `Meta` per resolver read on 0.1.106 and will
 count one for all of them once its lock reaches 0.1.107.
+
+**0.1.108** carries five PRs on top of 0.1.107 (ledger [#1546](http://localhost:1062/l/default/item/1546) and
+[#200](http://localhost:1062/l/default/item/200), step 1 of the retry-authority design: devtools
+`claude/research/retry-authority-2026-10-18.md`, every recommendation taken on 2026-10-18). All additive: one minor, no
+breaking change, and nothing changes for a kernel or a module that adopts none of it.
+
+- **PR 231, failure classes.** `FailureClass` (`#[non_exhaustive]`): `transient`, `retry-after`, `over-budget`, `denied`,
+  `refused`, `permanent`, `unknown`, each a retry rule; `Error::class()` is a pure function of the variant. Four new
+  variants: `RetryAfter { delay: Option<Duration>, detail }`, `OverBudget { detail }`, `Refused(String)` and
+  `Unsupported { verb: Option<Verb>, detail }` (a verb the target does not answer, or a missing host facility, so an
+  edge can answer 405 or 501). `Endpoint` is `unknown`, `DepthExceeded` `permanent`. `Error::retry_after_millis()` is
+  the delay rounded up, the wire and display form. `is_transient()` keeps its meaning: `RetryAfter` is not transient,
+  so an overlay built before it treats a rate limit as permanent, the safe reading.
+- **PR 232, idempotence.** `Verb::is_idempotent()`: Source, Exists, Meta and Delete, as RFC 9110 has it. The
+  transports' stricter replay rule (no Delete after a read-phase failure) is stated beside it as a rule for a narrower
+  situation.
+- **PR 233, declaration.** `ActionSpec.failures` and the flat `Description.failures` (`Failures::Unstated` or
+  `Only(..)`), the `fails(..)` builders and `ActionSpec::admits_failure`, the one predicate (implied: `permanent`
+  always, `denied` beside a `requires`). Stated classes join the v2 contract digest last and only when stated, so **an
+  action that states nothing keeps its contract IRI** (the contract vectors gained rows and changed none). The kernel
+  notes `undeclared-failure=<class>` on the trace of a failure its action's declaration does not admit, and never
+  rewrites the error. Vocabulary: `ik:mayFail` (no domain), `ik:FailureClass` and seven individuals,
+  `ik:TransientFailure` … `ik:UnknownFailure`, emitted on the endpoint and contract nodes; `ikigai_vocab::failure_class_iri`.
+- **PR 234, the retry budget and the run deadline.** The ceiling is the capability grant `urn:cap:retry:<n>`
+  (`cap_retry`, `RetryLimits`), monotone and clamped to the host's ceiling as `urn:cap:store:budget:<ms>` is;
+  `Kernel::with_retry_budget(base, ceiling)` opts a host in. The count is ONE shared `RetryBudget` pool per resolution
+  tree, carried in the new `IssueContext` through every sub-request as the depth is and narrowed at each to what its
+  capability is entitled to; `Invocation::retry_budget`, `with_retries`. The same context carries the run's deadline
+  (`not_after`), minted by a door (`Kernel::issue_with_context`, `issue_traced_with_context`), read by an endpoint
+  (`Invocation::not_after`, `time_left`) and only ever shortened (`with_not_after`); the kernel does not enforce it. The
+  new seam is `Issuer::issue_in_context`; its default drops the context, as `issue_at_depth`'s drops the depth. **With
+  no retry budget configured there is no pool** (decision 5): every overlay keeps its own `attempts`.
+- **PR 235, vectors.** `crates/ikigai-vocab/tests/vectors/failure_class_vectors.json`: per variant its kind, class,
+  transient flag, display form and rounded-up delay as core computes them, beside the decided wire v9 tag and HTTP edge
+  status and `Retry-After` rule (Timeout 504, OverBudget 422, Refused 502, DepthExceeded and Endpoint 500, RetryAfter
+  429), for the wire suite, the edge and the Python and Deno faces to pin.
+
+One deviation from the note: a sub-request whose capability lacks the retry grant gets min(what is left, its own
+entitlement), which is the host's base, rather than an empty pool. With a base of 0, the setting for a host that grants
+retries, that is the note's empty pool; the literal rule would make two equal capabilities behave differently by how
+they were reached. Pins: `error::tests::the_new_variants_are_never_transient_and_each_has_its_class`,
+`verb::tests::idempotence_is_every_verb_but_sink`, `run::tests::a_child_pool_spends_from_its_parent_and_refunds_on_failure`
+(crates/ikigai-core/src); `tests/failure_declarations.rs`, `tests/retry_budget.rs`.
+
+**Vocabulary:** the terms above, the JSON-LD context regenerated, `owl:versionInfo`. `/ns` needs a manual deploy after
+the publish. ikigai-vocab's core floor moves to 0.1.108 (it reads the new fields and `FailureClass`).
+
+**Migrating to 0.1.108.** Bump `ikigai-core` and `ikigai-vocab` to `"0.1.108"`; nothing else is required. A crate that
+matches `Error` exhaustively already has a wildcard arm (`#[non_exhaustive]`); the four new variants reach it. To adopt:
+refuse a bound with `OverBudget` instead of `Timeout` or `InvalidArgument`, a known delay with `RetryAfter`, an
+origin's 401/403 with `Refused`, an unanswered verb or a missing facility with `Unsupported`; read `class()` instead of
+`is_transient()` where the difference matters; declare `fails(..)` with the next conformance adoption. The wire carries
+the new variants as `Endpoint(display)` until wire v9.
