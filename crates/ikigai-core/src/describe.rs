@@ -515,6 +515,15 @@ impl ArgSpec {
     /// caller spelling it out would send, so `inv.inline_str(name)` sees it and a call with
     /// or without the default spelled out is one request and one cache entry.
     ///
+    /// **On an optional binding** (`.binding().optional()`, ledger #1547) the kernel fills
+    /// the BINDING instead, when the matched name leaves that segment out, so
+    /// `inv.bindings.get(name)` sees it. A request's identity is its target and its
+    /// arguments, never its bindings, so this fills a value and merges no names: the
+    /// short and the spelled-out name stay two requests, as two names always were. One
+    /// identity for both is a rewrite: an alias, or a space reporting
+    /// [`Resolved::canonical`](crate::Resolved::canonical). A required binding is part of
+    /// every name and may not have a default.
+    ///
     /// Typed as declared: a `bool` or an integer records its canonical lexical form
     /// (`true`, `50`) and, when the input declares no `class`, gives it the XSD datatype
     /// (`xsd:boolean`, `xsd:integer`), so a projection can state a typed default.
@@ -1647,8 +1656,9 @@ impl Description {
     ///   an undeclared input, or needing anything on the input's default value; an
     ///   [`Envelope`](Arguments::Envelope) (`arguments`) whose carrier is not a declared
     ///   by-value input; an example (`examples`) the contract refuses; an `output_from` input
-    ///   that is not declared; a default (`default`) on a binding or a required input, or
-    ///   one the contract refuses (outside `one_of`, implausible for its class).
+    ///   that is not declared; a default (`default`) on a required input (a binding
+    ///   included: only an OPTIONAL binding may have one), or one the contract refuses
+    ///   (outside `one_of`, implausible for its class).
     ///
     /// `[` and `]` are admitted: an id may be a full IRI with an IPv6 host, and a name's
     /// brackets are encoded (`http://[::1]/x` is `urn:ikigai:endpoint:http://%5B::1%5D/x`).
@@ -1840,14 +1850,18 @@ fn validate_relations(id: &str, verb: Option<Verb>, spec: &ActionSpec) -> crate:
     }
     for arg in &spec.inputs {
         // A default is what the kernel injects, so it must be a value the contract
-        // accepts, on an input a caller can leave out (ledger #19).
+        // accepts, on an input a caller can leave out (ledger #19). A binding can be left
+        // out only when it is optional: a name the grammar can match without that segment
+        // (ikigai-ledger's `items` beside `{ledger}:items`), and the kernel
+        // fills the binding when the matched name omits it (ledger #1547).
         if let Some(default) = &arg.default {
-            if arg.source == InputSource::Binding {
+            if arg.source == InputSource::Binding && arg.required {
                 return refuse(
                     "default",
                     format!(
-                        "input `{}` is a binding with a default: a binding is part of the \
-                         name, always present, never defaulted",
+                        "input `{}` is a required binding with a default: a required binding \
+                         is part of every name the endpoint answers, so it is never omitted; \
+                         only an optional binding (`.binding().optional()`) may declare one",
                         arg.name
                     ),
                 );
@@ -2396,8 +2410,28 @@ mod tests {
             )
             .validate()
             .expect("real defaults validate");
+        // Ledger #1547: an OPTIONAL binding may declare a default. Modeled on
+        // ikigai-ledger's `{ledger}` (its bare `items` is the `default` ledger's
+        // `default:items`), in its own builder order, and in the order
+        // where `default_value` alone makes it optional.
+        let ledger = Description::new("items")
+            .verb(Verb::Source)
+            .input(
+                ArgSpec::new("ledger")
+                    .class("http://www.w3.org/2001/XMLSchema#string")
+                    .default_value("default")
+                    .binding()
+                    .optional(),
+            )
+            .input(ArgSpec::new("period").binding().default_value("today"));
+        ledger
+            .validate()
+            .expect("an optional binding may have a default");
         let mut required = ArgSpec::new("n").default_value("1");
         required.required = true;
+        // A binding the name always carries (required) with a default: still refused.
+        let mut required_binding = ArgSpec::new("path").binding().default_value("x");
+        required_binding.required = true;
         for d in [
             Description::new("x")
                 .verb(Verb::Source)
@@ -2407,7 +2441,15 @@ mod tests {
                 .input(ArgSpec::new("n").class(XSD_INTEGER).default_value("many")),
             Description::new("x")
                 .verb(Verb::Source)
-                .input(ArgSpec::new("path").binding().default_value("x")),
+                .input(required_binding),
+            // An optional binding's default is held to the contract like any other.
+            Description::new("x").verb(Verb::Source).input(
+                ArgSpec::new("period")
+                    .binding()
+                    .optional()
+                    .one_of(["today", "week"])
+                    .default_value("month"),
+            ),
             Description::new("x").verb(Verb::Source).input(required),
         ] {
             let err = d.validate().expect_err("must be refused");

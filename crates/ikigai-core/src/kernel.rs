@@ -56,6 +56,7 @@ use crate::capability::Capability;
 use crate::describe::{ContractCaching, Description};
 use crate::endpoint::{Dependencies, Endpoint, Invocation, Issuer, Spawner};
 use crate::error::{Error, Result};
+use crate::grammar::Bindings;
 use crate::iri::Iri;
 use crate::listen::{CutListener, Hearing, ListenSpec, Listeners, CAP_LISTEN};
 use crate::meta::MetaRenderer;
@@ -719,23 +720,31 @@ pub(crate) struct Floor {
     /// (ledger #19). Kept beside the floor because it is read from the same description
     /// at the same moment, so the prefill costs no `describe()` of its own.
     defaults: Vec<(Verb, Vec<(String, String)>)>,
+    /// The same for each declared verb's bindings with a default: what the kernel fills
+    /// into the bindings when the matched name leaves that segment out (ledger #1547).
+    /// `Description::validate` admits one only on an optional binding.
+    binding_defaults: Vec<(Verb, Vec<(String, String)>)>,
 }
 
 impl Floor {
     pub(crate) fn of(description: &Description) -> Self {
         let specs = description.action_specs();
-        let defaults = specs
-            .iter()
-            .map(|spec| {
-                let filled = spec
-                    .inputs
-                    .iter()
-                    .filter(|i| i.source == crate::describe::InputSource::Argument)
-                    .filter_map(|i| i.default.clone().map(|d| (i.name.clone(), d)))
-                    .collect();
-                (spec.verb, filled)
-            })
-            .collect();
+        let declared_defaults = |source: crate::describe::InputSource| {
+            specs
+                .iter()
+                .map(|spec| {
+                    let filled = spec
+                        .inputs
+                        .iter()
+                        .filter(|i| i.source == source)
+                        .filter_map(|i| i.default.clone().map(|d| (i.name.clone(), d)))
+                        .collect();
+                    (spec.verb, filled)
+                })
+                .collect::<Vec<(Verb, Vec<(String, String)>)>>()
+        };
+        let defaults = declared_defaults(crate::describe::InputSource::Argument);
+        let binding_defaults = declared_defaults(crate::describe::InputSource::Binding);
         let declared: Vec<(Verb, Vec<String>)> = specs
             .into_iter()
             .map(|spec| (spec.verb, spec.requires))
@@ -759,6 +768,7 @@ impl Floor {
             declared,
             every,
             defaults,
+            binding_defaults,
         }
     }
 
@@ -767,8 +777,18 @@ impl Floor {
     /// the floor's table says); none for `Meta` (nothing is invoked) or any other
     /// undeclared verb (no contract states a default for it).
     pub(crate) fn defaults(&self, verb: Verb) -> &[(String, String)] {
+        Self::for_verb(&self.defaults, verb)
+    }
+
+    /// The binding defaults a resolution with `verb` is filled with, by the rule
+    /// [`defaults`](Self::defaults) states (ledger #1547).
+    pub(crate) fn binding_defaults(&self, verb: Verb) -> &[(String, String)] {
+        Self::for_verb(&self.binding_defaults, verb)
+    }
+
+    fn for_verb(table: &[(Verb, Vec<(String, String)>)], verb: Verb) -> &[(String, String)] {
         let own = |v: Verb| {
-            self.defaults
+            table
                 .iter()
                 .find(|(declared, _)| *declared == v)
                 .map(|(_, d)| d.as_slice())
@@ -808,6 +828,15 @@ impl Floor {
             .find(|scope| !crate::select::cap_satisfies(capability, scope))
             .cloned()
     }
+}
+
+/// What the floor memo answers for one resolution: the first scope the capability
+/// lacks, the by-value defaults the request leaves out, and the binding defaults the
+/// matched name leaves out.
+struct Admission {
+    lacking: Option<String>,
+    defaults: Vec<(String, String)>,
+    binding_defaults: Vec<(String, String)>,
 }
 
 /// The per-endpoint memo of declared floors, keyed by the endpoint's identity, so
@@ -908,26 +937,38 @@ impl FloorMemo {
         capability: &Capability,
         now: Option<Time>,
     ) -> Option<String> {
-        self.admit(endpoint, request, capability, now).0
+        self.admit(endpoint, request, &Bindings::new(), capability, now)
+            .lacking
     }
 
-    /// [`unsatisfied`](Self::unsatisfied), and the declared defaults the request leaves
-    /// out (`Floor::defaults`), which the kernel injects before the request's identity is
-    /// taken (ledger #19). One memo read for both.
+    /// [`unsatisfied`](Self::unsatisfied), the declared defaults the request leaves out
+    /// (`Floor::defaults`), which the kernel injects before the request's identity is
+    /// taken (ledger #19), and the declared binding defaults the resolution's `bindings`
+    /// lack (`Floor::binding_defaults`, ledger #1547). One memo read for all three.
     fn admit(
         &self,
         endpoint: &Arc<dyn Endpoint>,
         request: &Request,
+        bindings: &Bindings,
         capability: &Capability,
         now: Option<Time>,
-    ) -> (Option<String>, Vec<(String, String)>) {
-        let missing = |floor: &Floor| -> Vec<(String, String)> {
-            floor
-                .defaults(request.verb)
-                .iter()
-                .filter(|(name, _)| !request.args.contains_key(name))
-                .cloned()
-                .collect()
+    ) -> Admission {
+        let admission = |floor: &Floor| -> Admission {
+            Admission {
+                lacking: floor.unsatisfied(request, capability),
+                defaults: floor
+                    .defaults(request.verb)
+                    .iter()
+                    .filter(|(name, _)| !request.args.contains_key(name))
+                    .cloned()
+                    .collect(),
+                binding_defaults: floor
+                    .binding_defaults(request.verb)
+                    .iter()
+                    .filter(|(name, _)| bindings.get(name).is_none())
+                    .cloned()
+                    .collect(),
+            }
         };
         let key = Self::key(endpoint);
         let mut stale = false;
@@ -946,17 +987,14 @@ impl FloorMemo {
                     Some(until) => now.is_some_and(|now| now < until),
                 };
                 if fresh {
-                    return (
-                        entry.floor.unsatisfied(request, capability),
-                        missing(&entry.floor),
-                    );
+                    return admission(&entry.floor);
                 }
                 stale = true;
             }
         }
         let description = endpoint.describe();
         let floor = Floor::of(&description);
-        let lacking = (floor.unsatisfied(request, capability), missing(&floor));
+        let lacking = admission(&floor);
         let until = match description.contract_caching.expiry_at(now) {
             Expiry::Never => None,
             Expiry::At(deadline) => Some(deadline),
@@ -2855,10 +2893,28 @@ impl Kernel {
         // reads the declared default rather than a `MissingArgument`. Only by-value
         // inputs, only the ones left out (a caller's value always wins, an empty one
         // included), and never on `Meta`.
-        let (lacking, defaults) =
-            self.floors
-                .admit(&resolved.endpoint, &request, capability, started);
-        let defaulted = prefill(&mut request, &defaults);
+        //
+        // An OPTIONAL binding with a default (ledger #1547) is filled into the bindings
+        // the endpoint reads, when the matched name left that segment out. That fills a
+        // value and changes no identity: the id below is the target and the arguments,
+        // and the bindings were never in it (they are a function of the target), so a
+        // short name and its spelled-out twin stay two requests, as two names always
+        // were. Making them one is a rewrite: an alias, or a space reporting
+        // `Resolved::canonical`.
+        let Admission {
+            lacking,
+            defaults,
+            binding_defaults,
+        } = self.floors.admit(
+            &resolved.endpoint,
+            &request,
+            &resolved.bindings,
+            capability,
+            started,
+        );
+        let mut defaulted = prefill(&mut request, &defaults);
+        let bindings = fill_bindings(&resolved.bindings, &binding_defaults);
+        defaulted.extend(binding_defaults.into_iter().map(|(name, _)| name));
 
         // Identity is settled: the id keys the representation cache, and it is
         // derived from the target AFTER every rewrite has been accounted for, and from
@@ -2998,13 +3054,12 @@ impl Kernel {
             // endpoint it was applied to). An endpoint found in no level gets the
             // chain the request resolved in, unchanged: `descend` of an empty path
             // over a chain with no levels is that very chain.
-            let invocation =
-                Invocation::with_issuer(&request, &resolved.bindings, capability, self)
-                    .with_concurrency(self.spawner.clone(), issuer_arc)
-                    .with_span(span)
-                    .with_trace(trace.clone())
-                    .with_scope(scope.descend(levels.clone()))
-                    .with_depth(depth);
+            let invocation = Invocation::with_issuer(&request, &bindings, capability, self)
+                .with_concurrency(self.spawner.clone(), issuer_arc)
+                .with_span(span)
+                .with_trace(trace.clone())
+                .with_scope(scope.descend(levels.clone()))
+                .with_depth(depth);
             let representation = match resolved.endpoint.invoke(&invocation).await {
                 Ok(representation) => representation,
                 // ★ A FAILURE CARRIES ITS DEPENDENCIES (ledger #611). What this
@@ -4220,8 +4275,14 @@ impl Kernel {
                 match scope.resolve_in(&meta, &self.root, &self.seals) {
                     Ok(Resolution::Hit(resolved)) if !resolved.endpoint.is_limiter() => {
                         self.floors
-                            .admit(&resolved.endpoint, &probed, capability, self.now_stamp())
-                            .1
+                            .admit(
+                                &resolved.endpoint,
+                                &probed,
+                                &resolved.bindings,
+                                capability,
+                                self.now_stamp(),
+                            )
+                            .defaults
                     }
                     _ => Vec::new(),
                 }
@@ -4410,6 +4471,24 @@ fn prefill(request: &mut Request, defaults: &[(String, String)]) -> Vec<String> 
         }
     }
     filled
+}
+
+/// The resolution's `bindings` with the declared binding `defaults` it lacks filled in
+/// (`Floor::binding_defaults`, already filtered to the absent ones; ledger #1547):
+/// borrowed unchanged when there is nothing to fill, which is every resolution but one
+/// whose name left out an optional, defaulted segment.
+fn fill_bindings<'b>(
+    bindings: &'b Bindings,
+    defaults: &[(String, String)],
+) -> std::borrow::Cow<'b, Bindings> {
+    if defaults.is_empty() {
+        return std::borrow::Cow::Borrowed(bindings);
+    }
+    let mut filled = bindings.clone();
+    for (name, value) in defaults {
+        filled.insert(name.clone(), value.clone());
+    }
+    std::borrow::Cow::Owned(filled)
 }
 
 /// The [`DEFAULTED_NOTE`] naming the inputs the kernel filled from their declared
@@ -8102,6 +8181,119 @@ mod tests {
         // A caller's value always wins, an empty one included.
         assert_eq!(read(&[("separator", ",")]), "[,]");
         assert_eq!(read(&[("separator", "")]), "[]");
+    }
+
+    /// An endpoint modeled on ikigai-ledger's `items`: bound at the short name
+    /// `urn:demo:items` AND the spelled-out `urn:demo:{ledger}:items`, with an optional
+    /// `{ledger}` binding defaulting to `default` (ledger #1547). It answers the binding it
+    /// read, `<none>` when there was none, and counts its computations.
+    fn defaulted_binding_space(calls: Arc<std::sync::atomic::AtomicUsize>) -> EndpointSpace {
+        use crate::describe::ArgSpec;
+        use crate::grammar::UriTemplate;
+        let items: Arc<dyn Endpoint> = Arc::new(
+            FnEndpoint::new("items", move |inv: &Invocation<'_>| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let ledger = inv.bindings.get("ledger").unwrap_or("<none>").to_string();
+                Ok(
+                    Representation::new(ReprType::new("text/plain"), ledger.into_bytes())
+                        .cacheable(),
+                )
+            })
+            .with_description(
+                Description::new("items").verb(Verb::Source).input(
+                    ArgSpec::new("ledger")
+                        .default_value("default")
+                        .binding()
+                        .optional(),
+                ),
+            ),
+        );
+        EndpointSpace::new()
+            .bind_arc(Exact::new("urn:demo:items"), items.clone())
+            .bind_arc(
+                UriTemplate::parse("urn:demo:{ledger}:items").unwrap(),
+                items,
+            )
+    }
+
+    /// Ledger #1547: a name that leaves out an optional binding's segment reaches the
+    /// endpoint with the declared default in its bindings (on 0.1.105: no binding at all),
+    /// a name that spells it keeps its own value, and the trace says what was filled.
+    #[test]
+    fn an_omitted_optional_binding_is_filled_from_its_default() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let kernel = Kernel::new(Arc::new(defaulted_binding_space(calls)));
+        let rec = Rec::new();
+        kernel.set_tracer(rec.clone());
+        let root = Capability::root();
+        let read = |name: &str| {
+            let request = Request::new(Verb::Source, iri(name));
+            String::from_utf8(block_on(kernel.issue(request, &root)).unwrap().bytes).unwrap()
+        };
+        assert_eq!(read("urn:demo:items"), "default");
+        assert_eq!(read("urn:demo:other:items"), "other");
+        assert_eq!(read("urn:demo:default:items"), "default");
+        let filled: Vec<_> = rec
+            .events()
+            .iter()
+            .map(|e| {
+                let note = e.notes.iter().find(|(k, _)| k == DEFAULTED_NOTE);
+                (e.target.clone(), note.map(|(_, v)| v.clone()))
+            })
+            .collect();
+        assert_eq!(
+            filled,
+            [
+                ("urn:demo:items".to_string(), Some("ledger".to_string())),
+                ("urn:demo:other:items".to_string(), None),
+                ("urn:demo:default:items".to_string(), None),
+            ]
+        );
+    }
+
+    /// Ledger #1547, the identity half. A request's id is its target and its arguments;
+    /// the bindings were never in it (they are a function of the target), so filling one
+    /// changes no id: the short name is ONE cache entry however often it is read, and the
+    /// probe keys it as served. The short and the spelled-out name are two names, so two
+    /// entries, exactly as before the fill; one identity for both is a rewrite, and with
+    /// the kernel's alias table saying so they are one entry.
+    #[test]
+    fn a_filled_binding_changes_no_identity() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let root = Capability::root();
+        let short = || Request::new(Verb::Source, iri("urn:demo:items"));
+        let spelled = || Request::new(Verb::Source, iri("urn:demo:default:items"));
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let kernel = Kernel::new(Arc::new(defaulted_binding_space(calls.clone())));
+        for _ in 0..2 {
+            block_on(kernel.issue(short(), &root)).unwrap();
+        }
+        assert_eq!(calls.load(SeqCst), 1, "the short name is one cache entry");
+        assert!(kernel.is_cached(&short(), &root), "keyed as it was served");
+        assert!(
+            !kernel.is_cached(&spelled(), &root),
+            "another name, another entry"
+        );
+        block_on(kernel.issue(spelled(), &root)).unwrap();
+        assert_eq!(calls.load(SeqCst), 2);
+        assert_ne!(short().id(), spelled().id());
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let aliased = Kernel::new(Arc::new(defaulted_binding_space(calls.clone()))).with_aliases(
+            Arc::new(AliasTable::new().exact("urn:demo:items", "urn:demo:default:items")),
+        );
+        let first = block_on(aliased.issue(short(), &root)).unwrap();
+        let second = block_on(aliased.issue(spelled(), &root)).unwrap();
+        assert_eq!(
+            (first.bytes, second.bytes),
+            (b"default".to_vec(), b"default".to_vec())
+        );
+        assert_eq!(
+            calls.load(SeqCst),
+            1,
+            "a rewrite makes the two names one entry"
+        );
     }
 
     /// The kernel's own operations prefill too, and the trace names what was filled.
