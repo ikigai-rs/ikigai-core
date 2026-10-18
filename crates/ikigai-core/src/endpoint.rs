@@ -1027,6 +1027,10 @@ impl<'a> Invocation<'a> {
     }
 
     /// The bytes of an inline argument, or an error if absent / not inline.
+    ///
+    /// A by-value input the contract gives a default (`ArgSpec::default_value`) is never
+    /// absent here when the kernel dispatched the request: the kernel injects the declared
+    /// default before it builds the invocation (ledger #19), so this reads it.
     pub fn inline_arg(&self, name: &str) -> Result<&[u8]> {
         match self.request.args.get(name) {
             Some(ArgRef::Inline(bytes)) => Ok(bytes),

@@ -188,6 +188,67 @@ impl PartialEq for ArgSpec {
     }
 }
 
+/// A declared default (see [`ArgSpec::default_value`]): its canonical lexical form, and the
+/// XSD datatype a `bool` or an integer carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefaultValue {
+    lexical: String,
+    datatype: Option<&'static str>,
+}
+
+impl DefaultValue {
+    /// The canonical lexical form: what the kernel injects.
+    pub fn lexical(&self) -> &str {
+        &self.lexical
+    }
+
+    /// The XSD datatype the value carries, if it is typed (a `bool`, an integer).
+    pub fn datatype(&self) -> Option<&'static str> {
+        self.datatype
+    }
+}
+
+const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+macro_rules! text_default {
+    ($($t:ty),*) => {$(
+        impl From<$t> for DefaultValue {
+            fn from(value: $t) -> Self {
+                DefaultValue { lexical: String::from(value), datatype: None }
+            }
+        }
+    )*};
+}
+text_default!(
+    &str,
+    String,
+    &String,
+    Box<str>,
+    std::borrow::Cow<'_, str>,
+    char
+);
+
+macro_rules! integer_default {
+    ($($t:ty),*) => {$(
+        impl From<$t> for DefaultValue {
+            fn from(value: $t) -> Self {
+                DefaultValue { lexical: value.to_string(), datatype: Some(XSD_INTEGER) }
+            }
+        }
+    )*};
+}
+integer_default!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+
+impl From<bool> for DefaultValue {
+    fn from(value: bool) -> Self {
+        DefaultValue {
+            lexical: value.to_string(),
+            datatype: Some(XSD_BOOLEAN),
+        }
+    }
+}
+
 /// What one value of an enumerated input means (see [`ArgSpec::value`]): so a consumer
 /// reads a value's role from the contract instead of parsing another crate's summary
 /// prose, or mapping roles by position.
@@ -443,8 +504,32 @@ impl ArgSpec {
 
     /// Declare the value assumed when the argument is omitted (builder). Implies the
     /// argument is optional.
-    pub fn default_value(mut self, value: impl Into<String>) -> Self {
-        self.default = Some(value.into());
+    ///
+    /// **The kernel injects it** (ledger #19): a request that leaves this by-value input
+    /// out reaches the endpoint with the default filled in, as the inline argument a
+    /// caller spelling it out would send, so `inv.inline_str(name)` sees it and a call with
+    /// or without the default spelled out is one request and one cache entry.
+    ///
+    /// Typed as declared: a `bool` or an integer records its canonical lexical form
+    /// (`true`, `50`) and, when the input declares no `class`, gives it the XSD datatype
+    /// (`xsd:boolean`, `xsd:integer`), so a projection can state a typed default.
+    ///
+    /// ```
+    /// use ikigai_core::ArgSpec;
+    ///
+    /// let limit = ArgSpec::new("limit").default_value(50);
+    /// assert_eq!(limit.default.as_deref(), Some("50"));
+    /// assert_eq!(limit.class.as_deref(), Some("http://www.w3.org/2001/XMLSchema#integer"));
+    /// assert!(!limit.required);
+    /// // A string says nothing about the type.
+    /// assert_eq!(ArgSpec::new("sep").default_value(" ").class, None);
+    /// ```
+    pub fn default_value(mut self, value: impl Into<DefaultValue>) -> Self {
+        let value = value.into();
+        if self.class.is_none() {
+            self.class = value.datatype.map(str::to_string);
+        }
+        self.default = Some(value.lexical);
         self.required = false;
         self
     }
@@ -1552,7 +1637,9 @@ impl Description {
     ///   defaulted input; a [`ValueNote`] (`values`) for a value outside `one_of`, needing
     ///   an undeclared input, or needing anything on the input's default value; an
     ///   [`Envelope`](Arguments::Envelope) (`arguments`) whose carrier is not a declared
-    ///   by-value input.
+    ///   by-value input; an example (`examples`) the contract refuses; an `output_from` input
+    ///   that is not declared; a default (`default`) on a binding or a required input, or
+    ///   one the contract refuses (outside `one_of`, implausible for its class).
     ///
     /// `[` and `]` are admitted: an id may be a full IRI with an IPv6 host, and a name's
     /// brackets are encoded (`http://[::1]/x` is `urn:ikigai:endpoint:http://%5B::1%5D/x`).
@@ -1743,6 +1830,47 @@ fn validate_relations(id: &str, verb: Option<Verb>, spec: &ActionSpec) -> crate:
         }
     }
     for arg in &spec.inputs {
+        // A default is what the kernel injects, so it must be a value the contract
+        // accepts, on an input a caller can leave out (ledger #19).
+        if let Some(default) = &arg.default {
+            if arg.source == InputSource::Binding {
+                return refuse(
+                    "default",
+                    format!(
+                        "input `{}` is a binding with a default: a binding is part of the \
+                         name, always present, never defaulted",
+                        arg.name
+                    ),
+                );
+            }
+            if arg.required {
+                return refuse(
+                    "default",
+                    format!(
+                        "input `{}` is required and has a default: a default is what an \
+                         omitted input assumes",
+                        arg.name
+                    ),
+                );
+            }
+            let probe = ActionSpec::new(Verb::Source).input(ArgSpec {
+                needs: Vec::new(),
+                values: BTreeMap::new(),
+                ..arg.clone()
+            });
+            let proposed =
+                crate::check::ProposedArgs::new().with(arg.name.clone(), default.clone());
+            if let Some(violation) = probe.check(&proposed).into_iter().next() {
+                return refuse(
+                    "default",
+                    format!(
+                        "input `{}`'s default `{default}` is one the contract refuses: \
+                         {violation}",
+                        arg.name
+                    ),
+                );
+            }
+        }
         // Every example passes the contract's own rules for its input, so a stale example
         // is refused at bind rather than handed to an agent.
         for example in &arg.examples {
@@ -2241,6 +2369,55 @@ mod tests {
         assert_eq!(
             ok.action_specs()[0].output_from,
             Some(OutputFrom::Input("graph".to_string()))
+        );
+    }
+
+    /// Ledger #19: a default is what the kernel injects, so it must be a value the
+    /// contract accepts, on an input a caller can leave out.
+    #[test]
+    fn validate_refuses_a_default_the_kernel_could_not_honor() {
+        Description::new("x")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("limit").default_value(50))
+            .input(ArgSpec::new("strict").default_value(true))
+            .input(
+                ArgSpec::new("as")
+                    .one_of(["text/plain", "text/turtle"])
+                    .default_value("text/plain"),
+            )
+            .validate()
+            .expect("real defaults validate");
+        let mut required = ArgSpec::new("n").default_value("1");
+        required.required = true;
+        for d in [
+            Description::new("x")
+                .verb(Verb::Source)
+                .input(ArgSpec::new("mode").one_of(["a", "b"]).default_value("c")),
+            Description::new("x")
+                .verb(Verb::Source)
+                .input(ArgSpec::new("n").class(XSD_INTEGER).default_value("many")),
+            Description::new("x")
+                .verb(Verb::Source)
+                .input(ArgSpec::new("path").binding().default_value("x")),
+            Description::new("x").verb(Verb::Source).input(required),
+        ] {
+            let err = d.validate().expect_err("must be refused");
+            assert!(
+                matches!(&err, crate::Error::InvalidArgument { name, .. } if name == "default"),
+                "{err:?}"
+            );
+        }
+        // A typed default carries its datatype only when the input declares none.
+        let declared = ArgSpec::new("n")
+            .class("http://www.w3.org/2001/XMLSchema#decimal")
+            .default_value(5);
+        assert_eq!(
+            declared.class.as_deref(),
+            Some("http://www.w3.org/2001/XMLSchema#decimal")
+        );
+        assert_eq!(
+            ArgSpec::new("on").default_value(false).class.as_deref(),
+            Some(XSD_BOOLEAN)
         );
     }
 
