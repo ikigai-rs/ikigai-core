@@ -226,7 +226,7 @@ pub enum Error {
 ///
 /// | class | meaning | who may repeat it |
 /// | --- | --- | --- |
-/// | [`Transient`](Self::Transient) | the same request may succeed now | an overlay holding retry budget, for an idempotent verb |
+/// | [`Transient`](Self::Transient) | the same request may succeed now | an overlay holding retry budget, for an idempotent verb ([`Verb::is_idempotent`]) |
 /// | [`RetryAfter`](Self::RetryAfter) | the same request may succeed, not before a stated time | an overlay holding budget AND time (the delay fits its deadline); otherwise the caller |
 /// | [`OverBudget`](Self::OverBudget) | the input exceeds a bound; under the same bound it fails the same | nobody in the chain: only a holder of a larger bound, with a new request |
 /// | [`Denied`](Self::Denied) | the caller's capability does not cover it | nobody: a different authority is a different request |
@@ -320,8 +320,8 @@ impl Error {
     /// unavailable), `false` for **permanent** ones (unresolved, bad argument,
     /// denied, or a domain endpoint error). The retry / circuit-breaker / failover
     /// overlays gate on this. Note the request *verb* separately governs whether a
-    /// re-issue is *safe*: a non-idempotent `Sink` needs an idempotency key even
-    /// when the error is transient. `NotFound` and `Denied` are permanent — re-issuing
+    /// re-issue is *safe* ([`Verb::is_idempotent`]): a non-idempotent `Sink` needs an
+    /// idempotency key even when the error is transient. `NotFound` and `Denied` are permanent — re-issuing
     /// won't conjure the resource or the grant — and so is `Conflict`: re-issuing
     /// against the same state gets the same refusal, so a retry overlay that re-sent it
     /// would only spend its budget. What clears a conflict is a change of state.
