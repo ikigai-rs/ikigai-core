@@ -109,6 +109,7 @@ pub mod builtins;
 pub mod cache;
 mod cache_graph;
 mod capability;
+mod check;
 pub mod config;
 mod confine;
 mod content;
@@ -147,6 +148,7 @@ pub use capability::{
     is_deny_scope, principal_scope, Capability, PrincipalError, MAX_PRINCIPAL_LEN,
     PRINCIPAL_SCOPE_PREFIX,
 };
+pub use check::{ProposedArgs, Violation, ViolationKind, ViolationPath};
 pub use confine::Confine;
 pub use content::{ContentId, ContentIdError};
 pub use contract::{

@@ -3942,9 +3942,7 @@ impl Kernel {
                 // The focus node is the contract checked, and resultPath joins to the
                 // catalog's input nodes, which every contract owns under its own IRI.
                 let action_iri = spec.contract_iri(&description.id);
-                let input_ns = format!("{action_iri}:input:");
-                let report =
-                    validate_against_spec(&action_iri, &input_ns, &spec, proposed, capability);
+                let report = validation_report(&action_iri, &spec, proposed, capability);
                 Ok(Representation::new(
                     ReprType::new("text/turtle").with_param("charset", "utf-8"),
                     report.into_bytes(),
@@ -4331,102 +4329,40 @@ pub(crate) fn parse_verb(name: &str) -> Result<Verb> {
     }
 }
 
-/// Check `proposed` (key=value pairs joined by `&`/newlines) against `spec`,
-/// including the capability pre-flight, and render the SHACL report.
-/// `input_ns` is the IRI prefix of the spec's input nodes in the catalog
-/// (action-scoped for explicitly authored actions, endpoint-scoped for
-/// synthesized ones), so `sh:resultPath` joins violations to the contract.
-fn validate_against_spec(
+/// Check `proposed` (key=value pairs joined by `&`/newlines) against `spec` with the
+/// one checker ([`ActionSpec::check`](crate::ActionSpec::check)), add the capability
+/// pre-flight, and render the SHACL report. `action_iri` is the contract node the
+/// report's focus is on; every path a violation names hangs off it, as the catalog
+/// spells it, so `sh:resultPath` joins violations to the contract.
+fn validation_report(
     action_iri: &str,
-    input_ns: &str,
     spec: &crate::describe::ActionSpec,
     proposed: &str,
     capability: &Capability,
 ) -> String {
-    use crate::describe::InputSource;
     // Every character Turtle's short string forbids raw — CR and LF too, which a
     // message quoting caller input can carry (`args` splits on `&` and LF only).
     let escape = crate::topology::escape_literal;
-    let mut provided: Vec<(&str, &str)> = Vec::new();
-    for pair in proposed.split(['&', '\n']) {
-        let pair = pair.trim();
-        if pair.is_empty() {
-            continue;
-        }
-        match pair.split_once('=') {
-            Some((k, v)) => provided.push((k.trim(), v.trim())),
-            None => provided.push((pair, "")),
-        }
-    }
 
-    // (message, Some(input node IRI)) per violation.
-    let mut violations: Vec<(String, Option<String>)> = Vec::new();
-
+    // (message, result path IRI, constraint component) per violation. A capability
+    // violation is about authority, not the shape of the arguments: it has no path and
+    // no SHACL constraint component.
+    let mut violations: Vec<(String, Option<String>, Option<&'static str>)> = Vec::new();
     for scope in &spec.requires {
         if !crate::select::cap_satisfies(capability, scope) {
-            violations.push((format!("the capability does not grant `{scope}`"), None));
-        }
-    }
-    for input in &spec.inputs {
-        // The input node as the catalog spells it: an input name is a NAME, so a `%` in it
-        // is `%25` (`ikigai-vocab`'s `to_turtle`; ledger #1352).
-        let node = format!("{input_ns}{}", crate::encode_name(&input.name));
-        let value = provided
-            .iter()
-            .find(|(k, _)| *k == input.name)
-            .map(|(_, v)| *v);
-        if input.required && input.source != InputSource::Binding && value.is_none() {
             violations.push((
-                format!("required input `{}` is missing", input.name),
-                Some(node),
-            ));
-            continue;
-        }
-        let Some(value) = value else { continue };
-        if !input.one_of.is_empty() && !input.one_of.iter().any(|v| v == value) {
-            violations.push((
-                format!(
-                    "`{value}` is not an accepted value of `{}` (one of: {})",
-                    input.name,
-                    input.one_of.join(", ")
-                ),
-                Some(node),
-            ));
-            continue;
-        }
-        if let Some(class) = &input.class {
-            let plausible = match class.as_str() {
-                "http://www.w3.org/2001/XMLSchema#boolean" => value == "true" || value == "false",
-                "http://www.w3.org/2001/XMLSchema#integer" => value.parse::<i64>().is_ok(),
-                "http://www.w3.org/2001/XMLSchema#dateTime" => {
-                    let b = value.as_bytes();
-                    b.len() >= 10
-                        && b[..4].iter().all(u8::is_ascii_digit)
-                        && b[4] == b'-'
-                        && b[5..7].iter().all(u8::is_ascii_digit)
-                        && b[7] == b'-'
-                        && b[8..10].iter().all(u8::is_ascii_digit)
-                }
-                _ => true, // entity classes are not statically checkable
-            };
-            if !plausible {
-                violations.push((
-                    format!(
-                        "`{value}` does not look like a {} for `{}`",
-                        class, input.name
-                    ),
-                    Some(node),
-                ));
-            }
-        }
-    }
-    for (k, _) in &provided {
-        if !spec.inputs.iter().any(|i| i.name == *k) {
-            violations.push((
-                format!("unknown argument `{k}` — not in this action's contract"),
+                format!("the capability does not grant `{scope}`"),
+                None,
                 None,
             ));
         }
+    }
+    for violation in spec.check(&crate::check::ProposedArgs::parse(proposed)) {
+        violations.push((
+            violation.message.clone(),
+            violation.path.as_ref().map(|p| p.node_iri(action_iri)),
+            Some(violation.kind.component()),
+        ));
     }
 
     let mut ttl = String::from("@prefix sh: <http://www.w3.org/ns/shacl#> .\n\n");
@@ -4437,7 +4373,7 @@ fn validate_against_spec(
         return ttl;
     }
     ttl.push_str("<urn:ikigai:validation:report> a sh:ValidationReport ;\n    sh:conforms false");
-    for (message, path) in &violations {
+    for (message, path, component) in &violations {
         // Both the focus node and the result path carry an endpoint id (and the path an
         // argument name) that nothing validated — encode, never interpolate raw.
         ttl.push_str(" ;\n    sh:result [ a sh:ValidationResult ;\n        sh:resultSeverity sh:Violation ;\n        sh:focusNode <");
@@ -4447,6 +4383,11 @@ fn validate_against_spec(
             ttl.push_str(&format!(
                 " ;\n        sh:resultPath <{}>",
                 crate::escape_iri_fragment(path)
+            ));
+        }
+        if let Some(component) = component {
+            ttl.push_str(&format!(
+                " ;\n        sh:sourceConstraintComponent <{component}>"
             ));
         }
         ttl.push_str(&format!(
@@ -5672,8 +5613,18 @@ mod tests {
                 && bad.contains(":input:start>"),
             "every contract owns its input nodes: {bad}"
         );
+        // Each shape violation names the SHACL constraint component it corresponds to.
+        for component in ["MinCount", "In", "Closed"] {
+            assert!(
+                bad.contains(&format!(
+                    "sh:sourceConstraintComponent <http://www.w3.org/ns/shacl#{component}ConstraintComponent>"
+                )),
+                "{component}: {bad}"
+            );
+        }
         let odd = validate("start=whenever", &Capability::root());
         assert!(odd.contains("does not look like a"), "{odd}");
+        assert!(odd.contains("shacl#DatatypeConstraintComponent"), "{odd}");
 
         // Capability pre-flight: a read-only capability fails validation BEFORE
         // any invocation is attempted — the same allows check enforcement runs.
