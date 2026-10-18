@@ -299,6 +299,19 @@ fn input_predicates(owner: &str, input: &ikigai_core::ArgSpec) -> String {
             lit(value)
         ));
     }
+    if input.is_enumerated() && input.one_of.is_empty() {
+        node.push_str(
+            " ;
+    ik:enumerated true",
+        );
+    }
+    for example in &input.examples {
+        node.push_str(&format!(
+            " ;
+    ik:example {}",
+            lit(example)
+        ));
+    }
     if let Some(separator) = input.list {
         node.push_str(&format!(
             " ;
@@ -365,6 +378,18 @@ fn value_nodes(owner: &str, input: &ikigai_core::ArgSpec) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// The `ik:outputFrom` predicate of an action (or the flat form), if it has one.
+fn output_from_predicate(owner: &str, from: Option<&ikigai_core::OutputFrom>) -> Option<String> {
+    match from? {
+        ikigai_core::OutputFrom::Input(name) => Some(format!(
+            "ik:outputFrom <{owner}:input:{}>",
+            name_fragment(name)
+        )),
+        ikigai_core::OutputFrom::Origin => Some("ik:outputFrom ik:Origin".to_string()),
+        _ => None,
+    }
 }
 
 /// The argument-set predicate of an action (or the flat form), if it is not closed.
@@ -505,6 +530,9 @@ pub fn to_turtle(description: &Description) -> String {
     if let Some(arguments) = arguments_predicate(&endpoint_iri, &description.arguments) {
         predicates.push(arguments);
     }
+    if let Some(from) = output_from_predicate(&endpoint_iri, description.output_from.as_ref()) {
+        predicates.push(from);
+    }
     for group in &description.groups {
         let (iri, statement) = group_node(&endpoint_iri, group);
         predicates.push(format!("ik:group <{iri}>"));
@@ -550,6 +578,9 @@ pub fn to_turtle(description: &Description) -> String {
         }
         if let Some(arguments) = arguments_predicate(&action_iri, &action.arguments) {
             preds.push(arguments);
+        }
+        if let Some(from) = output_from_predicate(&action_iri, action.output_from.as_ref()) {
+            preds.push(from);
         }
         for group in &action.groups {
             let (iri, statement) = group_node(&action_iri, group);
@@ -935,6 +966,28 @@ mod tests {
         assert!(
             enveloped.contains("ik:envelope <urn:ikigai:endpoint:intake:input:content>"),
             "{enveloped}"
+        );
+        // An empty enumeration, examples and an output's source (ledger #41, #357, #45).
+        let none: Vec<String> = Vec::new();
+        let passthrough = Description::new("fetch")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("provider").optional().one_of(none))
+            .input(ArgSpec::new("color").optional().example("#336699"))
+            .output_from(ikigai_core::OutputFrom::Origin);
+        let ttl = to_turtle(&passthrough);
+        assert!(ttl.contains("ik:enumerated true"), "{ttl}");
+        assert!(ttl.contains("ik:example \"#336699\""), "{ttl}");
+        assert!(ttl.contains("ik:outputFrom ik:Origin"), "{ttl}");
+        assert!(parse_count(&ttl) > 0);
+        let by_input = to_turtle(
+            &Description::new("compose")
+                .verb(Verb::Source)
+                .input(ArgSpec::new("src"))
+                .output_from(ikigai_core::OutputFrom::Input("src".to_string())),
+        );
+        assert!(
+            by_input.contains("ik:outputFrom <urn:ikigai:endpoint:compose:input:src>"),
+            "{by_input}"
         );
         // A member name with a comma cannot run two lists together.
         let odd = InputGroup::exactly_one(["a,b", "c"]).node_segment();

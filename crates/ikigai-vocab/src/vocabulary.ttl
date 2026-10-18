@@ -106,7 +106,7 @@ ik:output a rdf:Property ;
 ik:input a rdf:Property ;
     rdfs:range rdfs:Resource ;
     rdfs:label "input" ;
-    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, ik:oneOf, ik:valueNote, ik:listSeparator and ik:needs. No domain: emitted on all three." .
+    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, ik:oneOf, ik:enumerated, ik:example, ik:valueNote, ik:listSeparator and ik:needs. No domain: emitted on all three." .
 
 ik:inputName a rdf:Property ;
     rdfs:range xsd:string ;
@@ -182,12 +182,31 @@ ik:default a rdf:Property ;
 ik:oneOf a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "oneOf" ;
-    rdfs:comment "One accepted value of an enumerated input (repeated per value); absent = open-valued." .
+    rdfs:comment "One accepted value of an enumerated input (repeated per value). An input with no ik:oneOf is open-valued, unless it carries ik:enumerated true: then it declares an empty enumeration and accepts no value." .
 
 ik:listSeparator a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "listSeparator" ;
     rdfs:comment "On an input node: the value is a list in one argument, its items separated by \"comma\", \"whitespace\", \"comma-or-whitespace\" (either, runs collapsed) or \"newline\" (the .. map convention); empty items are dropped. ik:oneOf and ik:class then apply to EACH item, and a list is the one argument a caller may give more than once: every adapter joins the repeats with the separator's canonical character (a comma, a space, a line break) before building the request, so the repeated and the joined spelling are one call. Absent: one value." .
+
+ik:enumerated a rdf:Property ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "enumerated" ;
+    rdfs:comment "On an input node: true when the input declares an enumeration that is EMPTY, so it accepts no value (an enumeration built from configuration with nothing configured); a required input in that state makes its action uncallable, and urn:kernel:actions does not offer it. Emitted only for an empty enumeration: an ik:oneOf already says the input is enumerated, and an input with neither is open-valued." .
+
+ik:example a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "example" ;
+    rdfs:comment "On an input node: an example value (repeated per example) that the contract itself accepts, a lexical form an agent or a test can copy where ik:class can only say xsd:string (a hex color, inline JSON or an IRI). A host that validates descriptions refuses an example its own contract would refuse." .
+
+ik:outputFrom a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "outputFrom" ;
+    rdfs:comment "On an action (or an endpoint, for its flat form): its output type is not one it can state in advance. The value is the input node whose resource's type it serves (compose's src, a file face's path binding), or ik:Origin when it is decided at resolve time outside the kernel (an HTTP origin's Content-Type). With it, ik:output reads as at least these types, never only these." .
+
+ik:Origin a owl:NamedIndividual ;
+    rdfs:label "Origin" ;
+    rdfs:comment "The value of ik:outputFrom when an action's output type is chosen at resolve time by something outside the kernel: an HTTP origin, the branch a conditional took." .
 
 ik:needs a rdf:Property ;
     rdfs:range rdfs:Resource ;

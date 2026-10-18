@@ -161,7 +161,7 @@ pub use declare::{
 };
 pub use describe::{
     ActionSpec, ArgSpec, Arguments, ContractCaching, Description, EndpointKind, GroupKind,
-    InputGroup, InputSource, ListSeparator, Transreption, ValueNote,
+    InputGroup, InputSource, ListSeparator, OutputFrom, Transreption, ValueNote,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use endpoint::SyncIssuer;

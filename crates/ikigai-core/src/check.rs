@@ -601,14 +601,18 @@ impl ActionSpec {
 /// One value (a whole value, or one item of a list) against its input's `one_of` and
 /// declared class.
 fn check_value(input: &ArgSpec, value: &str) -> Option<Violation> {
-    if !input.one_of.is_empty() && !input.one_of.iter().any(|v| v == value) {
+    if input.is_enumerated() && !input.one_of.iter().any(|v| v == value) {
+        let accepted = if input.one_of.is_empty() {
+            "it accepts none: its enumeration is empty".to_string()
+        } else {
+            format!("one of: {}", input.one_of.join(", "))
+        };
         return Some(Violation::at_input(
             ViolationKind::NotOneOf,
             input,
             format!(
-                "`{value}` is not an accepted value of `{}` (one of: {})",
-                input.name,
-                input.one_of.join(", ")
+                "`{value}` is not an accepted value of `{}` ({accepted})",
+                input.name
             ),
         ));
     }
