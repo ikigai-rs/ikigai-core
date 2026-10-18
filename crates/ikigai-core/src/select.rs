@@ -137,15 +137,35 @@ impl Candidate {
 }
 
 /// Whether a transreptor can be invoked automatically — driven with only a piped `content`
-/// and a target `as`. True iff every *required* input is `content` or `as`. A transreptor
-/// with another required input (e.g. `urn:xslt:transform`'s `stylesheet`) is parameterized
-/// and must be invoked explicitly, so it is not auto-selected.
+/// and a target `as`. True iff every *required* input is `content` or `as`, and every
+/// [`ExactlyOne`](crate::GroupKind::ExactlyOne) or [`AtLeastOne`](crate::GroupKind::AtLeastOne)
+/// group has `content` or `as` among its members (a group is a required slot too). A
+/// transreptor with another required input (e.g. `urn:xslt:transform`'s `stylesheet`) is
+/// parameterized and must be invoked explicitly, so it is not auto-selected.
+///
+/// Read from the Source ACTION (`action_specs()`, both authoring forms), not the flat
+/// inputs alone, so a per-verb contract answers like a flat one (the ledger #1272 mistake
+/// it made before); a description that declares no Source keeps the flat inputs.
 pub fn is_auto_invocable(description: &Description) -> bool {
-    description
-        .inputs
-        .iter()
-        .filter(|i| i.required)
-        .all(|i| i.name == "content" || i.name == "as")
+    let source = description
+        .action_specs()
+        .into_iter()
+        .find(|a| a.verb == Verb::Source);
+    let (inputs, groups) = match &source {
+        Some(spec) => (spec.inputs.as_slice(), spec.groups.as_slice()),
+        None => (description.inputs.as_slice(), description.groups.as_slice()),
+    };
+    let auto = |name: &str| name == "content" || name == "as";
+    inputs.iter().filter(|i| i.required).all(|i| auto(&i.name))
+        && groups
+            .iter()
+            .filter(|g| {
+                matches!(
+                    g.kind,
+                    crate::GroupKind::ExactlyOne | crate::GroupKind::AtLeastOne
+                )
+            })
+            .all(|g| g.members.iter().any(|m| auto(m)))
 }
 
 /// Find a chain of auto-invocable transreptors in `root` converting `from` → `to`
@@ -781,16 +801,43 @@ fn media_type_parts(media_type: &str) -> (String, Vec<(String, String)>) {
 /// second kind is satisfiable but not offered on its own: [`select_actions`] drops it
 /// unless a fitted match survives beside it (see [`select_action`]). An action with only
 /// OPTIONAL inputs is still not inferable.
+///
+/// An [`ExactlyOne`](crate::GroupKind::ExactlyOne) or
+/// [`AtLeastOne`](crate::GroupKind::AtLeastOne) group is a required slot too: it is
+/// satisfied when at least one member declares a class present in `present`, and it makes
+/// the action FITTED like a required input does.
 fn spec_satisfiable(action: &crate::describe::ActionSpec, present: &[&str]) -> bool {
     if action.inputs.is_empty() {
         return true;
     }
+    let class_present = |input: &crate::describe::ArgSpec| {
+        input
+            .class
+            .as_deref()
+            .is_some_and(|class| present.contains(&class))
+    };
     let mut has_required = false;
     for input in action.inputs.iter().filter(|i| i.required) {
         has_required = true;
-        match &input.class {
-            Some(class) if present.contains(&class.as_str()) => {}
-            _ => return false,
+        if !class_present(input) {
+            return false;
+        }
+    }
+    for group in action.groups.iter().filter(|g| {
+        matches!(
+            g.kind,
+            crate::GroupKind::ExactlyOne | crate::GroupKind::AtLeastOne
+        )
+    }) {
+        has_required = true;
+        let satisfied = group.members.iter().any(|member| {
+            action
+                .inputs
+                .iter()
+                .any(|input| input.name == *member && class_present(input))
+        });
+        if !satisfied {
+            return false;
         }
     }
     has_required
@@ -851,6 +898,49 @@ mod tests {
                     Ok(Representation::new(ReprType::new("text/plain"), Vec::new()))
                 }),
             )
+    }
+
+    /// Ledger #1547: a group is a required slot to both selection readers, and
+    /// `is_auto_invocable` reads the Source action, not the flat inputs alone.
+    #[test]
+    fn selection_reads_input_groups_as_required_slots() {
+        use crate::describe::{ActionSpec, ArgSpec, InputGroup};
+        const PERSON: &str = "https://schema.org/Person";
+        const ORG: &str = "https://schema.org/Organization";
+        let piped = Description::new("lift")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("content").optional())
+            .input(ArgSpec::new("in").optional())
+            .group(InputGroup::exactly_one(["content", "in"]).pipe("content"));
+        assert!(is_auto_invocable(&piped));
+        let parameterized = Description::new("xslt")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("content"))
+            .input(ArgSpec::new("stylesheet").optional())
+            .input(ArgSpec::new("style").optional())
+            .group(InputGroup::exactly_one(["stylesheet", "style"]));
+        assert!(!is_auto_invocable(&parameterized));
+        // A per-verb contract answers like a flat one.
+        let per_verb = Description::new("xslt").action(
+            ActionSpec::new(Verb::Source)
+                .input(ArgSpec::new("content"))
+                .input(ArgSpec::new("stylesheet")),
+        );
+        assert!(!is_auto_invocable(&per_verb));
+
+        let greet = ActionSpec::new(Verb::Source)
+            .input(ArgSpec::new("who").class(PERSON).optional())
+            .input(ArgSpec::new("org").class(ORG).optional())
+            .group(InputGroup::at_least_one(["who", "org"]));
+        assert!(spec_satisfiable(&greet, &[PERSON]));
+        assert!(spec_satisfiable(&greet, &[ORG]));
+        assert!(!spec_satisfiable(&greet, &["urn:other"]));
+        // Without the group, two optional inputs are not inferable at all.
+        let loose = ActionSpec {
+            groups: Vec::new(),
+            ..greet.clone()
+        };
+        assert!(!spec_satisfiable(&loose, &[PERSON]));
     }
 
     #[test]

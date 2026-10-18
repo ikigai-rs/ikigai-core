@@ -31,6 +31,7 @@
     "Grounding": "ik:Grounding",
     "GroundingPart": "ik:GroundingPart",
     "Handback": "ik:Handback",
+    "InputGroup": "ik:InputGroup",
     "Layer": "ik:Layer",
     "Level": "ik:Level",
     "Limit": "ik:Limit",
@@ -227,6 +228,11 @@
       "@type": "@id"
     },
     "groundingFocus": "ik:groundingFocus",
+    "group": {
+      "@id": "ik:group",
+      "@type": "@id"
+    },
+    "groupKind": "ik:groupKind",
     "hangsFrom": {
       "@id": "ik:hangsFrom",
       "@type": "@id"
@@ -272,6 +278,10 @@
       "@type": "xsd:integer"
     },
     "mediaType": "ik:mediaType",
+    "member": {
+      "@id": "ik:member",
+      "@type": "@id"
+    },
     "missingOptional": {
       "@id": "ik:missingOptional",
       "@type": "xsd:integer"
@@ -279,6 +289,10 @@
     "modality": "ik:modality",
     "model": "ik:model",
     "namespace": "ik:namespace",
+    "needs": {
+      "@id": "ik:needs",
+      "@type": "@id"
+    },
     "notAfter": {
       "@id": "ik:notAfter",
       "@type": "xsd:dateTime"
@@ -318,6 +332,10 @@
     "passcode": "ik:passcode",
     "path": "ik:path",
     "pattern": "ik:pattern",
+    "pipe": {
+      "@id": "ik:pipe",
+      "@type": "@id"
+    },
     "pipeFrom": {
       "@id": "ik:pipeFrom",
       "@type": "@id"

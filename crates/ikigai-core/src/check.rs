@@ -15,7 +15,7 @@
 
 use std::fmt;
 
-use crate::describe::{ActionSpec, ArgSpec, InputSource};
+use crate::describe::{ActionSpec, ArgSpec, GroupKind, InputGroup, InputSource};
 use crate::request::Request;
 
 /// A proposed set of named arguments, in the order they were given, repeats kept.
@@ -134,6 +134,15 @@ pub enum ViolationKind {
     Implausible,
     /// A name the action does not declare.
     Unknown,
+    /// An [`ExactlyOne`](GroupKind::ExactlyOne) group with none, or more than one, of its
+    /// members given.
+    ExactlyOne,
+    /// An [`AtLeastOne`](GroupKind::AtLeastOne) group with none of its members given.
+    AtLeastOne,
+    /// An [`AtMostOne`](GroupKind::AtMostOne) group with more than one member given.
+    AtMostOne,
+    /// A given input whose declared dependency (`needs`) is not given.
+    Needs,
 }
 
 impl ViolationKind {
@@ -144,6 +153,10 @@ impl ViolationKind {
             ViolationKind::NotOneOf => "not-one-of",
             ViolationKind::Implausible => "implausible",
             ViolationKind::Unknown => "unknown",
+            ViolationKind::ExactlyOne => "exactly-one",
+            ViolationKind::AtLeastOne => "at-least-one",
+            ViolationKind::AtMostOne => "at-most-one",
+            ViolationKind::Needs => "needs",
         }
     }
 
@@ -155,6 +168,14 @@ impl ViolationKind {
             ViolationKind::NotOneOf => "http://www.w3.org/ns/shacl#InConstraintComponent",
             ViolationKind::Implausible => "http://www.w3.org/ns/shacl#DatatypeConstraintComponent",
             ViolationKind::Unknown => "http://www.w3.org/ns/shacl#ClosedConstraintComponent",
+            // `sh:xone` over one `sh:minCount 1` shape per member.
+            ViolationKind::ExactlyOne => "http://www.w3.org/ns/shacl#XoneConstraintComponent",
+            // `sh:or` of the same.
+            ViolationKind::AtLeastOne => "http://www.w3.org/ns/shacl#OrConstraintComponent",
+            // A count of the given members, at most one: a SPARQL-based constraint.
+            ViolationKind::AtMostOne => "http://www.w3.org/ns/shacl#SPARQLConstraintComponent",
+            // `sh:or ( [ sh:path a ; sh:maxCount 0 ] [ sh:path b ; sh:minCount 1 ] )`.
+            ViolationKind::Needs => "http://www.w3.org/ns/shacl#OrConstraintComponent",
         }
     }
 }
@@ -172,6 +193,9 @@ impl fmt::Display for ViolationKind {
 pub enum ViolationPath {
     /// A declared input, by name.
     Input(String),
+    /// An [`InputGroup`], by its node segment ([`InputGroup::node_segment`]:
+    /// `group:{kind}:{m1},{m2}`).
+    Group(String),
 }
 
 impl ViolationPath {
@@ -183,13 +207,16 @@ impl ViolationPath {
             ViolationPath::Input(name) => {
                 format!("{contract}:input:{}", crate::encode_name(name))
             }
+            ViolationPath::Group(segment) => format!("{contract}:{segment}"),
         }
     }
 
-    /// The path as the shared validation vectors spell it: `input:{name}`.
+    /// The path as the shared validation vectors spell it: `input:{name}`, or a group's
+    /// node segment.
     pub fn word(&self) -> String {
         match self {
             ViolationPath::Input(name) => format!("input:{name}"),
+            ViolationPath::Group(segment) => segment.clone(),
         }
     }
 }
@@ -232,6 +259,61 @@ impl fmt::Display for Violation {
     }
 }
 
+/// Whether a group member counts as GIVEN: proposed with a value that is not blank. A
+/// Sink's engine always sends `content`, empty when there is no body, so an empty value
+/// cannot count as choosing that member (ledger #1853: a bare `sink urn:kernel:cut` cut the
+/// empty thread).
+pub(crate) fn given(value: Option<&str>) -> bool {
+    value.is_some_and(|v| !v.trim().is_empty())
+}
+
+fn quoted(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn check_group(group: &InputGroup, proposed: &ProposedArgs) -> Option<Violation> {
+    let members: Vec<&str> = group.members.iter().map(String::as_str).collect();
+    let present: Vec<&str> = members
+        .iter()
+        .copied()
+        .filter(|m| given(proposed.get(m)))
+        .collect();
+    let (kind, broken, rule) = match group.kind {
+        GroupKind::ExactlyOne => (
+            ViolationKind::ExactlyOne,
+            present.len() != 1,
+            "exactly one of",
+        ),
+        GroupKind::AtLeastOne => (
+            ViolationKind::AtLeastOne,
+            present.is_empty(),
+            "at least one of",
+        ),
+        GroupKind::AtMostOne => (
+            ViolationKind::AtMostOne,
+            present.len() > 1,
+            "at most one of",
+        ),
+    };
+    if !broken {
+        return None;
+    }
+    let got = if present.is_empty() {
+        "got none".to_string()
+    } else {
+        format!("got {}", quoted(&present))
+    };
+    Some(Violation::new(
+        kind,
+        Some(ViolationPath::Group(group.node_segment())),
+        format!("{rule} {} is required; {got}", quoted(&members)),
+    ))
+}
+
 /// Whether `value` looks like a value of the XSD datatype `class`. Entity classes and
 /// datatypes this does not know are not statically checkable, so they always pass.
 pub(crate) fn plausible(class: &str, value: &str) -> bool {
@@ -259,8 +341,9 @@ impl ActionSpec {
     /// The rules: a required by-value input is given; a value is one of the input's
     /// `one_of`, when it declares one; a value is plausible for its declared XSD datatype
     /// (`xsd:boolean`, `xsd:integer`, `xsd:dateTime`; an entity class is not statically
-    /// checkable); every name is declared. A binding is part of the resource's name, so it
-    /// is never missing from a proposed call.
+    /// checkable); a given input's `needs` are given; every [`InputGroup`] holds (a member
+    /// is given when its value is not blank); every name is declared. A binding is part of
+    /// the resource's name, so it is never missing from a proposed call.
     ///
     /// ```
     /// use ikigai_core::{ActionSpec, ArgSpec, ProposedArgs, Verb, ViolationKind};
@@ -317,7 +400,21 @@ impl ActionSpec {
                     ));
                 }
             }
+            let missing: Vec<&str> = input
+                .needs
+                .iter()
+                .map(String::as_str)
+                .filter(|needed| !given(proposed.get(needed)))
+                .collect();
+            if given(Some(value)) && !missing.is_empty() {
+                violations.push(Violation::at_input(
+                    ViolationKind::Needs,
+                    input,
+                    format!("`{}` needs {}", input.name, quoted(&missing)),
+                ));
+            }
         }
+        violations.extend(self.groups.iter().filter_map(|g| check_group(g, proposed)));
         for (name, _) in proposed.pairs() {
             if !self.inputs.iter().any(|i| i.name == name) {
                 violations.push(Violation::new(

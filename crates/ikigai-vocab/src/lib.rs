@@ -259,7 +259,9 @@ fn cap_term(scope: &str) -> String {
 }
 
 /// The predicates of one input node (shared by the endpoint-level and action-level forms).
-fn input_predicates(input: &ikigai_core::ArgSpec) -> String {
+/// `owner` is the IRI the input nodes hang off (the endpoint's or the contract's), so a
+/// dependency names its sibling node.
+fn input_predicates(owner: &str, input: &ikigai_core::ArgSpec) -> String {
     let mut node = format!(
         "ik:inputName {} ;
     ik:source {} ;
@@ -297,7 +299,36 @@ fn input_predicates(input: &ikigai_core::ArgSpec) -> String {
             lit(value)
         ));
     }
+    for needed in &input.needs {
+        node.push_str(&format!(
+            " ;
+    ik:needs <{owner}:input:{}>",
+            name_fragment(needed)
+        ));
+    }
     node
+}
+
+/// One input group's node, hung off `owner` (the endpoint's or the contract's IRI):
+/// `{owner}:group:{kind}:{members}` ([`ikigai_core::InputGroup::node_segment`]), its members
+/// and pipe naming the sibling input nodes. Returns the node's IRI and its statement.
+fn group_node(owner: &str, group: &ikigai_core::InputGroup) -> (String, String) {
+    let iri = format!("{owner}:{}", group.node_segment());
+    let mut preds = vec![
+        "a ik:InputGroup".to_string(),
+        format!("ik:groupKind {}", lit(group.kind.word())),
+    ];
+    for member in &group.members {
+        preds.push(format!(
+            "ik:member <{owner}:input:{}>",
+            name_fragment(member)
+        ));
+    }
+    if let Some(pipe) = &group.pipe {
+        preds.push(format!("ik:pipe <{owner}:input:{}>", name_fragment(pipe)));
+    }
+    let statement = format!("<{iri}> {} .", preds.join(" ;\n    "));
+    (iri, statement)
 }
 
 /// Render a [`Description`] as a Turtle document using the ikigai vocabulary.
@@ -395,7 +426,15 @@ pub fn to_turtle(description: &Description) -> String {
     for input in &description.inputs {
         let node_iri = format!("{endpoint_iri}:input:{}", name_fragment(&input.name));
         predicates.push(format!("ik:input <{node_iri}>"));
-        extra_nodes.push(format!("<{node_iri}> {} .", input_predicates(input)));
+        extra_nodes.push(format!(
+            "<{node_iri}> {} .",
+            input_predicates(&endpoint_iri, input)
+        ));
+    }
+    for group in &description.groups {
+        let (iri, statement) = group_node(&endpoint_iri, group);
+        predicates.push(format!("ik:group <{iri}>"));
+        extra_nodes.push(statement);
     }
 
     // The per-verb ACTION view — the unit of selection. One ik:Action node per
@@ -428,8 +467,16 @@ pub fn to_turtle(description: &Description) -> String {
         for input in &action.inputs {
             let name = name_fragment(&input.name);
             let node_iri = format!("{action_iri}:input:{name}");
-            extra_nodes.push(format!("<{node_iri}> {} .", input_predicates(input)));
+            extra_nodes.push(format!(
+                "<{node_iri}> {} .",
+                input_predicates(&action_iri, input)
+            ));
             preds.push(format!("ik:input <{node_iri}>"));
+        }
+        for group in &action.groups {
+            let (iri, statement) = group_node(&action_iri, group);
+            preds.push(format!("ik:group <{iri}>"));
+            extra_nodes.push(statement);
         }
         extra_nodes.push(format!("<{action_iri}> {} .", preds.join(" ;\n    ")));
     }
@@ -504,6 +551,18 @@ pub fn to_text(description: &Description) -> String {
             source_name(input.source),
             opt,
             input.summary
+        ));
+    }
+    for group in &description.groups {
+        let pipe = group
+            .pipe
+            .as_deref()
+            .map(|p| format!(" (a pipe fills {p})"))
+            .unwrap_or_default();
+        s.push_str(&format!(
+            "  {} of: {}{pipe}\n",
+            group.kind.word(),
+            group.members.join(", ")
         ));
     }
     if !description.outputs.is_empty() {
@@ -713,6 +772,41 @@ mod tests {
         assert_eq!(ttl.matches("ik:class").count(), 2, "{ttl}");
         // No `requires` triple when none declared.
         assert!(!to_turtle(&sample()).contains("ik:requires"));
+    }
+
+    /// Ledger #15: a group and a dependency are triples on the contract, skolemized under
+    /// it, naming the sibling input nodes; and the document parses.
+    #[test]
+    fn renders_input_groups_and_dependencies() {
+        use ikigai_core::{ActionSpec, InputGroup};
+        let d = Description::new("cut").verb(Verb::Meta).action(
+            ActionSpec::new(Verb::Sink)
+                .input(ArgSpec::new("thread").optional())
+                .input(ArgSpec::new("content").optional().needs(["thread"]))
+                .group(InputGroup::exactly_one(["thread", "content"]).pipe("content")),
+        );
+        let ttl = to_turtle(&d);
+        let contract = d.action_specs()[0].contract_iri("cut");
+        let group = format!("<{contract}:group:exactly-one:content,thread>");
+        assert!(ttl.contains(&format!("ik:group {group}")), "{ttl}");
+        assert!(ttl.contains(&format!("{group} a ik:InputGroup")), "{ttl}");
+        assert!(ttl.contains("ik:groupKind \"exactly-one\""), "{ttl}");
+        assert!(
+            ttl.contains(&format!("ik:member <{contract}:input:thread>")),
+            "{ttl}"
+        );
+        assert!(
+            ttl.contains(&format!("ik:pipe <{contract}:input:content>")),
+            "{ttl}"
+        );
+        assert!(
+            ttl.contains(&format!("ik:needs <{contract}:input:thread>")),
+            "{ttl}"
+        );
+        assert!(parse_count(&ttl) > 0);
+        // A member name with a comma cannot run two lists together.
+        let odd = InputGroup::exactly_one(["a,b", "c"]).node_segment();
+        assert_ne!(odd, InputGroup::exactly_one(["a", "b,c"]).node_segment());
     }
 
     #[test]

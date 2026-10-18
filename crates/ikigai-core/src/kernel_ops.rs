@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::describe::{ArgSpec, Description};
+use crate::describe::{ArgSpec, Description, InputGroup};
 use crate::endpoint::{Endpoint, Invocation};
 use crate::error::{Error, Result};
 use crate::grammar::Bindings;
@@ -167,7 +167,8 @@ fn validate() -> Description {
         .summary(
             "Stage four of the selection funnel: check a proposed invocation against the \
              action's declared contract BEFORE firing it — required inputs present, one_of \
-             respected, XSD scalars plausible, no unknown arguments, and the ambient \
+             respected, XSD scalars plausible, input groups and dependencies held, no unknown \
+             arguments, and the ambient \
              capability satisfying the action's requires. The answer is a SHACL validation \
              report: violations are data, and sh:resultPath joins each one back to the \
              catalog's input node.",
@@ -187,7 +188,8 @@ fn validate() -> Description {
         .input(
             ArgSpec::new("endpoint")
                 .summary("alternative: the bound endpoint IRI, with verb=")
-                .optional(),
+                .optional()
+                .needs(["verb"]),
         )
         .input(
             ArgSpec::new("verb")
@@ -200,6 +202,7 @@ fn validate() -> Description {
                 .summary("the proposed arguments: key=value pairs joined with & (or newlines)")
                 .optional(),
         )
+        .group(InputGroup::exactly_one(["action", "endpoint"]))
         .output(TEXT_TURTLE)
 }
 
@@ -330,7 +333,7 @@ fn cut() -> Description {
              resolving rather than through a special method — so an endpoint, a filesystem \
              watcher or a remote peer all invalidate the same way. Name the thread in \
              `thread`, or sink it as content (`sink urn:kernel:cut <thread>`); exactly one \
-             of the two is required, which a contract of independent arguments cannot say.",
+             of the two, and a blank one counts as neither.",
         )
         .verb(Verb::Sink)
         .verb(Verb::Meta)
@@ -348,6 +351,7 @@ fn cut() -> Description {
                 .summary("the thread as sunk content — the `sink urn:kernel:cut <thread>` form")
                 .optional(),
         )
+        .group(InputGroup::exactly_one(["thread", "content"]).pipe("content"))
         .output(TEXT_PLAIN_UTF8)
 }
 
