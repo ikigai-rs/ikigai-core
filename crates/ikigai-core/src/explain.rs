@@ -495,6 +495,7 @@ fn kind_word(kind: &SpaceKind) -> &'static str {
         SpaceKind::Limit { .. } => "limit",
         SpaceKind::Confine => "confine",
         SpaceKind::Level { .. } => "level",
+        SpaceKind::Dynamic { .. } => "dynamic",
         SpaceKind::Chain { .. } => "chain",
     }
 }

@@ -116,6 +116,7 @@ mod content;
 mod contract;
 mod declare;
 mod describe;
+mod dynamic;
 mod endpoint;
 mod error;
 mod explain;
@@ -164,6 +165,10 @@ pub use describe::{
     ActionSpec, ArgSpec, Arguments, ContractCaching, DefaultValue, Description, EndpointKind,
     Failures, GroupKind, InputGroup, InputSource, ListSeparator, OutputFrom, Transreption,
     ValueNote,
+};
+pub use dynamic::{
+    DynamicRefusal, DynamicSpace, DynamicStatus, SpaceCheck, Threaded, DYNAMIC_PREFIX,
+    SESSION_PREFIX,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use endpoint::SyncIssuer;

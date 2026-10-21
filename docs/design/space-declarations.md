@@ -56,6 +56,7 @@ that names the node's IRI exactly as the Turtle does (skolems included) and says
 | `ik:Rewrite` | its rule is a closure. The table-driven form is `ik:Alias` |
 | `ik:Chain` as the root | a declaration describes a space; the chain is per request. `urn:kernel:topology` answers a chain, so a host reading one back declares its root layer: `Kernel::root_topology()` is that layer, without unwrapping the chain by hand |
 | `ik:Confine` where a space belongs | a confinement lives at a door: declare it as the door's `ik:confinedTo` |
+| `ik:DynamicSpace` | its doors are a running host's state, rebuilt from its own declaration resource (`DynamicSpace`, [#2006](http://localhost:1062/l/default/item/2006)): declare what it holds, or bind one in code |
 | a door or family whose `ik:matchKind` is `custom` | a grammar written outside core is described by its pattern and not defined by it (browse's `RootRow` adds a binding its pattern does not show). Rebuilding it from the text would silently change what it answers |
 | a `prefix` door, a template that does not parse | a door is an exact name or a template |
 | an endpoint name the registry does not hold | a declaration binds only what the host registered: it arranges, it never mints |

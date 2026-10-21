@@ -19,6 +19,7 @@
     "Directory": "ik:Directory",
     "Door": "ik:Door",
     "DryRun": "ik:DryRun",
+    "DynamicSpace": "ik:DynamicSpace",
     "Endpoint": "ik:Endpoint",
     "EndpointSpace": "ik:EndpointSpace",
     "Explanation": "ik:Explanation",
@@ -185,6 +186,10 @@
       "@id": "ik:cutCount",
       "@type": "xsd:nonNegativeInteger"
     },
+    "declaration": {
+      "@id": "ik:declaration",
+      "@type": "@id"
+    },
     "default": "ik:default",
     "derivedAt": {
       "@id": "ik:derivedAt",
@@ -252,6 +257,7 @@
       "@type": "@id"
     },
     "id": "ik:id",
+    "inForce": "ik:inForce",
     "inReplyTo": {
       "@id": "ik:inReplyTo",
       "@type": "@id"
@@ -261,6 +267,10 @@
       "@type": "@id"
     },
     "inputName": "ik:inputName",
+    "installs": {
+      "@id": "ik:installs",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "join": "ik:join",
     "jsonMode": {
       "@id": "ik:jsonMode",
@@ -378,6 +388,7 @@
       "@id": "ik:ref",
       "@type": "@id"
     },
+    "refusal": "ik:refusal",
     "repo": "ik:repo",
     "repository": {
       "@id": "ik:repository",
