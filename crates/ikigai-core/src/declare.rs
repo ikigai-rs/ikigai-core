@@ -25,6 +25,7 @@
 //! | `ik:Rewrite` | its rule is a closure, not a table: not data |
 //! | `ik:Chain` as the root | a declaration describes a space; the chain is per request |
 //! | `ik:Confine` as a space | a confinement lives at a door: declare it as the door's `ik:confinedTo` |
+//! | `ik:DynamicSpace` | its doors are a running host's state, rebuilt from its own declaration ([`DynamicSpace`](crate::DynamicSpace)) |
 //! | a `custom` door or family | a grammar written outside core is described by its pattern, not defined by it |
 //! | an endpoint name the registry does not hold | a declaration binds only what the host registered |
 //! | a seal the host, core or another level already owns | [`Kernel::check_sealing`] on the result |
@@ -158,6 +159,7 @@ impl Budget {
             }
             SpaceKind::Mount { prefix } => text += prefix.len(),
             SpaceKind::Limit { family, .. } => text += family.len(),
+            SpaceKind::Dynamic { declaration } => text += declaration.as_str().len(),
             SpaceKind::Level { seals, namespace } => {
                 text += seals.iter().map(String::len).sum::<usize>();
                 text += namespace.as_ref().map_or(0, String::len);
@@ -439,6 +441,13 @@ pub enum DeclarationError {
         /// The node.
         node: String,
     },
+    /// An `ik:DynamicSpace`: its doors are state a running host rebuilds from its own
+    /// declaration ([`DynamicSpace`](crate::DynamicSpace)), so a declaration cannot
+    /// build one. Declare the arrangement it holds, or bind a `DynamicSpace` in code.
+    Dynamic {
+        /// The node.
+        node: String,
+    },
     /// A door or a limiter whose pattern core cannot rebuild: a `custom` grammar, a
     /// `prefix` door, or a template that does not parse.
     Pattern {
@@ -519,6 +528,12 @@ impl fmt::Display for DeclarationError {
                 f,
                 "<{node}> is a confinement where a space belongs: a confinement lives at a \
                  door — declare it as that door's ik:confinedTo"
+            ),
+            DeclarationError::Dynamic { node } => write!(
+                f,
+                "<{node}> is a dynamic space: its doors are rebuilt by a running host from \
+                 its own declaration, so a declaration cannot build one (declare what it \
+                 holds, or bind a DynamicSpace in code)"
             ),
             DeclarationError::Pattern {
                 node,
@@ -738,6 +753,9 @@ impl Builder<'_> {
                 node: me.to_string(),
             }),
             SpaceKind::Confine => Err(DeclarationError::Confine {
+                node: me.to_string(),
+            }),
+            SpaceKind::Dynamic { .. } => Err(DeclarationError::Dynamic {
                 node: me.to_string(),
             }),
             SpaceKind::EndpointSpace { doors } => {
@@ -965,7 +983,7 @@ mod turtle {
     const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
     /// The kinds a space node may have.
-    const SPACE_KINDS: [&str; 10] = [
+    const SPACE_KINDS: [&str; 11] = [
         "OpaqueSpace",
         "EndpointSpace",
         "Fallback",
@@ -975,6 +993,7 @@ mod turtle {
         "Limit",
         "Confine",
         "Level",
+        "DynamicSpace",
         "Chain",
     ];
 
@@ -1496,6 +1515,20 @@ mod turtle {
                         },
                     }
                 }
+                "DynamicSpace" => {
+                    if id.is_none() {
+                        return Err(malformed(
+                            s,
+                            "a dynamic space is always named, never a skolem",
+                        ));
+                    }
+                    let declaration = self.one_iri(s, &p("declaration"))?;
+                    SpaceKind::Dynamic {
+                        declaration: Iri::parse(&declaration).map_err(|e| {
+                            malformed(s, format!("ik:declaration is not an IRI: {e}"))
+                        })?,
+                    }
+                }
                 other => return Err(malformed(s, format!("ik:{other} is not a space kind"))),
             };
             // The one-child kinds enclose their `ik:space`.
@@ -1506,6 +1539,7 @@ mod turtle {
                     | SpaceKind::Alias { .. }
                     | SpaceKind::Confine
                     | SpaceKind::Level { .. }
+                    | SpaceKind::Dynamic { .. }
             ) {
                 children.push(self.one_iri(s, &p("space"))?);
             }

@@ -365,6 +365,11 @@ ik:Level a rdfs:Class ;
     rdfs:label "Level" ;
     rdfs:comment "A level: where an endpoint found inside it runs. Always named. An endpoint found under it resolves its sub-requests in its resolved scope — the host's injected corridors, then this level's ik:space (its own doors, without the guard it was entered through), then each enclosing ik:Level, then the root — so a module reaches its siblings by short name and its internals stay behind the ik:Mount that guards the way in. The one construct in the tree that pushes: reachability over a tree with levels follows those pushes. In an ik:Chain's layers a level is a member of the resolved scope's level stack." .
 
+ik:DynamicSpace a rdfs:Class ;
+    rdfs:subClassOf ik:Space ;
+    rdfs:label "DynamicSpace" ;
+    rdfs:comment "A space whose doors are rebuilt from a declaration resource while the kernel runs (ikigai_core::DynamicSpace). Always named, urn:iki:space:dynamic:{name}, and the name stays fixed across versions: every answer it serves hangs from a golden thread of the same name, which each successful rebuild cuts, so no answer from doors that are gone survives the change. Its ik:declaration is the resource it is built from, in this vocabulary; its ik:space is the arrangement now in force. A candidate is checked before it binds, and a refused one leaves the doors in force. It also answers {name}:status, its own live status, which no declaration can shadow. A declaration cannot build one: its doors are a running host's state." .
+
 ik:OpaqueSpace a rdfs:Class ;
     rdfs:subClassOf ik:Space ;
     rdfs:label "OpaqueSpace" ;
@@ -382,7 +387,31 @@ ik:layers a rdf:Property ;
 ik:space a rdf:Property ;
     rdfs:range ik:Space ;
     rdfs:label "space" ;
-    rdfs:comment "The one space an ik:Mount, ik:Rewrite, ik:Alias, ik:Confine or ik:Level encloses." .
+    rdfs:comment "The one space an ik:Mount, ik:Rewrite, ik:Alias, ik:Confine or ik:Level encloses, or the arrangement an ik:DynamicSpace has in force." .
+
+ik:declaration a rdf:Property ;
+    rdfs:domain ik:DynamicSpace ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "declaration" ;
+    rdfs:comment "The resource an ik:DynamicSpace is built from: Turtle in this vocabulary, the same graph urn:kernel:topology emits for an arrangement. Writing it is the authority to change the space; a write cuts its thread and the host rebuilds." .
+
+ik:inForce a rdf:Property ;
+    rdfs:domain ik:DynamicSpace ;
+    rdfs:range xsd:string ;
+    rdfs:label "inForce" ;
+    rdfs:comment "The content address (b3:<hex>, BLAKE3) of the declaration text an ik:DynamicSpace has in force. Absent while the space is empty because nothing has bound yet." .
+
+ik:installs a rdf:Property ;
+    rdfs:domain ik:DynamicSpace ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "installs" ;
+    rdfs:comment "How many declarations an ik:DynamicSpace has bound since it was made: 0 while it is empty, and the version number of the arrangement in force otherwise." .
+
+ik:refusal a rdf:Property ;
+    rdfs:domain ik:DynamicSpace ;
+    rdfs:range xsd:string ;
+    rdfs:label "refusal" ;
+    rdfs:comment "Why the last candidate declaration of an ik:DynamicSpace did not bind, naming the node when there is one. Present only for a refusal since the arrangement in force bound; the doors in force are unchanged by it." .
 
 ik:seals a rdf:Property ;
     rdfs:domain ik:Level ;

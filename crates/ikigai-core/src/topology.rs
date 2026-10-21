@@ -38,7 +38,8 @@
 //! `ik:Mount` with `ik:prefix` and `ik:space`, `ik:Limit` with `ik:family` and
 //! `ik:matchKind`, `ik:EndpointSpace` with its `ik:pattern`s and its ordered
 //! `ik:doors`, `ik:Alias` with its `ik:rewrites` and `ik:maxHops`, `ik:Rewrite`,
-//! `ik:Confine`, `ik:Level` with `ik:space`, `ik:OpaqueSpace`). A node whose space
+//! `ik:Confine`, `ik:Level` with `ik:space`, `ik:DynamicSpace` with `ik:declaration`
+//! and `ik:space`, `ik:OpaqueSpace`). A node whose space
 //! claims an [`id`](crate::Space::id) is named by it, and an anonymous one is
 //! skolemized under `urn:ikigai:space:_:{n}` in render order — no blank nodes, so
 //! the graph diffs and every list cell can be addressed. Order is explicit where it
@@ -159,6 +160,15 @@ pub enum SpaceKind {
         /// The namespace the host accepted for it (`ik:namespace`); `None` when it
         /// seals under the prefix it is mounted under.
         namespace: Option<String>,
+    },
+    /// A dynamic space ([`DynamicSpace`](crate::DynamicSpace)): a space whose doors
+    /// are rebuilt from a declaration RESOURCE while the kernel runs. Always named
+    /// (the node's id is the space's fixed name); the node's one child is the inner
+    /// space now in force, which changes when the declaration does. Rendered
+    /// `ik:DynamicSpace` with `ik:declaration` and `ik:space`.
+    Dynamic {
+        /// The resource the inner space is built from (`ik:declaration`).
+        declaration: Iri,
     },
     /// The resolution chain itself — the entry node `urn:kernel:topology` answers:
     /// its children are the corridors innermost first, then the root unless the
@@ -590,6 +600,14 @@ impl Topology {
             }
             SpaceKind::Confine => {
                 let _ = write!(out, "\n<{me}> a ik:Confine");
+                write_space(out, &children);
+            }
+            SpaceKind::Dynamic { declaration } => {
+                let _ = write!(
+                    out,
+                    "\n<{me}> a ik:DynamicSpace ;\n    ik:declaration <{}>",
+                    declaration.as_str()
+                );
                 write_space(out, &children);
             }
             SpaceKind::Level { seals, namespace } => {

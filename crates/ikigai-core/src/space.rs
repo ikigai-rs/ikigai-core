@@ -1427,6 +1427,14 @@ pub trait Space: Send + Sync {
     /// - **A stateful zero-argument constructor** (one that allocates fresh state
     ///   on every call) stays anonymous: two calls hold different state behind the
     ///   same patterns, so a constant name would be false.
+    /// - **A space whose doors change over time** keeps ONE fixed name only if every
+    ///   answer it served under its old doors is invalidated when they change: then no
+    ///   cache entry from before a change survives it, and "same name, same doors" holds
+    ///   at every moment a request can observe. [`DynamicSpace`](crate::DynamicSpace)
+    ///   is named `urn:iki:space:dynamic:{name}` across every version on exactly that
+    ///   footing: each answer hangs from its thread, and each swap cuts it (ledger
+    ///   #2006). A changing space that does not cut what it served must not claim a
+    ///   name at all.
     fn id(&self) -> Option<Iri> {
         None
     }
