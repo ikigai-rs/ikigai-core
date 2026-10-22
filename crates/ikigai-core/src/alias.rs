@@ -156,10 +156,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::describe::Description;
-use crate::endpoint::{Endpoint, FnEndpoint};
+use crate::endpoint::{Endpoint, FnEndpoint, Invocation};
 use crate::error::Error;
 use crate::grammar::Bindings;
 use crate::iri::Iri;
+use crate::repr::Representation;
 use crate::request::Request;
 use crate::space::{answered, Resolution, Resolved, Scope, Space, SpaceEntry};
 use crate::topology::{SpaceKind, Topology, TopologyRule};
@@ -197,12 +198,56 @@ impl RuleKind {
     }
 }
 
+/// Where a rule's rewritten name is resolved: in the [`Alias`] space's own child, or
+/// from the root of the caller's resolution chain (ledger #2061).
+///
+/// `#[non_exhaustive]`: another place to resolve at (an enclosing level, say) is
+/// additive.
+///
+/// ```
+/// use ikigai_core::{AliasTable, ResolveAt};
+///
+/// let table = AliasTable::new()
+///     .exact("urn:example:old", "urn:example:new")
+///     .exact_at_root("urn:example:view:open", "urn:example:ledger:open");
+/// let at: Vec<&str> = table.rules().iter().map(|rule| rule.resolve_at().keyword()).collect();
+/// assert_eq!(at, ["root", "child"]);
+/// assert_eq!(ResolveAt::default(), ResolveAt::Child);
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+#[non_exhaustive]
+pub enum ResolveAt {
+    /// In the alias's own child: the rewrite is a change of NAME inside one space, and
+    /// is reported on [`Resolved::canonical`](crate::Resolved::canonical), so both
+    /// names share one cache entry and one golden thread. Every rule was this one before views (ledger #2061).
+    #[default]
+    Child,
+    /// From the ROOT of the caller's resolution chain, as a sub-request under the
+    /// caller's own capability — a VIEW onto a name served anywhere the caller can
+    /// reach. The match resolves to a small forwarding endpoint that re-issues the
+    /// rewritten name ([`Invocation::issue`](crate::Invocation::issue)); see [`Alias`]
+    /// for what that means for authority, caching and cycles.
+    Root,
+}
+
+impl ResolveAt {
+    /// The keyword this place is written with: `child` or `root` (the text form's
+    /// optional fourth field, and the topology's `ik:resolveAt`).
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            ResolveAt::Child => "child",
+            ResolveAt::Root => "root",
+        }
+    }
+}
+
 /// One rewrite rule, with the live counters that make it observable.
 #[derive(Debug)]
 pub struct AliasRule {
     kind: RuleKind,
     from: String,
     to: String,
+    at: ResolveAt,
     hops: AtomicU64,
     unresolved: AtomicU64,
     refused: AtomicU64,
@@ -222,6 +267,11 @@ impl AliasRule {
     /// The backing name (or namespace) it is rewritten to.
     pub fn to(&self) -> &str {
         &self.to
+    }
+
+    /// Where the rewritten name is resolved: the alias's child, or the root.
+    pub fn resolve_at(&self) -> ResolveAt {
+        self.at
     }
 
     /// How many rewrites this rule has performed.
@@ -440,11 +490,36 @@ impl AliasTable {
         self.rule(RuleKind::Prefix, from, to)
     }
 
-    fn rule(mut self, kind: RuleKind, from: impl Into<String>, to: impl Into<String>) -> Self {
+    fn rule(self, kind: RuleKind, from: impl Into<String>, to: impl Into<String>) -> Self {
+        self.rule_at(kind, from, to, ResolveAt::Child)
+    }
+
+    /// Rewrite the single name `from` to `to`, and resolve `to` FROM THE ROOT under the
+    /// caller's capability rather than in the alias's child (builder): a view onto a
+    /// name served elsewhere. See [`ResolveAt::Root`].
+    pub fn exact_at_root(self, from: impl Into<String>, to: impl Into<String>) -> Self {
+        self.rule_at(RuleKind::Exact, from, to, ResolveAt::Root)
+    }
+
+    /// Rewrite every name under `from` to the same name under `to`, resolved FROM THE
+    /// ROOT under the caller's capability (builder). See [`ResolveAt::Root`].
+    pub fn prefix_at_root(self, from: impl Into<String>, to: impl Into<String>) -> Self {
+        self.rule_at(RuleKind::Prefix, from, to, ResolveAt::Root)
+    }
+
+    /// A rule of `kind`, resolved `at` (builder): the general form of the four above.
+    pub fn rule_at(
+        mut self,
+        kind: RuleKind,
+        from: impl Into<String>,
+        to: impl Into<String>,
+        at: ResolveAt,
+    ) -> Self {
         self.rules.push(AliasRule {
             kind,
             from: from.into(),
             to: to.into(),
+            at,
             hops: AtomicU64::new(0),
             unresolved: AtomicU64::new(0),
             refused: AtomicU64::new(0),
@@ -629,8 +704,12 @@ impl AliasTable {
     /// # the urn:iki: migration
     /// prefix  urn:fn:         urn:iki:fn:
     /// exact   urn:log:config  file:/logConfig.yaml
+    /// exact   urn:example:view:open  urn:example:ledger:open  root
     /// max-hops 8
     /// ```
+    ///
+    /// An optional fourth field says where the rewritten name resolves: `child` (the
+    /// default, and never written back) or `root` ([`ResolveAt`]).
     ///
     /// Blank lines and `#` comments are ignored. Whitespace-separated, so neither
     /// field may contain a space — IRIs may not either, so nothing is lost.
@@ -651,7 +730,19 @@ impl AliasTable {
                     })?;
                     table = table.with_max_hops(hops);
                 }
-                [kind @ ("exact" | "prefix"), from, to] => {
+                [kind @ ("exact" | "prefix"), from, to, rest @ ..] if rest.len() <= 1 => {
+                    let at = match rest {
+                        [] | ["child"] => ResolveAt::Child,
+                        ["root"] => ResolveAt::Root,
+                        [other, ..] => {
+                            return Err(AliasParseError {
+                                line,
+                                detail: format!(
+                                    "`{other}` is not where a rule resolves (child or root)"
+                                ),
+                            })
+                        }
+                    };
                     // Both sides must be IRIs (a prefix is one too: `urn:fn:`
                     // parses). Validating here means a malformed table fails when
                     // it is read, not on the one request that happens to hit the
@@ -662,18 +753,19 @@ impl AliasTable {
                             detail: format!("{label} `{value}`: {e}"),
                         })?;
                     }
-                    table = if *kind == "exact" {
-                        table.exact(*from, *to)
+                    let kind = if *kind == "exact" {
+                        RuleKind::Exact
                     } else {
-                        table.prefix(*from, *to)
+                        RuleKind::Prefix
                     };
+                    table = table.rule_at(kind, *from, *to, at);
                 }
                 _ => {
                     return Err(AliasParseError {
                         line,
                         detail: format!(
-                            "expected `exact <from> <to>`, `prefix <from> <to>` or \
-                             `max-hops <n>`, got `{content}`"
+                            "expected `exact <from> <to> [root]`, `prefix <from> <to> [root]` \
+                             or `max-hops <n>`, got `{content}`"
                         ),
                     })
                 }
@@ -692,11 +784,15 @@ impl AliasTable {
         }
         for rule in &self.rules {
             out.push_str(&format!(
-                "{} {} {}\n",
+                "{} {} {}",
                 rule.kind.keyword(),
                 rule.from,
                 rule.to
             ));
+            if rule.at != ResolveAt::Child {
+                out.push_str(&format!(" {}", rule.at.keyword()));
+            }
+            out.push('\n');
         }
         out
     }
@@ -723,6 +819,67 @@ impl AliasTable {
 /// Resolving an already-canonical target through this space is a no-op: the rules
 /// do not match their own destinations in a well-formed table, so the kernel's
 /// canonicalize-then-resolve is idempotent and costs one failed scan.
+///
+/// # Where the rewritten name resolves
+///
+/// **An `Alias` space resolves a rewritten name only in its own child** — the space it
+/// wraps — for every rule of the default kind ([`ResolveAt::Child`]). It never reaches
+/// the rest of the arrangement: an `Alias` placed inside a dynamic space whose rule
+/// names something the HOST serves elsewhere misses, because the host's doors are not
+/// in its child (ledger #2061). Only [`Kernel::with_aliases`](crate::Kernel::with_aliases)
+/// rewrites BEFORE root resolution, and that table is the host's, fixed at build.
+///
+/// A rule declared [`ResolveAt::Root`] ([`AliasTable::exact_at_root`],
+/// [`AliasTable::prefix_at_root`], `ik:resolveAt "root"` in a declaration) is the
+/// other half: a **view**. A name it matches resolves to a forwarding endpoint, and
+/// invoking that endpoint issues the rewritten name as a sub-request from the root of
+/// the caller's resolution chain ([`Invocation::issue`](crate::Invocation::issue)), with
+/// the same verb and arguments, and answers what that sub-request answers. When any
+/// rule of a chain is a root rule, the chain's final name is resolved from the root.
+///
+/// - **It grants nothing.** The sub-request runs under the caller's own capability,
+///   so a caller who may not read the target is refused exactly as if they had asked
+///   for it directly; the view's own door declares no capability of its own.
+/// - **It never stands in for an existing name.** The space is consulted where it is
+///   placed, so a name an earlier layer answers never reaches it, and it forwards only
+///   names its own rules match.
+/// - **The view's answer is its OWN cache entry, depending on the target's.** No
+///   canonical is reported (reporting one would key the view under the target, and the
+///   forwarder's own sub-request would then be the entry it is computing). The
+///   sub-request's dependencies propagate, so cutting the target's thread invalidates
+///   the view, and the view expires no later than the target; inside a
+///   [`Threaded`](crate::Threaded) or [`DynamicSpace`](crate::DynamicSpace) the answer
+///   also hangs from the space's thread, so swapping the declaration invalidates it.
+/// - **Cycles terminate.** A cycle inside one table is refused by the table walk (and
+///   by [`build`](crate::build) before it binds); a cycle through two tables (a view
+///   onto a view onto the first) is stopped by the kernel's nesting-depth bound
+///   ([`Kernel::with_max_depth`](crate::Kernel::with_max_depth)) as
+///   [`Error::DepthExceeded`].
+/// - `Meta` of a view describes the forwarder (it names its target in its summary):
+///   `Meta` takes no invocation, so it cannot be forwarded.
+///
+/// ```
+/// use std::sync::Arc;
+/// use futures::executor::block_on;
+/// use ikigai_core::{
+///     Alias, AliasTable, Capability, EndpointSpace, Exact, Fallback, FnEndpoint, Iri, Kernel,
+///     ReprType, Representation, Request, Space, Verb,
+/// };
+///
+/// let open = FnEndpoint::new("open", |_| {
+///     Ok(Representation::new(ReprType::new("text/plain"), b"3 open".to_vec()).cacheable())
+/// });
+/// let host = EndpointSpace::new().bind(Exact::new("urn:example:ledger:open"), open);
+/// let views = Alias::new(
+///     Arc::new(AliasTable::new().exact_at_root("urn:example:view:open", "urn:example:ledger:open")),
+///     Arc::new(EndpointSpace::new()),
+/// );
+/// let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![Arc::new(host), Arc::new(views)]));
+/// let kernel = Kernel::new(root);
+/// let view = Request::new(Verb::Source, Iri::parse("urn:example:view:open").unwrap());
+/// let answer = block_on(kernel.issue(view, &Capability::root())).unwrap();
+/// assert_eq!(answer.bytes, b"3 open");
+/// ```
 pub struct Alias {
     table: Arc<AliasTable>,
     inner: Arc<dyn Space>,
@@ -779,7 +936,10 @@ impl Space for Alias {
                 .table
                 .rules()
                 .iter()
-                .map(|rule| TopologyRule::new(rule.kind(), rule.from(), rule.to()))
+                .map(|rule| {
+                    TopologyRule::new(rule.kind(), rule.from(), rule.to())
+                        .resolving_at(rule.resolve_at())
+                })
                 .collect(),
             max_hops: self.table.max_hops(),
         })
@@ -792,6 +952,22 @@ impl Alias {
     fn resolve_through(&self, request: &Request, scope: &Scope) -> Resolution {
         match self.table.canonicalize(&request.target) {
             Canonical::Direct => self.inner.resolve(request, scope),
+            Canonical::Aliased(hop)
+                if hop
+                    .rules()
+                    .iter()
+                    .any(|&i| self.table.rules()[i].resolve_at() == ResolveAt::Root) =>
+            {
+                // A view: forward from the root under the caller's capability. No
+                // canonical is reported — the view's answer is its own entry, hung from
+                // the target's threads by the sub-request (see the type's docs).
+                Resolution::Hit(Resolved::new(
+                    Arc::new(ViewEndpoint {
+                        target: hop.canonical().clone(),
+                    }),
+                    Bindings::default(),
+                ))
+            }
             Canonical::Aliased(hop) => {
                 let mut rewritten = request.clone();
                 rewritten.target = hop.canonical().clone();
@@ -820,6 +996,42 @@ impl Alias {
                 Bindings::default(),
             )),
         }
+    }
+}
+
+/// The endpoint a root-resolving rule's match resolves to: it re-issues the request
+/// under the rewritten name, from the root, under the caller's own capability.
+struct ViewEndpoint {
+    target: Iri,
+}
+
+#[async_trait::async_trait]
+impl Endpoint for ViewEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> crate::error::Result<Representation> {
+        let mut forwarded = inv.request.clone();
+        forwarded.target = self.target.clone();
+        // `issue`, never an attenuating or widening form: the caller's capability, as
+        // it arrived. Its dependencies are recorded, so the view hangs from the target.
+        inv.issue(forwarded).await
+    }
+
+    fn name(&self) -> &str {
+        "alias-view"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("alias-view")
+            .title("A view onto another name")
+            .summary(format!(
+                "Forwards to <{}>, resolved from the root under the caller's own \
+                 capability (an ik:RewriteRule with ik:resolveAt \"root\").",
+                self.target.as_str()
+            ))
+            .verb(Verb::Source)
+            .verb(Verb::Sink)
+            .verb(Verb::Exists)
+            .verb(Verb::Delete)
+            .verb(Verb::Meta)
     }
 }
 

@@ -402,6 +402,7 @@
       "@id": "ik:requires",
       "@type": "@id"
     },
+    "resolveAt": "ik:resolveAt",
     "resolvedAs": {
       "@id": "ik:resolvedAs",
       "@type": "@id"

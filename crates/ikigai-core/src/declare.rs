@@ -51,14 +51,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
-use crate::alias::{Alias, AliasTable, RuleKind};
+use crate::alias::{Alias, AliasTable, Canonical, ResolveAt};
 use crate::confine::Confine;
 use crate::endpoint::Endpoint;
 use crate::grammar::{Exact, UriTemplate};
+use crate::iri::Iri;
 use crate::kernel::Kernel;
 use crate::seal::SealError;
 use crate::space::{EndpointSpace, Fallback, Level, Limit, Mount, Space};
-use crate::topology::{Door, MatchKind, SpaceKind, Topology, SKOLEM_PREFIX};
+use crate::topology::{Door, MatchKind, SpaceKind, Topology, TopologyRule, SKOLEM_PREFIX};
 
 /// **How deeply a declaration may nest spaces**: the root is depth 1, and each space
 /// it encloses — a layer, a mounted or aliased space, a level's space, a door's
@@ -767,13 +768,37 @@ impl Builder<'_> {
             }
             SpaceKind::Fallback => Ok(()),
             SpaceKind::Mount { .. } => encloses(1),
-            SpaceKind::Alias { max_hops, .. } => {
+            SpaceKind::Alias { rules, max_hops } => {
                 encloses(1)?;
                 if *max_hops == 0 {
                     return Err(DeclarationError::Malformed {
                         node: Some(me.to_string()),
                         reason: "an alias table follows at least one hop (ik:maxHops ≥ 1)".into(),
                     });
+                }
+                // A view (a root-resolving rule) whose own table cannot terminate is
+                // refused here, where the table shows it, rather than bound to fail on
+                // every request. Walking each view's `from` finds a self-loop, a cycle
+                // through the table and an over-long chain. Child rules keep their
+                // run-time refusal, exactly as before views existed.
+                if rules.iter().any(|rule| rule.at == ResolveAt::Root) {
+                    let table = alias_table(rules, *max_hops);
+                    for (i, rule) in rules.iter().enumerate() {
+                        if rule.at != ResolveAt::Root {
+                            continue;
+                        }
+                        let Ok(from) = Iri::parse(rule.from.as_str()) else {
+                            continue;
+                        };
+                        if let Canonical::Refused(refusal) = table.preview(&from) {
+                            return Err(DeclarationError::Malformed {
+                                node: Some(format!("{me}:rule:{}", i + 1)),
+                                reason: format!(
+                                    "a view (ik:resolveAt \"root\") must terminate: {refusal}"
+                                ),
+                            });
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -879,14 +904,7 @@ impl Builder<'_> {
                 })
             }
             SpaceKind::Alias { rules, max_hops } => {
-                let mut table = AliasTable::new().with_max_hops(*max_hops);
-                for rule in rules {
-                    table = match rule.kind {
-                        RuleKind::Exact => table.exact(rule.from.clone(), rule.to.clone()),
-                        RuleKind::Prefix => table.prefix(rule.from.clone(), rule.to.clone()),
-                    };
-                }
-                let alias = Alias::new(Arc::new(table), only());
+                let alias = Alias::new(Arc::new(alias_table(rules, *max_hops)), only());
                 Arc::new(match id {
                     Some(id) => alias.named(id),
                     None => alias,
@@ -935,6 +953,15 @@ impl Builder<'_> {
 
 /// What [`Builder::assemble`] answers for a node [`Builder::check`] should already
 /// have refused — never reached, and a refusal rather than a panic if it ever is.
+/// The table an `ik:Alias` node's rules declare, each resolving where it says.
+fn alias_table(rules: &[TopologyRule], max_hops: usize) -> AliasTable {
+    rules
+        .iter()
+        .fold(AliasTable::new().with_max_hops(max_hops), |table, rule| {
+            table.rule_at(rule.kind, rule.from.clone(), rule.to.clone(), rule.at)
+        })
+}
+
 fn not_built(me: &str) -> DeclarationError {
     DeclarationError::Malformed {
         node: Some(me.to_string()),
@@ -971,7 +998,7 @@ mod turtle {
     use oxrdf::{NamedOrBlankNode, Term, Triple};
 
     use super::{too_large, Budget, DeclarationBound, DeclarationError, MAX_DECLARATION_DEPTH};
-    use crate::alias::RuleKind;
+    use crate::alias::{ResolveAt, RuleKind};
     use crate::iri::Iri;
     use crate::topology::{Door, MatchKind, SpaceKind, Topology, TopologyRule, SKOLEM_PREFIX};
 
@@ -1492,8 +1519,25 @@ mod turtle {
                         };
                         let from = self.one_str(&rule, &p("logical"))?;
                         let to = self.one_str(&rule, &p("canonical"))?;
+                        let at = match self.optional(&rule, &p("resolveAt"))? {
+                            None => ResolveAt::Child,
+                            Some(term) => {
+                                match Self::literal_of(&rule, &p("resolveAt"), term, "string")?
+                                    .as_str()
+                                {
+                                    "child" => ResolveAt::Child,
+                                    "root" => ResolveAt::Root,
+                                    other => {
+                                        return Err(malformed(
+                                            &rule,
+                                            format!("ik:resolveAt {other:?} is not child or root"),
+                                        ))
+                                    }
+                                }
+                            }
+                        };
                         self.no_more(&rule)?;
-                        rules.push(TopologyRule::new(kind, from, to));
+                        rules.push(TopologyRule::new(kind, from, to).resolving_at(at));
                     }
                     SpaceKind::Alias { rules, max_hops }
                 }

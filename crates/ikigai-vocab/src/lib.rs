@@ -1795,6 +1795,8 @@ mod tests {
             "matchKind",
             "confinedTo",
             "maxHops",
+            // Ledger #2061: a rule that resolves from the root, a view.
+            "resolveAt",
         ] {
             assert!(
                 subjects.contains(&format!("<{NS}{term}>")),
