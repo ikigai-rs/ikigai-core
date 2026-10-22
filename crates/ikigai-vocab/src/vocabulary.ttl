@@ -38,9 +38,9 @@
 #     urn:plan:{plan-id}:fork:{n}     one ik:Fork
 #     urn:plan:{plan-id}:input:{name} a declared parameter (an ArgSpec node, as on an endpoint)
 #     urn:plan:{plan-id}:step:{n}:arg:{name}  one ik:Argument of a step
-# {plan-id} is the program's name when the plan is stored (`urn:program:{name}` is then the
-# RESOLVABLE face that runs it; `urn:plan:{name}` the graph that describes it) and the
-# plan's content address when it is anonymous. `{name}` segments pass through
+# {plan-id} is the plan's name when stored, or its content address when anonymous.
+# `urn:plan:{name}` names the plan graph and its nodes; `urn:script:{name}` stores the
+# plan and `urn:script:{name}:result` runs it. `{name}` segments pass through
 # `ikigai_core::escape_iri_fragment`; `ikigai_vocab::plan` builds each kind and is the
 # one place the scheme is coded.
 

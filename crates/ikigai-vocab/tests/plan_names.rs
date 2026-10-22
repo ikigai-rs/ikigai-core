@@ -5,9 +5,10 @@
 //! - a bound name, a parameter name and an argument name are NAMES, so a `%` in one is a
 //!   character and is written `%25` (the rule `to_turtle` uses for an endpoint's input
 //!   names, so `:input:{name}` is spelled one way under a plan and under an endpoint);
-//! - the plan id is the IRI segment a stored plan is NAMED by (`urn:program:{name}` runs
-//!   it, `urn:plan:{name}` describes it, and a plan read back from Turtle recovers its id by
-//!   stripping the prefix), so a real escape in it is kept and only a `%` that does not
+//! - the plan id is the IRI segment a stored plan is NAMED by (`urn:plan:{name}` names
+//!   its graph and nodes, `urn:script:{name}` stores it, and `urn:script:{name}:result`
+//!   runs it). A plan read back from Turtle recovers its id by stripping the plan prefix,
+//!   so a real escape in it is kept and only a `%` that does not
 //!   start one is written `%25`: re-encoding `a%20b` would rename every stored plan
 //!   carrying it and break the read-then-write round trip.
 
