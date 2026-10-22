@@ -2443,3 +2443,38 @@ refuse a bound with `OverBudget` instead of `Timeout` or `InvalidArgument`, a kn
 origin's 401/403 with `Refused`, an unanswered verb or a missing facility with `Unsupported`; read `class()` instead of
 `is_transient()` where the difference matters; declare `fails(..)` with the next conformance adoption. The wire carries
 the new variants as `Endpoint(display)` until wire v9.
+
+**0.1.109** carries one PR on top of 0.1.108: dynamic spaces, version one (ikigai-rs/ikigai-core PR 237, ledger
+[#2006](http://localhost:1062/l/default/item/2006); design in devtools `claude/briefs/ikigai-core-dynamic-spaces-2006.md`).
+All additive: nothing changes for a kernel or a module that does not use it.
+
+- **`Threaded { inner, thread }`**: a space that resolves through `inner` and makes every answer it serves depend on
+  `thread`, so cutting that thread invalidates everything the space served. `Threaded::session(id, inner)` names a
+  per-session space and its thread `urn:iki:space:session:{id}`; ending the session is cutting it.
+- **`DynamicSpace::new(name, declaration_iri, registry)`**: a space the host places in its arrangement, whose doors come
+  from a declaration resource (Turtle in the `ik:` arrangement vocabulary) and change when that resource does.
+  `install_topology` always; `install`, `refresh` and `drive` behind the `declare` feature. A change is checked before
+  it binds (build's refusals, a refusal of new sealing levels, then an optional host `SpaceCheck`); a refused change
+  keeps the old doors and is reported. A successful one swaps the inner space, cuts the space's own thread
+  `urn:iki:space:dynamic:{name}` (every answer the old doors served goes) and calls `bindings_changed`. The space starts
+  empty and says why when it has no valid declaration. Its status is a door on the space itself,
+  `urn:iki:space:dynamic:{name}:status` (text/plain and `as=text/turtle`, uncacheable). A dynamic space keeps a FIXED
+  name: `Space::id`'s doc now says a space whose doors change may keep one name only if it cuts what it served.
+- **Topology**: `SpaceKind::Dynamic { declaration }` renders `ik:DynamicSpace ; ik:declaration <…> ; ik:space <inner>`;
+  `from_turtle` parses it and `build` refuses it as a node of a declaration (`DeclarationError::Dynamic`). Both enums
+  are `#[non_exhaustive]`, so a consumer's wildcard arm receives the new variant.
+
+Known limits, filed: under a narrowed capability `drive` does not hear a change to a declaration served uncacheable
+(the listener authority rule; ledger [#2048](http://localhost:1062/l/default/item/2048)), so a host drives it under
+root for now; the status door is not in the topology ([#2049](http://localhost:1062/l/default/item/2049)). The finer
+cut, only the names a change removed, is [#2034](http://localhost:1062/l/default/item/2034). Pins: `tests/dynamic.rs`
+(15 tests under the `declare` feature).
+
+**Vocabulary:** `ik:DynamicSpace`, `ik:declaration`, and the status terms `ik:inForce`, `ik:installs` and
+`ik:refusal`; the JSON-LD context regenerated; `owl:versionInfo`. `/ns` needs a manual deploy after the publish.
+ikigai-vocab's core floor stays 0.1.108 (its code reads nothing new).
+
+**Migrating to 0.1.109.** Bump `ikigai-core` and `ikigai-vocab` to `"0.1.109"`; nothing else is required. A host that
+wants a dynamic space builds a `Registry` of the endpoints a declaration may bind, places `DynamicSpace::new(..)` in its
+arrangement, installs once at start, and spawns `drive` under a capability holding `urn:cap:kernel:listen` and read on
+the declaration.
