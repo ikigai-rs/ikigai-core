@@ -667,7 +667,16 @@ impl AliasTable {
     /// Record that a rewritten target resolved to nothing. Called by the kernel on
     /// [`crate::Error::Unresolved`] so the miss is attributed to
     /// the rule that moved the name.
+    ///
+    /// A hop whose path does not match this table's current rules is ignored. Hops
+    /// can outlive a builder insertion (which re-sorts rule indices), or come from
+    /// another table; their indices alone are not enough to attribute a miss.
     pub fn record_unresolved(&self, hop: &AliasHop) {
+        // Validate the whole path, not only its bounds: an in-range index may name
+        // a different rule. Preview does not alter hops or refusal counters.
+        if self.preview(hop.logical()).hop() != Some(hop) {
+            return;
+        }
         for &index in &hop.rules {
             self.rules[index].unresolved.fetch_add(1, Ordering::Relaxed);
         }
