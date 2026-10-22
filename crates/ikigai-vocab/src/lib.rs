@@ -56,10 +56,9 @@ pub const SPACE_ID: &str = "urn:iki:space:vocab";
 /// validator that reads one, and the fixtures that pin the shape agree on every IRI.
 ///
 /// A plan and everything in it is skolemized under `urn:plan:{plan-id}` (no blank nodes:
-/// the graph diffs, signs, and answers SPARQL). `{plan-id}` is the program's name when the
-/// plan is stored — `urn:program:{name}` is then the resolvable face that RUNS it, and
-/// `urn:plan:{name}` the graph that DESCRIBES it — and the plan's content address when it
-/// is anonymous.
+/// the graph diffs, signs, and answers SPARQL). `{plan-id}` is the plan's name when
+/// stored, or its content address when anonymous. `urn:plan:{name}` names the plan graph
+/// and its nodes; `urn:script:{name}` stores the plan and `urn:script:{name}:result` runs it.
 ///
 /// Every author-supplied segment is encoded so that a hostile one cannot close the IRI
 /// early and the IRI always parses, and each by what it IS (ledger #1352):

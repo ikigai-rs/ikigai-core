@@ -4,8 +4,9 @@
 # `urn:cms:policy:strict` (unreachable thirty days -> gone), and the verdicts go straight
 # to `urn:cms:link-remove`. The lenient twin is one word and one sink away —
 # `urn:cms:policy:lenient` (ninety days across three passes) sinking to
-# `urn:cms:review-queue`, a human queue — two `urn:program:` resources, diffable; run
-# both against the same `@checks` and compare sinks before trusting the strict one.
+# `urn:cms:review-queue`, a human queue — two diffable `urn:plan:{name}` graphs, stored
+# at `urn:script:{name}` and run through `urn:script:{name}:result`. Run both against the
+# same `@checks` and compare sinks before trusting the strict one.
 #
 # --- text face ---
 #   urls    = source urn:cms:bookmarks root=@root as=text/uri-list
