@@ -2478,3 +2478,30 @@ ikigai-vocab's core floor stays 0.1.108 (its code reads nothing new).
 wants a dynamic space builds a `Registry` of the endpoints a declaration may bind, places `DynamicSpace::new(..)` in its
 arrangement, installs once at start, and spawns `drive` under a capability holding `urn:cap:kernel:listen` and read on
 the declaration.
+
+**0.1.110** carries one PR on top of 0.1.109: views, a declared alias whose target resolves from the root
+(ikigai-rs/ikigai-core PR 239, ledger [#2061](http://localhost:1062/l/default/item/2061); found when gonk's views arc,
+[#2006](http://localhost:1062/l/default/item/2006) arc 2, stopped at its premise check). All additive: an existing
+alias behaves exactly as before.
+
+- **`ResolveAt { Child, Root }`** (`#[non_exhaustive]`, `Child` the default) on an alias rule:
+  `AliasTable::exact_at_root`, `prefix_at_root` and `rule_at(kind, from, to, at)`; the text form takes an optional
+  fourth field, `root`. A child rule resolves its rewritten name in the alias's own child, as every rule did before. A
+  ROOT rule answers through a forwarding endpoint (`alias-view`) that re-issues the rewritten name as a sub-request in
+  the invocation's scope, under the caller's own capability: a view grants nothing, and a host that places the alias
+  last in its arrangement keeps a view from standing in for any name it already answers.
+- **Cache:** a view is its own entry, depending on the target's threads (and, inside a `DynamicSpace` or `Threaded`,
+  on the space's thread); no canonical name is reported, so the view and its target do not share an entry.
+- **Declarations:** `TopologyRule` gains `at` (the struct is `#[non_exhaustive]`), rendered as `ik:resolveAt "root"` on
+  an `ik:RewriteRule`; `declare::build` refuses a root-rule self-loop, cycle or over-long chain, naming the rule.
+- **Docs:** `Alias` now says an alias resolves only in its child, and only `Kernel::with_aliases` rewrites before root
+  resolution.
+
+Known gap, filed: a view is invisible to discovery (its `Meta` describes the forwarder, and the catalog does not list
+view names; ledger [#2065](http://localhost:1062/l/default/item/2065)). Pins: `tests/root_alias.rs` (9 tests).
+
+**Vocabulary:** `ik:resolveAt`; the JSON-LD context regenerated; `owl:versionInfo`. `/ns` needs a manual deploy after
+the publish. ikigai-vocab's core floor stays 0.1.108 (its code reads nothing new).
+
+**Migrating to 0.1.110.** Bump `ikigai-core` and `ikigai-vocab` to `"0.1.110"`; nothing else is required. To declare a
+view, add `ik:resolveAt "root"` to an `ik:RewriteRule`, or build it with `exact_at_root` / `prefix_at_root`.
