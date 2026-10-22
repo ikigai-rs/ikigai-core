@@ -37,7 +37,8 @@
 //! The graph is over the `ik:` vocabulary (`ik:Chain`, `ik:Fallback` with `ik:layers`,
 //! `ik:Mount` with `ik:prefix` and `ik:space`, `ik:Limit` with `ik:family` and
 //! `ik:matchKind`, `ik:EndpointSpace` with its `ik:pattern`s and its ordered
-//! `ik:doors`, `ik:Alias` with its `ik:rewrites` and `ik:maxHops`, `ik:Rewrite`,
+//! `ik:doors`, `ik:Alias` with its `ik:rewrites` and `ik:maxHops` (each rule an
+//! `ik:RewriteRule`, a view among them marked `ik:resolveAt "root"`), `ik:Rewrite`,
 //! `ik:Confine`, `ik:Level` with `ik:space`, `ik:DynamicSpace` with `ik:declaration`
 //! and `ik:space`, `ik:OpaqueSpace`). A node whose space
 //! claims an [`id`](crate::Space::id) is named by it, and an anonymous one is
@@ -74,7 +75,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::alias::RuleKind;
+use crate::alias::{ResolveAt, RuleKind};
 use crate::declare::DeclarationError;
 use crate::iri::Iri;
 use crate::space::Space;
@@ -189,16 +190,34 @@ pub struct TopologyRule {
     pub from: String,
     /// The backing name (or prefix) it rewrites to.
     pub to: String,
+    /// Where the rewritten name resolves (`ik:resolveAt`, written only for
+    /// [`ResolveAt::Root`]; a rule without it resolves in the alias's child).
+    pub at: ResolveAt,
 }
 
 impl TopologyRule {
-    /// A rule summary.
+    /// A rule summary, resolving in the alias's child.
     pub fn new(kind: RuleKind, from: impl Into<String>, to: impl Into<String>) -> Self {
         TopologyRule {
             kind,
             from: from.into(),
             to: to.into(),
+            at: ResolveAt::Child,
         }
+    }
+
+    /// Where the rewritten name resolves (builder).
+    ///
+    /// ```
+    /// use ikigai_core::{ResolveAt, RuleKind, TopologyRule};
+    ///
+    /// let view = TopologyRule::new(RuleKind::Exact, "urn:example:view:open", "urn:example:ledger:open")
+    ///     .resolving_at(ResolveAt::Root);
+    /// assert_eq!(view.at, ResolveAt::Root);
+    /// ```
+    pub fn resolving_at(mut self, at: ResolveAt) -> Self {
+        self.at = at;
+        self
     }
 }
 
@@ -582,12 +601,18 @@ impl Topology {
                     let _ = write!(
                         out,
                         "\n<{me}:rule:{}> a ik:RewriteRule ;\n    ik:ruleKind \"{}\" ;\n    \
-                         ik:logical \"{}\" ;\n    ik:canonical \"{}\" .\n",
+                         ik:logical \"{}\" ;\n    ik:canonical \"{}\"",
                         i + 1,
                         rule.kind.keyword(),
                         escape_literal(&rule.from),
                         escape_literal(&rule.to)
                     );
+                    // Only a view says where it resolves: a child rule renders exactly
+                    // as it did before `ik:resolveAt` existed.
+                    if rule.at != ResolveAt::Child {
+                        let _ = write!(out, " ;\n    ik:resolveAt \"{}\"", rule.at.keyword());
+                    }
+                    out.push_str(" .\n");
                 }
             }
             SpaceKind::Limit { family, kind } => {

@@ -348,7 +348,7 @@ ik:Alias a rdfs:Class ;
 
 ik:RewriteRule a rdfs:Class ;
     rdfs:label "RewriteRule" ;
-    rdfs:comment "One rule of an ik:Alias table: ik:ruleKind (exact or prefix), ik:logical (the name or prefix it matches) and ik:canonical (what it rewrites to). Skolemized under the alias node as {alias}:rule:{n}, n its position in the table — or, for a rule of the kernel's own table that an ik:DryRun would fire, under the run as {run}:rule:{n}, n the order it fires in." .
+    rdfs:comment "One rule of an ik:Alias table: ik:ruleKind (exact or prefix), ik:logical (the name or prefix it matches), ik:canonical (what it rewrites to) and, for a view, ik:resolveAt \"root\". Skolemized under the alias node as {alias}:rule:{n}, n its position in the table — or, for a rule of the kernel's own table that an ik:DryRun would fire, under the run as {run}:rule:{n}, n the order it fires in." .
 
 ik:Limit a rdfs:Class ;
     rdfs:subClassOf ik:Space ;
@@ -495,7 +495,13 @@ ik:canonical a rdf:Property ;
     rdfs:domain ik:RewriteRule ;
     rdfs:range xsd:string ;
     rdfs:label "canonical" ;
-    rdfs:comment "The backing name or prefix an ik:RewriteRule rewrites to — what the resolution reports as its canonical name, under which the logical and backing names share one cache entry and one golden thread." .
+    rdfs:comment "The backing name or prefix an ik:RewriteRule rewrites to — what the resolution reports as its canonical name, under which the logical and backing names share one cache entry and one golden thread. For a view (ik:resolveAt \"root\") the name it forwards to instead: the view's answer is its own entry, depending on the target's." .
+
+ik:resolveAt a rdf:Property ;
+    rdfs:domain ik:RewriteRule ;
+    rdfs:range xsd:string ;
+    rdfs:label "resolveAt" ;
+    rdfs:comment "Where an ik:RewriteRule's rewritten name resolves: \"child\" (the default when absent: in the ik:Alias's own enclosed ik:space, the rewrite reported as the canonical name) or \"root\" (a VIEW: from the root of the caller's resolution chain, as a sub-request under the caller's own capability, so it grants nothing and its answer depends on the target's golden threads). A view onto a name lets a dynamic space declare a name its host serves elsewhere." .
 
 # ---- explanation (urn:kernel:explain — a dry run of resolution) --------------
 # The module author's "why did my endpoint not get called?" as a graph: one
