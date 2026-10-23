@@ -3976,6 +3976,7 @@ impl Kernel {
             // thread name and answer `cut `.
             ("cut", Verb::Sink) => {
                 require_cap("urn:cap:kernel:cut")?;
+                kernel_single_face(request, "text/plain")?;
                 let given =
                     |name| kernel_arg(request, name).filter(|v| crate::check::given(Some(v)));
                 let thread = match (given("thread"), given("content")) {
@@ -4102,6 +4103,7 @@ impl Kernel {
             // what a viewer wants.
             ("cached", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
+                kernel_single_face(request, "text/plain")?;
                 let target = kernel_arg(request, "target")
                     .ok_or_else(|| Error::MissingArgument("target".to_string()))?;
                 let target = Iri::parse(target.trim()).map_err(|e| Error::InvalidArgument {
@@ -4136,6 +4138,7 @@ impl Kernel {
             // own is not seen (`Kernel::canonical`); ask by the name `explain` reports.
             ("uncached", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
+                kernel_single_face(request, "text/plain")?;
                 let asked = match kernel_arg(request, "target").map(str::trim) {
                     None => None,
                     Some(target) => {
@@ -4191,6 +4194,7 @@ impl Kernel {
             // this question arrives unannounced.
             ("aliases", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
+                kernel_single_face(request, "text/plain")?;
                 let mut body = String::from("aliases\n");
                 let Some(table) = self.aliases.as_ref() else {
                     body.push_str("  (no rewrite table installed)\n");
@@ -4234,6 +4238,7 @@ impl Kernel {
             // is rather than rendered as a different arrangement.
             ("topology", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
+                kernel_single_face(request, "text/turtle")?;
                 let turtle = chain
                     .topology(&self.root)
                     .try_to_turtle()
@@ -4346,6 +4351,7 @@ impl Kernel {
             // That merge is marked on the node rather than left silent (ledger #17).
             ("catalog", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
+                kernel_single_face(request, "text/turtle")?;
                 let renderer = self
                     .meta
                     .as_ref()
@@ -4414,6 +4420,7 @@ impl Kernel {
             // IRI per line, so it pipes into a `..` map. Cacheable like the catalog (a pure
             // function of the binding set + `types`).
             ("actions", Verb::Source) => {
+                let turtle = kernel_face(request)?;
                 // NO inspect gate, deliberately: unlike the catalog (which discloses the
                 // whole kernel), the manifold is SELF-LIMITING — it only ever contains
                 // actions the asking capability can invoke. "What can I do?" must be
@@ -4446,7 +4453,6 @@ impl Kernel {
                 // Kept no longer than the tightest contract the walk read (ledger #1579).
                 let (matches, caching) = self.select_actions_bounded(&query);
                 let expiry = caching.expiry_at(self.now_stamp());
-                let turtle = kernel_arg(request, "as") == Some("text/turtle");
                 if turtle {
                     // The auditable face: each match an ik:ActionMatch node of its OWN,
                     // one per door and verb (`urn:ikigai:match:{verb}:{pattern}`), joined
@@ -4529,6 +4535,7 @@ impl Kernel {
             // function of (action, args, capability) — cacheable; the cache key
             // carries the capability fingerprint.
             ("validate", Verb::Source) => {
+                kernel_single_face(request, "text/turtle")?;
                 // Exactly one of `action` or `endpoint`, and `endpoint` needs `verb`: the
                 // contract's group and dependency, enforced here in the same terms, so
                 // validate never blesses a call it refuses (ledger #15). The verb is read
@@ -5148,6 +5155,23 @@ fn kernel_arg<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
         Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes).ok(),
         _ => None,
     }
+}
+
+/// Validate the requested face before a single-face operation runs (especially
+/// before `cut` mutates state). Omission selects its only face.
+fn kernel_single_face(request: &Request, face: &str) -> Result<()> {
+    if let Some(asked) = kernel_arg(request, "as").map(str::trim) {
+        if asked != face {
+            return Err(Error::InvalidArgument {
+                name: "as".to_string(),
+                detail: format!(
+                    "`{asked}` is not a face of `{}` ({face})",
+                    request.target.as_str()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Whether a live introspection operation was asked for its Turtle face

@@ -204,6 +204,7 @@ fn validate() -> Description {
                 .optional(),
         )
         .group(InputGroup::exactly_one(["action", "endpoint"]))
+        .input(single_face("text/turtle"))
         .output(TEXT_TURTLE)
 }
 
@@ -228,6 +229,7 @@ fn catalog() -> Description {
         .verb(Verb::Source)
         .verb(Verb::Meta)
         .requires(CAP_INSPECT)
+        .input(single_face("text/turtle"))
         .output(TEXT_TURTLE)
 }
 
@@ -253,6 +255,15 @@ fn dependents() -> Description {
         .input(face())
         .output(TEXT_PLAIN_UTF8)
         .output(TEXT_TURTLE)
+}
+
+/// The `as` input of an operation with only one response face. Declaring it
+/// lets callers route an explicit face through the same contract as other inputs.
+fn single_face(media_type: &str) -> ArgSpec {
+    ArgSpec::new("as")
+        .summary("response face")
+        .one_of([media_type])
+        .default_value(media_type)
 }
 
 /// The `as` input of an operation with a text face and a Turtle face.
@@ -323,6 +334,7 @@ fn topology() -> Description {
         .verb(Verb::Source)
         .verb(Verb::Meta)
         .requires(CAP_INSPECT)
+        .input(single_face("text/turtle"))
         .output(TEXT_TURTLE)
 }
 
@@ -354,6 +366,7 @@ fn cut() -> Description {
                 .optional(),
         )
         .group(InputGroup::exactly_one(["thread", "content"]).pipe("content"))
+        .input(single_face("text/plain"))
         .output(TEXT_PLAIN_UTF8)
 }
 
@@ -402,6 +415,7 @@ fn cached() -> Description {
                 .one_of(["source", "exists"])
                 .default_value("source"),
         )
+        .input(single_face("text/plain"))
         .output(TEXT_PLAIN_UTF8)
 }
 
@@ -429,6 +443,7 @@ fn uncached() -> Description {
                 )
                 .optional(),
         )
+        .input(single_face("text/plain"))
         .output(TEXT_PLAIN_UTF8)
 }
 
@@ -463,6 +478,7 @@ fn aliases() -> Description {
         .verb(Verb::Source)
         .verb(Verb::Meta)
         .requires(CAP_INSPECT)
+        .input(single_face("text/plain"))
         .output(TEXT_PLAIN_UTF8)
 }
 
