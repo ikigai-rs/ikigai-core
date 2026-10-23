@@ -2479,6 +2479,28 @@ wants a dynamic space builds a `Registry` of the endpoints a declaration may bin
 arrangement, installs once at start, and spawns `drive` under a capability holding `urn:cap:kernel:listen` and read on
 the declaration.
 
+**0.1.111** carries three PRs on top of 0.1.110, all additive:
+
+- **Turtle faces for `urn:kernel:scheduler` and `urn:kernel:constraint`** (ikigai-rs/ikigai-core PR 243, for the UI
+  book's kernel inspector, ledger [#1800](http://localhost:1062/l/default/item/1800)). `as=text/turtle` on either now
+  answers a graph over the same rows as the text face, so the two cannot disagree. The scheduler is one
+  `ik:Scheduler` node with typed properties for the rows the kernel knows (backend, worker threads, active, spawned
+  and completed tasks), and an `ik:Reading` (label, value and position) for any other row, so nothing a reporter says is
+  dropped. The constraint window is an `ik:ConstraintWindow` with one `ik:ConstraintTarget` per ranked target, the same
+  top five as the text face. Both still need `urn:cap:kernel:inspect` and are still uncacheable; any other `as` is
+  refused. One text-face change: constraint ties now break by target name, so the order is the same in every process.
+  `SchedulerReporter` is unchanged.
+- **Alias attribution checks the hop** (PR 241): `AliasTable::record_unresolved` ignores a hop that does not belong to
+  this table, where an empty table panicked and a re-sorted one counted a miss against the wrong rule.
+- **The plan/script split, documented** (PR 242, ledger [#2087](http://localhost:1062/l/default/item/2087)): the
+  vocabulary and crate docs say that `urn:plan:{name}` names the plan graph, `urn:script:{name}` stores the plan and
+  `urn:script:{name}:result` runs it, and a test keeps the retired spelling from coming back.
+
+**Vocabulary:** 21 new terms (`ik:Scheduler`, `ik:Reading`, `ik:ConstraintWindow`, `ik:ConstraintTarget` and their
+properties); the JSON-LD context regenerated; `owl:versionInfo`. `/ns` needs a manual deploy after the publish.
+
+**Migrating to 0.1.111.** Bump `ikigai-core` and `ikigai-vocab` to `"0.1.111"`; nothing else is required.
+
 **0.1.110** carries one PR on top of 0.1.109: views, a declared alias whose target resolves from the root
 (ikigai-rs/ikigai-core PR 239, ledger [#2061](http://localhost:1062/l/default/item/2061); found when gonk's views arc,
 [#2006](http://localhost:1062/l/default/item/2006) arc 2, stopped at its premise check). All additive: an existing
