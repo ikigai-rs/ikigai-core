@@ -122,6 +122,7 @@ mod error;
 mod explain;
 mod grammar;
 pub(crate) mod hashing;
+mod inspect_graph;
 mod iri;
 mod kernel;
 mod kernel_ops;

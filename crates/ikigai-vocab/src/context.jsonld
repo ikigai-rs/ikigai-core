@@ -13,6 +13,8 @@
     "Chain": "ik:Chain",
     "Collaboration": "ik:Collaboration",
     "Confine": "ik:Confine",
+    "ConstraintTarget": "ik:ConstraintTarget",
+    "ConstraintWindow": "ik:ConstraintWindow",
     "Consultation": "ik:Consultation",
     "CorsPolicy": "ik:CorsPolicy",
     "Credential": "ik:Credential",
@@ -46,12 +48,14 @@
     "Process": "ik:Process",
     "Progress": "ik:Progress",
     "Question": "ik:Question",
+    "Reading": "ik:Reading",
     "Release": "ik:Release",
     "Review": "ik:Review",
     "Rewrite": "ik:Rewrite",
     "RewriteRule": "ik:RewriteRule",
     "Route": "ik:Route",
     "RouteRequest": "ik:RouteRequest",
+    "Scheduler": "ik:Scheduler",
     "Space": "ik:Space",
     "Stage": "ik:Stage",
     "Step": "ik:Step",
@@ -64,6 +68,10 @@
     "action": {
       "@id": "ik:action",
       "@type": "@id"
+    },
+    "activeTasks": {
+      "@id": "ik:activeTasks",
+      "@type": "xsd:nonNegativeInteger"
     },
     "addressedTo": {
       "@id": "ik:addressedTo",
@@ -126,7 +134,19 @@
       "@id": "ik:byteSize",
       "@type": "xsd:integer"
     },
+    "cachedCallCount": {
+      "@id": "ik:cachedCallCount",
+      "@type": "xsd:nonNegativeInteger"
+    },
+    "cachedPercent": {
+      "@id": "ik:cachedPercent",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "calendar": "ik:calendar",
+    "callCount": {
+      "@id": "ik:callCount",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "canonical": "ik:canonical",
     "cap": {
       "@id": "ik:cap",
@@ -140,8 +160,16 @@
       "@id": "ik:class",
       "@type": "@id"
     },
+    "completedTasks": {
+      "@id": "ik:completedTasks",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "confinedTo": {
       "@id": "ik:confinedTo",
+      "@type": "@id"
+    },
+    "constraintResource": {
+      "@id": "ik:constraintResource",
       "@type": "@id"
     },
     "consulted": {
@@ -182,6 +210,10 @@
     "corsOrigin": "ik:corsOrigin",
     "cost": "ik:cost",
     "csp": "ik:csp",
+    "currentConstraint": {
+      "@id": "ik:currentConstraint",
+      "@type": "@id"
+    },
     "cutCount": {
       "@id": "ik:cutCount",
       "@type": "xsd:nonNegativeInteger"
@@ -376,6 +408,16 @@
     },
     "prefix": "ik:prefix",
     "promptKind": "ik:promptKind",
+    "rankedTarget": {
+      "@id": "ik:rankedTarget",
+      "@type": "@id"
+    },
+    "reading": {
+      "@id": "ik:reading",
+      "@type": "@id"
+    },
+    "readingLabel": "ik:readingLabel",
+    "readingValue": "ik:readingValue",
     "reanchored": {
       "@id": "ik:reanchored",
       "@type": "xsd:boolean"
@@ -437,6 +479,7 @@
     },
     "ruleKind": "ik:ruleKind",
     "sampleTriple": "ik:sampleTriple",
+    "schedulerBackend": "ik:schedulerBackend",
     "scope": {
       "@id": "ik:scope",
       "@type": "@id"
@@ -487,6 +530,10 @@
       "@id": "ik:space",
       "@type": "@id"
     },
+    "spawnedTasks": {
+      "@id": "ik:spawnedTasks",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "step": {
       "@id": "ik:step",
       "@type": "@id"
@@ -521,6 +568,14 @@
     },
     "transreptsFrom": "ik:transreptsFrom",
     "transreptsTo": "ik:transreptsTo",
+    "uncachedCallCount": {
+      "@id": "ik:uncachedCallCount",
+      "@type": "xsd:nonNegativeInteger"
+    },
+    "uncachedMillis": {
+      "@id": "ik:uncachedMillis",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "underlineLinks": {
       "@id": "ik:underlineLinks",
       "@type": "xsd:boolean"
@@ -537,6 +592,14 @@
     "var": "ik:var",
     "vendor": "ik:vendor",
     "verb": "ik:verb",
-    "versionTag": "ik:versionTag"
+    "versionTag": "ik:versionTag",
+    "windowResolutions": {
+      "@id": "ik:windowResolutions",
+      "@type": "xsd:nonNegativeInteger"
+    },
+    "workerThreads": {
+      "@id": "ik:workerThreads",
+      "@type": "xsd:nonNegativeInteger"
+    }
   }
 }
