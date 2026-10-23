@@ -4296,31 +4296,37 @@ impl Kernel {
                     now: self.now_stamp(),
                 })
             }
-            // Inspect the host scheduler (backend, threads, live task counts).
+            // Inspect the host scheduler (backend, threads, live task counts). Both
+            // faces render the same rows: the injected reporter's, or with none the
+            // runtime-free single-threaded default. Live state, uncacheable on both.
             ("scheduler", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
-                let mut body = String::from("scheduler\n");
-                match &self.scheduler {
-                    Some(reporter) => {
-                        for (label, value) in reporter.rows() {
-                            body.push_str(&format!("  {label:<10} {value}\n"));
-                        }
-                    }
-                    // No scheduler injected ⇒ the runtime-free single-threaded default.
-                    None => {
-                        body.push_str("  backend    single\n");
-                        body.push_str("  threads    1\n");
-                    }
+                let rows = match &self.scheduler {
+                    Some(reporter) => reporter.rows(),
+                    None => crate::inspect_graph::default_scheduler_rows(),
+                };
+                if kernel_face(request)? {
+                    return Ok(kernel_turtle(crate::inspect_graph::scheduler_turtle(&rows)));
                 }
-                Ok(kernel_text(body))
+                Ok(kernel_text(crate::inspect_graph::scheduler_text(&rows)))
             }
             // The throughput readout: where the constraint is right now — the
             // resources that consumed the most *uncached* compute over the recent
             // window. Cache hits are excluded from the total (they cost nothing); the
-            // heaviest target is the bottleneck (Goldratt step 1).
+            // heaviest target is the bottleneck (Goldratt step 1). Both faces rank the
+            // same rows; live state, uncacheable on both.
             ("constraint", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
-                Ok(kernel_text(self.render_constraint()))
+                let turtle = kernel_face(request)?;
+                let (total, rows) = self.constraint_rows();
+                if turtle {
+                    return Ok(kernel_turtle(crate::inspect_graph::constraint_turtle(
+                        total, &rows,
+                    )));
+                }
+                Ok(kernel_text(crate::inspect_graph::constraint_text(
+                    total, &rows,
+                )))
             }
             // The kernel's own catalog: every bound endpoint's `describe()` as one RDF
             // (Turtle) graph — so the kernel is queryable *about itself* with SPARQL and
@@ -4620,10 +4626,11 @@ impl Kernel {
         }
     }
 
-    /// Aggregate the constraint window by target and render the heaviest first.
-    /// Ranks by uncached compute time when the kernel has a clock, else by uncached
-    /// call count — so the readout is meaningful even on a clockless kernel.
-    fn render_constraint(&self) -> String {
+    /// Aggregate the constraint window by target, heaviest first, with how many
+    /// resolutions the window holds. Ranks by uncached compute time when the kernel
+    /// has a clock, else by uncached call count — so the readout is meaningful even on
+    /// a clockless kernel.
+    fn constraint_rows(&self) -> (usize, Vec<crate::inspect_graph::ConstraintRow>) {
         let window = self.constraint.lock().expect("constraint lock");
         let total = window.len();
         // Per target: (uncached_ms, calls, cached, any_timed).
@@ -4642,38 +4649,31 @@ impl Kernel {
             }
         }
         let mut rows: Vec<_> = by_target.into_iter().collect();
-        // Heaviest uncached time first; break ties by uncached call count.
+        // Heaviest uncached time first; break ties by uncached call count, then by
+        // name. The window is a `HashMap`, reseeded per kernel, so without the last
+        // key two equal targets came out in a different order per process (the text
+        // face reordered, the Turtle face a different `ik:order`).
         rows.sort_by(|a, b| {
             let a_uncached = a.1 .1 - a.1 .2;
             let b_uncached = b.1 .1 - b.1 .2;
-            b.1 .0.cmp(&a.1 .0).then(b_uncached.cmp(&a_uncached))
+            b.1 .0
+                .cmp(&a.1 .0)
+                .then(b_uncached.cmp(&a_uncached))
+                .then(a.0.cmp(b.0))
         });
-
-        let mut body = format!("constraint  (last {total} resolutions)\n");
-        if rows.is_empty() {
-            body.push_str("  (no resolutions yet)\n");
-            return body;
-        }
-        for (rank, (target, (uncached_ms, calls, cached, timed))) in rows.iter().take(5).enumerate()
-        {
-            let uncached = calls - cached;
-            let cached_pct = if *calls > 0 { cached * 100 / calls } else { 0 };
-            // The leader is the constraint only if it actually consumed capacity.
-            let marker = if rank == 0 && (*uncached_ms > 0 || uncached > 0) {
-                "   ← constraint"
-            } else {
-                ""
-            };
-            let cost = if *timed {
-                format!("{uncached_ms}ms uncached")
-            } else {
-                format!("{uncached} uncached")
-            };
-            body.push_str(&format!(
-                "  {target}{marker}\n    {cost} · {calls} calls · {cached_pct}% cached\n"
-            ));
-        }
-        body
+        let rows = rows
+            .into_iter()
+            .map(|(target, (uncached_ms, calls, cached, timed))| {
+                crate::inspect_graph::ConstraintRow {
+                    target: target.to_string(),
+                    uncached_ms,
+                    calls,
+                    cached,
+                    timed,
+                }
+            })
+            .collect();
+        (total, rows)
     }
 
     /// The number of representations currently cached (diagnostics/tests).

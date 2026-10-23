@@ -645,6 +645,131 @@ ik:cutCount a rdf:Property ;
     rdfs:label "cutCount" ;
     rdfs:comment "How many times an ik:GoldenThread has been cut, as the kernel tracks it — its current generation. A thread no resident entry hangs from may be forgotten and start again from zero, so this is the tracked count, not the lifetime one." .
 
+# ---- the scheduler and the constraint as graphs (urn:kernel:scheduler, urn:kernel:constraint)
+# The Turtle faces of the two remaining text-only introspection readouts, so an
+# inspector can draw them as graph views beside the cache's. Both are computed from
+# the same rows as their text faces. The scheduler is one node, the resource itself;
+# a row the kernel does not type is an ik:Reading at urn:ikigai:scheduler:reading:{n}.
+# A ranked target of the constraint window is skolemized from its name as
+# urn:ikigai:constraint:target:{name}.
+
+ik:Scheduler a rdfs:Class ;
+    rdfs:label "Scheduler" ;
+    rdfs:comment "The host scheduler as a kernel sees it through urn:kernel:scheduler: its backend (ik:schedulerBackend), worker threads (ik:workerThreads) and live task counters (ik:activeTasks, ik:spawnedTasks, ik:completedTasks), each present only when the host's reporter gives it. Any other row the reporter gives is an ik:reading. A kernel with no scheduler injected states the runtime-free default: backend \"single\", one thread." .
+
+ik:schedulerBackend a rdf:Property ;
+    rdfs:domain ik:Scheduler ;
+    rdfs:range xsd:string ;
+    rdfs:label "schedulerBackend" ;
+    rdfs:comment "The scheduler's backend, as its reporter names it (\"single\", \"pool\", …)." .
+
+ik:workerThreads a rdf:Property ;
+    rdfs:domain ik:Scheduler ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "workerThreads" ;
+    rdfs:comment "How many worker threads the scheduler runs tasks on." .
+
+ik:activeTasks a rdf:Property ;
+    rdfs:domain ik:Scheduler ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "activeTasks" ;
+    rdfs:comment "How many spawned tasks the scheduler holds that have not completed, when it was read." .
+
+ik:spawnedTasks a rdf:Property ;
+    rdfs:domain ik:Scheduler ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "spawnedTasks" ;
+    rdfs:comment "How many tasks have been spawned on the scheduler since it started." .
+
+ik:completedTasks a rdf:Property ;
+    rdfs:domain ik:Scheduler ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "completedTasks" ;
+    rdfs:comment "How many spawned tasks have completed since the scheduler started." .
+
+ik:Reading a rdfs:Class ;
+    rdfs:label "Reading" ;
+    rdfs:comment "One label/value row of a readout that the vocabulary does not type: kept verbatim (ik:readingLabel, ik:readingValue) rather than dropped, with its position among the readout's rows (ik:order). On urn:kernel:scheduler, a row the host's reporter adds, or a known row whose value does not fit its type, or a known label given again." .
+
+ik:reading a rdf:Property ;
+    rdfs:range ik:Reading ;
+    rdfs:label "reading" ;
+    rdfs:comment "A row of the subject's readout that has no typed property, as an ik:Reading. Multi-valued. No domain, on purpose: any readout may carry rows a host adds." .
+
+ik:readingLabel a rdf:Property ;
+    rdfs:domain ik:Reading ;
+    rdfs:range xsd:string ;
+    rdfs:label "readingLabel" ;
+    rdfs:comment "An ik:Reading's label, exactly as the readout gives it." .
+
+ik:readingValue a rdf:Property ;
+    rdfs:domain ik:Reading ;
+    rdfs:range xsd:string ;
+    rdfs:label "readingValue" ;
+    rdfs:comment "An ik:Reading's value, exactly as the readout gives it, as a string: an untyped row carries no type to apply." .
+
+ik:ConstraintWindow a rdfs:Class ;
+    rdfs:label "ConstraintWindow" ;
+    rdfs:comment "The throughput readout of urn:kernel:constraint: the kernel's rolling window of recent resolutions (ik:windowResolutions), the targets that consumed the most uncached compute in it, heaviest first (ik:rankedTarget, each an ik:ConstraintTarget with its ik:order), and the leader as ik:currentConstraint when it consumed any capacity. Cache hits cost nothing and do not count toward the ranking." .
+
+ik:windowResolutions a rdf:Property ;
+    rdfs:domain ik:ConstraintWindow ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "windowResolutions" ;
+    rdfs:comment "How many resolutions the constraint window holds right now (it is bounded, and drops the oldest)." .
+
+ik:rankedTarget a rdf:Property ;
+    rdfs:domain ik:ConstraintWindow ;
+    rdfs:range ik:ConstraintTarget ;
+    rdfs:label "rankedTarget" ;
+    rdfs:comment "A target the constraint window lists; its rank is its ik:order. Multi-valued; the window lists only the heaviest few, as the text readout does." .
+
+ik:currentConstraint a rdf:Property ;
+    rdfs:domain ik:ConstraintWindow ;
+    rdfs:range ik:ConstraintTarget ;
+    rdfs:label "currentConstraint" ;
+    rdfs:comment "The ranked target that is the constraint now: the leader (ik:order 1), stated only when it consumed uncached compute. Absent when the window is empty or every resolution in it was a cache hit." .
+
+ik:ConstraintTarget a rdfs:Class ;
+    rdfs:label "ConstraintTarget" ;
+    rdfs:comment "One target of an ik:ConstraintWindow: the resource requested (ik:constraintResource), its rank (ik:order, from 1), how often it was resolved in the window and how often the cache served it (ik:callCount, ik:cachedCallCount, ik:uncachedCallCount, ik:cachedPercent), and its uncached compute time (ik:uncachedMillis) when the kernel has a clock." .
+
+ik:constraintResource a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "constraintResource" ;
+    rdfs:comment "The resource an ik:ConstraintTarget counts resolutions of, as it was requested." .
+
+ik:callCount a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "callCount" ;
+    rdfs:comment "How many times the target was resolved in the window, cached or not." .
+
+ik:cachedCallCount a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "cachedCallCount" ;
+    rdfs:comment "How many of the target's resolutions in the window the cache served." .
+
+ik:uncachedCallCount a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "uncachedCallCount" ;
+    rdfs:comment "How many of the target's resolutions in the window were computed: ik:callCount less ik:cachedCallCount. What a clockless kernel ranks by." .
+
+ik:cachedPercent a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "cachedPercent" ;
+    rdfs:comment "The share of the target's resolutions the cache served, as a whole percentage rounded down, as the text readout shows it." .
+
+ik:uncachedMillis a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "uncachedMillis" ;
+    rdfs:comment "The target's uncached compute time over the window, in milliseconds, by the kernel's clock. Absent on a kernel with no clock, which ranks by ik:uncachedCallCount instead." .
+
 # ---- events (the calendar/agenda event graph) --------------------------------
 # Events themselves are typed with the iCalendar vocabulary
 # (http://www.w3.org/2002/12/cal/ical# — ical:Vevent, ical:uid, ical:summary,

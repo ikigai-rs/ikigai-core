@@ -473,12 +473,15 @@ fn scheduler() -> Description {
         .summary(
             "The host scheduler as the kernel sees it — backend, threads, live task counts. \
              A kernel with no scheduler injected reports the runtime-free single-threaded \
-             default.",
+             default. The Turtle face states it as one ik:Scheduler, its known rows as \
+             typed properties and any other row as an ik:Reading.",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)
         .requires(CAP_INSPECT)
+        .input(face())
         .output(TEXT_PLAIN_UTF8)
+        .output(TEXT_TURTLE)
 }
 
 /// The description of `urn:kernel:constraint`.
@@ -489,12 +492,15 @@ fn constraint() -> Description {
             "Where the constraint is right now: the resources that consumed the most \
              *uncached* compute over the recent window, heaviest first. Cache hits are \
              excluded — they cost nothing — so the leader is the bottleneck (Goldratt step \
-             one).",
+             one). The Turtle face states the ik:ConstraintWindow and each listed target as \
+             an ik:ConstraintTarget in rank order.",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)
         .requires(CAP_INSPECT)
+        .input(face())
         .output(TEXT_PLAIN_UTF8)
+        .output(TEXT_TURTLE)
 }
 
 /// One kernel operation as an [`Endpoint`], for description only.
