@@ -204,5 +204,8 @@ pub use space::{
     space_iri, EndpointSpace, Fallback, Level, LevelPath, Limit, Mount, Resolution, Resolved,
     Rewrite, Scope, Space, SpaceEntry, SPACE_PREFIX,
 };
-pub use topology::{Door, MatchKind, SpaceKind, Topology, TopologyRule, SKOLEM_PREFIX};
+pub use topology::{
+    escape_literal, turtle_literal, Door, MatchKind, SpaceKind, Topology, TopologyRule,
+    SKOLEM_PREFIX,
+};
 pub use verb::Verb;
