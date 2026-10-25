@@ -2479,6 +2479,20 @@ wants a dynamic space builds a `Registry` of the endpoints a declaration may bin
 arrangement, installs once at start, and spawns `drive` under a capability holding `urn:cap:kernel:listen` and read on
 the declaration.
 
+**0.1.112** exports `ikigai_core::escape_literal` (escaped contents) and
+`ikigai_core::turtle_literal` (a complete quoted Turtle string literal). Modules can
+write string literals without adding an RDF dependency. Both use core's existing
+`STRING_LITERAL_QUOTE` escaping: backslash, double quote, LF and CR are escaped;
+tabs and non-ASCII characters remain unchanged. Core's own Turtle output is unchanged.
+Doctests and `tests/turtle_literal.rs` pin exact bytes and parser round trips.
+
+This patch also includes PR 245's refusal of unsupported response faces across kernel
+operations. The workspace keeps its lockstep version; no vocabulary terms change.
+
+**Migrating to 0.1.112.** Bump `ikigai-core` and `ikigai-vocab` to `"0.1.112"`.
+Consumers writing Turtle can use `turtle_literal(value)` directly in an object position,
+or `escape_literal(value)` inside quotes they provide themselves.
+
 **0.1.111** carries three PRs on top of 0.1.110, all additive:
 
 - **Turtle faces for `urn:kernel:scheduler` and `urn:kernel:constraint`** (ikigai-rs/ikigai-core PR 243, for the UI

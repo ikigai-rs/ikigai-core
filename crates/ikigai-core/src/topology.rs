@@ -700,11 +700,40 @@ fn write_list(block: &mut String, me: &str, property: &str, cell: &str, items: &
     }
 }
 
-/// Escape a literal for a Turtle `"…"` position: every character the short string
-/// form forbids raw — `\`, `"`, LF and CR (`STRING_LITERAL_QUOTE`).
-pub(crate) fn escape_literal(s: &str) -> String {
+/// Escape the contents of a Turtle double-quoted short string literal.
+///
+/// Escapes backslash, double quote, LF and CR, as required by Turtle's
+/// `STRING_LITERAL_QUOTE` grammar. Tabs and non-ASCII characters are left as they
+/// are. This does not add surrounding quotes; use [`turtle_literal`] for a
+/// complete literal term.
+///
+/// ```
+/// use ikigai_core::escape_literal;
+///
+/// assert_eq!(escape_literal("say \"hi\"\n"), "say \\\"hi\\\"\\n");
+/// assert_eq!(escape_literal("\té"), "\té");
+/// ```
+pub fn escape_literal(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+/// Return a complete Turtle double-quoted short string literal.
+///
+/// Adds surrounding quotes to [`escape_literal`]'s output. The result is a plain
+/// string literal term, without a language tag or an explicit datatype, ready to
+/// use in a Turtle object position.
+///
+/// ```
+/// use ikigai_core::turtle_literal;
+///
+/// let name = "say \"hi\"\n";
+/// assert_eq!(turtle_literal(name), "\"say \\\"hi\\\"\\n\"");
+/// let triple = format!("<urn:subject> <urn:name> {} .", turtle_literal(name));
+/// assert_eq!(triple, "<urn:subject> <urn:name> \"say \\\"hi\\\"\\n\" .");
+/// ```
+pub fn turtle_literal(s: &str) -> String {
+    format!("\"{}\"", escape_literal(s))
 }
