@@ -144,7 +144,7 @@ pub use alias::{
     RuleKind, DEFAULT_MAX_HOPS,
 };
 pub use arg::ArgRef;
-pub use body::{Body, ByteStream, Replay, COLLECT_LIMIT};
+pub use body::{Body, ByteStream, Replay};
 /// The chunk type of a streamed [`Body`], re-exported so a producer needs no `bytes`
 /// dependency of its own (and cannot pick a second copy of it).
 pub use bytes::Bytes;
@@ -198,7 +198,10 @@ pub use listen::{
 pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};
-pub use run::{cap_retry, IssueContext, RetryBudget, RetryLimits, CAP_RETRY};
+pub use run::{
+    cap_retry, cap_stream_memory, IssueContext, MemoryBudget, MemoryLimits, RetryBudget,
+    RetryLimits, CAP_RETRY, CAP_STREAM_MEMORY, DEFAULT_STREAM_MEMORY,
+};
 pub use seal::{SealError, SealOwner};
 pub use select::{
     describe_entry, is_auto_invocable, is_lossless_plan, select_action, select_action_in,

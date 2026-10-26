@@ -334,38 +334,57 @@ impl Representation<Body> {
         })
     }
 
-    /// [`collect`](Self::collect) without awaiting, for a body that is already a buffer:
-    /// the kernel's bytes entry points take this path first, so the common case adds no
-    /// async frame per nesting level (measured: the boxed async collect alone cost about
-    /// 2 KiB of stack per level in a debug build). A streamed body is refused here as
-    /// `Unsupported`; the caller checks [`Body::as_bytes`] first.
-    pub(crate) fn collect_buffer(self, max_bytes: usize) -> crate::Result<Representation> {
+    /// Collect the body into a buffer under a run's byte pool ([`Body::collect_within`]:
+    /// drawn as it is read, refused with `OverBudget` past the pool, never truncated),
+    /// keeping the type, expiry and threads. What the kernel's bytes entry points do, and
+    /// what an endpoint that buffers a body does through
+    /// [`Invocation::collect`](crate::Invocation::collect).
+    pub async fn collect_within(
+        self,
+        budget: &crate::MemoryBudget,
+    ) -> crate::Result<Representation> {
         let Representation {
             repr_type,
             bytes,
             expiry,
             threads,
         } = self;
-        let Body::Bytes(bytes) = bytes else {
-            return Err(crate::Error::Unsupported {
-                verb: None,
-                detail: "a streamed body cannot be collected without reading it".to_string(),
-            });
-        };
-        if bytes.len() > max_bytes {
-            return Err(crate::Error::OverBudget {
-                detail: format!(
-                    "the body is larger than the {max_bytes}-byte collect bound ({} bytes)",
-                    bytes.len()
-                ),
-            });
-        }
+        let bytes = bytes.collect_within(budget).await?;
         Ok(Representation {
             repr_type,
             bytes: Vec::from(bytes),
             expiry,
             threads,
         })
+    }
+
+    /// The buffer, without awaiting, when the body is one: the kernel's bytes entry points
+    /// take this path first, so the common case adds no async frame per nesting level
+    /// (measured: the boxed async collect alone cost about 2 KiB of stack per level in a
+    /// debug build). A buffer is handed over as it is, drawing on no budget: it is
+    /// already in memory (ledger #2238). `Err(self)` for a streamed body, which the caller
+    /// collects.
+    pub(crate) fn into_buffer(self) -> std::result::Result<Representation, Self> {
+        let Representation {
+            repr_type,
+            bytes,
+            expiry,
+            threads,
+        } = self;
+        match bytes {
+            Body::Bytes(bytes) => Ok(Representation {
+                repr_type,
+                bytes: Vec::from(bytes),
+                expiry,
+                threads,
+            }),
+            other => Err(Representation {
+                repr_type,
+                bytes: other,
+                expiry,
+                threads,
+            }),
+        }
     }
 
     /// This answer with its buffer copied into a `Vec`, keeping its type, expiry and

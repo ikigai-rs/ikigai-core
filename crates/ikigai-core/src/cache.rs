@@ -173,6 +173,9 @@ struct Slot {
 pub(crate) enum Answer {
     /// The body as the endpoint (or the cache) holds it.
     Body(Representation<Body>),
+    /// A streamed body (a `Replay` or a `Once`) with the byte pool of the run it was
+    /// answered in (ledger #2238): what a buffer caller collects it under.
+    Streamed(Representation<Body>, crate::MemoryBudget),
     /// A buffer copied out of a cache entry for a caller that wants bytes.
     Buffer(Representation),
 }
@@ -181,8 +184,23 @@ impl Answer {
     /// The body face: a copied buffer becomes [`Body::Bytes`] without another copy.
     pub(crate) fn into_body(self) -> Representation<Body> {
         match self {
-            Answer::Body(representation) => representation,
+            Answer::Body(representation) | Answer::Streamed(representation, _) => representation,
             Answer::Buffer(representation) => representation.into_body(),
+        }
+    }
+
+    /// This answer with the run's byte pool attached when its body is streamed: `pool`
+    /// is asked only then, so a buffer answer (every cache hit on a buffer) admits
+    /// nothing and allocates nothing.
+    pub(crate) fn budgeted(self, pool: impl FnOnce() -> Option<crate::MemoryBudget>) -> Answer {
+        match self {
+            Answer::Body(representation) if representation.bytes.as_bytes().is_none() => {
+                match pool() {
+                    Some(pool) => Answer::Streamed(representation, pool),
+                    None => Answer::Body(representation),
+                }
+            }
+            other => other,
         }
     }
 }
