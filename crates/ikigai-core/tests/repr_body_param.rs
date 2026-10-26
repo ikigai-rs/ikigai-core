@@ -2,9 +2,10 @@
 //! nothing for the bytes case. These are the spike's checks, kept as regression tests:
 //! today's constructors infer at real call sites with no annotation, and a
 //! `Representation<Vec<u8>>` serializes byte-for-byte as it did before the parameter
-//! existed (the fixtures below were captured from 0.1.112, before the change).
+//! existed (the fixtures below were captured from 0.1.112, before the change). So does a
+//! `CacheEntry` holding a buffer, whose serde impls are hand-written since bodies.
 
-use ikigai_core::{Expiry, ReprType, Representation, Time};
+use ikigai_core::{Body, CacheEntry, Expiry, ReprType, Representation, Thread, Time};
 
 /// The fixture value: a parameter, a non-default expiry, and a thread (which is
 /// `serde(skip)`, so it must not appear in either encoding).
@@ -41,4 +42,86 @@ fn json_encoding_is_unchanged() {
     assert_eq!(json, JSON_0_1_112);
     let back: Representation = serde_json::from_str(&json).unwrap();
     assert_eq!(back, fixture());
+}
+
+/// Captured from ikigai-core 0.1.112 (origin/main e1d21a9), where `CacheEntry` derived serde,
+/// with the same `entry()`.
+const ENTRY_POSTCARD_0_1_112: &[u8] = &[
+    5, 117, 114, 110, 58, 120, 10, 116, 101, 120, 116, 47, 112, 108, 97, 105, 110, 0, 2, 104, 105,
+    1, 5, 1, 5, 117, 114, 110, 58, 120, 3, 1, 7, 2, 1, 4,
+];
+
+/// Captured from ikigai-core 0.1.112 (origin/main e1d21a9), with the same `entry()`.
+const ENTRY_JSON_0_1_112: &str = r#"{"target":"urn:x","representation":{"repr_type":{"media_type":"text/plain","params":{}},"bytes":[104,105],"expiry":{"At":5}},"edges":[["urn:x",3]],"cost_millis":7,"hits":2,"stored_tick":1,"last_used_tick":4}"#;
+
+fn entry(body: Body) -> CacheEntry {
+    CacheEntry {
+        target: "urn:x".into(),
+        representation: Representation::from_body(ReprType::new("text/plain"), body)
+            .with_expiry(Expiry::At(Time::from_millis(5))),
+        edges: vec![(Thread::new("urn:x"), 3)],
+        cost_millis: Some(7),
+        hits: 2,
+        stored_tick: 1,
+        last_used_tick: 4,
+    }
+}
+
+#[test]
+fn a_cache_entry_holding_a_buffer_encodes_as_the_derive_did() {
+    let buffered = entry(Body::from(b"hi".to_vec()));
+    assert_eq!(
+        postcard::to_stdvec(&buffered).unwrap(),
+        ENTRY_POSTCARD_0_1_112
+    );
+    assert_eq!(
+        serde_json::to_string(&buffered).unwrap(),
+        ENTRY_JSON_0_1_112
+    );
+    let back: CacheEntry = postcard::from_bytes(ENTRY_POSTCARD_0_1_112).unwrap();
+    assert_eq!(back.representation.bytes.as_bytes().unwrap(), &b"hi"[..]);
+    assert_eq!(back.edges, buffered.edges);
+}
+
+#[test]
+fn a_cache_entry_holding_a_replay_is_refused_not_read() {
+    struct Never;
+    impl ikigai_core::Replay for Never {
+        fn open(&self) -> ikigai_core::ByteStream {
+            panic!("serializing an entry must not read its body");
+        }
+    }
+    let err = serde_json::to_string(&entry(Body::replay(Never))).unwrap_err();
+    assert!(err.to_string().contains("replay"), "{err}");
+}
+
+/// The call shapes the spike checked (ledger #2237): none needs an annotation. The one
+/// that does is a bare function path with nothing to infer from,
+/// `let f = Representation::cacheable;` (E0282), documented on `Representation`.
+#[test]
+fn todays_call_shapes_infer_with_no_annotation() {
+    let a = Representation::new(ReprType::new("text/plain"), "x");
+    // A function path fed by a typed input.
+    let cached: Vec<Representation> = vec![a.clone()]
+        .into_iter()
+        .map(Representation::cacheable)
+        .collect();
+    assert_eq!(cached[0].expiry, Expiry::Never);
+    let ok: Result<Representation, ()> = Ok(a.clone());
+    assert_eq!(
+        ok.map(Representation::cacheable).map(|r| r.bytes.len()),
+        Ok(1)
+    );
+    // The shared builders on a value.
+    let threaded = a.clone().with_expiry(Expiry::Never).depends_on("urn:t");
+    assert_eq!(threaded.threads().len(), 1);
+    // A turbofish in type position takes the default.
+    let bytes = postcard::to_stdvec(&a).unwrap();
+    let back = postcard::from_bytes::<Representation>(&bytes).unwrap();
+    assert_eq!(back.content_id(), a.content_id());
+    // A closure over an annotated binding, and a constructor as a function value.
+    let take = |r: Representation| r.bytes;
+    assert_eq!(take(a.clone()), b"x");
+    let make: fn(ReprType, Vec<u8>) -> Representation = Representation::new;
+    assert_eq!(make(ReprType::new("text/plain"), b"x".to_vec()), a);
 }

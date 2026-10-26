@@ -105,6 +105,7 @@
 
 pub mod alias;
 mod arg;
+mod body;
 pub mod builtins;
 pub mod cache;
 mod cache_graph;
@@ -143,6 +144,10 @@ pub use alias::{
     RuleKind, DEFAULT_MAX_HOPS,
 };
 pub use arg::ArgRef;
+pub use body::{Body, ByteStream, Replay, COLLECT_LIMIT};
+/// The chunk type of a streamed [`Body`], re-exported so a producer needs no `bytes`
+/// dependency of its own (and cannot pick a second copy of it).
+pub use bytes::Bytes;
 pub use cache::{
     CacheBound, CacheEntry, CacheKey, CachePolicy, CacheRow, CostAware, CutSnapshot, EntryFacts,
     EntryState, Fifo, Lru, ReprCache,

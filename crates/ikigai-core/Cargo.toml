@@ -23,6 +23,14 @@ exclude = ["tests/formalism_pins.rs", "tests/american_spelling.rs"]
 # core stays executor-agnostic and WASM-able. The executor is chosen at the edge.
 async-trait = "0.1"
 blake3 = "1"
+# A streamed body's chunk type (ledger #2237): the vetted shared buffer quinn already hands
+# out, so a cache hit stops copying and a QUIC chunk needs no copy. 1.2 is the floor:
+# `From<Bytes> for Vec<u8>`, which the bytes-returning entry points collect through, arrived
+# there. Runtime-free and wasm-clean.
+bytes = "1.2"
+# The `Stream` trait a one-shot body is (ledger #2237), named directly rather than through
+# futures-util's re-export, since it is in core's public API. Trait only: no runtime.
+futures-core = { version = "0.3", default-features = false }
 # Future *combinators* only (try_join_all) — runtime-free and WASM-able, so
 # `compose` can fork its `$a{}` sub-resolutions and join them. Spawns nothing;
 # the executor is still chosen at the edge.

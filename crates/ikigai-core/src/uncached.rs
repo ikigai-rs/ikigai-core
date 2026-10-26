@@ -110,6 +110,9 @@ pub(crate) struct Uncached {
     pub(crate) deps: VolatileDeps,
     /// The piped input the stage folded in was `Always`.
     pub(crate) upstream: bool,
+    /// The answer's body is a one-shot stream (ledger #2237): it can be read once, so
+    /// it is never stored, whatever its expiry says.
+    pub(crate) one_shot: bool,
     /// The expiry allowed storing and the store did not.
     pub(crate) declined: Option<Declined>,
 }
@@ -118,7 +121,11 @@ impl Uncached {
     /// Whether nothing was found to blame — never true of a result the kernel
     /// reports, and the guard that keeps an empty note off an event.
     pub(crate) fn is_empty(&self) -> bool {
-        !self.declared && self.deps.is_empty() && !self.upstream && self.declined.is_none()
+        !self.declared
+            && self.deps.is_empty()
+            && !self.upstream
+            && !self.one_shot
+            && self.declined.is_none()
     }
 }
 
@@ -145,6 +152,9 @@ impl fmt::Display for Uncached {
         }
         if self.upstream {
             clauses.push("upstream".to_string());
+        }
+        if self.one_shot {
+            clauses.push("one-shot body".to_string());
         }
         match self.declined {
             None => {}
