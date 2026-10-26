@@ -245,6 +245,20 @@ pub trait Issuer: Send + Sync {
         None
     }
 
+    /// The body stored under content id `id` in the issuer's content store (ledger #2240):
+    /// the seam [`Invocation::content_body`] resolves an
+    /// [`ArgRef::Content`] through, inside the invocation whose request carries it. The
+    /// default has no store and refuses with [`Error::Unsupported`]; the kernel answers
+    /// from the store a host installed
+    /// ([`Kernel::with_content_store`](crate::Kernel::with_content_store)), and with
+    /// [`Error::NotFound`] when nothing is held under `id`.
+    fn content(&self, id: &crate::ContentId) -> Result<crate::Body> {
+        Err(Error::Unsupported {
+            verb: None,
+            detail: format!("content {id} names a value, and this issuer has no content store"),
+        })
+    }
+
     /// Plan a chain of transreptors converting media type `from` → `to` over the
     /// issuer's mounted spaces (see [`select_transreptor`](crate::select_transreptor)).
     /// The default offers none — a detached or remote issuer can't enumerate spaces; the
@@ -1299,6 +1313,14 @@ impl<'a> Invocation<'a> {
     pub fn inline_arg(&self, name: &str) -> Result<&[u8]> {
         match self.request.args.get(name) {
             Some(ArgRef::Inline(bytes)) => Ok(bytes),
+            // A stored value cannot be lent as inline bytes (ledger #2240): the endpoint
+            // reads it as a body.
+            Some(ArgRef::Content(id)) => Err(Error::InvalidArgument {
+                name: name.to_string(),
+                detail: format!(
+                    "expected an inline value, got content {id}: read it with `content_body`"
+                ),
+            }),
             Some(_) => Err(Error::InvalidArgument {
                 name: name.to_string(),
                 detail: "expected an inline value".to_string(),
@@ -1478,12 +1500,17 @@ impl<'a> Invocation<'a> {
 
     /// The body behind argument `name` (ledger #2237), whichever way it was supplied: an
     /// inline value as [`Body::Bytes`](crate::Body::Bytes); a reference through
-    /// [`source_body`](Self::source_body), recorded as a dependency like any sub-request.
-    /// A Sink that can take large content reads it this way.
+    /// [`source_body`](Self::source_body), recorded as a dependency like any sub-request;
+    /// a content id ([`ArgRef::Content`]) from a body a plan attached to this request
+    /// ([`transrept`](Self::transrept)), else from the kernel's content store (ledger
+    /// #2240, [`Kernel::with_content_store`](crate::Kernel::with_content_store)). A Sink
+    /// that can take large content reads it this way.
     ///
-    /// ⚠ A [`ArgRef::Content`] value is refused with [`Error::Unsupported`] until the
-    /// content store lands (ledger #2240, stage 4 of the streams design); nothing resolves
-    /// one today, here or anywhere.
+    /// A content id resolves only here, inside the invocation whose request carries it:
+    /// there is no name to read one by. With no store installed it is
+    /// [`Error::Unsupported`]; with one that holds nothing under the id,
+    /// [`Error::NotFound`]. [`inline_arg`](Self::inline_arg) keeps refusing it, since it
+    /// cannot hand out a stored body as inline bytes.
     ///
     /// ```
     /// use futures::executor::block_on;
@@ -1521,13 +1548,18 @@ impl<'a> Invocation<'a> {
                         });
                     }
                 }
-                Err(Error::Unsupported {
-                    verb: None,
-                    detail: format!(
-                        "argument `{name}` names content {id}, and this kernel has no content \
-                         store to resolve it"
-                    ),
-                })
+                // Otherwise the kernel's content store (ledger #2240), still only for the
+                // id this invocation's own request carries.
+                match self.issuer {
+                    Some(issuer) => issuer.content(id),
+                    None => Err(Error::Unsupported {
+                        verb: None,
+                        detail: format!(
+                            "argument `{name}` names content {id}, and a detached invocation \
+                             has no content store to resolve it"
+                        ),
+                    }),
+                }
             }
             None => Err(Error::MissingArgument(name.to_string())),
         }

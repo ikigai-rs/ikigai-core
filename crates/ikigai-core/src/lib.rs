@@ -114,6 +114,7 @@ mod check;
 pub mod config;
 mod confine;
 mod content;
+mod content_store;
 mod contract;
 mod declare;
 mod describe;
@@ -160,6 +161,7 @@ pub use capability::{
 pub use check::{ProposedArgs, Violation, ViolationKind, ViolationPath, GIVEN_TWICE};
 pub use confine::Confine;
 pub use content::{ContentId, ContentIdError};
+pub use content_store::{ContentHandle, ContentStore, MemoryContentStore};
 pub use contract::{
     canonical_contract_iri, canonical_match_iri, encode_name, match_iri, parse_contract_iri,
     parse_match_iri, CONTRACT_PREFIX, MATCH_PREFIX,
