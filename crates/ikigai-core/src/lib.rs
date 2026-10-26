@@ -135,6 +135,7 @@ mod run;
 mod seal;
 mod select;
 mod space;
+pub mod stream;
 mod topology;
 mod uncached;
 mod verb;

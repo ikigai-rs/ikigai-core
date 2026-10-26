@@ -1446,6 +1446,22 @@ pub struct Transreption {
     /// exists; a declaration that is wrong is a module defect the planner cannot see.
     #[serde(default = "lossless_default")]
     pub lossless: bool,
+    /// Whether the transreptor reads its `content` **incrementally** (ledger #2239): it
+    /// takes the body as it comes ([`Invocation::content_body`](crate::Invocation::content_body))
+    /// and never needs it whole first, so a plan hands it a streamed body without
+    /// collecting it ([`Invocation::transrept`](crate::Invocation::transrept)). **Default
+    /// `false`**: a step that says nothing is handed its input collected, under the run's
+    /// byte budget, exactly as every transreptor was before bodies existed. Declared with
+    /// [`Description::incremental`]. A planning fact, not part of the vocabulary projection
+    /// or the contract digest; skipped in the serialized description when `false`, so a
+    /// transreptor that does not declare it encodes exactly as before the field existed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub incremental: bool,
+}
+
+/// `skip_serializing_if` for [`Transreption::incremental`].
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The `serde` default for [`Transreption::lossless`]: a contract that predates the
@@ -1460,6 +1476,7 @@ impl Default for Transreption {
             from: Vec::new(),
             to: Vec::new(),
             lossless: true,
+            incremental: false,
         }
     }
 }
@@ -1468,6 +1485,12 @@ impl Transreption {
     /// Whether the conversion is declared lossless (see [`lossless`](Self::lossless)).
     pub fn is_lossless(&self) -> bool {
         self.lossless
+    }
+
+    /// Whether the transreptor reads its input incrementally (see
+    /// [`incremental`](Self::incremental)).
+    pub fn is_incremental(&self) -> bool {
+        self.incremental
     }
 }
 
@@ -1741,6 +1764,7 @@ impl Description {
             from: from.into_iter().map(Into::into).collect(),
             to: to.into_iter().map(Into::into).collect(),
             lossless: true,
+            incremental: false,
         });
         self
     }
@@ -1780,6 +1804,39 @@ impl Description {
             EndpointKind::Endpoint => panic!(
                 "`Description::lossy` on `{}`, which is not a transreptor: declare the \
                  conversions first (`.transreptor(from, to).lossy()`)",
+                self.id
+            ),
+        }
+        self
+    }
+
+    /// Declare the transreptor **incremental** (builder, ledger #2239): it reads its
+    /// `content` as a body, as it comes, and never needs it whole, so a plan hands it a
+    /// streamed body without collecting it first (see [`Transreption::incremental`]).
+    /// Follows [`transreptor`](Self::transreptor).
+    ///
+    /// # Panics
+    ///
+    /// If the endpoint is not a transreptor, as [`lossy`](Self::lossy) does: there is no
+    /// plan step to hand a body to.
+    ///
+    /// ```
+    /// use ikigai_core::Description;
+    ///
+    /// let gunzip = Description::new("gunzip")
+    ///     .transreptor(["application/gzip"], ["application/octet-stream"])
+    ///     .incremental();
+    /// assert!(gunzip.transreption().unwrap().is_incremental());
+    /// // Saying nothing is handed a collected body.
+    /// let plain = Description::new("plain").transreptor(["text/a"], ["text/b"]);
+    /// assert!(!plain.transreption().unwrap().is_incremental());
+    /// ```
+    pub fn incremental(mut self) -> Self {
+        match &mut self.kind {
+            EndpointKind::Transreptor(t) => t.incremental = true,
+            EndpointKind::Endpoint => panic!(
+                "`Description::incremental` on `{}`, which is not a transreptor: declare the \
+                 conversions first (`.transreptor(from, to).incremental()`)",
                 self.id
             ),
         }

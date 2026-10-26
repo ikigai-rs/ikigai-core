@@ -42,6 +42,10 @@ pub(crate) enum DepKind {
     /// It failed with any other error but a miss (`Unresolved` / `NotFound` hang a
     /// thread instead): the kernel cannot name what would make the failure go away.
     Failed,
+    /// It is a body handed over by a content id that is not the bytes' digest (a
+    /// one-shot or unhashed body a plan attached, ledger #2239): a request carrying it
+    /// never repeats, so nothing built on it is stored.
+    OneShot,
 }
 
 impl DepKind {
@@ -50,6 +54,7 @@ impl DepKind {
             DepKind::Volatile => "dependency",
             DepKind::Denied => "denied",
             DepKind::Failed => "failed",
+            DepKind::OneShot => "one-shot content",
         }
     }
 }
@@ -135,7 +140,12 @@ impl fmt::Display for Uncached {
         if self.declared {
             clauses.push("declared".to_string());
         }
-        for kind in [DepKind::Volatile, DepKind::Denied, DepKind::Failed] {
+        for kind in [
+            DepKind::Volatile,
+            DepKind::Denied,
+            DepKind::Failed,
+            DepKind::OneShot,
+        ] {
             let names: Vec<&str> = self
                 .deps
                 .names

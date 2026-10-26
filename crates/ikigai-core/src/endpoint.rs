@@ -646,6 +646,16 @@ impl Recorded {
         }
     }
 
+    /// The invocation read a body attached under a nonce id (ledger #2239): its answer
+    /// can never be asked for again, so it is made uncacheable, and the note says why.
+    fn one_shot(&self, id: &crate::ContentId) {
+        let mut deps = self.deps.lock().expect("deps lock");
+        deps.meet(Expiry::Always);
+        if let Ok(name) = Iri::parse(id.to_string()) {
+            deps.volatile.note(DepKind::OneShot, &name);
+        }
+    }
+
     /// A miss (`Unresolved` / `NotFound`): an edge on the missing `name`, and
     /// whatever the failed resolution itself depended on (`carried`) — its threads,
     /// and its expiry met into this invocation's, as a success's would be.
@@ -1430,6 +1440,16 @@ impl<'a> Invocation<'a> {
     /// endpoint's read, and the endpoint returns that error: nothing built on it is
     /// stored, because errors never reach the cache.
     pub async fn issue_body(&self, request: Request) -> Result<Representation<crate::Body>> {
+        self.issue_body_in(request, self.run.clone()).await
+    }
+
+    /// [`issue_body`](Self::issue_body) under `run`, a context derived from this
+    /// invocation's own (one with a body attached, [`transrept`](Self::transrept)).
+    async fn issue_body_in(
+        &self,
+        request: Request,
+        run: crate::run::IssueContext,
+    ) -> Result<Representation<crate::Body>> {
         let issuer = self
             .issuer
             .ok_or_else(|| Error::Endpoint("sub-requests require a kernel context".to_string()))?;
@@ -1442,7 +1462,7 @@ impl<'a> Invocation<'a> {
                 self.trace.clone(),
                 self.scope.clone(),
                 self.depth + 1,
-                self.run.clone(),
+                run,
             )
             .await;
         self.recorded.record(&requested, &result, carried);
@@ -1485,15 +1505,118 @@ impl<'a> Invocation<'a> {
                 let target = target.clone();
                 Ok(self.source_body(&target).await?.bytes)
             }
-            Some(ArgRef::Content(id)) => Err(Error::Unsupported {
-                verb: None,
-                detail: format!(
-                    "argument `{name}` names content {id}, and this kernel has no content store \
-                     to resolve it"
-                ),
-            }),
+            Some(ArgRef::Content(id)) => {
+                // A body the run attached for this very request (a plan's incremental
+                // step, ledger #2239): resolved here, inside the invocation that carries
+                // its id, and nowhere else.
+                if let Some(attached) = self.run.attached() {
+                    if let Some(body) = attached.body_for(id) {
+                        if attached.is_nonce() {
+                            self.recorded.one_shot(id);
+                        }
+                        return body.ok_or_else(|| {
+                            Error::Conflict(format!(
+                                "argument `{name}` names one-shot content {id}, already read once"
+                            ))
+                        });
+                    }
+                }
+                Err(Error::Unsupported {
+                    verb: None,
+                    detail: format!(
+                        "argument `{name}` names content {id}, and this kernel has no content \
+                         store to resolve it"
+                    ),
+                })
+            }
             None => Err(Error::MissingArgument(name.to_string())),
         }
+    }
+
+    /// Run a transreption **plan** over `input` ([`select_transreptor`](Self::select_transreptor)
+    /// plans it): each step is issued as a sub-request, recorded as a dependency like any
+    /// other, with `as` set to the step's target type, and its answer is the next step's
+    /// input (ledger #2239).
+    ///
+    /// How a step is handed its input depends on the step:
+    ///
+    /// - An [`incremental`](crate::TransreptionStep::incremental) step is handed the body
+    ///   **as it is, uncollected**: a buffer inline, anything streamed by content id
+    ///   (`content=b3:…`), attached to that one request and resolved only by its
+    ///   invocation ([`content_body`](Self::content_body)). The id is the bytes' digest
+    ///   when the body knows it (a [`Replay`](crate::Replay) with a validator), so the step
+    ///   is cached on it; otherwise it is a nonce, and the step's answer is never stored
+    ///   (the uncached note says `one-shot content`).
+    /// - Any other step is handed the body collected, under the run's byte budget
+    ///   ([`collect`](Self::collect)), inline, exactly as before bodies existed.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     AsyncFnEndpoint, Body, Bytes, Capability, EndpointSpace, Exact, Iri, Kernel, ReprType,
+    ///     Representation, Request, Verb,
+    /// };
+    ///
+    /// // A page that decodes a streamed body through whatever plan reaches `text/plain`:
+    /// // here the kernel's own incremental `urn:stream:text`, never collected on the way.
+    /// let page = AsyncFnEndpoint::new("page", |inv| {
+    ///     Box::pin(async move {
+    ///         let chunks = [Ok(Bytes::from_static(b"caf\xc3")), Ok(Bytes::from_static(b"\xa9"))];
+    ///         let streamed = Representation::from_body(
+    ///             ReprType::new("application/octet-stream"),
+    ///             Body::once(futures::stream::iter(chunks)),
+    ///         );
+    ///         let plan = inv
+    ///             .select_transreptor("application/octet-stream", "text/plain")
+    ///             .expect("urn:stream:text is a kernel builtin");
+    ///         assert!(plan[0].incremental);
+    ///         let text = inv.transrept(streamed, &plan).await?;
+    ///         Ok(Representation::new(text.repr_type.clone(), inv.collect(text.bytes).await?.to_vec()))
+    ///     })
+    /// });
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:page"), page)));
+    /// let read = Request::new(Verb::Source, Iri::parse("urn:page").unwrap());
+    /// let answer = block_on(kernel.issue(read, &Capability::root())).unwrap();
+    /// assert_eq!(answer.bytes, "café".as_bytes());
+    /// ```
+    pub async fn transrept(
+        &self,
+        input: Representation<crate::Body>,
+        plan: &[crate::TransreptionStep],
+    ) -> Result<Representation<crate::Body>> {
+        let mut current = input;
+        for step in plan {
+            let target = Iri::parse(&step.endpoint).map_err(|e| {
+                Error::Endpoint(format!("bad transreptor IRI `{}`: {e}", step.endpoint))
+            })?;
+            let request = Request::new(Verb::Source, target)
+                .with_arg("as", ArgRef::Inline(step.to.clone().into_bytes()));
+            current = match current.bytes {
+                crate::Body::Bytes(bytes) => {
+                    let request = request.with_arg("content", ArgRef::Inline(Vec::from(bytes)));
+                    self.issue_body(request).await?
+                }
+                streamed if step.incremental => {
+                    let (id, nonce) = match &streamed {
+                        crate::Body::Replay(replay) => match replay.validator() {
+                            Some(id) => (id, false),
+                            None => (nonce_id(), true),
+                        },
+                        _ => (nonce_id(), true),
+                    };
+                    let request = request.with_arg("content", ArgRef::Content(id));
+                    let run = self.run.clone().with_attached(id, streamed, nonce);
+                    self.issue_body_in(request, run).await?
+                }
+                streamed => {
+                    let bytes = self.collect(streamed).await?;
+                    let request = request.with_arg("content", ArgRef::Inline(Vec::from(bytes)));
+                    self.issue_body(request).await?
+                }
+            };
+        }
+        Ok(current)
     }
 
     /// Hang this invocation's answer from `thread`, **whether the endpoint succeeds
@@ -2155,6 +2278,19 @@ impl Endpoint for AsyncFnEndpoint {
             .clone()
             .unwrap_or_else(|| Description::new(&self.name))
     }
+}
+
+/// A content id that names no bytes: what a streamed body whose digest is not known
+/// before it is read is attached under ([`Invocation::transrept`]). Unique per process run
+/// (a counter, keyed apart from every digest), so no two attachments share one.
+fn nonce_id() -> crate::ContentId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut h = blake3::Hasher::new();
+    h.update(b"ikigai.content.nonce.v0");
+    h.update(&n.to_le_bytes());
+    h.update(&(std::process::id() as u64).to_le_bytes());
+    crate::ContentId::of(h.finalize().as_bytes())
 }
 
 #[cfg(test)]

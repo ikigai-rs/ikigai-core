@@ -393,6 +393,7 @@ fn a_module_seals_a_name_in_its_namespace_and_another_modules_copy_is_never_cons
         kernel.sealed(),
         [
             ("urn:kernel:".to_string(), SealOwner::Core),
+            ("urn:stream:".to_string(), SealOwner::Core),
             (
                 "urn:m:key".to_string(),
                 SealOwner::Level(iri("urn:example:level:m"))
@@ -548,7 +549,10 @@ fn a_kernel_with_no_seals_beyond_cores_reports_just_that() {
     let kernel = Kernel::new(Arc::new(EndpointSpace::new()));
     assert_eq!(
         kernel.sealed(),
-        [("urn:kernel:".to_string(), SealOwner::Core)]
+        [
+            ("urn:kernel:".to_string(), SealOwner::Core),
+            ("urn:stream:".to_string(), SealOwner::Core),
+        ]
     );
     let kernel = kernel
         .with_sealed(["urn:cap:", "urn:secret:"])
@@ -557,6 +561,7 @@ fn a_kernel_with_no_seals_beyond_cores_reports_just_that() {
         kernel.sealed(),
         [
             ("urn:kernel:".to_string(), SealOwner::Core),
+            ("urn:stream:".to_string(), SealOwner::Core),
             ("urn:cap:".to_string(), SealOwner::Host),
             ("urn:secret:".to_string(), SealOwner::Host),
             ("urn:sign:".to_string(), SealOwner::Host),
