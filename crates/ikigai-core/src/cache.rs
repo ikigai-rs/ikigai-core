@@ -113,25 +113,23 @@ impl CacheKey {
 /// stored. The entry is valid only while every thread is still at that generation —
 /// cut any of them and it is stale.
 ///
-/// `Serialize`/`Deserialize` keep the door open for an ejected cache, and **serializing
-/// one of these is not the hard part of ejection, nor permission to import one**:
-/// `generation` is a per-process counter and means nothing in another instance. See
-/// `docs/design/cache-ejection.md`.
+/// `Serialize`/`Deserialize` are derived because everything inside already is, and
+/// keeping the door open for an ejected cache costs nothing here. **Serializing one
+/// of these is not the hard part of ejection, and this derive is not permission to
+/// import one** — `generation` is a per-process counter and means nothing in another
+/// instance. See `docs/design/cache-ejection.md`.
 ///
-/// Since bodies (ledger #2237) the impls are written by hand, because an entry holds a
-/// [`Body`] and a body deliberately does not serialize. An entry whose body is a buffer
-/// encodes exactly as the derive did before (its representation as
-/// `Representation<Vec<u8>>`), and one whose body is a [`Replay`](crate::Replay) (a file,
-/// a store) is refused with a serializer error rather than read in full behind the
-/// caller's back. What deserializes is a buffer.
-#[derive(Debug)]
+/// This is the BUFFER face of an entry, exactly as 0.1.112 published it (ledger #2261).
+/// Since streamed bodies (ledger #2237) the cache itself holds a body that can be read
+/// again (a buffer or a [`Replay`](crate::Replay)) in a private slot of the same shape;
+/// [`ReprCache::get_body`] and [`ReprCache::store_body`] are its body face.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CacheEntry {
     /// The IRI of the request that produced this entry — kept so `urn:kernel:cache`
     /// can name what is cached (the cache is otherwise keyed by a content hash).
     pub target: String,
-    /// The cached representation itself: a body that can be read again (a buffer or a
-    /// [`Replay`](crate::Replay)), never a one-shot stream.
-    pub representation: Representation<Body>,
+    /// The cached representation itself.
+    pub representation: Representation,
     /// The golden threads this entry depends on, each pinned to a generation.
     pub edges: Vec<(Thread, u64)>,
     /// What it cost to produce, in milliseconds, when the kernel had a clock to
@@ -146,82 +144,27 @@ pub struct CacheEntry {
     pub last_used_tick: u64,
 }
 
-/// The encoding of a [`CacheEntry`], field for field what the derive produced when the
-/// entry held a `Representation<Vec<u8>>`: same names, same order, the body as a byte
-/// sequence.
-#[derive(Serialize)]
-#[serde(rename = "CacheEntry")]
-struct EntryOut<'a> {
-    target: &'a str,
-    representation: ReprOut<'a>,
-    edges: &'a [(Thread, u64)],
-    cost_millis: Option<u64>,
-    hits: u64,
-    stored_tick: u64,
-    last_used_tick: u64,
+impl CacheEntry {
+    /// The entry's size in bytes: the representation's payload. Metadata overhead is
+    /// deliberately not counted — the bound is about what the cache is *holding*,
+    /// and a policy comparing entries wants the number it can also reason about.
+    pub fn bytes(&self) -> usize {
+        self.representation.bytes.len()
+    }
 }
 
-/// [`Representation`]'s serialized fields (its threads are `serde(skip)`), over a borrowed
-/// buffer.
-#[derive(Serialize)]
-#[serde(rename = "Representation")]
-struct ReprOut<'a> {
-    repr_type: &'a crate::ReprType,
-    bytes: &'a [u8],
-    expiry: Expiry,
-}
-
-/// What a [`CacheEntry`] deserializes from: the derive's shape, with a buffer body.
-#[derive(Deserialize)]
-#[serde(rename = "CacheEntry")]
-struct EntryIn {
+/// What the cache actually holds for one key: [`CacheEntry`]'s fields over a body that
+/// can be read again (ledger #2237). Private, so the public entry keeps its 0.1.112
+/// shape (ledger #2261).
+#[derive(Debug)]
+struct Slot {
     target: String,
-    representation: Representation,
+    representation: Representation<Body>,
     edges: Vec<(Thread, u64)>,
     cost_millis: Option<u64>,
     hits: u64,
     stored_tick: u64,
     last_used_tick: u64,
-}
-
-impl Serialize for CacheEntry {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let Some(bytes) = self.representation.bytes.as_bytes() else {
-            return Err(serde::ser::Error::custom(
-                "a cache entry whose body is a replay (a file, a store) does not serialize: \
-                 only a buffer body has bytes to write",
-            ));
-        };
-        EntryOut {
-            target: &self.target,
-            representation: ReprOut {
-                repr_type: &self.representation.repr_type,
-                bytes,
-                expiry: self.representation.expiry,
-            },
-            edges: &self.edges,
-            cost_millis: self.cost_millis,
-            hits: self.hits,
-            stored_tick: self.stored_tick,
-            last_used_tick: self.last_used_tick,
-        }
-        .serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for CacheEntry {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let entry = EntryIn::deserialize(deserializer)?;
-        Ok(CacheEntry {
-            target: entry.target,
-            representation: entry.representation.into_body(),
-            edges: entry.edges,
-            cost_millis: entry.cost_millis,
-            hits: entry.hits,
-            stored_tick: entry.stored_tick,
-            last_used_tick: entry.last_used_tick,
-        })
-    }
 }
 
 /// What the kernel's resolution path answers with (ledger #2237): a body, or, for a
@@ -245,22 +188,19 @@ impl Answer {
 }
 
 /// What a body counts against the byte bound: its length, or `usize::MAX` when it does
-/// not know it (see [`CacheEntry::bytes`]).
+/// not know it (see [`Slot::bytes`]).
 fn body_size(body: &Body) -> usize {
     body.len_hint()
         .and_then(|len| usize::try_from(len).ok())
         .unwrap_or(usize::MAX)
 }
 
-impl CacheEntry {
-    /// The entry's size in bytes: the representation's payload. Metadata overhead is
-    /// deliberately not counted — the bound is about what the cache is *holding*,
-    /// and a policy comparing entries wants the number it can also reason about.
-    ///
-    /// A [`Replay`](crate::Replay) counts its length hint, which is conservative for one
-    /// backed by a file (it holds no memory) until a spill budget exists; one that does
-    /// not know its length counts as `usize::MAX`, so no bounded policy admits it.
-    pub fn bytes(&self) -> usize {
+impl Slot {
+    /// [`CacheEntry::bytes`] over a body. A [`Replay`](crate::Replay) counts its length
+    /// hint, which is conservative for one backed by a file (it holds no memory) until a
+    /// spill budget exists; one that does not know its length counts as `usize::MAX`, so
+    /// no bounded policy admits it.
+    fn bytes(&self) -> usize {
         body_size(&self.representation.bytes)
     }
 
@@ -571,7 +511,7 @@ pub struct ReprCache {
 }
 
 struct CacheState {
-    entries: HashMap<CacheKey, CacheEntry>,
+    entries: HashMap<CacheKey, Slot>,
     /// Current generation of each golden thread (absent ⇒ generation 0).
     generations: HashMap<Thread, u64>,
     /// The most recent cuts, oldest first, as `(thread, sequence)`.
@@ -622,27 +562,19 @@ impl ReprCache {
     /// `now` is the kernel's clock reading, or `None` on a clock-free kernel (which
     /// conservatively treats any deadline as passed).
     ///
-    /// The answer is a second handle on the stored body: a buffer is shared, not copied
-    /// (since bodies, ledger #2237).
-    pub fn get(&self, key: &CacheKey, now: Option<Time>) -> Option<Representation<Body>> {
-        let mut state = self.state.lock().expect("cache lock");
-        match state.entries.get(key) {
-            None => None,
-            Some(entry) if !state.is_valid(entry, now) => {
-                if let Some(evicted) = state.entries.remove(key) {
-                    state.bytes = state.bytes.saturating_sub(evicted.bytes());
-                }
-                None
-            }
-            Some(_) => {
-                state.tick += 1;
-                let tick = state.tick;
-                let entry = state.entries.get_mut(key).expect("entry present");
-                entry.hits += 1;
-                entry.last_used_tick = tick;
-                entry.representation.share()
-            }
-        }
+    /// The buffer face, as 0.1.112 published it (ledger #2261): the answer is the stored
+    /// buffer, copied out. An entry whose body is a [`Replay`](crate::Replay) (stored
+    /// through [`store_body`](Self::store_body)) is not a buffer and is not read behind
+    /// the caller's back: it answers `None` here, without counting a hit, and is served by
+    /// [`get_body`](Self::get_body).
+    pub fn get(&self, key: &CacheKey, now: Option<Time>) -> Option<Representation> {
+        self.serve(key, now, Representation::copied)
+    }
+
+    /// [`get`](Self::get)'s body face (ledger #2237): a second handle on the stored body,
+    /// a buffer shared without copying or a [`Replay`](crate::Replay).
+    pub fn get_body(&self, key: &CacheKey, now: Option<Time>) -> Option<Representation<Body>> {
+        self.serve(key, now, Representation::share)
     }
 
     /// [`get`](Self::get), in the face the kernel's caller asked for (ledger #2237): with
@@ -655,6 +587,24 @@ impl ReprCache {
         now: Option<Time>,
         buffer: bool,
     ) -> Option<Answer> {
+        self.serve(key, now, |stored| {
+            if buffer {
+                if let Some(copy) = stored.copied() {
+                    return Some(Answer::Buffer(copy));
+                }
+            }
+            stored.share().map(Answer::Body)
+        })
+    }
+
+    /// The one serving path behind every face: a stale entry is evicted, and a valid one
+    /// counts a hit only when `face` can answer from it.
+    fn serve<T>(
+        &self,
+        key: &CacheKey,
+        now: Option<Time>,
+        face: impl FnOnce(&Representation<Body>) -> Option<T>,
+    ) -> Option<T> {
         let mut state = self.state.lock().expect("cache lock");
         match state.entries.get(key) {
             None => None,
@@ -664,19 +614,14 @@ impl ReprCache {
                 }
                 None
             }
-            Some(_) => {
+            Some(entry) => {
+                let answer = face(&entry.representation)?;
                 state.tick += 1;
                 let tick = state.tick;
                 let entry = state.entries.get_mut(key).expect("entry present");
                 entry.hits += 1;
                 entry.last_used_tick = tick;
-                let stored = &entry.representation;
-                if buffer {
-                    if let Some(copy) = stored.copied() {
-                        return Some(Answer::Buffer(copy));
-                    }
-                }
-                stored.share().map(Answer::Body)
+                Some(answer)
             }
         }
     }
@@ -696,16 +641,30 @@ impl ReprCache {
     /// `taken` (the lost-cut race) or the policy declines to admit it. Returns
     /// whether it was stored — `false` is always a safe outcome.
     ///
-    /// A one-shot body ([`Body::Once`]) is never stored: `false`.
+    /// The buffer face, as 0.1.112 published it (ledger #2261); the buffer moves into the
+    /// entry without a copy. [`store_body`](Self::store_body) is the body face.
     pub fn store(
         &self,
         key: CacheKey,
         target: String,
-        representation: impl Into<Representation<Body>>,
+        representation: Representation,
         taken: CutSnapshot,
         cost_millis: Option<u64>,
     ) -> bool {
-        self.store_outcome(key, target, &representation.into(), taken, cost_millis)
+        self.store_body(key, target, representation.into_body(), taken, cost_millis)
+    }
+
+    /// [`store`](Self::store)'s body face (ledger #2237). A one-shot body
+    /// ([`Body::Once`]) is never stored: `false`.
+    pub fn store_body(
+        &self,
+        key: CacheKey,
+        target: String,
+        representation: Representation<Body>,
+        taken: CutSnapshot,
+        cost_millis: Option<u64>,
+    ) -> bool {
+        self.store_outcome(key, target, &representation, taken, cost_millis)
             .is_ok()
     }
 
@@ -764,7 +723,7 @@ impl ReprCache {
         if !self.policy.admit(&candidate) {
             return Err(Declined::Policy);
         }
-        let entry = CacheEntry {
+        let entry = Slot {
             target,
             representation: representation.share().ok_or(Declined::Policy)?,
             edges,
@@ -1047,13 +1006,13 @@ impl CacheState {
     /// its pinned generation, and any deadline is still in the future. The single
     /// source of truth behind both [`ReprCache::get`] and [`ReprCache::probe`], so
     /// the serving path and the read-only probe can never disagree.
-    fn is_valid(&self, entry: &CacheEntry, now: Option<Time>) -> bool {
+    fn is_valid(&self, entry: &Slot, now: Option<Time>) -> bool {
         self.state_of(entry, now).is_live()
     }
 
     /// [`is_valid`](Self::is_valid), saying which half failed — a cut edge is
     /// reported ahead of a passed deadline, since the cut is the one an edit caused.
-    fn state_of(&self, entry: &CacheEntry, now: Option<Time>) -> EntryState {
+    fn state_of(&self, entry: &Slot, now: Option<Time>) -> EntryState {
         let edges_current = entry
             .edges
             .iter()
