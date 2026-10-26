@@ -202,11 +202,11 @@ impl Provenance {
 /// M0 carries the universal byte form; richer in-memory forms (RDF graphs,
 /// solution sets) arrive with the store.
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct Representation {
+pub struct Representation<B = Vec<u8>> {
     /// The representation type.
     pub repr_type: ReprType,
     /// The representation's bytes.
-    pub bytes: Vec<u8>,
+    pub bytes: B,
     /// Cache validity; defaults to [`Expiry::Always`] (uncacheable).
     #[serde(default)]
     pub expiry: Expiry,
@@ -237,7 +237,7 @@ static NO_THREADS: BTreeSet<Thread> = BTreeSet::new();
 // Threads are cache provenance, not content: two representations with the same
 // type and bytes are equal regardless of how their validity was tracked. (Also
 // keeps wire round-trips equal, since `threads` is `serde(skip)`.)
-impl PartialEq for Representation {
+impl<B: PartialEq> PartialEq for Representation<B> {
     fn eq(&self, other: &Self) -> bool {
         self.repr_type == other.repr_type
             && self.bytes == other.bytes
@@ -245,9 +245,9 @@ impl PartialEq for Representation {
     }
 }
 
-impl Eq for Representation {}
+impl<B: Eq> Eq for Representation<B> {}
 
-impl Representation {
+impl Representation<Vec<u8>> {
     /// Build a representation from a type and bytes (uncacheable by default).
     pub fn new(repr_type: ReprType, bytes: impl Into<Vec<u8>>) -> Self {
         Representation {
@@ -258,6 +258,17 @@ impl Representation {
         }
     }
 
+    /// The content address of this representation (its type and bytes together).
+    pub fn content_id(&self) -> ContentId {
+        let mut h = blake3::Hasher::new();
+        feed_str(&mut h, "ikigai.repr.v0");
+        feed_str(&mut h, &self.repr_type.canonical());
+        feed_bytes(&mut h, &self.bytes);
+        ContentId::from_hasher(h)
+    }
+}
+
+impl<B> Representation<B> {
     /// Mark this representation permanently cacheable ([`Expiry::Never`]).
     pub fn cacheable(mut self) -> Self {
         self.expiry = Expiry::Never;
@@ -303,15 +314,6 @@ impl Representation {
     pub(crate) fn with_threads(mut self, threads: BTreeSet<Thread>) -> Self {
         self.threads = (!threads.is_empty()).then(|| Arc::new(threads));
         self
-    }
-
-    /// The content address of this representation (its type and bytes together).
-    pub fn content_id(&self) -> ContentId {
-        let mut h = blake3::Hasher::new();
-        feed_str(&mut h, "ikigai.repr.v0");
-        feed_str(&mut h, &self.repr_type.canonical());
-        feed_bytes(&mut h, &self.bytes);
-        ContentId::from_hasher(h)
     }
 }
 
