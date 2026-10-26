@@ -44,15 +44,22 @@ use crate::topology::{MatchKind, SpaceKind, Topology};
 /// is built exactly as cheaply as it was. Monotone: set, never cleared.
 pub(crate) static SEALING_LEVELS: AtomicBool = AtomicBool::new(false);
 
-/// The prefix core seals: the kernel's own namespace, answered ahead of every
-/// chain.
-pub(crate) const CORE_SEAL: &str = "urn:kernel:";
+/// The prefixes core seals: the kernel's own namespace and the stream builtins
+/// (ledger #2239), each answered by the kernel ahead of every chain.
+pub(crate) const CORE_SEALS: [&str; 2] = ["urn:kernel:", crate::stream::STREAM_PREFIX];
+
+fn core_claims() -> Vec<(String, SealOwner)> {
+    CORE_SEALS
+        .iter()
+        .map(|prefix| (prefix.to_string(), SealOwner::Core))
+        .collect()
+}
 
 /// Who owns a sealed prefix.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SealOwner {
-    /// This crate: `urn:kernel:`.
+    /// This crate: `urn:kernel:` and `urn:stream:`.
     Core,
     /// The host that built the kernel ([`Kernel::with_sealed`](crate::Kernel::with_sealed)).
     Host,
@@ -247,7 +254,7 @@ pub(crate) struct Seals {
 impl Default for Seals {
     fn default() -> Self {
         Seals {
-            claims: vec![(CORE_SEAL.to_string(), SealOwner::Core)],
+            claims: core_claims(),
             levels: Vec::new(),
             trivial: true,
         }
@@ -270,7 +277,7 @@ impl Seals {
         let mut found = Found::default();
         found.walk(tree, &mut Vec::new(), Some(String::new()));
 
-        let mut claims: Vec<(String, SealOwner)> = vec![(CORE_SEAL.to_string(), SealOwner::Core)];
+        let mut claims: Vec<(String, SealOwner)> = core_claims();
         claims.extend(host.iter().map(|p| (p.clone(), SealOwner::Host)));
         for level in &found.levels {
             for prefix in &level.seals {
@@ -314,7 +321,7 @@ impl Seals {
                 }
             }
         }
-        let trivial = claims.len() == 1;
+        let trivial = claims.len() == CORE_SEALS.len();
         let mut levels: Vec<(Iri, u64)> = Vec::new();
         for level in &found.levels {
             if let Some(serial) = level.serial {

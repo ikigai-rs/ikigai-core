@@ -713,6 +713,13 @@ pub struct Kernel {
     ///
     /// [`MemoryLimits::default`]: crate::MemoryLimits::default
     memory: crate::run::MemoryLimits,
+    /// The stream builtins (`urn:stream:*`, ledger #2239): answered by the kernel ahead of
+    /// every chain, as `urn:kernel:*` is, so no module can answer for them. Planned
+    /// through by transreptor selection, but NOT listed by [`entries`](Self::entries) or
+    /// the catalog yet: `ikigai-conformance` walks every listed name outside
+    /// `urn:kernel:`, so listing them would put core's builtins under every module's
+    /// suite (the hub's report carries the conformance contract that lets them be listed).
+    streams: Arc<dyn Space>,
     /// The declared floor of every endpoint resolved so far, memoized per endpoint
     /// identity — see [`FloorMemo`]. Consulted on every request (the floor runs
     /// before the cache lookup); cleared by a cut of [`BINDINGS_THREAD`].
@@ -1482,6 +1489,7 @@ impl Kernel {
             max_depth: DEFAULT_MAX_DEPTH,
             retry: None,
             memory: crate::run::MemoryLimits::default(),
+            streams: Arc::new(crate::stream::space()),
             floors: FloorMemo::default(),
             probes: ProbeMemo::default(),
             scope_names: Mutex::new(BTreeMap::new()),
@@ -1641,7 +1649,10 @@ impl Kernel {
         to: &str,
         policy: &TransreptionPolicy,
     ) -> Option<Vec<TransreptionStep>> {
-        crate::select::select_transreptor_with(self.root.as_ref(), from, to, policy)
+        // The root's transreptors first, then the kernel's stream builtins (ledger #2239):
+        // a module's own conversion is preferred where both exist.
+        let planned = Fallback::new(vec![Arc::clone(&self.root), Arc::clone(&self.streams)]);
+        crate::select::select_transreptor_with(&planned, from, to, policy)
     }
 
     /// [`select_transreptor`](Self::select_transreptor) **in a resolution chain**:
@@ -1675,7 +1686,11 @@ impl Kernel {
         if scope.is_empty() {
             return self.select_transreptor_with(from, to, policy);
         }
-        crate::select::select_transreptor_with(&scope.view(None, &self.root), from, to, policy)
+        let planned = Fallback::new(vec![
+            Arc::new(scope.view(None, &self.root)) as Arc<dyn Space>,
+            Arc::clone(&self.streams),
+        ]);
+        crate::select::select_transreptor_with(&planned, from, to, policy)
     }
 
     /// Install an `rdfs:subClassOf` axiom set — `(subclass, superclass)` IRI pairs, e.g.
@@ -3376,7 +3391,14 @@ impl Kernel {
         // miss, exactly as if nothing were bound. That "exactly" is the point of
         // confinement: the caller cannot tell a name outside the chain from a name
         // that does not exist, so there is no decision here to misconfigure.
-        let mut resolved = match scope.resolve_in(&request, &self.root, &self.seals) {
+        // The stream builtins are the kernel's own: answered from its space whatever the
+        // chain, as `urn:kernel:*` is answered ahead of every chain (ledger #2239).
+        let resolution = if crate::stream::is_stream(request.target.as_str()) {
+            Ok(self.streams.resolve(&request, &Scope::empty()))
+        } else {
+            scope.resolve_in(&request, &self.root, &self.seals)
+        };
+        let mut resolved = match resolution {
             Ok(Resolution::Hit(resolved)) => resolved,
             // A sealed name answered where its owner is not — through something the
             // build-time check could not see. Refused, and said so on the trace.
@@ -3453,6 +3475,14 @@ impl Kernel {
         // The seal check refuses this on most paths already (`Seals::admit`); this
         // is the one that holds on every path, the host's corridors included.
         if let Some(canonical) = resolved.canonical.as_ref() {
+            if crate::stream::is_stream(canonical.as_str()) {
+                return Err(Error::Endpoint(format!(
+                    "`{}` was rewritten by a space to `{}`, inside the stream builtins' \
+                     namespace — `urn:stream:` is answered only by the kernel: refused",
+                    request.target.as_str(),
+                    canonical.as_str()
+                )));
+            }
             if kernel_op(canonical.as_str()).is_some() {
                 return Err(Error::Endpoint(format!(
                     "`{}` was rewritten by a space to `{}`, inside the kernel's own \

@@ -53,14 +53,19 @@ pub struct TransreptionStep {
     /// step so a caller that consented to a lossy hop can still see which hop it was;
     /// under the default policy every step is `true` by construction.
     pub lossless: bool,
+    /// Whether the transreptor reads its input incrementally
+    /// ([`Transreption::incremental`](crate::Transreption::incremental)): a plan hands it
+    /// the body as it is, uncollected ([`Invocation::transrept`](crate::Invocation::transrept)).
+    pub incremental: bool,
 }
 
 impl TransreptionStep {
-    fn new(endpoint: &str, to: &str, lossless: bool) -> Self {
+    fn new(endpoint: &str, to: &str, lossless: bool, incremental: bool) -> Self {
         TransreptionStep {
             endpoint: endpoint.to_string(),
             to: to.to_string(),
             lossless,
+            incremental,
         }
     }
 }
@@ -124,6 +129,7 @@ struct Candidate {
     from: Vec<String>,
     to: Vec<String>,
     lossless: bool,
+    incremental: bool,
 }
 
 impl Candidate {
@@ -132,7 +138,7 @@ impl Candidate {
     }
 
     fn step(&self, to: &str) -> TransreptionStep {
-        TransreptionStep::new(&self.iri, to, self.lossless)
+        TransreptionStep::new(&self.iri, to, self.lossless, self.incremental)
     }
 }
 
@@ -262,6 +268,7 @@ fn collect(root: &dyn Space) -> Vec<Candidate> {
                         from: t.from.clone(),
                         to: t.to.clone(),
                         lossless: t.lossless,
+                        incremental: t.incremental,
                     });
                 }
             }

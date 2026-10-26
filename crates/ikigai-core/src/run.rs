@@ -459,6 +459,51 @@ pub struct IssueContext {
     retries: Option<RetryBudget>,
     not_after: Option<Time>,
     memory: Option<MemoryBudget>,
+    /// A body handed to ONE request by content id (ledger #2239): what a plan attaches
+    /// for an incremental step, resolved only by an invocation whose request carries
+    /// `ArgRef::Content` of that id. In-process: it never crosses a wire.
+    attached: Option<Arc<Attached>>,
+}
+
+/// A body attached to a run by content id ([`IssueContext::attached`]).
+pub(crate) struct Attached {
+    id: crate::content::ContentId,
+    /// The body; taken by the first reader when it is one-shot.
+    body: std::sync::Mutex<Option<crate::Body>>,
+    /// Whether `id` is a nonce rather than the digest of the bytes (a body whose digest is
+    /// not known before it is read): a request carrying it can never repeat, so nothing
+    /// built on it is worth storing.
+    nonce: bool,
+}
+
+impl Attached {
+    /// The attached body for `id`, when it is this one: a second handle on a body that can
+    /// be read again, or a one-shot body taken by its first reader (a second reader gets
+    /// `Some(None)`).
+    pub(crate) fn body_for(&self, id: &crate::content::ContentId) -> Option<Option<crate::Body>> {
+        if self.id != *id {
+            return None;
+        }
+        let mut slot = self.body.lock().expect("attached body lock");
+        Some(match slot.as_ref().and_then(crate::Body::share) {
+            Some(shared) => Some(shared),
+            None => slot.take(),
+        })
+    }
+
+    /// Whether the attachment's id is a nonce ([`Attached::nonce`]).
+    pub(crate) fn is_nonce(&self) -> bool {
+        self.nonce
+    }
+}
+
+impl fmt::Debug for Attached {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Attached")
+            .field("id", &self.id)
+            .field("nonce", &self.nonce)
+            .finish()
+    }
 }
 
 impl IssueContext {
@@ -545,7 +590,30 @@ impl IssueContext {
             retries,
             not_after: self.not_after,
             memory: Some(memory),
+            attached: self.attached,
         }
+    }
+
+    /// This context with `body` attached under `id` (ledger #2239): what
+    /// [`Invocation::transrept`](crate::Invocation::transrept) hands an incremental step.
+    /// `nonce` says `id` is not the bytes' digest.
+    pub(crate) fn with_attached(
+        mut self,
+        id: crate::content::ContentId,
+        body: crate::Body,
+        nonce: bool,
+    ) -> Self {
+        self.attached = Some(Arc::new(Attached {
+            id,
+            body: std::sync::Mutex::new(Some(body)),
+            nonce,
+        }));
+        self
+    }
+
+    /// The attached body, if any ([`with_attached`](Self::with_attached)).
+    pub(crate) fn attached(&self) -> Option<&Attached> {
+        self.attached.as_deref()
     }
 
     /// Whether this context's byte pool is `other`'s very pool (not merely an equal count).
