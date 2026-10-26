@@ -3,9 +3,9 @@
 //! today's constructors infer at real call sites with no annotation, and a
 //! `Representation<Vec<u8>>` serializes byte-for-byte as it did before the parameter
 //! existed (the fixtures below were captured from 0.1.112, before the change). So does a
-//! `CacheEntry` holding a buffer, whose serde impls are hand-written since bodies.
+//! `CacheEntry`, which keeps its 0.1.112 shape and derive (ledger #2261).
 
-use ikigai_core::{Body, CacheEntry, Expiry, ReprType, Representation, Thread, Time};
+use ikigai_core::{CacheEntry, Expiry, ReprType, Representation, Thread, Time};
 
 /// The fixture value: a parameter, a non-default expiry, and a thread (which is
 /// `serde(skip)`, so it must not appear in either encoding).
@@ -54,10 +54,10 @@ const ENTRY_POSTCARD_0_1_112: &[u8] = &[
 /// Captured from ikigai-core 0.1.112 (origin/main e1d21a9), with the same `entry()`.
 const ENTRY_JSON_0_1_112: &str = r#"{"target":"urn:x","representation":{"repr_type":{"media_type":"text/plain","params":{}},"bytes":[104,105],"expiry":{"At":5}},"edges":[["urn:x",3]],"cost_millis":7,"hits":2,"stored_tick":1,"last_used_tick":4}"#;
 
-fn entry(body: Body) -> CacheEntry {
+fn entry() -> CacheEntry {
     CacheEntry {
         target: "urn:x".into(),
-        representation: Representation::from_body(ReprType::new("text/plain"), body)
+        representation: Representation::new(ReprType::new("text/plain"), b"hi".to_vec())
             .with_expiry(Expiry::At(Time::from_millis(5))),
         edges: vec![(Thread::new("urn:x"), 3)],
         cost_millis: Some(7),
@@ -68,31 +68,13 @@ fn entry(body: Body) -> CacheEntry {
 }
 
 #[test]
-fn a_cache_entry_holding_a_buffer_encodes_as_the_derive_did() {
-    let buffered = entry(Body::from(b"hi".to_vec()));
-    assert_eq!(
-        postcard::to_stdvec(&buffered).unwrap(),
-        ENTRY_POSTCARD_0_1_112
-    );
-    assert_eq!(
-        serde_json::to_string(&buffered).unwrap(),
-        ENTRY_JSON_0_1_112
-    );
+fn a_cache_entry_encodes_as_it_did_in_0_1_112() {
+    let entry = entry();
+    assert_eq!(postcard::to_stdvec(&entry).unwrap(), ENTRY_POSTCARD_0_1_112);
+    assert_eq!(serde_json::to_string(&entry).unwrap(), ENTRY_JSON_0_1_112);
     let back: CacheEntry = postcard::from_bytes(ENTRY_POSTCARD_0_1_112).unwrap();
-    assert_eq!(back.representation.bytes.as_bytes().unwrap(), &b"hi"[..]);
-    assert_eq!(back.edges, buffered.edges);
-}
-
-#[test]
-fn a_cache_entry_holding_a_replay_is_refused_not_read() {
-    struct Never;
-    impl ikigai_core::Replay for Never {
-        fn open(&self) -> ikigai_core::ByteStream {
-            panic!("serializing an entry must not read its body");
-        }
-    }
-    let err = serde_json::to_string(&entry(Body::replay(Never))).unwrap_err();
-    assert!(err.to_string().contains("replay"), "{err}");
+    assert_eq!(back.representation, entry.representation);
+    assert_eq!(back.edges, entry.edges);
 }
 
 /// The call shapes the spike checked (ledger #2237): none needs an annotation. The one
