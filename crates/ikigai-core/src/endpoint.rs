@@ -190,6 +190,30 @@ pub trait Issuer: Send + Sync {
             .await
     }
 
+    /// [`issue_in_context`](Issuer::issue_in_context), answering with a body that may be
+    /// streamed (ledger #2237): the seam [`Invocation::issue_body`] calls. The kernel
+    /// overrides it to hand over the answer's body as the endpoint produced it.
+    ///
+    /// **The default delegates and wraps the buffer** as [`Body::Bytes`](crate::Body::Bytes),
+    /// so every issuer written before bodies existed answers a body request correctly,
+    /// with the collected answer it would have given anyway.
+    #[allow(clippy::too_many_arguments)] // the full seam, as `issue_in_context`
+    async fn issue_body_in_context(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<crate::TraceScope>,
+        scope: Scope,
+        depth: u32,
+        context: crate::run::IssueContext,
+    ) -> (Result<Representation<crate::Body>>, Dependencies) {
+        let (result, carried) = self
+            .issue_in_context(request, capability, parent, trace, scope, depth, context)
+            .await;
+        (result.map(Representation::into_body), carried)
+    }
+
     /// Merge a subtree of [`TraceEvent`](crate::TraceEvent)s produced by *another*
     /// kernel — a remote one reached through a mounted `RemoteSpace` — into `trace`,
     /// the [`TraceScope`](crate::TraceScope) of the resolution that forwarded the
@@ -581,7 +605,12 @@ impl Recorded {
     ///   consulted, not the name that was requested (a move conflicts on the board's
     ///   cells, not on the move's own IRI), so a thread on `requested` is one no write
     ///   would ever cut.
-    fn record(&self, requested: &Iri, result: &Result<Representation>, carried: Dependencies) {
+    fn record<B>(
+        &self,
+        requested: &Iri,
+        result: &Result<Representation<B>>,
+        carried: Dependencies,
+    ) {
         match result {
             Ok(representation) => {
                 let mut deps = self.deps.lock().expect("deps lock");
@@ -1339,6 +1368,83 @@ impl<'a> Invocation<'a> {
         result
     }
 
+    /// Issue a sub-request and take its answer's body **as the endpoint produced it**
+    /// (ledger #2237): a buffer, a body that can be read again, or a one-shot stream,
+    /// never collected on the way. Recorded as a dependency exactly as
+    /// [`issue`](Self::issue) records one, under this invocation's own capability and one
+    /// nesting level deeper.
+    ///
+    /// ★ **The dependency is recorded when the answer arrives, not when the body has been
+    /// read.** A stream that fails part-way while this endpoint reads it fails this
+    /// endpoint's read, and the endpoint returns that error: nothing built on it is
+    /// stored, because errors never reach the cache.
+    pub async fn issue_body(&self, request: Request) -> Result<Representation<crate::Body>> {
+        let issuer = self
+            .issuer
+            .ok_or_else(|| Error::Endpoint("sub-requests require a kernel context".to_string()))?;
+        let requested = request.target.clone();
+        let (result, carried) = issuer
+            .issue_body_in_context(
+                request,
+                self.capability,
+                self.span,
+                self.trace.clone(),
+                self.scope.clone(),
+                self.depth + 1,
+                self.run.clone(),
+            )
+            .await;
+        self.recorded.record(&requested, &result, carried);
+        result
+    }
+
+    /// `SOURCE` another resource as a body ([`issue_body`](Self::issue_body)), recording it
+    /// as a dependency.
+    pub async fn source_body(&self, target: &Iri) -> Result<Representation<crate::Body>> {
+        self.issue_body(Request::new(Verb::Source, target.clone()))
+            .await
+    }
+
+    /// The body behind argument `name` (ledger #2237), whichever way it was supplied: an
+    /// inline value as [`Body::Bytes`](crate::Body::Bytes); a reference through
+    /// [`source_body`](Self::source_body), recorded as a dependency like any sub-request.
+    /// A Sink that can take large content reads it this way.
+    ///
+    /// ⚠ A [`ArgRef::Content`] value is refused with [`Error::Unsupported`] until the
+    /// content store lands (ledger #2240, stage 4 of the streams design); nothing resolves
+    /// one today, here or anywhere.
+    ///
+    /// ```
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{ArgRef, Bindings, Capability, Invocation, Iri, Request, Verb};
+    ///
+    /// let request = Request::new(Verb::Sink, Iri::parse("urn:x").unwrap())
+    ///     .with_arg("content", ArgRef::Inline(b"hello".to_vec()));
+    /// let (bindings, capability) = (Bindings::new(), Capability::root());
+    /// let inv = Invocation::detached(&request, &bindings, &capability);
+    /// let body = block_on(inv.content_body("content")).unwrap();
+    /// assert_eq!(body.as_bytes().unwrap(), &b"hello"[..]);
+    /// ```
+    pub async fn content_body(&self, name: &str) -> Result<crate::Body> {
+        match self.request.args.get(name) {
+            Some(ArgRef::Inline(bytes)) => {
+                Ok(crate::Body::from(bytes::Bytes::copy_from_slice(bytes)))
+            }
+            Some(ArgRef::Reference(target)) => {
+                let target = target.clone();
+                Ok(self.source_body(&target).await?.bytes)
+            }
+            Some(ArgRef::Content(id)) => Err(Error::Unsupported {
+                verb: None,
+                detail: format!(
+                    "argument `{name}` names content {id}, and this kernel has no content store \
+                     to resolve it"
+                ),
+            }),
+            None => Err(Error::MissingArgument(name.to_string())),
+        }
+    }
+
     /// Hang this invocation's answer from `thread`, **whether the endpoint succeeds
     /// or fails** (ledger #1079).
     ///
@@ -1758,6 +1864,58 @@ impl SyncIssuer {
 pub trait Endpoint: Send + Sync {
     /// Produce a representation for the invocation.
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation>;
+
+    /// Produce a representation whose body may be streamed (ledger #2237): a buffer, a
+    /// body that can be read again ([`Body::Replay`](crate::Body::Replay)), or a one-shot
+    /// stream ([`Body::Once`](crate::Body::Once)). **This is what the kernel calls.** The
+    /// default wraps [`invoke`](Self::invoke)'s buffer as [`Body::Bytes`](crate::Body::Bytes)
+    /// without copying it, so every endpoint written before bodies existed answers exactly
+    /// as it did.
+    ///
+    /// An endpoint that streams overrides this, and its `invoke` collects under a bound, so
+    /// a caller holding only the bytes API is never handed an unbounded answer.
+    /// **Provenance closes when this returns**: the stream holds no `Invocation` (the
+    /// borrow forbids it), so every sub-request the answer depends on is made before the
+    /// body is returned, and the kernel decides about caching with all of them recorded.
+    ///
+    /// ⚠ An overlay that wraps one endpoint (a governor, a retry) should forward this as
+    /// it forwards `invoke`; one that does not still answers correctly, through the
+    /// default, but collects the inner endpoint's stream on the way.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use async_trait::async_trait;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     Body, Bytes, Capability, Endpoint, EndpointSpace, Exact, Invocation, Iri, Kernel,
+    ///     ReprType, Representation, Request, Result, Verb, COLLECT_LIMIT,
+    /// };
+    ///
+    /// struct Counter;
+    /// #[async_trait]
+    /// impl Endpoint for Counter {
+    ///     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+    ///         self.invoke_body(inv).await?.collect(COLLECT_LIMIT).await
+    ///     }
+    ///     async fn invoke_body(&self, _inv: &Invocation<'_>) -> Result<Representation<Body>> {
+    ///         let chunks = (1..=3).map(|n| Ok(Bytes::from(format!("{n} "))));
+    ///         Ok(Representation::from_body(
+    ///             ReprType::new("text/plain"),
+    ///             Body::once(futures::stream::iter(chunks)),
+    ///         ))
+    ///     }
+    /// }
+    ///
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:count"), Counter)));
+    /// let read = || Request::new(Verb::Source, Iri::parse("urn:count").unwrap());
+    /// // The bytes API collects the stream; the body API hands it over as it is.
+    /// assert_eq!(block_on(kernel.issue(read(), &Capability::root())).unwrap().bytes, b"1 2 3 ");
+    /// let body = block_on(kernel.issue_body(read(), &Capability::root())).unwrap();
+    /// assert!(body.bytes.is_one_shot());
+    /// ```
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<crate::Body>> {
+        self.invoke(inv).await.map(Representation::into_body)
+    }
 
     /// A short label for diagnostics.
     fn name(&self) -> &str {

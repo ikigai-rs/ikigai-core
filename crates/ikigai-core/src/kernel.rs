@@ -51,7 +51,8 @@ use async_trait::async_trait;
 
 use crate::alias::{Alias, AliasHop, AliasTable, Canonical};
 use crate::arg::ArgRef;
-use crate::cache::{CacheKey, CachePolicy, ReprCache};
+use crate::body::Body;
+use crate::cache::{Answer, CacheKey, CachePolicy, ReprCache};
 use crate::capability::Capability;
 use crate::describe::{ContractCaching, Description};
 use crate::endpoint::{Dependencies, Endpoint, Invocation, Issuer, Spawner};
@@ -439,6 +440,9 @@ pub const LEVEL_NOTE: &str = "level";
 /// - `+<n> more` — the three lists above name at most eight sub-requests between
 ///   them; this counts the rest, so a list that is not whole never reads as whole.
 /// - `upstream` — the piped input the stage folded in was `Always`.
+/// - `one-shot body` — the answer's body is a one-shot stream ([`Body::Once`]): it can
+///   be read once, so it is never stored, whatever its expiry (ledger #2237). Making
+///   such an answer cacheable is an explicit spill.
 /// - `no-clock` — an [`Expiry::At`] deadline on a kernel with no clock, which could
 ///   never tell when it expired.
 /// - `expired <ms>` — an `At` deadline already past on the kernel's clock when the
@@ -1374,6 +1378,11 @@ struct IssueCtx<'f> {
     /// Where a FAILED invocation's dependencies are written, so the endpoint that
     /// issued this sub-request can hang a fallback from them (ledger #611).
     failed: Option<&'f mut Dependencies>,
+    /// Whether the caller wants a BUFFER (every bytes entry point, the default) or the
+    /// body as the endpoint produced it (`issue_body` and its seam). Read only on a cache
+    /// hit: a buffer caller is handed a copy of the stored buffer directly, as before
+    /// bodies existed, instead of a shared handle it would then copy out of (ledger #2237).
+    buffer: bool,
 }
 
 impl IssueCtx<'_> {
@@ -1388,6 +1397,7 @@ impl IssueCtx<'_> {
             depth: 0,
             run: crate::run::IssueContext::new(),
             failed: None,
+            buffer: true,
         }
     }
 }
@@ -2708,13 +2718,16 @@ impl Kernel {
         // Top-level entry: no parent span (this is a trace root if one is recording
         // via the globally-installed tracer).
         let trace = self.global_scope();
-        self.issue_inner(
-            request,
-            capability,
-            IssueCtx {
-                trace,
-                ..IssueCtx::top()
-            },
+        collected(
+            self.issue_answer(
+                request,
+                capability,
+                IssueCtx {
+                    trace,
+                    ..IssueCtx::top()
+                },
+            )
+            .await,
         )
         .await
     }
@@ -2793,14 +2806,17 @@ impl Kernel {
         scope: Scope,
     ) -> Result<Representation> {
         let trace = self.global_scope();
-        self.issue_inner(
-            request,
-            capability,
-            IssueCtx {
-                trace,
-                scope,
-                ..IssueCtx::top()
-            },
+        collected(
+            self.issue_answer(
+                request,
+                capability,
+                IssueCtx {
+                    trace,
+                    scope,
+                    ..IssueCtx::top()
+                },
+            )
+            .await,
         )
         .await
     }
@@ -2826,13 +2842,16 @@ impl Kernel {
         capability: &Capability,
         tracer: Arc<dyn Tracer>,
     ) -> Result<Representation> {
-        self.issue_inner(
-            request,
-            capability,
-            IssueCtx {
-                trace: Some(TraceScope::new(tracer)),
-                ..IssueCtx::top()
-            },
+        collected(
+            self.issue_answer(
+                request,
+                capability,
+                IssueCtx {
+                    trace: Some(TraceScope::new(tracer)),
+                    ..IssueCtx::top()
+                },
+            )
+            .await,
         )
         .await
     }
@@ -2877,16 +2896,98 @@ impl Kernel {
         context: crate::run::IssueContext,
     ) -> Result<Representation> {
         let trace = self.global_scope();
-        self.issue_inner(
+        collected(
+            self.issue_answer(
+                request,
+                capability,
+                IssueCtx {
+                    trace,
+                    run: context,
+                    ..IssueCtx::top()
+                },
+            )
+            .await,
+        )
+        .await
+    }
+
+    /// [`issue`](Self::issue), answering with the body **as the endpoint produced it**
+    /// (ledger #2237): a buffer ([`Body::Bytes`], shared, so a cache hit copies nothing), a
+    /// body that can be read again ([`Body::Replay`]), or a one-shot stream
+    /// ([`Body::Once`]). The bytes entry points are this, collected under
+    /// [`COLLECT_LIMIT`](crate::COLLECT_LIMIT).
+    ///
+    /// Caching is unchanged for a body that can be read again: it is stored and served
+    /// as bytes are. A one-shot body is never stored, and the uncached note says
+    /// `one-shot body` ([`UNCACHED_NOTE`]). A cut invalidates lookups, not open readers: a
+    /// body already handed out is read to its end as the version it was.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     Capability, EndpointSpace, Exact, FnEndpoint, Iri, Kernel, ReprType, Representation,
+    ///     Request, Verb,
+    /// };
+    ///
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(
+    ///     Exact::new("urn:doc"),
+    ///     FnEndpoint::new("doc", |_| {
+    ///         Ok(Representation::new(ReprType::new("text/plain"), b"v1".to_vec()).cacheable())
+    ///     }),
+    /// )));
+    /// let read = || Request::new(Verb::Source, Iri::parse("urn:doc").unwrap());
+    /// let held = block_on(kernel.issue_body(read(), &Capability::root())).unwrap();
+    /// assert!(kernel.is_cached(&read(), &Capability::root()));
+    /// // A cut invalidates the lookup; the body already handed out still reads its version.
+    /// kernel.cut("urn:doc");
+    /// assert!(!kernel.is_cached(&read(), &Capability::root()));
+    /// assert_eq!(held.bytes.as_bytes().unwrap(), &b"v1"[..]);
+    /// ```
+    pub async fn issue_body(
+        &self,
+        request: Request,
+        capability: &Capability,
+    ) -> Result<Representation<Body>> {
+        let trace = self.global_scope();
+        self.issue_answer(
+            request,
+            capability,
+            IssueCtx {
+                trace,
+                buffer: false,
+                ..IssueCtx::top()
+            },
+        )
+        .await
+        .map(Answer::into_body)
+    }
+
+    /// [`issue_body`](Self::issue_body) as a **run** a door minted, under `context`'s
+    /// deadline and retry limit ([`issue_with_context`](Self::issue_with_context)). A
+    /// one-shot body ends at the run's deadline: the first chunk that arrives once the
+    /// kernel's clock reads past `not_after` is replaced by `OverBudget`, and the stream
+    /// ends there, so a live feed never outlives its run and never ends as if it were
+    /// whole.
+    pub async fn issue_body_with_context(
+        &self,
+        request: Request,
+        capability: &Capability,
+        context: crate::run::IssueContext,
+    ) -> Result<Representation<Body>> {
+        let trace = self.global_scope();
+        self.issue_answer(
             request,
             capability,
             IssueCtx {
                 trace,
                 run: context,
+                buffer: false,
                 ..IssueCtx::top()
             },
         )
         .await
+        .map(Answer::into_body)
     }
 
     /// [`issue_with_context`](Self::issue_with_context), recording this resolution into
@@ -2899,14 +3000,17 @@ impl Kernel {
         tracer: Arc<dyn Tracer>,
         context: crate::run::IssueContext,
     ) -> Result<Representation> {
-        self.issue_inner(
-            request,
-            capability,
-            IssueCtx {
-                trace: Some(TraceScope::new(tracer)),
-                run: context,
-                ..IssueCtx::top()
-            },
+        collected(
+            self.issue_answer(
+                request,
+                capability,
+                IssueCtx {
+                    trace: Some(TraceScope::new(tracer)),
+                    run: context,
+                    ..IssueCtx::top()
+                },
+            )
+            .await,
         )
         .await
     }
@@ -2941,15 +3045,18 @@ impl Kernel {
         scope: Scope,
     ) -> Result<Representation> {
         let trace = self.global_scope();
-        self.issue_inner(
-            request,
-            capability,
-            IssueCtx {
-                incoming: Some(incoming),
-                trace,
-                scope,
-                ..IssueCtx::top()
-            },
+        collected(
+            self.issue_answer(
+                request,
+                capability,
+                IssueCtx {
+                    incoming: Some(incoming),
+                    trace,
+                    scope,
+                    ..IssueCtx::top()
+                },
+            )
+            .await,
         )
         .await
     }
@@ -2962,13 +3069,31 @@ impl Kernel {
     /// confinement holds below the endpoint that entered it; the public
     /// [`issue`](Self::issue) is the parentless, no-upstream, empty-chain entry
     /// point.
-    #[allow(clippy::too_many_arguments)] // the one resolution path; every caller names each fact
+    ///
+    /// The bytes face of [`issue_answer`](Self::issue_answer): the answer's body
+    /// collected under [`COLLECT_LIMIT`](crate::COLLECT_LIMIT), refused with `OverBudget`
+    /// past it, never truncated (ledger #2237). A buffer is handed over as it is; only a
+    /// streamed body is read here, after the answer was recorded, stored or not stored.
     async fn issue_inner(
         &self,
         request: Request,
         capability: &Capability,
         ctx: IssueCtx<'_>,
     ) -> Result<Representation> {
+        collected(self.issue_answer(request, capability, ctx).await).await
+    }
+
+    /// The resolution path, answering with the body as the endpoint produced it: a
+    /// buffer, a body that can be read again, or a one-shot stream (ledger #2237). Every
+    /// entry point runs through here; the bytes ones collect what it returns
+    /// ([`collected`]), the body ones take [`Answer::into_body`].
+    #[allow(clippy::too_many_arguments)] // the one resolution path; every caller names each fact
+    async fn issue_answer(
+        &self,
+        request: Request,
+        capability: &Capability,
+        ctx: IssueCtx<'_>,
+    ) -> Result<Answer> {
         let IssueCtx {
             parent,
             incoming,
@@ -2977,6 +3102,7 @@ impl Kernel {
             depth,
             run,
             failed,
+            buffer,
         } = ctx;
         // ★ THE CUT SNAPSHOT, BEFORE ANYTHING ELSE. Everything this request is
         // about to observe is state as of *now*; a cut that lands after this point
@@ -3116,14 +3242,14 @@ impl Kernel {
                 }
             };
             if cacheable_verb {
-                if let Some(cached) = self.cache.get(&key, started) {
+                if let Some(cached) = self.cache.get_answer(&key, started, buffer) {
                     record(true, Vec::new());
                     return Ok(cached);
                 }
             }
             let representation =
                 match self.issue_kernel(op, &request, capability, &trace, parent, &scope) {
-                    Ok(representation) => representation,
+                    Ok(representation) => representation.into_body(),
                     // A denial is already on the trace, as the refusal it is.
                     Err(error @ Error::Denied(_)) => return Err(error),
                     Err(error) => {
@@ -3149,7 +3275,7 @@ impl Kernel {
                 match self.cache.store_outcome(
                     key,
                     request.target.as_str().to_string(),
-                    std::borrow::Cow::Borrowed(&representation),
+                    &representation,
                     taken,
                     self.elapsed_since(started),
                 ) {
@@ -3167,7 +3293,7 @@ impl Kernel {
                 vec![(UNCACHED_NOTE.to_string(), why.to_string())]
             };
             record(false, notes);
-            return Ok(representation);
+            return Ok(Answer::Body(representation));
         }
 
         let cacheable_verb = request.verb.is_cacheable();
@@ -3415,7 +3541,7 @@ impl Kernel {
             // Freshness is evaluated as of `started` — the instant this resolution
             // began, one clock reading shared with the trace event and the
             // constraint window rather than a fresh read per lookup.
-            if let Some(cached) = self.cache.get(&key, started) {
+            if let Some(cached) = self.cache.get_answer(&key, started, buffer) {
                 self.trace_record(
                     &trace,
                     &request,
@@ -3482,7 +3608,10 @@ impl Kernel {
             // nothing would cut the binding thread for it (ledger #1579).
             let bound = description.contract_caching.expiry_at(started);
             let expiry = rendered.expiry.most_restrictive(bound);
-            rendered.depends_on(BINDINGS_THREAD).with_expiry(expiry)
+            rendered
+                .depends_on(BINDINGS_THREAD)
+                .with_expiry(expiry)
+                .into_body()
         } else {
             // Invocation is asynchronous. On a scheduled kernel, hand it the spawner
             // and an owned self-handle so re-entrant fan-out runs concurrently.
@@ -3512,7 +3641,7 @@ impl Kernel {
                 // The run's pool, narrowed to what THIS request's capability is entitled
                 // to (minted here when nothing above minted one), and its deadline.
                 .with_run(run.admitted(self.retry.as_ref(), capability));
-            let representation = match resolved.endpoint.invoke(&invocation).await {
+            let representation = match resolved.endpoint.invoke_body(&invocation).await {
                 Ok(representation) => representation,
                 // ★ A FAILURE CARRIES ITS DEPENDENCIES (ledger #611). What this
                 // invocation read before it failed is handed back beside the error, so
@@ -3637,6 +3766,19 @@ impl Kernel {
             let mut notes = provenance_notes(&trace, alias, answered, levels, &defaulted);
             notes.append(&mut trace_notes);
             trace_notes = notes;
+            // ★ AN OPEN-ENDED BODY ENDS AT THE RUN'S DEADLINE (ledger #2237). A one-shot
+            // stream read past `not_after` ends with `OverBudget` at the first chunk that
+            // arrives late, never as a clean end: a live feed with no deadline would
+            // otherwise hold its reader for as long as it cared to produce. Checked per
+            // chunk on the kernel's clock (core owns no timer); a body that can be read
+            // again is bounded by whoever opens it.
+            let representation = match (invocation.not_after(), self.clock.as_ref()) {
+                (Some(deadline), Some(clock)) if representation.bytes.is_one_shot() => {
+                    let clock = Arc::clone(clock);
+                    representation.map_body(|body| body.ending_at(deadline, clock))
+                }
+                _ => representation,
+            };
             representation.with_expiry(effective).with_threads(threads)
         };
         if request.verb == Verb::Meta {
@@ -3673,6 +3815,14 @@ impl Kernel {
                     Some(_) => {}
                 },
             }
+            // ★ A ONE-SHOT BODY IS NEVER STORED (ledger #2237): it can be read once, and the
+            // caller is the one reading it. Named as its own cause, after (and beside) whatever the
+            // expiry said, because the two are different axes: the expiry says how long the
+            // bytes are TRUE, the body whether they can be READ AGAIN. Making such an answer
+            // cacheable is an explicit spill, never an automatic copy.
+            if representation.bytes.is_one_shot() {
+                why.one_shot = true;
+            }
             if why.is_empty() {
                 // The store may still decline: `taken` predates the invocation, so a
                 // cut that landed while it ran means this representation is already
@@ -3680,7 +3830,7 @@ impl Kernel {
                 match self.cache.store_outcome(
                     key,
                     request.target.as_str().to_string(),
-                    std::borrow::Cow::Borrowed(&representation),
+                    &representation,
                     taken,
                     self.elapsed_since(started),
                 ) {
@@ -3728,7 +3878,7 @@ impl Kernel {
         if request.verb.is_mutating() {
             self.cut(request.target.as_str());
         }
-        Ok(representation)
+        Ok(Answer::Body(representation))
     }
 
     /// Cut a golden thread: invalidate every cached representation that depends on
@@ -5230,6 +5380,32 @@ fn meta_target(request: &Request) -> ReprType {
     ReprType::new("text/turtle")
 }
 
+/// The bytes face of an answer: a buffer the cache copied out for a buffer caller as it
+/// is, a body collected under [`COLLECT_LIMIT`](crate::COLLECT_LIMIT), refused with
+/// `OverBudget` past it, never truncated (ledger #2237). A buffer body is converted
+/// without an await; only a streamed body is read.
+///
+/// ★ **A stack and a hit-path budget, not a style.** Every nested sub-request runs
+/// through the kernel's `Issuer` seams, and each of them awaits `issue_answer` INLINE and
+/// hands the answer here, rather than calling a collecting wrapper around it: a wrapper
+/// frame that builds the resolution path's ~2 KiB future (or awaits a collect) adds that
+/// much stack per nesting level, and the first cut overflowed the 64-deep default budget
+/// on a 2 MiB test thread in a debug build. Boxing the inner future instead fixed the
+/// stack and cost ~85 ns on every cache hit (an allocation and a copy of the future). And
+/// a buffer caller's hit is copied straight out of the entry ([`Answer::Buffer`]), not
+/// shared and then copied, which was another ~30 ns. The numbers are in
+/// `docs/formalism/README.md`'s measurements table (ledger #2237).
+async fn collected(answer: Result<Answer>) -> Result<Representation> {
+    let answer = match answer? {
+        Answer::Buffer(representation) => return Ok(representation),
+        Answer::Body(representation) => representation,
+    };
+    if answer.bytes.as_bytes().is_some() {
+        return answer.collect_buffer(crate::COLLECT_LIMIT);
+    }
+    Box::pin(answer.collect(crate::COLLECT_LIMIT)).await
+}
+
 /// The name of the `Meta` argument that consents to a lossy transreption step:
 /// `lossy=allow`. `lossy=deny` is the default, spelled; any other value is refused
 /// rather than read as the default, so a mistyped consent cannot silently become a
@@ -5274,14 +5450,17 @@ impl Issuer for Kernel {
         // merits — no pipe upstream here. No depth threaded either: an external
         // wrapper on this seam restarts the count (see `Issuer::issue_at_depth`).
         let trace = self.global_scope();
-        self.issue_inner(
-            request,
-            capability,
-            IssueCtx {
-                parent,
-                trace,
-                ..IssueCtx::top()
-            },
+        collected(
+            self.issue_answer(
+                request,
+                capability,
+                IssueCtx {
+                    parent,
+                    trace,
+                    ..IssueCtx::top()
+                },
+            )
+            .await,
         )
         .await
     }
@@ -5299,14 +5478,17 @@ impl Issuer for Kernel {
         // concurrent traced resolutions never bleed into each other's collectors.
         // (Compatibility path — no chain and no depth threaded; `issue_at_depth`
         // is the full seam and the one `Invocation` calls.)
-        self.issue_inner(
-            request,
-            capability,
-            IssueCtx {
-                parent,
-                trace,
-                ..IssueCtx::top()
-            },
+        collected(
+            self.issue_answer(
+                request,
+                capability,
+                IssueCtx {
+                    parent,
+                    trace,
+                    ..IssueCtx::top()
+                },
+            )
+            .await,
         )
         .await
     }
@@ -5324,15 +5506,18 @@ impl Issuer for Kernel {
         // entered it, an injected corridor is visible all the way down. Depth 0:
         // a caller on this seam did not say how deep it is, and the count restarts
         // here rather than guessing (see `Issuer::issue_at_depth`).
-        self.issue_inner(
-            request,
-            capability,
-            IssueCtx {
-                parent,
-                trace,
-                scope,
-                ..IssueCtx::top()
-            },
+        collected(
+            self.issue_answer(
+                request,
+                capability,
+                IssueCtx {
+                    parent,
+                    trace,
+                    scope,
+                    ..IssueCtx::top()
+                },
+            )
+            .await,
         )
         .await
     }
@@ -5349,16 +5534,19 @@ impl Issuer for Kernel {
         // Everything `issue_in_scope` carries plus the nesting depth the budget is
         // checked against in `issue_inner`. (`issue_recording` below is the seam
         // `Invocation` calls; this one is for an issuer that wraps the kernel.)
-        self.issue_inner(
-            request,
-            capability,
-            IssueCtx {
-                parent,
-                trace,
-                scope,
-                depth,
-                ..IssueCtx::top()
-            },
+        collected(
+            self.issue_answer(
+                request,
+                capability,
+                IssueCtx {
+                    parent,
+                    trace,
+                    scope,
+                    depth,
+                    ..IssueCtx::top()
+                },
+            )
+            .await,
         )
         .await
     }
@@ -5378,7 +5566,7 @@ impl Issuer for Kernel {
         // that never reached an endpoint.
         let mut failed = Dependencies::none();
         let result = self
-            .issue_inner(
+            .issue_answer(
                 request,
                 capability,
                 IssueCtx {
@@ -5391,6 +5579,7 @@ impl Issuer for Kernel {
                 },
             )
             .await;
+        let result = collected(result).await;
         (result, failed)
     }
 
@@ -5409,7 +5598,7 @@ impl Issuer for Kernel {
         // entitlement in `issue_inner`.
         let mut failed = Dependencies::none();
         let result = self
-            .issue_inner(
+            .issue_answer(
                 request,
                 capability,
                 IssueCtx {
@@ -5423,6 +5612,40 @@ impl Issuer for Kernel {
                 },
             )
             .await;
+        let result = collected(result).await;
+        (result, failed)
+    }
+
+    async fn issue_body_in_context(
+        &self,
+        request: Request,
+        capability: &Capability,
+        parent: Option<u64>,
+        trace: Option<TraceScope>,
+        scope: Scope,
+        depth: u32,
+        context: crate::run::IssueContext,
+    ) -> (Result<Representation<Body>>, Dependencies) {
+        // `issue_in_context` without the collect (ledger #2237): the body reaches the
+        // issuing invocation as the endpoint produced it.
+        let mut failed = Dependencies::none();
+        let result = self
+            .issue_answer(
+                request,
+                capability,
+                IssueCtx {
+                    parent,
+                    trace,
+                    scope,
+                    depth,
+                    run: context,
+                    failed: Some(&mut failed),
+                    buffer: false,
+                    ..IssueCtx::top()
+                },
+            )
+            .await
+            .map(Answer::into_body);
         (result, failed)
     }
 

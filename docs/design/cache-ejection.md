@@ -22,7 +22,10 @@ build host and shipping the answer is worth real time on the edge and in CI.
 Serialization. `Representation`, `ReprType`, `Expiry`, `Thread` and `RequestId` all
 derive `serde` already, so `CacheEntry` and `CacheKey` derive it for free — they do, as
 of 0.1.70, precisely so the door stays open at no cost. A postcard or JSON bundle of
-entries is an afternoon.
+entries is an afternoon. (Since streamed bodies, ledger #2237, `CacheEntry`'s impls are
+written by hand, because an entry holds a `Body` and a body does not serialize: an entry
+holding a buffer encodes byte-for-byte as the derive did, and one holding a replayable
+body, a file or a store, is refused rather than read in full.)
 
 **The derive is not permission to import one.** What follows is why.
 

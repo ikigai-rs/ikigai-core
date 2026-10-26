@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::body::Body;
 use crate::content::ContentId;
 use crate::hashing::{feed_bytes, feed_str};
 
@@ -199,14 +200,34 @@ impl Provenance {
 
 /// A typed value produced by an endpoint.
 ///
-/// M0 carries the universal byte form; richer in-memory forms (RDF graphs,
-/// solution sets) arrive with the store.
+/// The body type `B` defaults to today's buffer, `Vec<u8>`, the way `HashMap` defaults
+/// its hasher: every `Representation` written without a parameter is
+/// `Representation<Vec<u8>>`, with the same constructors, the same public `bytes` field
+/// and the same encoding on every wire. Stream-aware code says
+/// [`Representation<Body>`](crate::Body) (ledger #2237): its `bytes` field holds a
+/// [`Body`](crate::Body), which may be a buffer, a body that can be read again, or a
+/// one-shot stream.
+///
+/// ★ **A default type parameter does not drive inference in an expression.**
+/// `Representation::new(..)` infers because `new` exists only on
+/// `impl Representation<Vec<u8>>`; a method shared by every body type (`cacheable`,
+/// `with_expiry`, `depends_on`, …) infers from its receiver. The one shape that needs an
+/// annotation is a bare path with nothing to infer from, e.g.
+/// `let f = Representation::cacheable;` (E0282): write `Representation::<Vec<u8>>::cacheable`
+/// or call it on a value. In a TYPE position (`-> Representation`, `Vec<Representation>`,
+/// a turbofish `from_bytes::<Representation>`) the default applies as always.
+///
+/// The serde derive bounds the body by `Serialize`/`Deserialize`, so
+/// `Representation<Vec<u8>>` encodes byte-for-byte as it did before the parameter existed
+/// (`tests/repr_body_param.rs` pins postcard and JSON against 0.1.112) and
+/// `Representation<Body>` does not encode at all.
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct Representation {
+pub struct Representation<B = Vec<u8>> {
     /// The representation type.
     pub repr_type: ReprType,
-    /// The representation's bytes.
-    pub bytes: Vec<u8>,
+    /// The representation's bytes: a `Vec<u8>` by default, a [`Body`](crate::Body) in
+    /// `Representation<Body>`.
+    pub bytes: B,
     /// Cache validity; defaults to [`Expiry::Always`] (uncacheable).
     #[serde(default)]
     pub expiry: Expiry,
@@ -237,7 +258,7 @@ static NO_THREADS: BTreeSet<Thread> = BTreeSet::new();
 // Threads are cache provenance, not content: two representations with the same
 // type and bytes are equal regardless of how their validity was tracked. (Also
 // keeps wire round-trips equal, since `threads` is `serde(skip)`.)
-impl PartialEq for Representation {
+impl<B: PartialEq> PartialEq for Representation<B> {
     fn eq(&self, other: &Self) -> bool {
         self.repr_type == other.repr_type
             && self.bytes == other.bytes
@@ -245,9 +266,9 @@ impl PartialEq for Representation {
     }
 }
 
-impl Eq for Representation {}
+impl<B: Eq> Eq for Representation<B> {}
 
-impl Representation {
+impl Representation<Vec<u8>> {
     /// Build a representation from a type and bytes (uncacheable by default).
     pub fn new(repr_type: ReprType, bytes: impl Into<Vec<u8>>) -> Self {
         Representation {
@@ -255,6 +276,137 @@ impl Representation {
             bytes: bytes.into(),
             expiry: Expiry::Always,
             threads: None,
+        }
+    }
+
+    /// The content address of this representation (its type and bytes together).
+    pub fn content_id(&self) -> ContentId {
+        let mut h = blake3::Hasher::new();
+        feed_str(&mut h, "ikigai.repr.v0");
+        feed_str(&mut h, &self.repr_type.canonical());
+        feed_bytes(&mut h, &self.bytes);
+        ContentId::from_hasher(h)
+    }
+
+    /// This representation with its buffer as a [`Body::Bytes`] (no copy), keeping its
+    /// type, expiry and threads.
+    pub fn into_body(self) -> Representation<Body> {
+        self.map_body(Body::from)
+    }
+}
+
+impl Representation<Body> {
+    /// Build a representation from a type and a [`Body`] (uncacheable by default).
+    ///
+    /// ```
+    /// use ikigai_core::{Body, ReprType, Representation};
+    ///
+    /// let streamed = Representation::from_body(
+    ///     ReprType::new("application/octet-stream"),
+    ///     Body::once(futures::stream::iter([Ok(bytes::Bytes::from_static(b"chunk"))])),
+    /// );
+    /// assert!(streamed.bytes.is_one_shot());
+    /// ```
+    pub fn from_body(repr_type: ReprType, body: impl Into<Body>) -> Self {
+        Representation {
+            repr_type,
+            bytes: body.into(),
+            expiry: Expiry::Always,
+            threads: None,
+        }
+    }
+
+    /// Collect the body into a buffer under `max_bytes` ([`Body::collect`]: refused with
+    /// `OverBudget` past the bound, never truncated), keeping the type, expiry and threads.
+    pub async fn collect(self, max_bytes: usize) -> crate::Result<Representation> {
+        let Representation {
+            repr_type,
+            bytes,
+            expiry,
+            threads,
+        } = self;
+        let bytes = bytes.collect(max_bytes).await?;
+        Ok(Representation {
+            repr_type,
+            bytes: Vec::from(bytes),
+            expiry,
+            threads,
+        })
+    }
+
+    /// [`collect`](Self::collect) without awaiting, for a body that is already a buffer:
+    /// the kernel's bytes entry points take this path first, so the common case adds no
+    /// async frame per nesting level (measured: the boxed async collect alone cost about
+    /// 2 KiB of stack per level in a debug build). A streamed body is refused here as
+    /// `Unsupported`; the caller checks [`Body::as_bytes`] first.
+    pub(crate) fn collect_buffer(self, max_bytes: usize) -> crate::Result<Representation> {
+        let Representation {
+            repr_type,
+            bytes,
+            expiry,
+            threads,
+        } = self;
+        let Body::Bytes(bytes) = bytes else {
+            return Err(crate::Error::Unsupported {
+                verb: None,
+                detail: "a streamed body cannot be collected without reading it".to_string(),
+            });
+        };
+        if bytes.len() > max_bytes {
+            return Err(crate::Error::OverBudget {
+                detail: format!(
+                    "the body is larger than the {max_bytes}-byte collect bound ({} bytes)",
+                    bytes.len()
+                ),
+            });
+        }
+        Ok(Representation {
+            repr_type,
+            bytes: Vec::from(bytes),
+            expiry,
+            threads,
+        })
+    }
+
+    /// This answer with its buffer copied into a `Vec`, keeping its type, expiry and
+    /// threads: what a cache hit hands a buffer caller. `None` when the body is not a
+    /// buffer.
+    pub(crate) fn copied(&self) -> Option<Representation> {
+        Some(Representation {
+            repr_type: self.repr_type.clone(),
+            bytes: self.bytes.as_bytes()?.to_vec(),
+            expiry: self.expiry,
+            threads: self.threads.clone(),
+        })
+    }
+
+    /// A second handle on this answer when its body can be read again (what the cache
+    /// keeps and serves); `None` for a one-shot body.
+    pub(crate) fn share(&self) -> Option<Representation<Body>> {
+        Some(Representation {
+            repr_type: self.repr_type.clone(),
+            bytes: self.bytes.share()?,
+            expiry: self.expiry,
+            threads: self.threads.clone(),
+        })
+    }
+}
+
+impl From<Representation> for Representation<Body> {
+    fn from(representation: Representation) -> Self {
+        representation.into_body()
+    }
+}
+
+impl<B> Representation<B> {
+    /// The same representation over another body (builder): `f` maps the body, and the
+    /// type, expiry and golden threads are kept as they are.
+    pub fn map_body<C>(self, f: impl FnOnce(B) -> C) -> Representation<C> {
+        Representation {
+            repr_type: self.repr_type,
+            bytes: f(self.bytes),
+            expiry: self.expiry,
+            threads: self.threads,
         }
     }
 
@@ -303,15 +455,6 @@ impl Representation {
     pub(crate) fn with_threads(mut self, threads: BTreeSet<Thread>) -> Self {
         self.threads = (!threads.is_empty()).then(|| Arc::new(threads));
         self
-    }
-
-    /// The content address of this representation (its type and bytes together).
-    pub fn content_id(&self) -> ContentId {
-        let mut h = blake3::Hasher::new();
-        feed_str(&mut h, "ikigai.repr.v0");
-        feed_str(&mut h, &self.repr_type.canonical());
-        feed_bytes(&mut h, &self.bytes);
-        ContentId::from_hasher(h)
     }
 }
 
