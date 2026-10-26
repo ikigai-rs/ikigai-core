@@ -55,21 +55,12 @@ use futures_util::StreamExt;
 
 use crate::content::ContentId;
 use crate::error::{Error, Result};
+use crate::run::MemoryBudget;
 
 /// A one-shot stream of chunks: futures-core's [`Stream`] of `Result<Bytes>`, boxed and
 /// `Send`. An `Err` item ends the body as a FAILURE: a reader must never take the chunks
 /// before it as the whole (refuse, never truncate).
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
-
-/// How many bytes [`Kernel::issue`](crate::Kernel::issue) (and every other bytes-returning
-/// entry point) collects from a body before it refuses with
-/// [`Error::OverBudget`]: 64 MiB, the wire's `MAX_FRAME`, so it refuses nothing that
-/// crossed a wire before bodies existed.
-///
-/// ⚠ **A stated constant until the run's byte budget lands** (ledger #2238, stage 2 of the
-/// streams design), which replaces it with a pool on [`IssueContext`](crate::IssueContext)
-/// under the grant `urn:cap:stream:memory:<bytes>` and a host ceiling.
-pub const COLLECT_LIMIT: usize = 64 * 1024 * 1024;
 
 /// A body that can be **read again**: every [`open`](Replay::open) is a fresh reader from
 /// the start. What a file, a spill or a stored object offers.
@@ -207,19 +198,87 @@ impl Body {
                         return Err(over(usize::try_from(len).unwrap_or(usize::MAX)));
                     }
                 }
-                let mut stream = other.into_stream();
-                let mut buffer = BytesMut::new();
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
-                    let seen = buffer.len().saturating_add(chunk.len());
+                drain(other.into_stream(), |chunk_len, held| {
+                    let seen = held.saturating_add(chunk_len);
                     if seen > max_bytes {
-                        return Err(over(seen));
+                        Err(over(seen))
+                    } else {
+                        Ok(())
                     }
-                    buffer.extend_from_slice(&chunk);
-                }
-                Ok(buffer.freeze())
+                })
+                .await
             }
         }
+    }
+
+    /// Collect the whole body into one buffer **under a run's byte pool** (ledger #2238):
+    /// every chunk read out of a stream is drawn from `budget` before it is held, and the
+    /// collect refuses with [`Error::OverBudget`] at the first chunk the pool cannot cover,
+    /// in the middle of the stream too. **It never truncates.** A collect that fails
+    /// (past the pool, or a stream error) drops what it read and gives its draw back.
+    ///
+    /// A [`Bytes`](Body::Bytes) body is returned as it is and draws nothing: it is already
+    /// in memory, and refusing it after the fact would free nothing. A
+    /// [`Replay`](Body::Replay) whose length hint exceeds what is left is refused before it
+    /// is opened.
+    ///
+    /// ```
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{Body, IssueContext};
+    ///
+    /// let run = IssueContext::new().with_memory_limit(5);
+    /// let pool = run.memory_budget().unwrap();
+    /// let stream = |parts: &[&'static [u8]]| {
+    ///     let parts: Vec<_> = parts.iter().map(|p| Ok(ikigai_core::Bytes::from_static(p))).collect();
+    ///     Body::once(futures::stream::iter(parts))
+    /// };
+    /// assert_eq!(block_on(stream(&[b"ab", b"c"]).collect_within(pool)).unwrap(), &b"abc"[..]);
+    /// assert_eq!(pool.remaining(), 2, "three bytes drawn for the whole run");
+    /// // Past the pool: refused mid-stream, and the failed collect gives back its draw.
+    /// assert!(matches!(
+    ///     block_on(stream(&[b"x", b"yz"]).collect_within(pool)),
+    ///     Err(ikigai_core::Error::OverBudget { .. })
+    /// ));
+    /// assert_eq!(pool.remaining(), 2);
+    /// // A buffer is already held: handed over as it is, drawing nothing.
+    /// assert_eq!(block_on(Body::from(b"0123456789".to_vec()).collect_within(pool)).unwrap().len(), 10);
+    /// assert_eq!(pool.remaining(), 2);
+    /// ```
+    pub async fn collect_within(self, budget: &MemoryBudget) -> Result<Bytes> {
+        let over = |seen: u64| {
+            Error::OverBudget {
+            detail: format!(
+                "the body is larger than the run's byte budget: {} byte(s) left, at least {seen}                  needed (a `urn:cap:stream:memory:<bytes>` grant raises it, up to the host's                  ceiling)",
+                budget.remaining()
+            ),
+        }
+        };
+        let stream = match self {
+            Body::Bytes(bytes) => return Ok(bytes),
+            other => {
+                if let Some(len) = other.len_hint() {
+                    if len > budget.remaining() {
+                        return Err(over(len));
+                    }
+                }
+                other.into_stream()
+            }
+        };
+        let mut drawn: u64 = 0;
+        let result = drain(stream, |chunk_len, held| {
+            let wanted = chunk_len as u64;
+            if budget.try_draw(wanted) {
+                drawn += wanted;
+                Ok(())
+            } else {
+                Err(over(held as u64 + wanted))
+            }
+        })
+        .await;
+        if result.is_err() {
+            budget.give_back(drawn);
+        }
+        result
     }
 
     /// A second handle on a body that can be read again (`Bytes`, `Replay`): what the
@@ -247,6 +306,23 @@ impl Body {
             other => other,
         }
     }
+}
+
+/// Read `stream` to its end into one buffer, asking `admit(chunk_len, held)` before each
+/// chunk is held: the one loop behind [`Body::collect`] and [`Body::collect_within`], so a
+/// bound and a pool refuse at the same point (the first chunk that does not fit), and a
+/// stream error ends the read as a failure.
+async fn drain(
+    mut stream: ByteStream,
+    mut admit: impl FnMut(usize, usize) -> Result<()>,
+) -> Result<Bytes> {
+    let mut buffer = BytesMut::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        admit(chunk.len(), buffer.len())?;
+        buffer.extend_from_slice(&chunk);
+    }
+    Ok(buffer.freeze())
 }
 
 impl From<Vec<u8>> for Body {

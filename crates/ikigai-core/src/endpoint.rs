@@ -1003,6 +1003,48 @@ impl<'a> Invocation<'a> {
         self.run.retry_budget()
     }
 
+    /// The run's **byte pool** (ledger #2238): how many more bytes this resolution tree may
+    /// buffer, collecting streamed bodies into memory. Always present on an invocation the
+    /// kernel built (the kernel mints it from the capability's
+    /// `urn:cap:stream:memory:<bytes>` grant under the host's ceiling); `None` on a
+    /// [`detached`](Self::detached) one, where [`collect`](Self::collect) uses
+    /// [`DEFAULT_STREAM_MEMORY`](crate::DEFAULT_STREAM_MEMORY).
+    pub fn memory_budget(&self) -> Option<&crate::MemoryBudget> {
+        self.run.memory_budget()
+    }
+
+    /// Collect `body` into one buffer **under the run's byte pool**
+    /// ([`Body::collect_within`](crate::Body::collect_within)): a streamed body is drawn as
+    /// it is read and refused with [`Error::OverBudget`] past the pool, never truncated; a
+    /// buffer is handed over as it is. How an endpoint that must hold a whole body (a
+    /// parser, a non-incremental transreptor) buffers it, so that buffering anywhere in a
+    /// run counts against one budget.
+    ///
+    /// ```
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{Bindings, Body, Capability, Invocation, Iri, Request, Verb};
+    ///
+    /// let request = Request::new(Verb::Source, Iri::parse("urn:x").unwrap());
+    /// let (bindings, capability) = (Bindings::new(), Capability::root());
+    /// let inv = Invocation::detached(&request, &bindings, &capability);
+    /// let small = inv.with_memory_limit(3);
+    /// let body = || Body::once(futures::stream::iter([Ok(ikigai_core::Bytes::from_static(b"four"))]));
+    /// assert!(matches!(
+    ///     block_on(small.collect(body())),
+    ///     Err(ikigai_core::Error::OverBudget { .. })
+    /// ));
+    /// assert_eq!(block_on(inv.collect(body())).unwrap(), &b"four"[..]);
+    /// ```
+    pub async fn collect(&self, body: crate::Body) -> Result<bytes::Bytes> {
+        match self.run.memory_budget() {
+            Some(budget) => body.collect_within(budget).await,
+            None => {
+                let budget = crate::MemoryBudget::new(crate::DEFAULT_STREAM_MEMORY);
+                body.collect_within(&budget).await
+            }
+        }
+    }
+
     /// The run's **deadline** on the kernel clock (ledger #1546, decision 7), set by the door
     /// that issued the run ([`Kernel::issue_with_context`](crate::Kernel::issue_with_context))
     /// and inherited, never extended, by every sub-request. `None` when no door set one. The
@@ -1089,6 +1131,15 @@ impl<'a> Invocation<'a> {
         if run.retry_budget().is_some() {
             run = run.with_retry_limit(retries);
         }
+        self.reborrow_with_run(run)
+    }
+
+    /// **The same invocation, with its run's byte pool no larger than `bytes`**: a reborrow
+    /// like [`with_retries`](Self::with_retries) whose [`collect`](Self::collect) and
+    /// sub-requests draw on a child pool of at most `bytes` that also draws from the
+    /// run's. Narrowing only. On a detached invocation it mints a pool of `bytes`.
+    pub fn with_memory_limit(&self, bytes: u64) -> Invocation<'_> {
+        let run = self.run.clone().with_memory_limit(bytes);
         self.reborrow_with_run(run)
     }
 
@@ -1872,8 +1923,9 @@ pub trait Endpoint: Send + Sync {
     /// without copying it, so every endpoint written before bodies existed answers exactly
     /// as it did.
     ///
-    /// An endpoint that streams overrides this, and its `invoke` collects under a bound, so
-    /// a caller holding only the bytes API is never handed an unbounded answer.
+    /// An endpoint that streams overrides this, and its `invoke` collects under the run's
+    /// byte pool ([`Invocation::collect`], [`Representation::collect_within`]), so a caller
+    /// holding only the bytes API is never handed an unbounded answer.
     /// **Provenance closes when this returns**: the stream holds no `Invocation` (the
     /// borrow forbids it), so every sub-request the answer depends on is made before the
     /// body is returned, and the kernel decides about caching with all of them recorded.
@@ -1888,14 +1940,16 @@ pub trait Endpoint: Send + Sync {
     /// use futures::executor::block_on;
     /// use ikigai_core::{
     ///     Body, Bytes, Capability, Endpoint, EndpointSpace, Exact, Invocation, Iri, Kernel,
-    ///     ReprType, Representation, Request, Result, Verb, COLLECT_LIMIT,
+    ///     ReprType, Representation, Request, Result, Verb,
     /// };
     ///
     /// struct Counter;
     /// #[async_trait]
     /// impl Endpoint for Counter {
     ///     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-    ///         self.invoke_body(inv).await?.collect(COLLECT_LIMIT).await
+    ///         let body = self.invoke_body(inv).await?;
+    ///         let budget = inv.memory_budget().expect("the kernel mints one");
+    ///         body.collect_within(budget).await
     ///     }
     ///     async fn invoke_body(&self, _inv: &Invocation<'_>) -> Result<Representation<Body>> {
     ///         let chunks = (1..=3).map(|n| Ok(Bytes::from(format!("{n} "))));

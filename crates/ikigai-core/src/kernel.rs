@@ -707,6 +707,12 @@ pub struct Kernel {
     /// entitlement. `None` (the default) is today's behavior: no pool, so each retry
     /// overlay keeps its own `attempts` (ledger #1546, decision 5).
     retry: Option<crate::run::RetryLimits>,
+    /// The host's byte-budget policy (ledger #2238): the base every caller may buffer
+    /// and the ceiling no caller exceeds. Always set; [`MemoryLimits::default`] when the
+    /// host configured none.
+    ///
+    /// [`MemoryLimits::default`]: crate::MemoryLimits::default
+    memory: crate::run::MemoryLimits,
     /// The declared floor of every endpoint resolved so far, memoized per endpoint
     /// identity — see [`FloorMemo`]. Consulted on every request (the floor runs
     /// before the cache lookup); cleared by a cut of [`BINDINGS_THREAD`].
@@ -1475,6 +1481,7 @@ impl Kernel {
             subclass_closure: BTreeMap::new(),
             max_depth: DEFAULT_MAX_DEPTH,
             retry: None,
+            memory: crate::run::MemoryLimits::default(),
             floors: FloorMemo::default(),
             probes: ProbeMemo::default(),
             scope_names: Mutex::new(BTreeMap::new()),
@@ -2181,6 +2188,64 @@ impl Kernel {
     /// ```
     pub fn with_retry_budget(mut self, base: u32, ceiling: u32) -> Self {
         self.retry = Some(crate::run::RetryLimits::new(base, ceiling));
+        self
+    }
+
+    /// Set the host's **byte budget** (builder, ledger #2238): how many bytes a run may
+    /// buffer in all, collecting streamed bodies into memory. A caller gets `base` bytes,
+    /// more up to `ceiling` with a grant `urn:cap:stream:memory:<bytes>`
+    /// ([`cap_stream_memory`](crate::cap_stream_memory)), and root gets `ceiling`; a door
+    /// lowers one run's further with
+    /// [`IssueContext::with_memory_limit`](crate::IssueContext::with_memory_limit). One pool
+    /// serves the whole resolution tree, so nested collects are bounded by one number.
+    ///
+    /// Without this the kernel runs under [`MemoryLimits::default`](crate::MemoryLimits),
+    /// [`DEFAULT_STREAM_MEMORY`](crate::DEFAULT_STREAM_MEMORY) (64 MiB) for every caller.
+    /// What draws on it is the kernel's collect of a streamed body for a bytes caller
+    /// ([`issue`](Self::issue) and every bytes seam), [`Invocation::collect`], and every
+    /// buffering builtin; a buffer an endpoint already built draws nothing. Past it the
+    /// answer is [`Error::OverBudget`], never a shorter body.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     cap_stream_memory, Body, Bytes, Capability, EndpointSpace, Error, Exact, Iri, Kernel,
+    ///     ReprType, Representation, Request, Result, Verb,
+    /// };
+    ///
+    /// // An endpoint that answers a 4-byte one-shot stream.
+    /// struct Stream4;
+    /// #[async_trait::async_trait]
+    /// impl ikigai_core::Endpoint for Stream4 {
+    ///     async fn invoke(&self, inv: &ikigai_core::Invocation<'_>) -> Result<Representation> {
+    ///         let body = self.invoke_body(inv).await?;
+    ///         body.collect_within(inv.memory_budget().unwrap()).await
+    ///     }
+    ///     async fn invoke_body(
+    ///         &self,
+    ///         _: &ikigai_core::Invocation<'_>,
+    ///     ) -> Result<Representation<Body>> {
+    ///         let chunk = Ok(Bytes::from_static(b"four"));
+    ///         Ok(Representation::from_body(
+    ///             ReprType::new("text/plain"),
+    ///             Body::once(futures::stream::iter([chunk])),
+    ///         ))
+    ///     }
+    /// }
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:s"), Stream4)))
+    ///     .with_stream_memory(2, 1 << 20);
+    /// let read = || Request::new(Verb::Source, Iri::parse("urn:s").unwrap());
+    /// // A caller with no grant gets the base, 2 bytes: refused, never truncated.
+    /// let plain = Capability::scoped(["urn:cap:read"]);
+    /// assert!(matches!(block_on(kernel.issue(read(), &plain)), Err(Error::OverBudget { .. })));
+    /// // A grant raises it; root gets the ceiling.
+    /// let granted = Capability::scoped([cap_stream_memory(4)]);
+    /// assert_eq!(block_on(kernel.issue(read(), &granted)).unwrap().bytes, b"four");
+    /// assert_eq!(block_on(kernel.issue(read(), &Capability::root())).unwrap().bytes, b"four");
+    /// ```
+    pub fn with_stream_memory(mut self, base: u64, ceiling: u64) -> Self {
+        self.memory = crate::run::MemoryLimits::new(base, ceiling);
         self
     }
 
@@ -2914,8 +2979,8 @@ impl Kernel {
     /// [`issue`](Self::issue), answering with the body **as the endpoint produced it**
     /// (ledger #2237): a buffer ([`Body::Bytes`], shared, so a cache hit copies nothing), a
     /// body that can be read again ([`Body::Replay`]), or a one-shot stream
-    /// ([`Body::Once`]). The bytes entry points are this, collected under
-    /// [`COLLECT_LIMIT`](crate::COLLECT_LIMIT).
+    /// ([`Body::Once`]). The bytes entry points are this, a streamed body collected under
+    /// the run's byte pool ([`with_stream_memory`](Self::with_stream_memory)).
     ///
     /// Caching is unchanged for a body that can be read again: it is stored and served
     /// as bytes are. A one-shot body is never stored, and the uncached note says
@@ -3070,10 +3135,10 @@ impl Kernel {
     /// [`issue`](Self::issue) is the parentless, no-upstream, empty-chain entry
     /// point.
     ///
-    /// The bytes face of [`issue_answer`](Self::issue_answer): the answer's body
-    /// collected under [`COLLECT_LIMIT`](crate::COLLECT_LIMIT), refused with `OverBudget`
-    /// past it, never truncated (ledger #2237). A buffer is handed over as it is; only a
-    /// streamed body is read here, after the answer was recorded, stored or not stored.
+    /// The bytes face of [`issue_answer`](Self::issue_answer): a streamed body collected
+    /// under the run's byte pool, refused with `OverBudget` past it, never truncated
+    /// (ledgers #2237, #2238). A buffer is handed over as it is; only a streamed body is
+    /// read here, after the answer was recorded, stored or not stored.
     async fn issue_inner(
         &self,
         request: Request,
@@ -3542,6 +3607,14 @@ impl Kernel {
             // began, one clock reading shared with the trace event and the
             // constraint window rather than a fresh read per lookup.
             if let Some(cached) = self.cache.get_answer(&key, started, buffer) {
+                // A stored `Replay` is collected by a buffer caller under the run's pool,
+                // admitted here only for such a hit: a buffer hit admits nothing.
+                let cached = cached.budgeted(|| {
+                    run.clone()
+                        .admitted(self.retry.as_ref(), &self.memory, capability)
+                        .memory_budget()
+                        .cloned()
+                });
                 self.trace_record(
                     &trace,
                     &request,
@@ -3565,6 +3638,9 @@ impl Kernel {
         // the causes are still in hand, rather than reconstructed from an expiry that
         // has already forgotten them (NetKernel News 2.47; `uncached.rs`).
         let mut why = Uncached::default();
+        // The run's byte pool as admitted for this request, attached to a streamed answer
+        // so a buffer caller collects it under the run's budget (ledger #2238).
+        let mut pool: Option<crate::MemoryBudget> = None;
         let representation = if request.verb == Verb::Meta {
             // Selection-driven Meta: the renderer emits the endpoint's description in its
             // *canonical* serializations (Turtle, and JSON/text where the renderer supports
@@ -3632,15 +3708,17 @@ impl Kernel {
             // endpoint it was applied to). An endpoint found in no level gets the
             // chain the request resolved in, unchanged: `descend` of an empty path
             // over a chain with no levels is that very chain.
+            let admitted = run.admitted(self.retry.as_ref(), &self.memory, capability);
+            pool = admitted.memory_budget().cloned();
             let invocation = Invocation::with_issuer(&request, &bindings, capability, self)
                 .with_concurrency(self.spawner.clone(), issuer_arc)
                 .with_span(span)
                 .with_trace(trace.clone())
                 .with_scope(scope.descend(levels.clone()))
                 .with_depth(depth)
-                // The run's pool, narrowed to what THIS request's capability is entitled
+                // The run's pools, narrowed to what THIS request's capability is entitled
                 // to (minted here when nothing above minted one), and its deadline.
-                .with_run(run.admitted(self.retry.as_ref(), capability));
+                .with_run(admitted);
             let representation = match resolved.endpoint.invoke_body(&invocation).await {
                 Ok(representation) => representation,
                 // ★ A FAILURE CARRIES ITS DEPENDENCIES (ledger #611). What this
@@ -3878,7 +3956,7 @@ impl Kernel {
         if request.verb.is_mutating() {
             self.cut(request.target.as_str());
         }
-        Ok(Answer::Body(representation))
+        Ok(Answer::Body(representation).budgeted(|| pool))
     }
 
     /// Cut a golden thread: invalidate every cached representation that depends on
@@ -5381,9 +5459,11 @@ fn meta_target(request: &Request) -> ReprType {
 }
 
 /// The bytes face of an answer: a buffer the cache copied out for a buffer caller as it
-/// is, a body collected under [`COLLECT_LIMIT`](crate::COLLECT_LIMIT), refused with
-/// `OverBudget` past it, never truncated (ledger #2237). A buffer body is converted
-/// without an await; only a streamed body is read.
+/// is, a buffer body as it is, and a streamed body collected under the run's byte pool
+/// (the request's admitted [`MemoryBudget`](crate::MemoryBudget), which `issue_answer`
+/// attaches as [`Answer::Streamed`]), refused with
+/// `OverBudget` past it, never truncated (ledgers #2237, #2238). A buffer is converted
+/// without an await and draws nothing; only a streamed body is read, and drawn.
 ///
 /// ★ **A stack and a hit-path budget, not a style.** Every nested sub-request runs
 /// through the kernel's `Issuer` seams, and each of them awaits `issue_answer` INLINE and
@@ -5396,14 +5476,21 @@ fn meta_target(request: &Request) -> ReprType {
 /// shared and then copied, which was another ~30 ns. The numbers are in
 /// `docs/formalism/README.md`'s measurements table (ledger #2237).
 async fn collected(answer: Result<Answer>) -> Result<Representation> {
-    let answer = match answer? {
+    let (answer, budget) = match answer? {
         Answer::Buffer(representation) => return Ok(representation),
-        Answer::Body(representation) => representation,
+        Answer::Streamed(representation, budget) => (representation, Some(budget)),
+        Answer::Body(representation) => (representation, None),
     };
-    if answer.bytes.as_bytes().is_some() {
-        return answer.collect_buffer(crate::COLLECT_LIMIT);
-    }
-    Box::pin(answer.collect(crate::COLLECT_LIMIT)).await
+    let streamed = match answer.into_buffer() {
+        Ok(buffer) => return Ok(buffer),
+        Err(streamed) => streamed,
+    };
+    // `issue_answer` attaches the run's pool to every streamed answer it hands back; a
+    // missing one would be a path that skipped admission, and gets the default ceiling
+    // rather than no bound at all.
+    let budget =
+        budget.unwrap_or_else(|| crate::MemoryBudget::new(crate::run::DEFAULT_STREAM_MEMORY));
+    Box::pin(streamed.collect_within(&budget)).await
 }
 
 /// The name of the `Meta` argument that consents to a lossy transreption step:

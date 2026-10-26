@@ -15,7 +15,7 @@ use futures::StreamExt;
 use ikigai_core::{
     ArgRef, AsyncFnEndpoint, Body, ByteStream, Bytes, Capability, Clock, Endpoint, EndpointSpace,
     Error, Exact, FnEndpoint, Invocation, Iri, IssueContext, Kernel, Replay, ReprType,
-    Representation, Request, Result, Time, TraceEvent, Tracer, Verb, COLLECT_LIMIT, UNCACHED_NOTE,
+    Representation, Request, Result, Time, TraceEvent, Tracer, Verb, UNCACHED_NOTE,
 };
 
 fn iri(s: &str) -> Iri {
@@ -57,7 +57,8 @@ where
     F: Fn() -> Body + Send + Sync,
 {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        self.invoke_body(inv).await?.collect(COLLECT_LIMIT).await
+        let budget = inv.memory_budget().expect("the kernel mints a byte pool");
+        self.invoke_body(inv).await?.collect_within(budget).await
     }
 
     async fn invoke_body(&self, _inv: &Invocation<'_>) -> Result<Representation<Body>> {
@@ -257,10 +258,11 @@ fn an_endpoint_written_before_bodies_answers_a_body_request_unchanged() {
 }
 
 #[test]
-fn the_bytes_api_refuses_a_body_past_the_collect_bound_and_never_truncates() {
-    // One chunk past the bound, in 1 MiB chunks that share one buffer.
+fn the_bytes_api_refuses_a_body_past_the_default_byte_budget_and_never_truncates() {
+    // One chunk past the default budget, in 1 MiB chunks that share one buffer.
     let mib = Bytes::from(vec![7u8; 1 << 20]);
-    let chunks = COLLECT_LIMIT / (1 << 20) + 1;
+    let limit = ikigai_core::DEFAULT_STREAM_MEMORY as usize;
+    let chunks = limit / (1 << 20) + 1;
     let (big, _) = streamer(false, move || {
         let mib = mib.clone();
         Body::once(futures::stream::iter(
@@ -275,8 +277,8 @@ fn the_bytes_api_refuses_a_body_past_the_collect_bound_and_never_truncates() {
     assert!(matches!(err, Error::OverBudget { .. }), "{err:?}");
     // The body API hands it over, uncollected; a caller with a larger bound may read it.
     let body = block_on(kernel.issue_body(source("urn:big"), &root)).unwrap();
-    let read = block_on(body.bytes.collect(COLLECT_LIMIT + (1 << 20))).unwrap();
-    assert_eq!(read.len(), COLLECT_LIMIT + (1 << 20));
+    let read = block_on(body.bytes.collect(limit + (1 << 20))).unwrap();
+    assert_eq!(read.len(), limit + (1 << 20));
 }
 
 #[test]
