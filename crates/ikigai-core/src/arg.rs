@@ -14,6 +14,10 @@ pub enum ArgRef {
     Reference(Iri),
     /// A small literal value carried inline; identity is the value's bytes.
     Inline(Vec<u8>),
-    /// A larger value interned into a content store, named by its content id.
+    /// A larger value interned into a content store, named by its content id: identity
+    /// is the digest. Resolved only inside the invocation that carries it, from a body a
+    /// plan attached or the kernel's content store (ledger #2240,
+    /// [`Kernel::with_content_store`](crate::Kernel::with_content_store)), as a body
+    /// ([`Invocation::content_body`](crate::Invocation::content_body)), never as inline bytes.
     Content(ContentId),
 }

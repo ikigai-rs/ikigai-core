@@ -720,6 +720,9 @@ pub struct Kernel {
     /// `urn:kernel:`, so listing them would put core's builtins under every module's
     /// suite (the hub's report carries the conformance contract that lets them be listed).
     streams: Arc<dyn Space>,
+    /// The content store `ArgRef::Content` resolves through (ledger #2240), when the host
+    /// installed one ([`with_content_store`](Self::with_content_store)).
+    content: Option<Arc<dyn crate::ContentStore>>,
     /// The declared floor of every endpoint resolved so far, memoized per endpoint
     /// identity — see [`FloorMemo`]. Consulted on every request (the floor runs
     /// before the cache lookup); cleared by a cut of [`BINDINGS_THREAD`].
@@ -1490,6 +1493,7 @@ impl Kernel {
             retry: None,
             memory: crate::run::MemoryLimits::default(),
             streams: Arc::new(crate::stream::space()),
+            content: None,
             floors: FloorMemo::default(),
             probes: ProbeMemo::default(),
             scope_names: Mutex::new(BTreeMap::new()),
@@ -2261,6 +2265,20 @@ impl Kernel {
     /// ```
     pub fn with_stream_memory(mut self, base: u64, ceiling: u64) -> Self {
         self.memory = crate::run::MemoryLimits::new(base, ceiling);
+        self
+    }
+
+    /// Install the **content store** an [`ArgRef::Content`] argument resolves through
+    /// (builder, ledger #2240): inside the invocation whose request carries the id, and
+    /// nowhere else ([`Invocation::content_body`]). The host keeps its own handle to put
+    /// content in; [`MemoryContentStore`](crate::MemoryContentStore) is core's
+    /// in-memory one. Without a store a content id is refused as `Unsupported`, as before.
+    ///
+    /// A request that carries a content id is keyed by the digest, so it caches like any
+    /// other value; the store holds only bodies that can be read again, so a retried
+    /// request reads its content again.
+    pub fn with_content_store(mut self, store: Arc<dyn crate::ContentStore>) -> Self {
+        self.content = Some(store);
         self
     }
 
@@ -5768,6 +5786,21 @@ impl Issuer for Kernel {
 
     fn now(&self) -> Option<Time> {
         self.clock.as_ref().map(|clock| clock.now())
+    }
+
+    fn content(&self, id: &crate::ContentId) -> Result<Body> {
+        let Some(store) = self.content.as_ref() else {
+            return Err(Error::Unsupported {
+                verb: None,
+                detail: format!(
+                    "content {id} names a value, and this kernel has no content store \
+                     (`Kernel::with_content_store`)"
+                ),
+            });
+        };
+        store
+            .get(id)
+            .ok_or_else(|| Error::NotFound(format!("no content is held under {id}")))
     }
 
     fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {

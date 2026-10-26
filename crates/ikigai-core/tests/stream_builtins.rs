@@ -466,7 +466,8 @@ fn a_step_over_a_replay_with_a_digest_is_cached_on_the_digest() {
 
 #[test]
 fn attached_content_resolves_only_inside_the_request_that_carries_it() {
-    // A request naming content by id with nothing attached is refused, as before.
+    // A request naming content by id, with nothing attached and no content store
+    // installed, is refused as Unsupported (tests/content_store.rs covers a store).
     let (kernel, _) = kernel();
     let request = stream("collect").with_arg("content", ArgRef::Content(ContentId::of(b"x")));
     assert!(matches!(
