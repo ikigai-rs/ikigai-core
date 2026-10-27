@@ -512,6 +512,106 @@ fn the_dual_form_keeps_v1_digests_and_digests_the_new_constructs_under_v2() {
     }
 }
 
+/// Ledger #2176, #2432: existence sensitivity. The flag puts a contract in the v2 form and
+/// is fed LAST, after the failure classes, as the byte `2`; an unset flag (absent or an
+/// explicit `false`) feeds nothing, so a contract that does not set it keeps its digest.
+/// Per verb, an explicit action's flag REPLACES the flat one, as its `requires` does. The
+/// rows pin each of those, so a regeneration that loses one fails here.
+#[test]
+fn existence_sensitivity_is_its_own_contract_and_an_explicit_action_replaces_the_flat_flag() {
+    let doc: Value = serde_json::from_str(&compute()).unwrap();
+    let contract = |name: &str| -> String {
+        doc["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no contract case {name}"))["contract"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        contract("sensitive/unflagged"),
+        contract("sensitive/false-is-absent (same digest as sensitive/unflagged)")
+    );
+    // The flag moves a contract with no failure classes, one with stated classes, and
+    // one stating only the implied ones; and none of the five collide.
+    let distinct = [
+        "sensitive/unflagged",
+        "sensitive/flagged",
+        "sensitive/failures-unflagged",
+        "sensitive/failures-and-flag",
+        "sensitive/only-the-implied-failures-and-flag",
+    ]
+    .map(contract);
+    assert_eq!(
+        distinct.iter().collect::<BTreeSet<_>>().len(),
+        distinct.len(),
+        "{distinct:?}"
+    );
+
+    // Which nodes of each door's Turtle say `ik:existenceSensitive true`: the endpoint node
+    // carries the FLAT flag only, each action node its own verb's normalized flag.
+    let sensitive = |name: &str| -> BTreeSet<String> {
+        let predicate = format!("{}existenceSensitive", ikigai_vocab::NS);
+        door_triples(&doc, name)
+            .iter()
+            .filter(|t| t.predicate.as_str() == predicate)
+            .map(|t| {
+                assert_eq!(kind(&t.object), Kind::Literal("true".into()), "{t}");
+                match &t.subject {
+                    NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
+                    NamedOrBlankNode::BlankNode(b) => panic!("a blank node in {name}: {b}"),
+                }
+            })
+            .collect()
+    };
+    let action = |name: &str, verb: &str| -> String {
+        doc["doors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .unwrap_or_else(|| panic!("no door named {name}"))["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["verb"] == verb)
+            .unwrap_or_else(|| panic!("door {name} has no {verb} action"))["contract"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let endpoint = |id: &str| format!("urn:ikigai:endpoint:{id}");
+    assert_eq!(
+        sensitive("core/existence-sensitive"),
+        BTreeSet::from([
+            endpoint("existence-sensitive"),
+            action("core/existence-sensitive", "Source"),
+            action("core/existence-sensitive", "Exists"),
+        ])
+    );
+    assert_eq!(
+        sensitive("core/existence-sensitive-per-verb"),
+        BTreeSet::from([action("core/existence-sensitive-per-verb", "Sink")])
+    );
+    assert_eq!(
+        sensitive("core/existence-sensitive-replaced"),
+        BTreeSet::from([
+            endpoint("existence-sensitive-replaced"),
+            action("core/existence-sensitive-replaced", "Source"),
+        ])
+    );
+    assert_eq!(
+        sensitive("core/existence-sensitive-failures"),
+        BTreeSet::from([
+            endpoint("existence-sensitive-failures"),
+            action("core/existence-sensitive-failures", "Source"),
+        ])
+    );
+}
+
 /// Regenerate `contract_vectors.json`./// Regenerate `contract_vectors.json`. Ignored so a normal run only CHECKS; run it with
 /// `-- --ignored` after editing the cases.
 #[test]

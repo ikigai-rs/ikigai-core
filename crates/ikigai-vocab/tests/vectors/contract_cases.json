@@ -1063,6 +1063,113 @@
           }
         ]
       }
+    },
+    {
+      "name": "core/existence-sensitive",
+      "pattern": "urn:core:existence-sensitive",
+      "description": {
+        "id": "existence-sensitive",
+        "title": "",
+        "summary": "a flat door whose existence is sensitive, for every verb (ledger #2176)",
+        "verbs": [
+          "Source",
+          "Exists",
+          "Meta"
+        ],
+        "inputs": [],
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:vault:read"
+        ],
+        "existence_sensitive": true
+      }
+    },
+    {
+      "name": "core/existence-sensitive-per-verb",
+      "pattern": "urn:core:existence-sensitive-per-verb",
+      "description": {
+        "id": "existence-sensitive-per-verb",
+        "title": "",
+        "summary": "only the Sink verb is sensitive; the flat Source is not (ledger #2176)",
+        "verbs": [
+          "Source",
+          "Sink",
+          "Meta"
+        ],
+        "inputs": [],
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:vault:read"
+        ],
+        "actions": [
+          {
+            "verb": "Sink",
+            "requires": [
+              "urn:cap:vault:write"
+            ],
+            "existence_sensitive": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "core/existence-sensitive-replaced",
+      "pattern": "urn:core:existence-sensitive-replaced",
+      "description": {
+        "id": "existence-sensitive-replaced",
+        "title": "",
+        "summary": "the flat flag is sensitive, but an explicit Sink action replaces it and is not (ledger #2176)",
+        "verbs": [
+          "Source",
+          "Sink",
+          "Meta"
+        ],
+        "inputs": [],
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:vault:read"
+        ],
+        "existence_sensitive": true,
+        "actions": [
+          {
+            "verb": "Sink",
+            "requires": [
+              "urn:cap:vault:write"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "core/existence-sensitive-failures",
+      "pattern": "urn:core:existence-sensitive-failures",
+      "description": {
+        "id": "existence-sensitive-failures",
+        "title": "",
+        "summary": "stated failure classes and the sensitivity flag together (ledger #2176)",
+        "verbs": [
+          "Source",
+          "Meta"
+        ],
+        "inputs": [],
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:vault:read"
+        ],
+        "failures": [
+          "retry-after",
+          "transient"
+        ],
+        "existence_sensitive": true
+      }
     }
   ],
   "contracts": [
@@ -1630,6 +1737,97 @@
         "requires": [
           "urn:cap:net:*"
         ]
+      }
+    },
+    {
+      "name": "sensitive/unflagged",
+      "id": "vaultGet",
+      "action": {
+        "verb": "Source",
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:vault:read"
+        ]
+      }
+    },
+    {
+      "name": "sensitive/false-is-absent (same digest as sensitive/unflagged)",
+      "id": "vaultGet",
+      "action": {
+        "verb": "Source",
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:vault:read"
+        ],
+        "existence_sensitive": false
+      }
+    },
+    {
+      "name": "sensitive/flagged",
+      "id": "vaultGet",
+      "action": {
+        "verb": "Source",
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:vault:read"
+        ],
+        "existence_sensitive": true
+      }
+    },
+    {
+      "name": "sensitive/failures-unflagged",
+      "id": "vaultGet",
+      "action": {
+        "verb": "Source",
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:vault:read"
+        ],
+        "failures": [
+          "retry-after",
+          "transient"
+        ]
+      }
+    },
+    {
+      "name": "sensitive/failures-and-flag",
+      "id": "vaultGet",
+      "action": {
+        "verb": "Source",
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:vault:read"
+        ],
+        "failures": [
+          "retry-after",
+          "transient"
+        ],
+        "existence_sensitive": true
+      }
+    },
+    {
+      "name": "sensitive/only-the-implied-failures-and-flag",
+      "id": "vaultGet",
+      "action": {
+        "verb": "Source",
+        "outputs": [
+          "text/plain"
+        ],
+        "requires": [
+          "urn:cap:vault:read"
+        ],
+        "failures": [],
+        "existence_sensitive": true
       }
     }
   ],
