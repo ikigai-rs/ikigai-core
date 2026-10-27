@@ -482,8 +482,45 @@ impl MemoryBudget {
         self.0.try_take(bytes)
     }
 
+    /// Reserve `bytes` for as long as the returned [`Reservation`] lives (ledger #2381):
+    /// they are drawn now, here and in every pool above, and given back when it drops. What
+    /// a step holding a WINDOW of a stream takes (a line, a tail, a parser buffer, a sniff
+    /// prefix): it reserves the window, holds it, and drops the reservation with it, so a
+    /// long stream never drains the pool, and an early return or a dropped stream cannot
+    /// leak what it held.
+    ///
+    /// Past what is left the answer is [`Error::OverBudget`](crate::Error::OverBudget),
+    /// and nothing is drawn. Use [`try_draw`](Self::try_draw) instead for bytes that are
+    /// handed over and leave the step's sight (a collected answer).
+    ///
+    /// ```
+    /// use ikigai_core::{Error, IssueContext};
+    ///
+    /// let run = IssueContext::new().with_memory_limit(10);
+    /// let pool = run.memory_budget().unwrap();
+    /// for _line in 0..1_000 {
+    ///     let held = pool.reserve(8).unwrap(); // one 8-byte line at a time
+    ///     assert_eq!(pool.remaining(), 2);
+    ///     drop(held);
+    /// }
+    /// assert_eq!(pool.remaining(), 10, "a thousand lines, one at a time, drain nothing");
+    /// assert!(matches!(pool.reserve(11), Err(Error::OverBudget { .. })));
+    /// assert_eq!(pool.remaining(), 10);
+    /// ```
+    pub fn reserve(&self, bytes: u64) -> crate::Result<Reservation> {
+        if self.0.try_take(bytes) {
+            Ok(Reservation {
+                pool: self.0.clone(),
+                bytes,
+            })
+        } else {
+            Err(over_reservation(bytes, self.remaining()))
+        }
+    }
+
     /// Give back `bytes` this pool drew, when what they were drawn for was dropped (a
-    /// failed collect).
+    /// failed collect). Crate-private: outside the crate a [`Reservation`] gives bytes back,
+    /// so nothing can give back more than it drew.
     pub(crate) fn give_back(&self, bytes: u64) {
         self.0.give_back(bytes)
     }
@@ -491,6 +528,93 @@ impl MemoryBudget {
     /// A view of this pool limited to `limit` bytes.
     pub(crate) fn narrowed(&self, limit: u64) -> MemoryBudget {
         MemoryBudget(self.0.narrowed(limit))
+    }
+}
+
+fn over_reservation(wanted: u64, left: u64) -> crate::Error {
+    crate::Error::OverBudget {
+        detail: format!(
+            "a reservation of {wanted} byte(s) is larger than the run's byte budget: {left} \
+             byte(s) left (a `urn:cap:stream:memory:<bytes>` grant raises it, up to the host's \
+             ceiling)"
+        ),
+    }
+}
+
+/// Bytes held from a [`MemoryBudget`] for as long as this lives
+/// ([`MemoryBudget::reserve`]): given back to the pool, and every pool above it, when it
+/// drops, however the step holding it ends.
+///
+/// A window that changes size moves with [`try_grow`](Self::try_grow) and
+/// [`shrink`](Self::shrink); a step that hands its buffer over for good (so the bytes leave
+/// its sight and stay held) ends the reservation with [`keep`](Self::keep).
+///
+/// ```
+/// use ikigai_core::{Error, IssueContext};
+///
+/// let run = IssueContext::new().with_memory_limit(10);
+/// let pool = run.memory_budget().unwrap();
+/// let mut window = pool.reserve(4).unwrap();
+/// window.try_grow(5).unwrap();
+/// assert!(matches!(window.try_grow(2), Err(Error::OverBudget { .. })));
+/// assert_eq!(window.bytes(), 9);
+/// window.shrink(6);
+/// assert_eq!((window.bytes(), pool.remaining()), (3, 7));
+/// drop(window);
+/// assert_eq!(pool.remaining(), 10);
+/// pool.reserve(4).unwrap().keep();
+/// assert_eq!(pool.remaining(), 6, "kept: drawn for the run, as try_draw is");
+/// ```
+#[must_use = "a reservation gives its bytes back when it drops"]
+pub struct Reservation {
+    pool: Pool,
+    bytes: u64,
+}
+
+impl Reservation {
+    /// How many bytes this holds.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Hold `more` bytes besides: all or nothing, [`Error::OverBudget`](crate::Error::OverBudget)
+    /// past what the pool has left, in which case this still holds what it held.
+    pub fn try_grow(&mut self, more: u64) -> crate::Result<()> {
+        if self.pool.try_take(more) {
+            self.bytes += more;
+            Ok(())
+        } else {
+            Err(over_reservation(more, self.pool.remaining()))
+        }
+    }
+
+    /// Give back `fewer` bytes now (at most what this holds), keeping the rest.
+    pub fn shrink(&mut self, fewer: u64) {
+        let fewer = fewer.min(self.bytes);
+        self.pool.give_back(fewer);
+        self.bytes -= fewer;
+    }
+
+    /// End the reservation WITHOUT giving its bytes back: they stay drawn for the run, as
+    /// a [`MemoryBudget::try_draw`] is, because the buffer they cover was handed over.
+    pub fn keep(mut self) {
+        self.bytes = 0;
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            self.pool.give_back(self.bytes);
+        }
+    }
+}
+
+impl fmt::Debug for Reservation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reservation")
+            .field("bytes", &self.bytes)
+            .finish()
     }
 }
 

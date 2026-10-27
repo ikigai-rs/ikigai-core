@@ -204,8 +204,8 @@ pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};
 pub use run::{
     cap_retry, cap_stream_memory, cap_stream_spill, IssueContext, MemoryBudget, MemoryLimits,
-    RetryBudget, RetryLimits, SpillLimits, CAP_RETRY, CAP_STREAM_MEMORY, CAP_STREAM_SPILL,
-    DEFAULT_STREAM_MEMORY, DEFAULT_STREAM_SPILL,
+    Reservation, RetryBudget, RetryLimits, SpillLimits, CAP_RETRY, CAP_STREAM_MEMORY,
+    CAP_STREAM_SPILL, DEFAULT_STREAM_MEMORY, DEFAULT_STREAM_SPILL,
 };
 pub use seal::{SealError, SealOwner};
 pub use select::{
