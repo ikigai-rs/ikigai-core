@@ -42,8 +42,11 @@ futures = "0.3" # block_on for the kernel faces in tests/manifold_identity.rs
 # dependency graph (the crate stays dependency-free).
 oxttl = "0.2"
 oxrdf.workspace = true
-# The conformance test (tests/conformance.rs, with `ikigai-conformance` as a dev-dependency) is
-# OUT for the 0.2.0 bump and comes back under ledger #2308: the published suite pins ikigai-core
-# ^0.1.108, which cannot admit 0.2.0, so it linked a second core, and the workspace [patch] cannot
-# bridge a requirement that excludes the patched version. Restore it pinned to the first
-# conformance release on core 0.2.0; the workspace [patch.crates-io] stays for that.
+# What "done" means for a module, run against `space()` (tests/conformance.rs). It depends on
+# `ikigai-core` and `ikigai-vocab` from crates.io, which would link a SECOND copy of each beside
+# this workspace's: the workspace root's `[patch.crates-io]` points both at the members here, so
+# the suite and this crate share one kernel. The `ikigai-vocab` edge is a dev-dependency cycle,
+# which cargo permits (an integration test links the plain library).
+# 0.11.0: the first suite on core 0.2.0 (ledger #2308). The test was out for the 0.2.0 bump because
+# 0.8 pinned core ^0.1.108, which no [patch] can bridge to 0.2.0.
+ikigai-conformance = "0.11.0"
