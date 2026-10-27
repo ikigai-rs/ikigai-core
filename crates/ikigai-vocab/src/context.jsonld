@@ -262,6 +262,10 @@
       "@type": "@id"
     },
     "example": "ik:example",
+    "existenceSensitive": {
+      "@id": "ik:existenceSensitive",
+      "@type": "xsd:boolean"
+    },
     "explanation": "ik:explanation",
     "family": "ik:family",
     "fileName": "ik:fileName",

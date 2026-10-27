@@ -1611,7 +1611,21 @@ mod turtle {
             let pattern = self.one_str(s, &format!("{IK}pattern"))?;
             let kind = self.match_kind(s)?;
             let endpoint = self.one_str(s, &format!("{IK}endpointName"))?;
-            let door = Door::new(pattern, kind, endpoint);
+            let mut door = Door::new(pattern, kind, endpoint);
+            if let Some(term) = self.optional(s, &format!("{IK}existenceSensitive"))? {
+                let p = format!("{IK}existenceSensitive");
+                door.existence_sensitive = match Self::literal_of(s, &p, term, "boolean")?.as_str()
+                {
+                    "true" => true,
+                    "false" => false,
+                    other => {
+                        return Err(malformed(
+                            s,
+                            format!("ik:existenceSensitive {other} is not a boolean"),
+                        ))
+                    }
+                };
+            }
             let mut corridor = None;
             if let Some(term) = self.optional(s, &format!("{IK}confinedTo"))? {
                 let iri = Self::iri_of(s, &format!("{IK}confinedTo"), term)?;

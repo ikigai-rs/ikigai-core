@@ -118,6 +118,7 @@ impl Canon {
 /// under [`CONTRACT_FORM_V2`].
 fn uses_v2(spec: &ActionSpec) -> bool {
     !spec.failures.is_unstated()
+        || spec.existence_sensitive
         || !spec.groups.is_empty()
         || !spec.arguments.is_closed()
         || spec.output_from.is_some()
@@ -509,6 +510,18 @@ impl ActionSpec {
     /// assert_eq!(ab.contract_id("fetch"), ba.contract_id("fetch"));
     /// ```
     ///
+    /// **Existence sensitivity** (ledger #2176) puts a contract in the v2 form too, and is
+    /// appended after the failure classes, only when set, as the byte `2`. A sensitive
+    /// contract is a different contract, and one that is not keeps its digest:
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, Verb};
+    ///
+    /// let open = ActionSpec::new(Verb::Source).requires("urn:cap:x");
+    /// let hidden = open.clone().existence_sensitive();
+    /// assert_ne!(open.contract_id("state"), hidden.contract_id("state"));
+    /// ```
+    ///
     /// The endpoint id is part of the contract: two endpoints with different ids and
     /// identical specs are two tools, and the contract node must say which one it
     /// belongs to.
@@ -598,6 +611,12 @@ impl ActionSpec {
                     c
                 }),
             );
+        }
+        // Existence sensitivity (ledger #2176) is fed ONLY when set, after the failure
+        // classes, as the byte `2`: an action that does not set it keeps its digest, and
+        // the byte differs from the failure classes' `1`, so neither tail is the other.
+        if self.existence_sensitive {
+            feed_u8(&mut h, 2);
         }
         ContentId::from_hasher(h)
     }
