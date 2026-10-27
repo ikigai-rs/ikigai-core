@@ -723,6 +723,15 @@ pub struct Kernel {
     /// The content store `ArgRef::Content` resolves through (ledger #2240), when the host
     /// installed one ([`with_content_store`](Self::with_content_store)).
     content: Option<Arc<dyn crate::ContentStore>>,
+    /// The spill facility `urn:stream:spill` writes through (ledger #2372), when the host
+    /// installed one ([`with_spill`](Self::with_spill)).
+    spill: Option<Arc<dyn crate::Spill>>,
+    /// The host's disk-budget policy for a spill (ledger #2372): the base every granted
+    /// caller may write and the ceiling no caller exceeds. [`SpillLimits::default`] when
+    /// the host configured none.
+    ///
+    /// [`SpillLimits::default`]: crate::SpillLimits::default
+    spill_limits: crate::run::SpillLimits,
     /// The declared floor of every endpoint resolved so far, memoized per endpoint
     /// identity — see [`FloorMemo`]. Consulted on every request (the floor runs
     /// before the cache lookup); cleared by a cut of [`BINDINGS_THREAD`].
@@ -1494,6 +1503,8 @@ impl Kernel {
             memory: crate::run::MemoryLimits::default(),
             streams: Arc::new(crate::stream::space()),
             content: None,
+            spill: None,
+            spill_limits: crate::run::SpillLimits::default(),
             floors: FloorMemo::default(),
             probes: ProbeMemo::default(),
             scope_names: Mutex::new(BTreeMap::new()),
@@ -2279,6 +2290,29 @@ impl Kernel {
     /// request reads its content again.
     pub fn with_content_store(mut self, store: Arc<dyn crate::ContentStore>) -> Self {
         self.content = Some(store);
+        self
+    }
+
+    /// Install the **spill facility** `urn:stream:spill` writes through (builder, ledger
+    /// #2372), beside [`with_content_store`](Self::with_content_store): it turns a one-shot
+    /// body into one that can be read again ([`Spill`](crate::Spill)). The file-backed one
+    /// is a host library's; without one, `urn:stream:spill` is `Unsupported`. How much one
+    /// request may write is [`with_stream_spill`](Self::with_stream_spill)'s.
+    pub fn with_spill(mut self, spill: Arc<dyn crate::Spill>) -> Self {
+        self.spill = Some(spill);
+        self
+    }
+
+    /// Set the host's **disk budget** for a spill (builder, ledger #2372): how many bytes
+    /// one `urn:stream:spill` request may write. A caller gets the largest
+    /// `urn:cap:stream:spill:<bytes>` it holds ([`cap_stream_spill`](crate::cap_stream_spill)),
+    /// never below `base` and never above `ceiling`, and root gets `ceiling`; the request's
+    /// own `max-bytes` lowers it further. Holding no grant at all is a denial, since the
+    /// builtin requires the family. Without this the kernel runs under
+    /// [`SpillLimits::default`](crate::SpillLimits): no base, a ceiling of
+    /// [`DEFAULT_STREAM_SPILL`](crate::DEFAULT_STREAM_SPILL) (1 GiB).
+    pub fn with_stream_spill(mut self, base: u64, ceiling: u64) -> Self {
+        self.spill_limits = crate::run::SpillLimits::new(base, ceiling);
         self
     }
 
@@ -5801,6 +5835,21 @@ impl Issuer for Kernel {
         store
             .get(id)
             .ok_or_else(|| Error::NotFound(format!("no content is held under {id}")))
+    }
+
+    fn spill(&self, capability: &Capability) -> Result<(Arc<dyn crate::Spill>, u64)> {
+        let Some(spill) = self.spill.as_ref() else {
+            return Err(Error::Unsupported {
+                verb: None,
+                detail: "urn:stream:spill needs the host's spill facility, and this kernel has \
+                         no spill facility (`Kernel::with_spill`)"
+                    .into(),
+            });
+        };
+        Ok((
+            Arc::clone(spill),
+            self.spill_limits.for_capability(capability),
+        ))
     }
 
     fn select_transreptor(&self, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {

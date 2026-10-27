@@ -136,6 +136,7 @@ mod run;
 mod seal;
 mod select;
 mod space;
+mod spill;
 pub mod stream;
 mod topology;
 mod uncached;
@@ -160,7 +161,7 @@ pub use capability::{
 };
 pub use check::{ProposedArgs, Violation, ViolationKind, ViolationPath, GIVEN_TWICE};
 pub use confine::Confine;
-pub use content::{ContentId, ContentIdError};
+pub use content::{ContentHasher, ContentId, ContentIdError};
 pub use content_store::{ContentHandle, ContentStore, MemoryContentStore};
 pub use contract::{
     canonical_contract_iri, canonical_match_iri, encode_name, match_iri, parse_contract_iri,
@@ -202,8 +203,9 @@ pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};
 pub use run::{
-    cap_retry, cap_stream_memory, IssueContext, MemoryBudget, MemoryLimits, RetryBudget,
-    RetryLimits, CAP_RETRY, CAP_STREAM_MEMORY, DEFAULT_STREAM_MEMORY,
+    cap_retry, cap_stream_memory, cap_stream_spill, IssueContext, MemoryBudget, MemoryLimits,
+    RetryBudget, RetryLimits, SpillLimits, CAP_RETRY, CAP_STREAM_MEMORY, CAP_STREAM_SPILL,
+    DEFAULT_STREAM_MEMORY, DEFAULT_STREAM_SPILL,
 };
 pub use seal::{SealError, SealOwner};
 pub use select::{
@@ -215,6 +217,7 @@ pub use space::{
     space_iri, EndpointSpace, Fallback, Level, LevelPath, Limit, Mount, Resolution, Resolved,
     Rewrite, Scope, Space, SpaceEntry, SPACE_PREFIX,
 };
+pub use spill::Spill;
 pub use topology::{
     escape_literal, turtle_literal, Door, MatchKind, SpaceKind, Topology, TopologyRule,
     SKOLEM_PREFIX,

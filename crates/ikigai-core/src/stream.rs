@@ -8,11 +8,15 @@
 //! | [`COLLECT`] `urn:stream:collect` | any body (`content`) as one buffer, under the run's byte budget |
 //! | [`TEXT`] `urn:stream:text` | a body decoded with its charset (UTF-8 by default) as `text/plain;charset=utf-8`; a malformed body is refused |
 //! | [`RANGE`] `urn:stream:range` | the bytes `[start, end)` of the resource `of`, over a seekable body; the answer hangs from `of`'s threads |
+//! | [`SPILL`] `urn:stream:spill` | any body (`content`) written through the host's spill facility ([`Spill`](crate::Spill)) and answered as a body that can be read again, under the caller's disk budget |
 //!
 //! Each declares what it enforces: [`OverBudget`](crate::FailureClass::OverBudget) past the
 //! run's byte budget (the grant `urn:cap:stream:memory:<bytes>`, required by none of them:
-//! holding none gets the host's base), and none requires a capability of its own. A body
-//! a builtin reads by reference is read under the CALLER's capability, as any sub-request.
+//! holding none gets the host's base), and none but `spill` requires a capability of its
+//! own. `spill` writes to the host's disk, so it requires the disk-budget family
+//! `urn:cap:stream:spill:*` ([`CAP_STREAM_SPILL`](crate::CAP_STREAM_SPILL)), and is
+//! `OverBudget` past the grant. A body a builtin reads by reference is read under the
+//! CALLER's capability, as any sub-request.
 //!
 //! ```
 //! use std::sync::Arc;
@@ -70,13 +74,16 @@ pub const TEXT: &str = "urn:stream:text";
 /// `urn:stream:range`: a byte range of a resource, over a seekable body.
 pub const RANGE: &str = "urn:stream:range";
 
+/// `urn:stream:spill`: a body written through the host's spill facility, to be read again.
+pub const SPILL: &str = "urn:stream:spill";
+
 const XSD_NON_NEGATIVE_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#nonNegativeInteger";
 const XSD_ANY_URI: &str = "http://www.w3.org/2001/XMLSchema#anyURI";
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const OCTETS: &str = "application/octet-stream";
 const TEXT_UTF8: &str = "text/plain;charset=utf-8";
 
-/// The space the kernel answers [`STREAM_PREFIX`] from: the three builtins at their names.
+/// The space the kernel answers [`STREAM_PREFIX`] from: the four builtins at their names.
 /// Built once per kernel.
 pub(crate) fn space() -> EndpointSpace {
     EndpointSpace::new()
@@ -84,6 +91,7 @@ pub(crate) fn space() -> EndpointSpace {
         .bind(Exact::new(COLLECT), Collect)
         .bind(Exact::new(TEXT), Text)
         .bind(Exact::new(RANGE), Range)
+        .bind(Exact::new(SPILL), SpillBody)
 }
 
 /// Whether the kernel answers `target` from the stream builtins.
@@ -565,5 +573,94 @@ async fn read_range(
             budget.give_back(drawn);
             Err(error)
         }
+    }
+}
+
+// --------------------------------------------------------------------------- spill
+
+/// `urn:stream:spill` ([`SPILL`]).
+struct SpillBody;
+
+/// Past the effective spill limit.
+fn over_spill(len: u64, limit: u64) -> Error {
+    Error::OverBudget {
+        detail: format!(
+            "the body is {len} bytes, past the spill limit of {limit} (the least of `max-bytes`, \
+             the caller's `urn:cap:stream:spill:<bytes>` grant and the host's ceiling)"
+        ),
+    }
+}
+
+#[async_trait]
+impl Endpoint for SpillBody {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let budget = run_budget(inv);
+        self.invoke_body(inv).await?.collect_within(&budget).await
+    }
+
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+        // The facility and the caller's grant first: with none installed nothing is read.
+        let (facility, granted) = inv.spill()?;
+        let limit = offset(inv, "max-bytes")?.map_or(granted, |asked| asked.min(granted));
+        let source = content(inv).await?;
+        let repr_type = source.repr_type.clone();
+        // A body that states its length past the limit is refused before a byte is written.
+        if let Some(len) = source.bytes.len_hint().filter(|len| *len > limit) {
+            return Err(over_spill(len, limit));
+        }
+        let replay = facility.spill(source.bytes.into_stream(), limit).await?;
+        // The facility's contract, checked rather than trusted: a spill is known by its
+        // content id and its length, and is never longer than it was allowed to be.
+        let (Some(_), Some(len)) = (replay.validator(), replay.len_hint()) else {
+            return Err(Error::Endpoint(
+                "the spill facility answered a body with no content id or no length; a spill \
+                 states both (`Replay::validator`, `Replay::len_hint`)"
+                    .into(),
+            ));
+        };
+        if len > limit {
+            return Err(over_spill(len, limit));
+        }
+        // Cacheable: a spill is immutable, and a referenced `content` was read as a
+        // recorded dependency, so the answer hangs from its threads.
+        Ok(Representation::from_body(repr_type, Body::Replay(replay)).cacheable())
+    }
+
+    fn name(&self) -> &str {
+        "spill"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("spill")
+            .title("Spill a body")
+            .summary(
+                "Writes the body given as `content` (inline, by reference, or by content id) \
+                 through the host's spill facility and answers it as a body that can be read \
+                 again, known by its content id and length, with a referenced body's type \
+                 kept. At most the least of `max-bytes`, the caller's \
+                 `urn:cap:stream:spill:<bytes>` grant and the host's ceiling is written: past \
+                 it the answer is OverBudget, never a shorter body. A host with no spill \
+                 facility (no file system) answers Unsupported. The answer is cacheable and \
+                 hangs from a referenced body's threads.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(crate::CAP_STREAM_SPILL)
+            .input(
+                ArgSpec::new("content")
+                    .summary("the body to spill")
+                    .class(XSD_STRING),
+            )
+            .input(
+                ArgSpec::new("max-bytes")
+                    .summary("the most to write; lowers the grant, never raises it")
+                    .class(XSD_NON_NEGATIVE_INTEGER)
+                    .optional(),
+            )
+            .output(OCTETS)
+            .fails(FailureClass::OverBudget)
+            // `Unsupported` (no spill facility) is classed Permanent.
+            .fails(FailureClass::Permanent)
+            .fails(FailureClass::Unknown)
     }
 }
