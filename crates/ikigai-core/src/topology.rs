@@ -295,6 +295,10 @@ pub struct Door {
     /// sub-requests are confined to, named by the confinement's name
     /// (`ik:confinedTo`).
     pub confined: Option<Box<Topology>>,
+    /// Whether the endpoint hides its existence from a caller its capability floor
+    /// refuses ([`Description::hides_existence`](crate::Description::hides_existence),
+    /// ledger #2176): `ik:existenceSensitive true`, written only when it does.
+    pub existence_sensitive: bool,
 }
 
 impl Door {
@@ -305,7 +309,15 @@ impl Door {
             kind,
             endpoint: endpoint.into(),
             confined: None,
+            existence_sensitive: false,
         }
+    }
+
+    /// Mark the door's endpoint as hiding its existence (builder): see
+    /// [`existence_sensitive`](Self::existence_sensitive).
+    pub fn existence_sensitive(mut self) -> Self {
+        self.existence_sensitive = true;
+        self
     }
 
     /// The corridor the door's endpoint confines its sub-requests to (builder).
@@ -571,6 +583,9 @@ impl Topology {
                     );
                     if let Some(corridor) = corridor {
                         let _ = write!(out, " ;\n    ik:confinedTo <{corridor}>");
+                    }
+                    if door.existence_sensitive {
+                        out.push_str(" ;\n    ik:existenceSensitive true");
                     }
                     out.push_str(" .\n");
                 }

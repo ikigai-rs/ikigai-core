@@ -807,6 +807,10 @@ pub(crate) struct Floor {
     /// into the bindings when the matched name leaves that segment out (ledger #1547).
     /// `Description::validate` admits one only on an optional binding.
     binding_defaults: Vec<(Verb, Defaults)>,
+    /// The declared verbs whose existence is sensitive (ledger #2176), and whether any
+    /// part of the description is: what [`conceals`](Self::conceals) reads.
+    sensitive: Vec<Verb>,
+    any_sensitive: bool,
 }
 
 /// One verb's declared defaults, `(input, lexical form)`, shared between the floor
@@ -833,6 +837,12 @@ impl Floor {
         };
         let defaults = declared_defaults(crate::describe::InputSource::Argument);
         let binding_defaults = declared_defaults(crate::describe::InputSource::Binding);
+        let sensitive: Vec<Verb> = specs
+            .iter()
+            .filter(|spec| spec.existence_sensitive)
+            .map(|spec| spec.verb)
+            .collect();
+        let any_sensitive = !sensitive.is_empty() || description.hides_existence();
         let declared: Vec<(Verb, Vec<String>)> = specs
             .into_iter()
             .map(|spec| (spec.verb, spec.requires))
@@ -857,7 +867,40 @@ impl Floor {
             every,
             defaults,
             binding_defaults,
+            sensitive,
+            any_sensitive,
         }
+    }
+
+    /// Whether `capability` is refused `verb` here in a way that must answer as a name
+    /// bound nowhere (ledger #2176): the description marks the verb's existence sensitive
+    /// and the floor refuses it. A declared verb reads its own flag; an undeclared one
+    /// (it needs what declared verbs need, by the table above) conceals when any part of
+    /// the description is sensitive. `Meta`, which the floor never gates, conceals when
+    /// the description is sensitive anywhere and `capability` passes the floor of no
+    /// declared verb: the description would tell it what every verb hides.
+    pub(crate) fn conceals(&self, verb: Verb, capability: &Capability) -> bool {
+        if !self.any_sensitive {
+            return false;
+        }
+        let passes = |scopes: &[String]| {
+            scopes
+                .iter()
+                .all(|s| crate::select::cap_satisfies(capability, s))
+        };
+        if verb == Verb::Meta {
+            return if self.declared.is_empty() {
+                !passes(&self.every)
+            } else {
+                !self.declared.iter().any(|(_, requires)| passes(requires))
+            };
+        }
+        let marked = if self.declared.iter().any(|(declared, _)| *declared == verb) {
+            self.sensitive.contains(&verb)
+        } else {
+            true
+        };
+        marked && !passes(self.requirements(verb))
     }
 
     /// The defaults a request with `verb` is prefilled with: the verb's own declared
@@ -953,6 +996,9 @@ fn undeclared_failure(
 
 struct Admission {
     lacking: Option<String>,
+    /// Whether the refusal (or, for a `Meta`, the description) must answer as a name
+    /// bound nowhere: see [`Floor::conceals`].
+    conceal: bool,
     defaults: Vec<(String, String)>,
     binding_defaults: Vec<(String, String)>,
     /// The verb's WHOLE declared defaults (not only the ones this request leaves out),
@@ -1113,6 +1159,7 @@ impl FloorMemo {
                 declared: floor.declared_defaults(request.verb).cloned(),
                 keep,
                 lacking: floor.unsatisfied(request, capability),
+                conceal: floor.conceals(request.verb, capability),
                 defaults: floor
                     .defaults(request.verb)
                     .iter()
@@ -1867,9 +1914,22 @@ impl Kernel {
     /// Lenient in, canonical out (ledger #1107): a match or contract IRI is accepted in
     /// any spelling its parse accepts, compared by what it PARSES to, and named back in
     /// errors by its canonical spelling, never as the caller typed it.
-    fn validate_target(&self, action: &str) -> Result<(Description, Verb)> {
+    fn validate_target(
+        &self,
+        action: &str,
+        capability: &Capability,
+    ) -> Result<(Description, Verb)> {
+        // A door whose existence is hidden from `capability` on the verb is not there,
+        // by every name an action can be given (ledger #2176): the caller gets what it
+        // would get for a door bound nowhere.
+        let shown = |description: &Description, verb: Verb| {
+            !Floor::of(description).conceals(verb, capability)
+        };
         if let Some((verb, pattern)) = crate::contract::parse_match_iri(action) {
-            let description = self.describe_pattern(&pattern).ok_or_else(|| {
+            let description = self
+                .describe_pattern(&pattern)
+                .filter(|description| shown(description, verb));
+            let description = description.ok_or_else(|| {
                 Error::Endpoint(format!(
                     "validate: no door `{pattern}` (from `{}`)",
                     crate::contract::match_iri(verb, &pattern)
@@ -1882,6 +1942,7 @@ impl Kernel {
                 .descriptions_for_id(&id)
                 .into_iter()
                 .map(|(_, description)| description)
+                .filter(|description| shown(description, verb))
                 .find(|description| {
                     description
                         .action_specs()
@@ -1907,7 +1968,8 @@ impl Kernel {
             Error::Endpoint(format!("validate: `{action}` names no :action: segment"))
         })?;
         let verb = parse_verb(verb_name)?;
-        let doors = self.descriptions_for_id(id);
+        let mut doors = self.descriptions_for_id(id);
+        doors.retain(|(_, description)| shown(description, verb));
         let Some((_, first)) = doors.first() else {
             return Err(Error::Endpoint(format!(
                 "validate: no endpoint with id `{id}`"
@@ -2710,7 +2772,7 @@ impl Kernel {
     fn trace_miss(
         &self,
         trace: &Option<TraceScope>,
-        request: &Request,
+        target: &Iri,
         capability: &Capability,
         span: Option<u64>,
         parent: Option<u64>,
@@ -2725,20 +2787,14 @@ impl Kernel {
         }
         let mut notes = alias_notes(alias);
         if alias.is_some() {
-            notes.push((
-                ALIAS_MISS_NOTE.to_string(),
-                request.target.as_str().to_string(),
-            ));
+            notes.push((ALIAS_MISS_NOTE.to_string(), target.as_str().to_string()));
         }
         notes.extend(scope_notes(scope));
         if !scope.is_empty() {
-            notes.push((
-                SCOPE_MISS_NOTE.to_string(),
-                request.target.as_str().to_string(),
-            ));
+            notes.push((SCOPE_MISS_NOTE.to_string(), target.as_str().to_string()));
         }
         trace_scope.record(TraceEvent {
-            target: request.target.as_str().to_string(),
+            target: target.as_str().to_string(),
             thread: thread_label(),
             started: None,
             ended: None,
@@ -3491,7 +3547,7 @@ impl Kernel {
                 }
                 self.trace_miss(
                     &trace,
-                    &request,
+                    &request.target,
                     capability,
                     span,
                     parent,
@@ -3547,6 +3603,9 @@ impl Kernel {
         // The name the cache-status probe asks by, which knows only the kernel's own
         // rewrite: kept for the probe memo below when a space rewrites it (ledger #1884).
         let mut probed_as: Option<Iri> = None;
+        // And the kernel's own hop, as it stood before the space's rewrite: with
+        // `probed_as`, what a miss at this name would have said (ledger #2176).
+        let mut missed_hop: Option<AliasHop> = None;
         if let Some(canonical) = resolved.canonical.take() {
             if canonical != request.target {
                 let previous = std::mem::replace(&mut request.target, canonical.clone());
@@ -3557,7 +3616,7 @@ impl Kernel {
                     .as_ref()
                     .map(|hop| hop.logical().clone())
                     .unwrap_or(previous);
-                alias = Some(AliasHop::reported(logical, canonical));
+                missed_hop = alias.replace(AliasHop::reported(logical, canonical));
             }
         }
         let alias = alias.as_ref();
@@ -3608,6 +3667,7 @@ impl Kernel {
         // `Resolved::canonical`.
         let Admission {
             lacking,
+            conceal,
             defaults,
             binding_defaults,
             declared,
@@ -3619,6 +3679,25 @@ impl Kernel {
             capability,
             started,
         );
+        // ★ EXISTENCE-SENSITIVE: a refusal that must not say the name is bound (ledger
+        // #2176, UX record D28). The endpoint declared its existence sensitive for this
+        // verb and the floor refuses the caller, or this is a `Meta` from a caller the
+        // floor refuses on every verb: the answer is the miss arm's above, byte for byte,
+        // under the name a miss would have named (the one asked for, before any rewrite
+        // a space reported), and the trace records what that miss records. Nothing is
+        // recorded for the probe, looked up or stored: a miss leaves none of that either.
+        // Placed with the limiter's reasoning, before everything that would remember a
+        // door, and after the limiter (a ⊥ declares nothing to be sensitive about).
+        if conceal {
+            let target = probed_as.as_ref().unwrap_or(&request.target);
+            let hop = if probed_as.is_some() {
+                missed_hop.as_ref()
+            } else {
+                alias
+            };
+            self.trace_miss(&trace, target, capability, span, parent, hop, &scope);
+            return Err(Error::Unresolved(target.clone()));
+        }
         // What the cache-status probe will prefill this name with, so it keys the next
         // request for it as this one is keyed WITHOUT resolving it (ledger #1884; see
         // `ProbeMemo`). Only for a verb whose answer can be cached (the probe answers
@@ -4862,7 +4941,7 @@ impl Kernel {
                                 .to_string(),
                         })
                     }
-                    (Some(action), None) => self.validate_target(action)?,
+                    (Some(action), None) => self.validate_target(action, capability)?,
                     (None, Some(endpoint)) => {
                         let verb_name = given("verb")
                             .ok_or_else(|| Error::MissingArgument("verb".to_string()))?;
@@ -4883,7 +4962,17 @@ impl Kernel {
                         let Some(resolved) = resolved else {
                             return Err(Error::Unresolved(Iri::parse(endpoint).expect("parsed")));
                         };
-                        (resolved.endpoint.describe(), parse_verb(verb_name)?)
+                        let description = resolved.endpoint.describe();
+                        // A door whose existence is hidden from this caller pre-flights
+                        // as the name bound nowhere it is to the caller (ledger #2176),
+                        // ahead of the verb's own errors, which only a bound name has.
+                        let verb = parse_verb(verb_name);
+                        let hidden = Floor::of(&description)
+                            .conceals(*verb.as_ref().unwrap_or(&Verb::Meta), capability);
+                        if hidden {
+                            return Err(Error::Unresolved(Iri::parse(endpoint).expect("parsed")));
+                        }
+                        (description, verb?)
                     }
                     (None, None) => {
                         return Err(Error::MissingArgument(
