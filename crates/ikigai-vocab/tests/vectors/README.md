@@ -88,6 +88,20 @@ it. The `failures/*` contracts pin that, declaration order included, and the
 `core/failure-classes` door pins the `ik:mayFail` triples, flat and per verb, each a
 vocabulary individual (`ik:RetryAfterFailure`; `ikigai_vocab::failure_class_iri`).
 
+**Existence sensitivity** (ledger #2176, ikigai-core 0.2.2; vectors ledger #2432): an action's
+`existence_sensitive: true` puts it in the v2 form too, and is fed after everything else,
+the failure classes included, only when set: the byte `2`. So a contract with both feeds the
+byte `1` and its classes, then `2`; an absent flag or an explicit `false` feeds nothing and
+keeps the digest. The `sensitive/*` contracts pin that: `false-is-absent` has
+`unflagged`'s digest, `failures-and-flag` fixes the order of the two tails, and
+`only-the-implied-failures-and-flag` (`1`, an empty set, `2`) differs from `flagged` (`2`
+alone). Per verb, an explicit action's flag REPLACES the flat one, like its `requires`. The
+doors pin that and the `ik:existenceSensitive true` triples: the endpoint node carries the
+FLAT flag only, each action node its own verb's. `core/existence-sensitive` is flat (every
+verb marked), `core/existence-sensitive-per-verb` marks only its explicit Sink beside an
+unmarked flat Source, `core/existence-sensitive-replaced` is flat-marked with an explicit
+Sink that is NOT, and `core/existence-sensitive-failures` states classes beside the flag.
+
 ## Lenient in, canonical out
 
 Postel's law (ledger #1107, decided 2026-10-10). A percent escape is `%` and exactly two
