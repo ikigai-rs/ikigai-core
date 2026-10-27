@@ -17,7 +17,8 @@ impl ContentId {
         ContentId(*blake3::hash(bytes).as_bytes())
     }
 
-    /// Finalize a hasher into a content address.
+    /// Finalize a hasher into a content address. Crate-private: outside core a digest
+    /// is built with [`ContentHasher`], so the identity rule stays in one place.
     pub(crate) fn from_hasher(hasher: blake3::Hasher) -> Self {
         ContentId(*hasher.finalize().as_bytes())
     }
@@ -37,6 +38,49 @@ impl ContentId {
             .try_into()
             .map_err(|_| ContentIdError("digest must be 32 bytes".into()))?;
         Ok(ContentId(arr))
+    }
+}
+
+/// An incremental [`ContentId`] (ledger #2372): the bytes fed in chunks, the same digest
+/// as [`ContentId::of`] of their concatenation. What a facility that hashes a body while it
+/// writes it (a spill, [`Spill`](crate::Spill)) uses, so it never restates core's identity
+/// rule (the algorithm, the `b3:` text form) itself.
+///
+/// ```
+/// use ikigai_core::{ContentHasher, ContentId};
+///
+/// let mut hasher = ContentHasher::new();
+/// for chunk in [&b"hello"[..], b", ", b"", b"world"] {
+///     hasher.update(chunk);
+/// }
+/// assert_eq!(hasher.finish(), ContentId::of(b"hello, world"));
+/// assert_eq!(ContentHasher::new().finish(), ContentId::of(b""));
+/// ```
+#[derive(Clone, Default)]
+pub struct ContentHasher(blake3::Hasher);
+
+impl ContentHasher {
+    /// A hasher that has seen no bytes.
+    pub fn new() -> Self {
+        ContentHasher(blake3::Hasher::new())
+    }
+
+    /// Feed the next chunk of the content.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    /// The content address of every byte fed so far.
+    pub fn finish(self) -> ContentId {
+        ContentId::from_hasher(self.0)
+    }
+}
+
+impl fmt::Debug for ContentHasher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContentHasher")
+            .field("fed", &self.0.count())
+            .finish()
     }
 }
 

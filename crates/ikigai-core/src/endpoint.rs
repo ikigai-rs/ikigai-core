@@ -259,6 +259,19 @@ pub trait Issuer: Send + Sync {
         })
     }
 
+    /// The issuer's spill facility and how many bytes `capability` may write to it in one
+    /// spill (ledger #2372): the seam `urn:stream:spill` reaches the kernel's
+    /// ([`Kernel::with_spill`](crate::Kernel::with_spill),
+    /// [`Kernel::with_stream_spill`](crate::Kernel::with_stream_spill)) through. The
+    /// default has none and refuses with [`Error::Unsupported`], naming "no spill facility".
+    fn spill(&self, capability: &Capability) -> Result<(Arc<dyn crate::Spill>, u64)> {
+        let _ = capability;
+        Err(Error::Unsupported {
+            verb: None,
+            detail: "this issuer has no spill facility".into(),
+        })
+    }
+
     /// Plan a chain of transreptors converting media type `from` → `to` over the
     /// issuer's mounted spaces (see [`select_transreptor`](crate::select_transreptor)).
     /// The default offers none — a detached or remote issuer can't enumerate spaces; the
@@ -1496,6 +1509,18 @@ impl<'a> Invocation<'a> {
     pub async fn source_body(&self, target: &Iri) -> Result<Representation<crate::Body>> {
         self.issue_body(Request::new(Verb::Source, target.clone()))
             .await
+    }
+
+    /// The spill facility and the bytes this invocation's capability may write to it
+    /// ([`Issuer::spill`]), for `urn:stream:spill` (ledger #2372). Detached, there is none.
+    pub(crate) fn spill(&self) -> Result<(Arc<dyn crate::Spill>, u64)> {
+        match self.issuer {
+            Some(issuer) => issuer.spill(self.capability),
+            None => Err(Error::Unsupported {
+                verb: None,
+                detail: "a detached invocation has no spill facility".into(),
+            }),
+        }
     }
 
     /// The body behind argument `name` (ledger #2237), whichever way it was supplied: an

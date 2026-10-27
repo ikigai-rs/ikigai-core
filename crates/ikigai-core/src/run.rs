@@ -354,6 +354,87 @@ impl MemoryLimits {
     }
 }
 
+/// The family of disk-budget grants: `urn:cap:stream:spill:<bytes>` (ledger #2372), the
+/// bytes a caller may have `urn:stream:spill` write to the host's spill facility for one
+/// request. Unlike [`CAP_STREAM_MEMORY`] it is REQUIRED: `urn:stream:spill` declares the
+/// wildcard, so a caller holding no grant in the family is denied before anything is written.
+pub const CAP_STREAM_SPILL: &str = "urn:cap:stream:spill:*";
+
+/// The grant that lets one `urn:stream:spill` request write up to `bytes` (clamped to the
+/// host's ceiling): `urn:cap:stream:spill:<bytes>`.
+///
+/// ```
+/// use ikigai_core::cap_stream_spill;
+///
+/// assert_eq!(cap_stream_spill(1_048_576), "urn:cap:stream:spill:1048576");
+/// ```
+pub fn cap_stream_spill(bytes: u64) -> String {
+    format!("{}{bytes}", CAP_STREAM_SPILL.trim_end_matches('*'))
+}
+
+/// The disk ceiling of a kernel that configures none: 1 GiB for one spill.
+pub const DEFAULT_STREAM_SPILL: u64 = 1024 * 1024 * 1024;
+
+/// A host's disk-budget policy for `urn:stream:spill` (ledger #2372): the **base** every
+/// granted caller gets and the **ceiling** no caller exceeds and root gets (set with
+/// [`Kernel::with_stream_spill`](crate::Kernel::with_stream_spill)). The default is a base
+/// of 0 and a ceiling of [`DEFAULT_STREAM_SPILL`], so a grant is exactly what its holder
+/// may write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpillLimits {
+    base: u64,
+    ceiling: u64,
+}
+
+impl Default for SpillLimits {
+    fn default() -> Self {
+        SpillLimits::new(0, DEFAULT_STREAM_SPILL)
+    }
+}
+
+impl SpillLimits {
+    /// A base and a ceiling, in bytes; a base above the ceiling is lowered to it.
+    pub fn new(base: u64, ceiling: u64) -> Self {
+        SpillLimits {
+            base: base.min(ceiling),
+            ceiling,
+        }
+    }
+
+    /// The bytes every granted caller may spill.
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
+    /// The most any caller may spill, and what root gets.
+    pub fn ceiling(&self) -> u64 {
+        self.ceiling
+    }
+
+    /// The bytes a capability may spill, by [`MemoryLimits::for_capability`]'s rule:
+    /// **root** gets the ceiling; a scoped capability gets the largest
+    /// `urn:cap:stream:spill:<bytes>` it holds (and does not deny), never below the base
+    /// and never above the ceiling. Monotone in grants, so attenuating can only lower it.
+    ///
+    /// ```
+    /// use ikigai_core::{cap_stream_spill, Capability, SpillLimits};
+    ///
+    /// let limits = SpillLimits::new(0, 1 << 20);
+    /// assert_eq!(limits.for_capability(&Capability::root()), 1 << 20);
+    /// assert_eq!(limits.for_capability(&Capability::scoped(["urn:cap:read"])), 0);
+    /// let some = Capability::scoped([cap_stream_spill(65_536)]);
+    /// assert_eq!(limits.for_capability(&some), 65_536);
+    /// let huge = Capability::scoped([cap_stream_spill(u64::MAX)]);
+    /// assert_eq!(limits.for_capability(&huge), 1 << 20, "never above the ceiling");
+    /// ```
+    pub fn for_capability(&self, capability: &Capability) -> u64 {
+        let Some(granted) = largest_grant::<u64>(capability, CAP_STREAM_SPILL) else {
+            return self.ceiling;
+        };
+        granted.max(self.base).min(self.ceiling)
+    }
+}
+
 /// The **byte pool** of one resolution tree (ledger #2238): how many more bytes the
 /// kernel may BUFFER anywhere below the door that minted it, collecting a streamed body
 /// ([`Body::Replay`](crate::Body::Replay), [`Body::Once`](crate::Body::Once)) into memory.
