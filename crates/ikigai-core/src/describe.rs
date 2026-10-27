@@ -950,6 +950,12 @@ pub struct ActionSpec {
     /// states nothing keeps its contract IRI.
     #[serde(default, skip_serializing_if = "Failures::is_unstated")]
     pub failures: Failures,
+    /// Whether this verb treats the resource's EXISTENCE as sensitive (ledger #2176, UX
+    /// record D28): see [`Description::existence_sensitive`]. Like `requires`, it REPLACES
+    /// the description's flat flag for this verb. Omitted from serialized output when
+    /// false, and an action that does not set it keeps its contract IRI.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub existence_sensitive: bool,
 }
 
 impl ActionSpec {
@@ -965,7 +971,16 @@ impl ActionSpec {
             arguments: Arguments::Closed,
             output_from: None,
             failures: Failures::Unstated,
+            existence_sensitive: false,
         }
+    }
+
+    /// Mark this verb's refusals as hiding the resource's existence (builder): a caller
+    /// the capability floor refuses on this verb gets the answer a name bound nowhere
+    /// gets. See [`Description::existence_sensitive`].
+    pub fn existence_sensitive(mut self) -> Self {
+        self.existence_sensitive = true;
+        self
     }
 
     /// Set the summary (builder).
@@ -1251,6 +1266,28 @@ pub struct Description {
     /// contract in the catalog, whatever each may be cached for).
     #[serde(skip)]
     pub contract_caching: ContractCaching,
+    /// Whether the resource's EXISTENCE is sensitive (ledger #2176, UX record D28), for
+    /// every verb this flat form stands for (each declared verb without its own
+    /// [`ActionSpec`], whose own flag replaces this one, as its `requires` does). Set it
+    /// with [`existence_sensitive`](Self::existence_sensitive).
+    ///
+    /// **Enforced**: when the kernel's capability floor refuses a caller on such a verb,
+    /// the caller gets [`Unresolved`](crate::Error::Unresolved), the answer a name bound
+    /// nowhere gets, byte for byte, and the trace records what a miss records, not a
+    /// denial. So a caller with no grant cannot tell "exists, and I may not" from "does
+    /// not exist". Everything else keeps [`Denied`](crate::Error::Denied): a refusal is a
+    /// 403 when existence is not sensitive. A verb the endpoint does not declare is
+    /// refused this way when any verb is sensitive, and so is a `Meta` (which the floor
+    /// otherwise never gates) from a caller the floor would refuse on every declared
+    /// verb. `urn:kernel:validate` answers such a caller as it answers a name bound
+    /// nowhere, and `urn:kernel:actions` never offers it the action.
+    ///
+    /// Only a refusal is collapsed: a verb that requires nothing is never refused, so the
+    /// flag hides nothing there. And it hides the name only from what the floor refuses;
+    /// another verb of the same endpoint that is NOT marked still answers `Denied`, which
+    /// says the resource exists. Omitted from serialized output when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub existence_sensitive: bool,
 }
 
 // Every field but `contract_caching`, which is cache policy, not contract (see the field).
@@ -1273,6 +1310,7 @@ impl PartialEq for Description {
             output_from,
             failures,
             contract_caching: _,
+            existence_sensitive,
         } = self;
         *id == other.id
             && *title == other.title
@@ -1287,6 +1325,7 @@ impl PartialEq for Description {
             && *arguments == other.arguments
             && *output_from == other.output_from
             && *failures == other.failures
+            && *existence_sensitive == other.existence_sensitive
     }
 }
 
@@ -1615,6 +1654,34 @@ impl Description {
         self
     }
 
+    /// Mark the resource's existence as sensitive (builder), for every verb the flat form
+    /// stands for: see the [field](Self::existence_sensitive).
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, Description, Verb};
+    ///
+    /// let state = Description::new("governor-state")
+    ///     .verb(Verb::Source)
+    ///     .requires("urn:cap:throttle:state")
+    ///     .existence_sensitive();
+    /// assert!(state.action_specs().iter().all(|a| a.existence_sensitive));
+    /// // An explicit action's own flag replaces the flat one for its verb.
+    /// let mixed = state.action(ActionSpec::new(Verb::Sink).requires("urn:cap:throttle:set"));
+    /// let sink = mixed.action_specs().into_iter().find(|a| a.verb == Verb::Sink).unwrap();
+    /// assert!(!sink.existence_sensitive);
+    /// ```
+    pub fn existence_sensitive(mut self) -> Self {
+        self.existence_sensitive = true;
+        self
+    }
+
+    /// Whether any verb of this description hides the resource's existence: the flat
+    /// [flag](Self::existence_sensitive) or an explicit [`ActionSpec`]'s (ledger #2176).
+    /// What a topology's door says (`ik:existenceSensitive`).
+    pub fn hides_existence(&self) -> bool {
+        self.existence_sensitive || self.actions.iter().any(|a| a.existence_sensitive)
+    }
+
     /// Declare a per-verb contract (builder). The verb is added to
     /// [`verbs`](Self::verbs) if not already declared.
     pub fn action(mut self, action: ActionSpec) -> Self {
@@ -1650,6 +1717,7 @@ impl Description {
                         arguments: self.arguments.clone(),
                         output_from: self.output_from.clone(),
                         failures: self.failures.clone(),
+                        existence_sensitive: self.existence_sensitive,
                     })
             })
             .collect()

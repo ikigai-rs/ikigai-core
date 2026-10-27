@@ -1709,6 +1709,11 @@ impl Space for EndpointSpace {
                 .iter()
                 .map(|(grammar, endpoint)| {
                     let door = Door::new(grammar.pattern(), grammar.match_kind(), endpoint.name());
+                    let door = if endpoint.describe().hides_existence() {
+                        door.existence_sensitive()
+                    } else {
+                        door
+                    };
                     match endpoint.confinement() {
                         Some(corridor) => door.confined_to(corridor),
                         None => door,

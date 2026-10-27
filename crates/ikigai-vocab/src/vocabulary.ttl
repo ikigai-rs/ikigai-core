@@ -47,7 +47,7 @@
 <https://ikigai-rs.dev/ns#> a owl:Ontology ;
     rdfs:label "ikigai endpoint vocabulary" ;
     rdfs:comment "Self-description vocabulary for ikigai resource-oriented endpoints, and the process vocabulary that makes a plan (a DAG of requests) a resource in the same graph." ;
-    owl:versionInfo "0.2.1" .
+    owl:versionInfo "0.2.2" .
 
 #
 # Classes
@@ -270,6 +270,11 @@ ik:mayFail a rdf:Property ;
     rdfs:label "mayFail" ;
     rdfs:comment "A failure class the subject says it can produce beyond the implied ones (repeated per class) — on an endpoint (its flat form), one of its ik:Action nodes, or an ik:Process (the union over its steps, as ik:requires is). Implied, so never needed: ik:PermanentFailure for every action, and ik:DeniedFailure for one that declares ik:requires. Absent means the subject states nothing, which is not the same as stating that it fails only in the implied ways; an action that states nothing keeps its content-addressed contract IRI. For the manifold and for conformance, never a runtime decision: a retry overlay decides from the class of the error it received, and the kernel only notes a mismatch on the trace (undeclared-failure). No domain, for the reason ik:requires has none (ikigai-core 0.1.108, ledger #1546)." .
 
+ik:existenceSensitive a rdf:Property ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "existenceSensitive" ;
+    rdfs:comment "Whether the subject hides its EXISTENCE from a caller the capability floor refuses (UX record D28): such a caller gets the answer a name bound nowhere gets, byte for byte (Unresolved, and the trace a miss records), never Denied, so it cannot tell \"exists, and I may not\" from \"does not exist\". On an endpoint (its flat form, for every verb without its own action), one of its ik:Action nodes (that verb; it replaces the flat flag, as ik:requires does), or an ik:Door (its endpoint hides its existence on some verb). A Meta from a caller refused on every declared verb, and a verb the endpoint does not declare, are hidden too; urn:kernel:validate answers such a caller as it answers a name bound nowhere, and urn:kernel:actions never offers it the action. Written only when true; absent, read false: a refusal is Denied when existence is not sensitive. Part of the contract: a sensitive action is a different content-addressed contract, and one that is not keeps its IRI. No domain, for the reason ik:requires has none (ikigai-core 0.2.2, ledger #2176)." .
+
 ik:FailureClass a rdfs:Class ;
     rdfs:label "FailureClass" ;
     rdfs:comment "Who may repeat a failure, and when: one of seven closed classes, each a retry rule. An error's class is a pure function of its kind (ikigai_core::Error::class). The value of ik:mayFail." .
@@ -324,7 +329,7 @@ ik:EndpointSpace a rdfs:Class ;
 
 ik:Door a rdfs:Class ;
     rdfs:label "Door" ;
-    rdfs:comment "One door of an ik:EndpointSpace: its ik:pattern, how that pattern matches (ik:matchKind), the name of the endpoint that answers it (ik:endpointName), and — when that endpoint confines its sub-requests — the corridor it confines them to (ik:confinedTo). Skolemized under its space as {space}:door:{n}, n its position in ik:doors. Not an ik:Space: a door is where a name comes in, not a place names are resolved." .
+    rdfs:comment "One door of an ik:EndpointSpace: its ik:pattern, how that pattern matches (ik:matchKind), the name of the endpoint that answers it (ik:endpointName), when that endpoint confines its sub-requests the corridor it confines them to (ik:confinedTo), and when it hides its existence from a caller it refuses, ik:existenceSensitive true. Skolemized under its space as {space}:door:{n}, n its position in ik:doors. Not an ik:Space: a door is where a name comes in, not a place names are resolved." .
 
 ik:Fallback a rdfs:Class ;
     rdfs:subClassOf ik:Space ;

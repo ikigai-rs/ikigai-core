@@ -541,6 +541,9 @@ pub fn to_turtle(description: &Description) -> String {
             .join(", ");
         predicates.push(format!("ik:requires {reqs}"));
     }
+    if description.existence_sensitive {
+        predicates.push("ik:existenceSensitive true".to_string());
+    }
     if let Some(classes) = description.failures.classes() {
         if !classes.is_empty() {
             let terms = classes
@@ -619,6 +622,9 @@ pub fn to_turtle(description: &Description) -> String {
         }
         for class in action.failures.classes().unwrap_or_default() {
             preds.push(format!("ik:mayFail {}", failure_class_term(*class)));
+        }
+        if action.existence_sensitive {
+            preds.push("ik:existenceSensitive true".to_string());
         }
         for input in &action.inputs {
             let name = name_fragment(&input.name);
@@ -935,6 +941,42 @@ mod tests {
         assert_eq!(ttl.matches("ik:class").count(), 2, "{ttl}");
         // No `requires` triple when none declared.
         assert!(!to_turtle(&sample()).contains("ik:requires"));
+    }
+
+    /// Existence sensitivity (ledger #2176): on the endpoint node for the flat form, on
+    /// each action node it covers, never written when false, and parsed as Turtle.
+    #[test]
+    fn projects_existence_sensitivity_on_the_endpoint_and_its_actions() {
+        let d = Description::new("governor-state")
+            .verb(Verb::Source)
+            .requires("urn:cap:throttle:state")
+            .existence_sensitive()
+            .action(ikigai_core::ActionSpec::new(Verb::Sink).requires("urn:cap:throttle:set"));
+        let ttl = to_turtle(&d);
+        // The endpoint node and the Source action, not the Sink action.
+        assert_eq!(
+            ttl.matches("ik:existenceSensitive true").count(),
+            2,
+            "{ttl}"
+        );
+        let source = d.action_specs()[0].contract_iri(&d.id);
+        let node = ttl
+            .split("\n\n")
+            .find(|block| block.starts_with(&format!("<{source}>")))
+            .expect("the source contract node");
+        assert!(node.contains("ik:existenceSensitive true"), "{node}");
+        let triples: Vec<_> = oxttl::TurtleParser::new()
+            .for_reader(ttl.as_bytes())
+            .map(|t| t.expect("parses"))
+            .collect();
+        assert_eq!(
+            triples
+                .iter()
+                .filter(|t| t.predicate.as_str() == format!("{NS}existenceSensitive"))
+                .count(),
+            2
+        );
+        assert!(!to_turtle(&sample()).contains("existenceSensitive"));
     }
 
     /// Ledger #1546: stated failure classes are `ik:mayFail` triples on the contract node
