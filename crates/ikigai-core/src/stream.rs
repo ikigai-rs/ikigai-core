@@ -152,7 +152,8 @@ impl Endpoint for Collect {
             .input(
                 ArgSpec::new("content")
                     .summary("the body to collect")
-                    .class(XSD_STRING),
+                    .class(XSD_STRING)
+                    .reads_body(),
             )
             .output(OCTETS)
             .fails(FailureClass::OverBudget)
@@ -262,7 +263,8 @@ impl Endpoint for Text {
             .input(
                 ArgSpec::new("content")
                     .summary("the body to decode")
-                    .class(XSD_STRING),
+                    .class(XSD_STRING)
+                    .reads_body(),
             )
             .input(
                 ArgSpec::new("charset")
@@ -649,7 +651,8 @@ impl Endpoint for SpillBody {
             .input(
                 ArgSpec::new("content")
                     .summary("the body to spill")
-                    .class(XSD_STRING),
+                    .class(XSD_STRING)
+                    .reads_body(),
             )
             .input(
                 ArgSpec::new("max-bytes")

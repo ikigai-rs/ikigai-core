@@ -367,6 +367,14 @@ fn input_predicates(owner: &str, input: &ikigai_core::ArgSpec) -> String {
             name_fragment(needed)
         ));
     }
+    if input.reads_body {
+        // Only when declared (ledger #2402), so an input that does not read a body renders
+        // exactly as before.
+        node.push_str(
+            " ;
+    ik:readsBody true",
+        );
+    }
     for value in input.values.keys() {
         node.push_str(&format!(
             " ;
@@ -977,6 +985,56 @@ mod tests {
             2
         );
         assert!(!to_turtle(&sample()).contains("existenceSensitive"));
+    }
+
+    /// Ledger #2402: an input read as a body says `ik:readsBody true` on the endpoint's and
+    /// the contract's input node, is absent otherwise, parses as an `xsd:boolean`, and comes
+    /// back from the JSON Meta face as it went in.
+    #[test]
+    fn projects_reads_body_on_the_input_nodes_and_round_trips_the_json() {
+        let d = Description::new("head")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("content").reads_body())
+            .input(ArgSpec::new("lines").optional());
+        let ttl = to_turtle(&d);
+        // One per view of the input (the endpoint's and its contract's), never for `lines`.
+        assert_eq!(ttl.matches("ik:readsBody true").count(), 2, "{ttl}");
+        let source = d.action_specs()[0].contract_iri(&d.id);
+        let reader = format!("<{source}:input:content>");
+        let node = ttl
+            .split("\n\n")
+            .find(|block| block.starts_with(&reader))
+            .expect("the contract's content input node");
+        assert!(node.contains("ik:readsBody true"), "{node}");
+        let triples: Vec<_> = oxttl::TurtleParser::new()
+            .for_reader(ttl.as_bytes())
+            .map(|t| t.expect("parses"))
+            .collect();
+        let flagged: Vec<_> = triples
+            .iter()
+            .filter(|t| t.predicate.as_str() == format!("{NS}readsBody"))
+            .collect();
+        assert_eq!(flagged.len(), 2);
+        for t in flagged {
+            match &t.object {
+                oxrdf::Term::Literal(l) => {
+                    assert_eq!(l.value(), "true");
+                    assert_eq!(
+                        l.datatype().as_str(),
+                        "http://www.w3.org/2001/XMLSchema#boolean"
+                    );
+                }
+                other => panic!("ik:readsBody is a literal, got {other}"),
+            }
+        }
+        assert!(!to_turtle(&sample()).contains("readsBody"));
+        // The JSON Meta face carries it, and reads it back.
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["inputs"][0]["reads_body"], true);
+        assert!(json["inputs"][1].get("reads_body").is_none());
+        let back: Description = serde_json::from_value(json).unwrap();
+        assert!(back.inputs[0].reads_body && !back.inputs[1].reads_body);
+        assert_eq!(back.action_specs(), d.action_specs());
     }
 
     /// Ledger #1546: stated failure classes are `ik:mayFail` triples on the contract node

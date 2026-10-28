@@ -1523,6 +1523,24 @@ impl<'a> Invocation<'a> {
         }
     }
 
+    /// Mark this invocation one-shot when its request carries the content id of a body
+    /// attached under a NONCE (ledger #2402): such a request can never be asked for again,
+    /// so its answer is not stored whether or not the endpoint reads the body, and the
+    /// uncached note names the content. The kernel calls it once, before invoking.
+    pub(crate) fn note_one_shot_attachment(&self) {
+        let Some(attached) = self.run.attached() else {
+            return;
+        };
+        let carried = self
+            .request
+            .args
+            .values()
+            .any(|value| matches!(value, ArgRef::Content(id) if id == attached.id()));
+        if attached.is_nonce() && carried {
+            self.recorded.one_shot(attached.id());
+        }
+    }
+
     /// The body behind argument `name` (ledger #2237), whichever way it was supplied: an
     /// inline value as [`Body::Bytes`](crate::Body::Bytes); a reference through
     /// [`source_body`](Self::source_body), recorded as a dependency like any sub-request;
@@ -1655,13 +1673,7 @@ impl<'a> Invocation<'a> {
                     self.issue_body(request).await?
                 }
                 streamed if step.incremental => {
-                    let (id, nonce) = match &streamed {
-                        crate::Body::Replay(replay) => match replay.validator() {
-                            Some(id) => (id, false),
-                            None => (nonce_id(), true),
-                        },
-                        _ => (nonce_id(), true),
-                    };
+                    let (id, nonce) = attachment_id(&streamed);
                     let request = request.with_arg("content", ArgRef::Content(id));
                     let run = self.run.clone().with_attached(id, streamed, nonce);
                     self.issue_body_in(request, run).await?
@@ -2340,6 +2352,20 @@ impl Endpoint for AsyncFnEndpoint {
 /// A content id that names no bytes: what a streamed body whose digest is not known
 /// before it is read is attached under ([`Invocation::transrept`]). Unique per process run
 /// (a counter, keyed apart from every digest), so no two attachments share one.
+/// The content id a body is attached under (ledger #2239, #2402), and whether it is a nonce:
+/// the body's digest when it knows one (a [`Replay`](crate::Replay) with a validator), so a
+/// request carrying it is a value that can be cached on; otherwise a fresh nonce, so the
+/// request can never repeat.
+pub(crate) fn attachment_id(body: &crate::Body) -> (crate::ContentId, bool) {
+    match body {
+        crate::Body::Replay(replay) => match replay.validator() {
+            Some(id) => (id, false),
+            None => (nonce_id(), true),
+        },
+        _ => (nonce_id(), true),
+    }
+}
+
 fn nonce_id() -> crate::ContentId {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

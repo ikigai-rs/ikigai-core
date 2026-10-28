@@ -102,6 +102,15 @@ verb marked), `core/existence-sensitive-per-verb` marks only its explicit Sink b
 unmarked flat Source, `core/existence-sensitive-replaced` is flat-marked with an explicit
 Sink that is NOT, and `core/existence-sensitive-failures` states classes beside the flag.
 
+**Inputs read as a body** (ledger #2402, ikigai-core 0.2.3): an input's `reads_body: true`
+puts its action in the v2 form too, and is fed after existence sensitivity, only when some
+input sets it: the byte `3`, then the set of those inputs' NAMES (sorted, deduplicated,
+count-prefixed, each length-prefixed, as `requires` is fed). It is not part of each input's
+own encoding, so no existing v2 digest moves; an absent flag or an explicit `false` feeds
+nothing. A door's Turtle carries `ik:readsBody true` on each input node that sets it. No
+`cases` row pins this yet: adding them is its own change, as it was for existence
+sensitivity, because every face's verbatim copy moves with it.
+
 ## Lenient in, canonical out
 
 Postel's law (ledger #1107, decided 2026-10-10). A percent escape is `%` and exactly two

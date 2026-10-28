@@ -191,9 +191,9 @@ pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, Tracer,
-    ALIAS_MISS_NOTE, ALIAS_NOTE, ANSWERED_NOTE, BINDINGS_THREAD, DEFAULTED_NOTE, DEFAULT_MAX_DEPTH,
-    DENIED_NOTE, DEPTH_NOTE, FAILED_NOTE, LEVEL_NOTE, LIMITED_NOTE, META_LOSSY_ARG,
-    SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE, SEALED_NOTE, UNCACHED_NOTE,
+    ALIAS_MISS_NOTE, ALIAS_NOTE, ANSWERED_NOTE, BINDINGS_THREAD, COLLECTED_NOTE, DEFAULTED_NOTE,
+    DEFAULT_MAX_DEPTH, DENIED_NOTE, DEPTH_NOTE, FAILED_NOTE, LEVEL_NOTE, LIMITED_NOTE,
+    META_LOSSY_ARG, SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE, SEALED_NOTE, UNCACHED_NOTE,
     UNDECLARED_FAILURE_NOTE,
 };
 pub use listen::{
@@ -203,8 +203,8 @@ pub use meta::MetaRenderer;
 pub use repr::{Expiry, Provenance, ReprType, Representation, Thread, Time};
 pub use request::{Request, RequestId};
 pub use run::{
-    cap_retry, cap_stream_memory, cap_stream_spill, IssueContext, MemoryBudget, MemoryLimits,
-    Reservation, RetryBudget, RetryLimits, SpillLimits, CAP_RETRY, CAP_STREAM_MEMORY,
+    cap_retry, cap_stream_memory, cap_stream_spill, BodyIssue, IssueContext, MemoryBudget,
+    MemoryLimits, Reservation, RetryBudget, RetryLimits, SpillLimits, CAP_RETRY, CAP_STREAM_MEMORY,
     CAP_STREAM_SPILL, DEFAULT_STREAM_MEMORY, DEFAULT_STREAM_SPILL,
 };
 pub use seal::{SealError, SealOwner};
