@@ -183,7 +183,7 @@ impl Expiry {
 /// and cutting `X`'s thread invalidates the transformed result too. A transform
 /// that is itself a pure function of its input (e.g. RDF transreption) thus
 /// *inherits* its source's cacheability rather than asserting its own.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Provenance {
     /// The upstream representation's expiry.
     pub expiry: Expiry,
