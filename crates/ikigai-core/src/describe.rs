@@ -96,6 +96,16 @@ pub struct ArgSpec {
     /// Omitted from serialized output when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, ValueNote>,
+    /// Whether the endpoint reads this argument as a BODY (ledger #2402): through
+    /// [`Invocation::content_body`](crate::Invocation::content_body), answering inline
+    /// bytes, a reference, a `b3:` content id and a live body attached to the request
+    /// ([`BodyIssue::attach`](crate::BodyIssue::attach)) exactly alike. So an engine, a door
+    /// or a wire may hand it any of those. The kernel enforces the other half: an argument
+    /// NOT declared this way never receives a live body, it receives the body collected
+    /// under the run's byte budget. Only on a by-value input. Omitted from serialized output
+    /// when false, so existing JSON contracts are unchanged; `ik:readsBody true` in Turtle.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reads_body: bool,
 }
 
 /// [`ArgSpec`]'s JSON form: the same fields, with `one_of` written whenever the input is
@@ -121,6 +131,8 @@ struct ArgSpecWire {
     list: Option<ListSeparator>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     values: BTreeMap<String, ValueNote>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    reads_body: bool,
 }
 
 impl From<ArgSpecWire> for ArgSpec {
@@ -138,6 +150,7 @@ impl From<ArgSpecWire> for ArgSpec {
             needs: wire.needs,
             list: wire.list,
             values: wire.values,
+            reads_body: wire.reads_body,
         }
     }
 }
@@ -156,6 +169,7 @@ impl From<ArgSpec> for ArgSpecWire {
             needs: spec.needs,
             list: spec.list,
             values: spec.values,
+            reads_body: spec.reads_body,
         }
     }
 }
@@ -178,6 +192,7 @@ impl PartialEq for ArgSpec {
             needs,
             list,
             values,
+            reads_body,
         } = self;
         *name == other.name
             && *summary == other.summary
@@ -191,6 +206,7 @@ impl PartialEq for ArgSpec {
             && *needs == other.needs
             && *list == other.list
             && *values == other.values
+            && *reads_body == other.reads_body
     }
 }
 
@@ -492,6 +508,7 @@ impl ArgSpec {
             needs: Vec::new(),
             list: None,
             values: BTreeMap::new(),
+            reads_body: false,
         }
     }
 
@@ -649,6 +666,24 @@ impl ArgSpec {
     /// note for the same value replaces the first.
     pub fn value(mut self, value: impl Into<String>, note: ValueNote) -> Self {
         self.values.insert(value.into(), note);
+        self
+    }
+
+    /// Declare that the endpoint reads this argument as a body (builder; ledger #2402):
+    /// see [`reads_body`](Self::reads_body). Only on a by-value input:
+    /// [`Description::validate`] refuses it on a binding, whose value is in the name.
+    ///
+    /// ```
+    /// use ikigai_core::ArgSpec;
+    ///
+    /// let content = ArgSpec::new("content").reads_body();
+    /// assert!(content.reads_body);
+    /// assert_eq!(serde_json::to_value(&content).unwrap()["reads_body"], true);
+    /// // Undeclared is the absence of the key, so an existing JSON contract is unchanged.
+    /// assert!(serde_json::to_value(ArgSpec::new("content")).unwrap().get("reads_body").is_none());
+    /// ```
+    pub fn reads_body(mut self) -> Self {
+        self.reads_body = true;
         self
     }
 
@@ -2144,6 +2179,18 @@ fn validate_relations(id: &str, verb: Option<Verb>, spec: &ActionSpec) -> crate:
         }
     }
     for arg in &spec.inputs {
+        // A body is a value handed to a request, and a binding's value is in the name
+        // (ledger #2402): there is nothing to read as a body.
+        if arg.reads_body && arg.source == InputSource::Binding {
+            return refuse(
+                "reads_body",
+                format!(
+                    "input `{}` is a binding and reads a body: a binding's value is in the \
+                     name, so only a by-value input can be read as a body",
+                    arg.name
+                ),
+            );
+        }
         // A default is what the kernel injects, so it must be a value the contract
         // accepts, on an input a caller can leave out (ledger #19). A binding can be left
         // out only when it is optional: a name the grammar can match without that segment

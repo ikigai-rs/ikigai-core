@@ -106,7 +106,7 @@ ik:output a rdf:Property ;
 ik:input a rdf:Property ;
     rdfs:range rdfs:Resource ;
     rdfs:label "input" ;
-    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, ik:oneOf, ik:enumerated, ik:example, ik:valueNote, ik:listSeparator and ik:needs. No domain: emitted on all three." .
+    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, ik:oneOf, ik:enumerated, ik:example, ik:valueNote, ik:listSeparator, ik:needs and ik:readsBody. No domain: emitted on all three." .
 
 ik:inputName a rdf:Property ;
     rdfs:range xsd:string ;
@@ -193,6 +193,11 @@ ik:enumerated a rdf:Property ;
     rdfs:range xsd:boolean ;
     rdfs:label "enumerated" ;
     rdfs:comment "On an input node: true when the input declares an enumeration that is EMPTY, so it accepts no value (an enumeration built from configuration with nothing configured); a required input in that state makes its action uncallable, and urn:kernel:actions does not offer it. Emitted only for an empty enumeration: an ik:oneOf already says the input is enumerated, and an input with neither is open-valued." .
+
+ik:readsBody a rdf:Property ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "readsBody" ;
+    rdfs:comment "On an input node: true when the endpoint reads this input as a BODY, answering inline bytes, a reference, a content id (b3:...) and a live body attached to the request exactly alike, so an engine, a door or a wire may hand it any of those. An input without it is read by value: the kernel collects a live body handed to it under the run's byte budget (OverBudget past it, never a shorter value) before the endpoint sees it. Only on a by-value input (ik:source \"argument\"). Emitted only when true." .
 
 ik:example a rdf:Property ;
     rdfs:range xsd:string ;

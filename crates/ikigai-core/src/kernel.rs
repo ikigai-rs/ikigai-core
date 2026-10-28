@@ -512,6 +512,14 @@ pub const UNCACHED_NOTE: &str = "uncached";
 /// a caller's value from the contract's. Absent when nothing was filled.
 pub const DEFAULTED_NOTE: &str = "defaulted";
 
+/// The trace-note key naming the arguments whose ATTACHED body the kernel collected before
+/// invoking, comma-joined (ledger #2402): a host attached a live body
+/// ([`BodyIssue::attach`](crate::BodyIssue::attach)) to an argument the endpoint does not
+/// declare [`reads_body`](crate::ArgSpec::reads_body), so the endpoint was handed the
+/// bytes, collected under the run's byte budget, rather than the body. Absent when nothing
+/// was collected, so a trace tells a streamed stage from a buffered one.
+pub const COLLECTED_NOTE: &str = "collected";
+
 /// The [`TraceEvent::notes`] key under which the kernel reports the **chain's
 /// clock** — the instant a temporal corridor's derived clock
 /// ([`Scope::with_named_at`]) read as the event was recorded, in milliseconds since
@@ -811,7 +819,19 @@ pub(crate) struct Floor {
     /// part of the description is: what [`conceals`](Self::conceals) reads.
     sensitive: Vec<Verb>,
     any_sensitive: bool,
+    /// Each declared verb's by-value inputs read as a body (ledger #2402): those declared
+    /// [`reads_body`](crate::ArgSpec::reads_body), and an incremental transreptor's
+    /// `content` on `Source` (ledger #2239). An attached body reaches one of these as it
+    /// is; any other argument is handed it collected.
+    body_readers: Vec<(Verb, Readers)>,
 }
+
+/// The names of one verb's inputs read as a body, shared like [`Defaults`].
+type Readers = Arc<[String]>;
+
+/// The boxed collection of an attached body ([`Kernel::settling`]): the names collected.
+type Settling<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<String>>> + Send + 'a>>;
 
 /// One verb's declared defaults, `(input, lexical form)`, shared between the floor
 /// that read them and the [`ProbeMemo`] entry the issue path leaves for the probe, so
@@ -843,6 +863,27 @@ impl Floor {
             .map(|spec| spec.verb)
             .collect();
         let any_sensitive = !sensitive.is_empty() || description.hides_existence();
+        let incremental = description
+            .transreption()
+            .is_some_and(crate::describe::Transreption::is_incremental);
+        let body_readers: Vec<(Verb, Readers)> = specs
+            .iter()
+            .map(|spec| {
+                let mut readers: Vec<String> = spec
+                    .inputs
+                    .iter()
+                    .filter(|i| i.reads_body && i.source == crate::describe::InputSource::Argument)
+                    .map(|i| i.name.clone())
+                    .collect();
+                if incremental
+                    && spec.verb == Verb::Source
+                    && !readers.iter().any(|r| r == "content")
+                {
+                    readers.push("content".to_string());
+                }
+                (spec.verb, Readers::from(readers))
+            })
+            .collect();
         let declared: Vec<(Verb, Vec<String>)> = specs
             .into_iter()
             .map(|spec| (spec.verb, spec.requires))
@@ -869,6 +910,25 @@ impl Floor {
             binding_defaults,
             sensitive,
             any_sensitive,
+            body_readers,
+        }
+    }
+
+    /// The inputs a request with `verb` reads as a body, by the rule
+    /// [`defaults`](Self::defaults) states: the verb's own, `Source`'s for an undeclared
+    /// `Exists`, none for `Meta` or any other undeclared verb (ledger #2402).
+    fn body_readers(&self, verb: Verb) -> Readers {
+        let own = |v: Verb| {
+            self.body_readers
+                .iter()
+                .find(|(declared, _)| *declared == v)
+                .map(|(_, r)| r.clone())
+        };
+        match (verb, own(verb)) {
+            (Verb::Meta, _) => Readers::from(Vec::new()),
+            (_, Some(readers)) => readers,
+            (Verb::Exists, None) => own(Verb::Source).unwrap_or_else(|| Readers::from(Vec::new())),
+            _ => Readers::from(Vec::new()),
         }
     }
 
@@ -1006,6 +1066,8 @@ struct Admission {
     /// leaves in the [`ProbeMemo`] for the cache-status probe (ledger #1884).
     declared: Option<Defaults>,
     keep: Keep,
+    /// The inputs this verb reads as a body ([`Floor::body_readers`], ledger #2402).
+    readers: Readers,
 }
 
 /// How long a contract read from a description may be kept, from its
@@ -1157,6 +1219,7 @@ impl FloorMemo {
         let admission = |floor: &Floor, keep: Keep| -> Admission {
             Admission {
                 declared: floor.declared_defaults(request.verb).cloned(),
+                readers: floor.body_readers(request.verb),
                 keep,
                 lacking: floor.unsatisfied(request, capability),
                 conceal: floor.conceals(request.verb, capability),
@@ -2705,7 +2768,7 @@ impl Kernel {
         // simply not holding. Carrying the hop on the denial event is what stops
         // that from being invisible.
         let mut notes = vec![(DENIED_NOTE.to_string(), lacking.to_string())];
-        notes.extend(provenance_notes(trace, alias, answered, levels, &[]));
+        notes.extend(provenance_notes(trace, alias, answered, levels, &[], &[]));
         notes.extend(scope_notes(scope));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
@@ -2832,7 +2895,7 @@ impl Kernel {
             LIMITED_NOTE.to_string(),
             request.target.as_str().to_string(),
         )];
-        notes.extend(provenance_notes(trace, alias, answered, levels, &[]));
+        notes.extend(provenance_notes(trace, alias, answered, levels, &[], &[]));
         notes.extend(scope_notes(scope));
         trace_scope.record(TraceEvent {
             target: request.target.as_str().to_string(),
@@ -3178,6 +3241,218 @@ impl Kernel {
         .map(Answer::into_body)
     }
 
+    /// Issue a request as `issue` describes it (ledger #2402), answering with the body **as
+    /// the endpoint produced it** ([`issue_body`](Self::issue_body)): in a resolution chain,
+    /// with an upstream stage's provenance folded in, as part of a run, traced, and with a
+    /// live body attached as the value of one named argument. Every part is optional
+    /// ([`BodyIssue`](crate::BodyIssue)); with none set this is [`issue_body`](Self::issue_body).
+    ///
+    /// The form an engine runs a pipeline stage through: the upstream's body attached to the
+    /// stage's `content`, so a stage that declares `content`
+    /// [`reads_body`](crate::ArgSpec::reads_body) starts reading while the upstream is still
+    /// producing, and one that does not is handed the body collected under the run's byte
+    /// budget, exactly as a by-value pipe would have handed it.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     BodyIssue, Body, Capability, EndpointSpace, Exact, Expiry, FnEndpoint, Iri, Kernel,
+    ///     Provenance, ReprType, Representation, Request, Thread, Verb,
+    /// };
+    ///
+    /// // A stage that does not read a body: `content` arrives inline, collected by the kernel.
+    /// let echo = FnEndpoint::new("echo", |inv| {
+    ///     let text = inv.inline_str("content")?.to_uppercase();
+    ///     Ok(Representation::new(ReprType::new("text/plain"), text.into_bytes()).cacheable())
+    /// });
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:echo"), echo)));
+    /// let upstream = Provenance::new(Expiry::Never, BTreeSet::from([Thread::from("urn:doc")]));
+    /// let issue = BodyIssue::new()
+    ///     .with_incoming(upstream)
+    ///     .attach("content", Body::from(b"hello".to_vec()));
+    /// let read = Request::new(Verb::Source, Iri::parse("urn:echo").unwrap());
+    /// let answer = block_on(kernel.issue_body_with(read, &Capability::root(), issue)).unwrap();
+    /// assert_eq!(answer.bytes.as_bytes().unwrap(), &b"HELLO"[..]);
+    /// // The upstream's thread rides the answer: cutting `urn:doc` invalidates it.
+    /// assert!(answer.threads().contains(&Thread::from("urn:doc")));
+    /// ```
+    pub async fn issue_body_with(
+        &self,
+        request: Request,
+        capability: &Capability,
+        issue: crate::run::BodyIssue,
+    ) -> Result<Representation<Body>> {
+        let (request, ctx) = self.body_issue(request, issue, false)?;
+        self.issue_answer(request, capability, ctx)
+            .await
+            .map(Answer::into_body)
+    }
+
+    /// [`issue_body_with`](Self::issue_body_with), answering with bytes: a streamed answer
+    /// collected under the run's byte budget, refused with `OverBudget` past it, as every
+    /// bytes entry point does.
+    pub async fn issue_with(
+        &self,
+        request: Request,
+        capability: &Capability,
+        issue: crate::run::BodyIssue,
+    ) -> Result<Representation> {
+        let (request, ctx) = self.body_issue(request, issue, true)?;
+        collected(self.issue_answer(request, capability, ctx).await).await
+    }
+
+    /// The request and resolution context a [`BodyIssue`](crate::BodyIssue) describes: its
+    /// body attached under a content id ([`crate::endpoint::attachment_id`]) the request
+    /// carries as the argument, its chain, upstream, run and tracer. Refuses a body
+    /// attached to a `Meta` request, or under a name the request already carries.
+    fn body_issue(
+        &self,
+        mut request: Request,
+        issue: crate::run::BodyIssue,
+        buffer: bool,
+    ) -> Result<(Request, IssueCtx<'static>)> {
+        let crate::run::BodyIssue {
+            scope,
+            incoming,
+            mut context,
+            tracer,
+            attach,
+        } = issue;
+        if let Some((name, body)) = attach {
+            if request.verb == Verb::Meta {
+                return Err(Error::InvalidArgument {
+                    name,
+                    detail: "a Meta request reads no argument as a body; attach it to the \
+                             verb that reads one"
+                        .to_string(),
+                });
+            }
+            if request.args.contains_key(&name) {
+                return Err(Error::InvalidArgument {
+                    name,
+                    detail: format!(
+                        "{}: the request carries it and a body is attached under it",
+                        crate::GIVEN_TWICE
+                    ),
+                });
+            }
+            let (id, nonce) = crate::endpoint::attachment_id(&body);
+            request = request.with_arg(name, ArgRef::Content(id));
+            context = context.with_attached(id, body, nonce);
+        }
+        let trace = match tracer {
+            Some(tracer) => Some(TraceScope::new(tracer)),
+            None => self.global_scope(),
+        };
+        Ok((
+            request,
+            IssueCtx {
+                incoming,
+                trace,
+                scope,
+                run: context,
+                buffer,
+                ..IssueCtx::top()
+            },
+        ))
+    }
+
+    /// [`settle_attached`](Self::settle_attached), boxed, when a body is attached; `None`
+    /// otherwise. Out of line and boxed so that neither its state nor its setup widens the
+    /// frame of the one resolution path, which a nesting of [`DEFAULT_MAX_DEPTH`]
+    /// sub-requests stacks 64 deep.
+    #[inline(never)]
+    fn settling<'a>(
+        &'a self,
+        request: &'a mut Request,
+        run: &'a mut crate::run::IssueContext,
+        capability: &'a Capability,
+        readers: Readers,
+    ) -> Option<Settling<'a>> {
+        run.attached()?;
+        Some(Box::pin(async move {
+            self.settle_attached(request, run, capability, &readers)
+                .await
+        }))
+    }
+
+    /// Hand an attached body over the way the endpoint declared it reads `request`'s
+    /// arguments (ledger #2402): each argument carrying the run's attached content id that
+    /// is not in `readers` is collected under the run's byte budget and replaced by its
+    /// inline bytes, and the body is detached once no argument names it any more, so
+    /// nothing below can reach it. The run is left ADMITTED against `capability`, so the
+    /// bytes drawn are drawn from the pool the endpoint then runs under (admitting it again
+    /// changes nothing). The names collected, in order; empty when nothing is attached.
+    ///
+    /// Past the budget: `OverBudget` naming the argument, never a shorter value. A one-shot
+    /// body two undeclared arguments name is read by the first and refused (`Conflict`) for
+    /// the second.
+    async fn settle_attached(
+        &self,
+        request: &mut Request,
+        run: &mut crate::run::IssueContext,
+        capability: &Capability,
+        readers: &[String],
+    ) -> Result<Vec<String>> {
+        let Some(id) = run.attached().map(|attached| *attached.id()) else {
+            return Ok(Vec::new());
+        };
+        let carrying: Vec<String> = request
+            .args
+            .iter()
+            .filter(|(_, value)| matches!(value, ArgRef::Content(c) if *c == id))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let undeclared: Vec<String> = carrying
+            .iter()
+            .filter(|name| !readers.contains(name))
+            .cloned()
+            .collect();
+        if undeclared.is_empty() {
+            return Ok(Vec::new());
+        }
+        let admitted = run
+            .clone()
+            .admitted(self.retry.as_ref(), &self.memory, capability);
+        let budget = admitted
+            .memory_budget()
+            .cloned()
+            .unwrap_or_else(|| crate::MemoryBudget::new(crate::run::DEFAULT_STREAM_MEMORY));
+        let attached = admitted
+            .attached()
+            .expect("the attachment survives admission");
+        for name in &undeclared {
+            let body = attached.body_for(&id).flatten().ok_or_else(|| {
+                Error::Conflict(format!(
+                    "argument `{name}` names one-shot content {id}, already read once"
+                ))
+            })?;
+            let bytes = body
+                .collect_within(&budget)
+                .await
+                .map_err(|error| match error {
+                    Error::OverBudget { detail } => Error::OverBudget {
+                        detail: format!(
+                            "argument `{name}` is not declared `reads_body`, so the kernel \
+                         collected the body attached to it: {detail}"
+                        ),
+                    },
+                    other => other,
+                })?;
+            request
+                .args
+                .insert(name.clone(), ArgRef::Inline(bytes.to_vec()));
+        }
+        *run = if undeclared.len() == carrying.len() {
+            admitted.without_attached()
+        } else {
+            admitted
+        };
+        Ok(undeclared)
+    }
+
     /// [`issue_with_context`](Self::issue_with_context), recording this resolution into
     /// `tracer` exactly as [`issue_traced`](Self::issue_traced) does: the form a wire
     /// server that carries a caller's context and traces per connection calls.
@@ -3288,7 +3563,7 @@ impl Kernel {
             trace,
             scope,
             depth,
-            run,
+            mut run,
             failed,
             buffer,
         } = ctx;
@@ -3386,6 +3661,11 @@ impl Kernel {
             let defaulted = crate::kernel_ops::description(&op)
                 .map(|description| prefill(&mut request, Floor::of(&description).defaults(verb)))
                 .unwrap_or_default();
+            // A kernel operation reads no argument as a body, and its arguments are small
+            // values: an attached body is REFUSED here rather than collected (ledger
+            // #2402), which keeps an await, and the stack it costs on every frame of a deep
+            // resolution, out of this path.
+            refuse_attached_to_kernel_op(&request, &run)?;
             let op = op.as_str();
             let mut key = CacheKey::new(request.id(), capability_key(capability));
             // The chain this answer is a function of, for its key and its trace event:
@@ -3672,6 +3952,7 @@ impl Kernel {
             binding_defaults,
             declared,
             keep,
+            readers,
         } = self.floors.admit(
             &resolved.endpoint,
             &request,
@@ -3717,11 +3998,6 @@ impl Kernel {
         let bindings = fill_bindings(&resolved.bindings, &binding_defaults);
         defaulted.extend(binding_defaults.into_iter().map(|(name, _)| name));
 
-        // Identity is settled: the id keys the representation cache, and it is
-        // derived from the target AFTER every rewrite has been accounted for, and from
-        // the arguments after the declared defaults are in.
-        let id = request.id();
-
         // The baseline capability floor: **declared = enforced**. Every `requires`
         // the endpoint declares for this verb must be satisfied — on the SAME
         // `cap_satisfies` predicate selection and `urn:kernel:validate` use, so
@@ -3752,6 +4028,23 @@ impl Kernel {
                 self.denial_message(&lacking, &request, capability, alias),
             ));
         }
+
+        // ★ AN ATTACHED BODY REACHES ONLY A DECLARED BODY READER (ledger #2402). A body a
+        // host attached to an argument this endpoint does not declare `reads_body` is
+        // collected HERE, under the run's byte budget, and handed over inline: what a
+        // by-value pipe would have sent, so it is that request, with that identity and that
+        // cache entry. After the floor, so a refused caller's body is never read; before
+        // the identity, which the inline bytes are part of. Boxed and out of line, and only
+        // when a body is attached (`settling`).
+        let collected = match self.settling(&mut request, &mut run, capability, readers) {
+            None => Vec::new(),
+            Some(settling) => settling.await?,
+        };
+
+        // Identity is settled: the id keys the representation cache, and it is
+        // derived from the target AFTER every rewrite has been accounted for, and from
+        // the arguments after the declared defaults are in.
+        let id = request.id();
 
         // Representation-cache lookup (idempotent verbs only): serve a cached entry
         // whose golden-thread edges are all still current. A cut entry is evicted
@@ -3784,7 +4077,7 @@ impl Kernel {
                     parent,
                     started,
                     true,
-                    provenance_notes(&trace, alias, answered, levels, &defaulted),
+                    provenance_notes(&trace, alias, answered, levels, &defaulted, &collected),
                     &scope,
                 );
                 self.record_resolution(&request, started, true);
@@ -3880,6 +4173,10 @@ impl Kernel {
                 // The run's pools, narrowed to what THIS request's capability is entitled
                 // to (minted here when nothing above minted one), and its deadline.
                 .with_run(admitted);
+            // A body attached under a NONCE id (ledger #2239, #2402) makes this request one
+            // that can never be asked for again, whether or not the endpoint reads it: its
+            // answer is not stored, and the uncached note names the content.
+            invocation.note_one_shot_attachment();
             let representation = match resolved.endpoint.invoke_body(&invocation).await {
                 Ok(representation) => representation,
                 // ★ A FAILURE CARRIES ITS DEPENDENCIES (ledger #611). What this
@@ -3913,7 +4210,7 @@ impl Kernel {
                             ));
                         }
                         notes.extend(provenance_notes(
-                            &trace, alias, answered, levels, &defaulted,
+                            &trace, alias, answered, levels, &defaulted, &collected,
                         ));
                         notes.append(&mut invocation.take_trace_notes());
                         self.trace_record(
@@ -4002,7 +4299,8 @@ impl Kernel {
             trace_notes = invocation.take_trace_notes();
             // The rewrite and the answering space are provenance of the invocation,
             // so they lead the endpoint's own notes rather than being appended after.
-            let mut notes = provenance_notes(&trace, alias, answered, levels, &defaulted);
+            let mut notes =
+                provenance_notes(&trace, alias, answered, levels, &defaulted, &collected);
             notes.append(&mut trace_notes);
             trace_notes = notes;
             // ★ AN OPEN-ENDED BODY ENDS AT THE RUN'S DEADLINE (ledger #2237). A one-shot
@@ -4023,7 +4321,7 @@ impl Kernel {
         if request.verb == Verb::Meta {
             // The Meta arm takes no invocation, so it never reached the note-merging
             // above; the rewrite and the answerer still have to show on the event.
-            trace_notes = provenance_notes(&trace, alias, answered, levels, &defaulted);
+            trace_notes = provenance_notes(&trace, alias, answered, levels, &defaulted, &collected);
         }
 
         // Store an idempotent result unless it's volatile (`Always`). A time-based
@@ -5344,6 +5642,7 @@ fn provenance_notes(
     answered: Option<&Iri>,
     levels: &LevelPath,
     defaulted: &[String],
+    collected: &[String],
 ) -> Vec<(String, String)> {
     if trace.is_none() {
         return Vec::new();
@@ -5354,6 +5653,7 @@ fn provenance_notes(
         notes.push((LEVEL_NOTE.to_string(), levels.to_string()));
     }
     notes.extend(defaulted_note(defaulted));
+    notes.extend(collected_note(collected));
     notes
 }
 
@@ -5397,6 +5697,38 @@ fn fill_bindings<'b>(
 /// before.
 fn defaulted_note(defaulted: &[String]) -> Option<(String, String)> {
     (!defaulted.is_empty()).then(|| (DEFAULTED_NOTE.to_string(), defaulted.join(",")))
+}
+
+/// Refuse a kernel operation whose request names the body attached to `run` (ledger
+/// #2402). Out of line, so its temporaries are not part of the resolution path's frame.
+#[cold]
+#[inline(never)]
+fn refuse_attached_to_kernel_op(request: &Request, run: &crate::run::IssueContext) -> Result<()> {
+    let Some(id) = run.attached().map(|attached| attached.id()) else {
+        return Ok(());
+    };
+    match request
+        .args
+        .iter()
+        .find(|(_, value)| matches!(value, ArgRef::Content(c) if c == id))
+    {
+        None => Ok(()),
+        Some((name, _)) => Err(Error::InvalidArgument {
+            name: name.clone(),
+            detail: format!(
+                "{} is a kernel operation, which reads no argument as a body; pass the value \
+                 inline",
+                request.target
+            ),
+        }),
+    }
+}
+
+/// The [`COLLECTED_NOTE`] naming the arguments whose attached body the kernel collected
+/// (ledger #2402). Nothing when nothing was, so an event without one is byte-identical to
+/// before.
+fn collected_note(collected: &[String]) -> Option<(String, String)> {
+    (!collected.is_empty()).then(|| (COLLECTED_NOTE.to_string(), collected.join(",")))
 }
 
 /// The trace notes disclosing the resolution chain — and, when the chain carries a

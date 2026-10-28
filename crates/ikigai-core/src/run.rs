@@ -700,6 +700,11 @@ impl Attached {
     pub(crate) fn is_nonce(&self) -> bool {
         self.nonce
     }
+
+    /// The content id the attachment answers to.
+    pub(crate) fn id(&self) -> &crate::content::ContentId {
+        &self.id
+    }
 }
 
 impl fmt::Debug for Attached {
@@ -821,6 +826,14 @@ impl IssueContext {
         self.attached.as_deref()
     }
 
+    /// This context with no body attached: what the kernel runs a request under once it
+    /// has collected the attached body for an argument that does not read one (ledger
+    /// #2402), so nothing below it can reach the body again.
+    pub(crate) fn without_attached(mut self) -> Self {
+        self.attached = None;
+        self
+    }
+
     /// Whether this context's byte pool is `other`'s very pool (not merely an equal count).
     #[cfg(test)]
     pub(crate) fn shares_memory_with(&self, other: &IssueContext) -> bool {
@@ -828,6 +841,134 @@ impl IssueContext {
             (Some(a), Some(b)) => a.0.same(&b.0),
             _ => false,
         }
+    }
+}
+
+/// How a host issues one request (ledger #2402): the resolution chain it resolves in, the
+/// provenance of the upstream stage whose output it carries, the run it belongs to, a
+/// tracer, and a **live body attached** as the value of one named argument. What
+/// [`Kernel::issue_body_with`](crate::Kernel::issue_body_with) and
+/// [`Kernel::issue_with`](crate::Kernel::issue_with) take; each part defaults to what
+/// [`Kernel::issue`](crate::Kernel::issue) uses (the empty chain, no upstream, a fresh run,
+/// the kernel's global tracer, nothing attached), so a builder names only what differs.
+///
+/// **The attached body** ([`attach`](Self::attach)) is how an engine hands a stage the
+/// upstream's body without collecting it between the two, and how a door hands an endpoint
+/// an upload in flight. The request carries the argument as an
+/// [`ArgRef::Content`](crate::ArgRef::Content) id, and the body rides this issue, in process only: it never
+/// crosses a wire. The id is the body's digest when it knows one (a spilled body, a
+/// [`Replay`](crate::Replay) with a validator), so the answer is cached on it like any
+/// value; otherwise it is a nonce, and the answer is never stored (the uncached note says
+/// `one-shot content`). A one-shot body is read once: a retry of the same request finds it
+/// spent and answers `Conflict`. Spill it first (`urn:stream:spill`) when the stage must be
+/// retried or cached.
+///
+/// ★ **Only an argument declared [`reads_body`](crate::ArgSpec::reads_body) receives the
+/// body as it is** (or an incremental transreptor's `content`, the promise core made first,
+/// ledger #2239). For any other argument the KERNEL collects the body under the run's byte
+/// budget before the endpoint is entered, and the endpoint sees the inline bytes a by-value
+/// pipe would have handed it, one request and one cache entry with it. Past the budget the
+/// answer is `OverBudget` naming the argument, never a shorter value. The trace says which
+/// happened: a collected argument is named under [`COLLECTED_NOTE`](crate::COLLECTED_NOTE).
+/// The kernel REFUSES (`InvalidArgument`) a body attached to a `Meta` request or to a kernel
+/// operation (`urn:kernel:*`), neither of which reads an argument as a body, and one attached
+/// under a name the request already carries.
+///
+/// `#[non_exhaustive]`: later parts are added here without a new entry point.
+///
+/// ```
+/// use std::sync::Arc;
+/// use futures::executor::block_on;
+/// use ikigai_core::{
+///     ArgSpec, AsyncFnEndpoint, Body, BodyIssue, Bytes, Capability, Description, EndpointSpace,
+///     Exact, Iri, Kernel, ReprType, Representation, Request, Verb,
+/// };
+///
+/// // A stage that reads `content` as a body, and says so.
+/// let count = AsyncFnEndpoint::new("count", |inv| {
+///     Box::pin(async move {
+///         let body = inv.content_body("content").await?;
+///         let n = inv.collect(body).await?.len();
+///         Ok(Representation::new(ReprType::new("text/plain"), n.to_string().into_bytes()))
+///     })
+/// })
+/// .with_description(
+///     Description::new("count")
+///         .verb(Verb::Source)
+///         .input(ArgSpec::new("content").reads_body()),
+/// );
+/// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:count"), count)));
+/// let upload = Body::once(futures::stream::iter([
+///     Ok(Bytes::from_static(b"abc")),
+///     Ok(Bytes::from_static(b"de")),
+/// ]));
+/// let read = Request::new(Verb::Source, Iri::parse("urn:count").unwrap());
+/// let issue = BodyIssue::new().attach("content", upload);
+/// let answer = block_on(kernel.issue_with(read, &Capability::root(), issue)).unwrap();
+/// assert_eq!(answer.bytes, b"5");
+/// ```
+#[derive(Default)]
+#[non_exhaustive]
+pub struct BodyIssue {
+    pub(crate) scope: crate::space::Scope,
+    pub(crate) incoming: Option<crate::repr::Provenance>,
+    pub(crate) context: IssueContext,
+    pub(crate) tracer: Option<Arc<dyn crate::kernel::Tracer>>,
+    pub(crate) attach: Option<(String, crate::Body)>,
+}
+
+impl BodyIssue {
+    /// An issue like [`Kernel::issue`](crate::Kernel::issue)'s: the empty chain, no
+    /// upstream, a fresh run, the kernel's global tracer, nothing attached.
+    pub fn new() -> Self {
+        BodyIssue::default()
+    }
+
+    /// Resolve in `scope` (builder), as [`Kernel::issue_in`](crate::Kernel::issue_in) does.
+    pub fn in_scope(mut self, scope: crate::space::Scope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// Fold an upstream stage's provenance into the answer (builder), as
+    /// [`Kernel::issue_with_incoming`](crate::Kernel::issue_with_incoming) does: the answer
+    /// is no more cacheable than the upstream, and hangs from its threads.
+    pub fn with_incoming(mut self, incoming: crate::repr::Provenance) -> Self {
+        self.incoming = Some(incoming);
+        self
+    }
+
+    /// Run as part of `context` (builder), as
+    /// [`Kernel::issue_with_context`](crate::Kernel::issue_with_context) does.
+    pub fn with_context(mut self, context: IssueContext) -> Self {
+        self.context = context;
+        self
+    }
+
+    /// Record the resolution into `tracer` (builder), as
+    /// [`Kernel::issue_traced`](crate::Kernel::issue_traced) does.
+    pub fn traced(mut self, tracer: Arc<dyn crate::kernel::Tracer>) -> Self {
+        self.tracer = Some(tracer);
+        self
+    }
+
+    /// Attach `body` as the value of argument `name` (builder): see the type's
+    /// documentation. A second attach replaces the first: one issue carries one body.
+    pub fn attach(mut self, name: impl Into<String>, body: crate::Body) -> Self {
+        self.attach = Some((name.into(), body));
+        self
+    }
+}
+
+impl fmt::Debug for BodyIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BodyIssue")
+            .field("scope", &self.scope.to_string())
+            .field("incoming", &self.incoming)
+            .field("context", &self.context)
+            .field("traced", &self.tracer.is_some())
+            .field("attach", &self.attach.as_ref().map(|(name, _)| name))
+            .finish()
     }
 }
 

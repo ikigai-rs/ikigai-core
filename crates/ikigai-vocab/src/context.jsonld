@@ -422,6 +422,10 @@
     },
     "readingLabel": "ik:readingLabel",
     "readingValue": "ik:readingValue",
+    "readsBody": {
+      "@id": "ik:readsBody",
+      "@type": "xsd:boolean"
+    },
     "reanchored": {
       "@id": "ik:reanchored",
       "@type": "xsd:boolean"

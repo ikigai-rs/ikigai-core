@@ -128,6 +128,7 @@ fn uses_v2(spec: &ActionSpec) -> bool {
                 || !i.values.is_empty()
                 || !i.examples.is_empty()
                 || (i.is_enumerated() && i.one_of.is_empty())
+                || i.reads_body
         })
 }
 
@@ -522,6 +523,19 @@ impl ActionSpec {
     /// assert_ne!(open.contract_id("state"), hidden.contract_id("state"));
     /// ```
     ///
+    /// **Inputs read as a body** (ledger #2402, [`ArgSpec::reads_body`]) put a contract in
+    /// the v2 form too, and are appended after existence sensitivity, only when there are
+    /// any, as the byte `3` and the set of their names. A contract that declares none keeps
+    /// its digest:
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, ArgSpec, Verb};
+    ///
+    /// let by_value = ActionSpec::new(Verb::Sink).input(ArgSpec::new("content"));
+    /// let by_body = ActionSpec::new(Verb::Sink).input(ArgSpec::new("content").reads_body());
+    /// assert_ne!(by_value.contract_id("file"), by_body.contract_id("file"));
+    /// ```
+    ///
     /// The endpoint id is part of the contract: two endpoints with different ids and
     /// identical specs are two tools, and the contract node must say which one it
     /// belongs to.
@@ -617,6 +631,20 @@ impl ActionSpec {
         // the byte differs from the failure classes' `1`, so neither tail is the other.
         if self.existence_sensitive {
             feed_u8(&mut h, 2);
+        }
+        // The inputs read as a body (ledger #2402) are fed ONLY when there are any, after
+        // existence sensitivity, as the byte `3` and the set of their names: an action that
+        // declares none keeps its digest, and `3` is neither earlier tail's byte. Not inside
+        // each input's encoding, which would move every existing v2 contract IRI.
+        let readers: Vec<String> = self
+            .inputs
+            .iter()
+            .filter(|i| i.reads_body)
+            .map(|i| i.name.clone())
+            .collect();
+        if !readers.is_empty() {
+            feed_u8(&mut h, 3);
+            feed_set(&mut h, &readers);
         }
         ContentId::from_hasher(h)
     }

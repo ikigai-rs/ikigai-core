@@ -390,7 +390,7 @@
 
 <urn:ikigai:shape:parameter> a sh:NodeShape ;
     rdfs:label "Parameter" ;
-    rdfs:comment "A declared input of a plan — the ArgSpec node an endpoint would carry: name, arrival mode, required flag, optional class / default / enumeration (empty, or with value notes) / list separator / examples / dependencies." ;
+    rdfs:comment "A declared input of a plan — the ArgSpec node an endpoint would carry: name, arrival mode, required flag, optional class / default / enumeration (empty, or with value notes) / list separator / examples / dependencies / whether it is read as a body." ;
     sh:nodeKind sh:IRI ;
     sh:property <urn:ikigai:shape:parameter:inputName> ,
                 <urn:ikigai:shape:parameter:source> ,
@@ -401,7 +401,8 @@
                 <urn:ikigai:shape:parameter:example> ,
                 <urn:ikigai:shape:parameter:enumerated> ,
                 <urn:ikigai:shape:parameter:valueNote> ,
-                <urn:ikigai:shape:parameter:needs> .
+                <urn:ikigai:shape:parameter:needs> ,
+                <urn:ikigai:shape:parameter:readsBody> .
 
 <urn:ikigai:shape:parameter:inputName> a sh:PropertyShape ;
     sh:path ik:inputName ;
@@ -438,6 +439,12 @@
     sh:maxCount 1 ;
     sh:in ( "comma" "whitespace" "comma-or-whitespace" "newline" ) ;
     sh:message "ik:listSeparator is comma, whitespace, comma-or-whitespace or newline" .
+
+<urn:ikigai:shape:parameter:readsBody> a sh:PropertyShape ;
+    sh:path ik:readsBody ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:boolean ;
+    sh:message "ik:readsBody is at most one boolean" .
 
 <urn:ikigai:shape:parameter:example> a sh:PropertyShape ;
     sh:path ik:example ;
