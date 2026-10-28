@@ -631,6 +631,12 @@ fn thread_label() -> String {
 
 /// Resolves requests against a root space, invokes the resolved endpoint, and
 /// caches cacheable representations by their content-addressed request id.
+///
+/// Host access to installed stream facilities is provided by [`Issuer`]: import the
+/// trait to call [`Issuer::spill`] for the spill facility and the caller's byte limit,
+/// or [`Issuer::content`] to read a held content id from the installed store.
+/// Configure these with [`Kernel::with_spill`], [`Kernel::with_stream_spill`] and
+/// [`Kernel::with_content_store`].
 pub struct Kernel {
     root: Arc<dyn Space>,
     /// Cacheable representations and the golden-thread generations that keep them
@@ -2412,7 +2418,8 @@ impl Kernel {
     ///
     /// A request that carries a content id is keyed by the digest, so it caches like any
     /// other value; the store holds only bodies that can be read again, so a retried
-    /// request reads its content again.
+    /// request reads its content again. Hosts can read held content through
+    /// [`Issuer::content`] (import [`Issuer`] to call it on a kernel).
     pub fn with_content_store(mut self, store: Arc<dyn crate::ContentStore>) -> Self {
         self.content = Some(store);
         self
@@ -2422,7 +2429,9 @@ impl Kernel {
     /// #2372), beside [`with_content_store`](Self::with_content_store): it turns a one-shot
     /// body into one that can be read again ([`Spill`](crate::Spill)). The file-backed one
     /// is a host library's; without one, `urn:stream:spill` is `Unsupported`. How much one
-    /// request may write is [`with_stream_spill`](Self::with_stream_spill)'s.
+    /// request may write is [`with_stream_spill`](Self::with_stream_spill)'s. Hosts can
+    /// obtain the facility and caller's byte limit through [`Issuer::spill`] (import
+    /// [`Issuer`] to call it on a kernel).
     pub fn with_spill(mut self, spill: Arc<dyn crate::Spill>) -> Self {
         self.spill = Some(spill);
         self

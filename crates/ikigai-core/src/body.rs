@@ -65,6 +65,10 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 /// A body that can be **read again**: every [`open`](Replay::open) is a fresh reader from
 /// the start. What a file, a spill or a stored object offers.
 ///
+/// `Arc<dyn Replay>` also implements this trait, so a shared replay returned by
+/// [`Spill::spill`](crate::Spill::spill) can be passed directly to
+/// [`MemoryContentStore::put_replay`](crate::MemoryContentStore::put_replay).
+///
 /// A replay that cannot keep its bytes stable while a reader is open (a file written in
 /// place) checks on open and at the end, and fails the stream with
 /// [`Error::Conflict`] rather than hand out torn bytes: a cut invalidates lookups, not open
@@ -92,6 +96,26 @@ pub trait Replay: Send + Sync {
     /// knows it (a spill hashes while it writes). `None` by default.
     fn validator(&self) -> Option<ContentId> {
         None
+    }
+}
+
+// Let shared replays (including the trait object returned by Spill) pass through
+// APIs that accept Replay by value without a host-defined forwarding wrapper.
+impl Replay for Arc<dyn Replay> {
+    fn open(&self) -> ByteStream {
+        self.as_ref().open()
+    }
+
+    fn open_at(&self, offset: u64) -> Option<ByteStream> {
+        self.as_ref().open_at(offset)
+    }
+
+    fn len_hint(&self) -> Option<u64> {
+        self.as_ref().len_hint()
+    }
+
+    fn validator(&self) -> Option<ContentId> {
+        self.as_ref().validator()
     }
 }
 
