@@ -328,3 +328,58 @@ fn declared_equals_enforced() {
         FailureClass::Permanent
     );
 }
+
+/// A host can store the shared trait object returned by its spill facility directly.
+#[test]
+fn spilled_shared_replay_can_be_stored_without_a_wrapper() {
+    use ikigai_core::{ContentStore, MemoryContentStore};
+
+    let facility = InMemory::default();
+    let input = Box::pin(futures::stream::iter([Ok(Bytes::from_static(b"stored"))]));
+    let replay = block_on(facility.spill(input, 6)).unwrap();
+    let store = MemoryContentStore::new(6);
+    let held = store.put_replay(replay).unwrap();
+    assert_eq!(held.id(), ContentId::of(b"stored"));
+    assert_eq!(store.held_bytes(), 6);
+    for _ in 0..2 {
+        let body = store.get(&held.id()).unwrap();
+        assert_eq!(block_on(body.collect(6)).unwrap(), &b"stored"[..]);
+    }
+    let id = held.id();
+    drop(held);
+    assert!(store.get(&id).is_none());
+    assert_eq!(store.held_bytes(), 0);
+}
+
+#[test]
+fn shared_replay_forwards_every_method_including_seeks() {
+    struct Seekable;
+    impl Replay for Seekable {
+        fn open(&self) -> ByteStream {
+            self.open_at(0).unwrap()
+        }
+        fn open_at(&self, offset: u64) -> Option<ByteStream> {
+            let bytes = Bytes::from_static(b"seek");
+            (offset <= 4).then(|| {
+                Box::pin(futures::stream::iter([Ok(bytes.slice(offset as usize..))])) as ByteStream
+            })
+        }
+        fn len_hint(&self) -> Option<u64> {
+            Some(4)
+        }
+        fn validator(&self) -> Option<ContentId> {
+            Some(ContentId::of(b"seek"))
+        }
+    }
+    let shared: Arc<dyn Replay> = Arc::new(Seekable);
+    // Explicit trait calls exercise the Arc implementation, rather than deref coercion.
+    assert_eq!(Replay::len_hint(&shared), Some(4));
+    assert_eq!(Replay::validator(&shared), Some(ContentId::of(b"seek")));
+    let body = Body::Once(Replay::open(&shared));
+    assert_eq!(block_on(body.collect(4)).unwrap(), &b"seek"[..]);
+    for _ in 0..2 {
+        let body = Body::Once(Replay::open_at(&shared, 2).unwrap());
+        assert_eq!(block_on(body.collect(4)).unwrap(), &b"ek"[..]);
+    }
+    assert!(Replay::open_at(&shared, 5).is_none());
+}
