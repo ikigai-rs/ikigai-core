@@ -53,7 +53,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::body::Body;
-use crate::repr::{Expiry, Representation, Thread, Time};
+use crate::repr::{Expiry, Provenance, Representation, Thread, Time};
 use crate::request::RequestId;
 use crate::uncached::Declined;
 
@@ -78,6 +78,10 @@ pub const CUT_LOG: usize = 4096;
 /// by construction, over-partitioned rather than unsound. The empty chain's
 /// fingerprint is `0`, so [`new`](Self::new) — which does not take one — is the empty
 /// chain's key, and every key built before scopes existed is unchanged.
+///
+/// The kernel additionally checks incoming pipe provenance in the private cache
+/// slot before reuse. A changed upstream expiry or thread set is a miss, even for
+/// the same public key; a successful store replaces that key's previous variant.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct CacheKey {
     /// The content-addressed identity of the request that produced the entry.
@@ -158,6 +162,10 @@ impl CacheEntry {
 /// shape (ledger #2261).
 #[derive(Debug)]
 struct Slot {
+    // The incoming provenance is a logical part of the kernel's cache key. Keep
+    // one variant per public CacheKey, replacing it on a mismatched computation:
+    // this preserves the public key's shape and keeps variants within its bound.
+    incoming: Option<Provenance>,
     target: String,
     representation: Representation<Body>,
     edges: Vec<(Thread, u64)>,
@@ -586,13 +594,13 @@ impl ReprCache {
     /// the caller's back: it answers `None` here, without counting a hit, and is served by
     /// [`get_body`](Self::get_body).
     pub fn get(&self, key: &CacheKey, now: Option<Time>) -> Option<Representation> {
-        self.serve(key, now, Representation::copied)
+        self.serve(key, now, |entry| entry.representation.copied())
     }
 
     /// [`get`](Self::get)'s body face (ledger #2237): a second handle on the stored body,
     /// a buffer shared without copying or a [`Replay`](crate::Replay).
     pub fn get_body(&self, key: &CacheKey, now: Option<Time>) -> Option<Representation<Body>> {
-        self.serve(key, now, Representation::share)
+        self.serve(key, now, |entry| entry.representation.share())
     }
 
     /// [`get`](Self::get), in the face the kernel's caller asked for (ledger #2237): with
@@ -604,8 +612,15 @@ impl ReprCache {
         key: &CacheKey,
         now: Option<Time>,
         buffer: bool,
+        incoming: Option<&Provenance>,
     ) -> Option<Answer> {
-        self.serve(key, now, |stored| {
+        self.serve(key, now, |entry| {
+            // Effective expiry/threads already include the upstream. They cannot
+            // be reused under a different upstream, even when the bytes match.
+            if entry.incoming.as_ref() != incoming {
+                return None;
+            }
+            let stored = &entry.representation;
             if buffer {
                 if let Some(copy) = stored.copied() {
                     return Some(Answer::Buffer(copy));
@@ -621,7 +636,7 @@ impl ReprCache {
         &self,
         key: &CacheKey,
         now: Option<Time>,
-        face: impl FnOnce(&Representation<Body>) -> Option<T>,
+        face: impl FnOnce(&Slot) -> Option<T>,
     ) -> Option<T> {
         let mut state = self.state.lock().expect("cache lock");
         match state.entries.get(key) {
@@ -633,7 +648,7 @@ impl ReprCache {
                 None
             }
             Some(entry) => {
-                let answer = face(&entry.representation)?;
+                let answer = face(entry)?;
                 state.tick += 1;
                 let tick = state.tick;
                 let entry = state.entries.get_mut(key).expect("entry present");
@@ -682,7 +697,7 @@ impl ReprCache {
         taken: CutSnapshot,
         cost_millis: Option<u64>,
     ) -> bool {
-        self.store_outcome(key, target, &representation, taken, cost_millis)
+        self.store_outcome(key, target, &representation, taken, cost_millis, None)
             .is_ok()
     }
 
@@ -702,6 +717,7 @@ impl ReprCache {
         representation: &Representation<Body>,
         taken: CutSnapshot,
         cost_millis: Option<u64>,
+        incoming: Option<&Provenance>,
     ) -> Result<(), Declined> {
         // A one-shot body cannot be read again, so there is nothing to keep. The kernel
         // never offers one (it names the cause itself, `one-shot body`); this is the
@@ -742,6 +758,7 @@ impl ReprCache {
             return Err(Declined::Policy);
         }
         let entry = Slot {
+            incoming: incoming.cloned(),
             target,
             representation: representation.share().ok_or(Declined::Policy)?,
             edges,
@@ -1108,6 +1125,32 @@ mod tests {
 
     fn threaded(bytes: usize, thread: &str) -> Representation {
         repr(bytes).depends_on(thread)
+    }
+
+    #[test]
+    fn kernel_hits_require_the_same_incoming_provenance_for_both_faces() {
+        let cache = ReprCache::default();
+        let up = Provenance::new(Expiry::Never, BTreeSet::from([Thread::new("urn:up:a")]));
+        let other = Provenance::new(Expiry::Never, BTreeSet::from([Thread::new("urn:up:b")]));
+        cache
+            .store_outcome(
+                key(1),
+                "urn:test:1".into(),
+                &repr(8).into_body(),
+                cache.snapshot(),
+                None,
+                Some(&up),
+            )
+            .unwrap();
+        for buffer in [false, true] {
+            assert!(cache.get_answer(&key(1), None, buffer, Some(&up)).is_some());
+            assert!(cache
+                .get_answer(&key(1), None, buffer, Some(&other))
+                .is_none());
+            assert!(cache.get_answer(&key(1), None, buffer, None).is_none());
+        }
+        let state = cache.state.lock().unwrap();
+        assert_eq!(state.entries[&key(1)].hits, 2, "mismatches are not hits");
     }
 
     #[test]

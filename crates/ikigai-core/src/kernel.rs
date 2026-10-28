@@ -3483,7 +3483,10 @@ impl Kernel {
     /// effective cacheability. So `source <X> | transform` is no more cacheable than
     /// `X` — cacheability flows down the pipe — and cutting `X`'s thread invalidates
     /// the transformed result too. The engine passes this for each pipe stage; plain
-    /// [`issue`](Self::issue) is the no-upstream case.
+    /// [`issue`](Self::issue) is the no-upstream case. Cache reuse also requires
+    /// matching incoming expiry and threads: identical request bytes alone do not
+    /// make an answer computed under another upstream valid here. The cache keeps
+    /// one upstream variant per request/authority/scope key.
     pub async fn issue_with_incoming(
         &self,
         request: Request,
@@ -3710,7 +3713,10 @@ impl Kernel {
                 }
             };
             if cacheable_verb {
-                if let Some(cached) = self.cache.get_answer(&key, started, buffer) {
+                if let Some(cached) =
+                    self.cache
+                        .get_answer(&key, started, buffer, incoming.as_ref())
+                {
                     record(true, Vec::new());
                     return Ok(cached);
                 }
@@ -3728,6 +3734,14 @@ impl Kernel {
                         return Err(error);
                     }
                 };
+            let representation = if let Some(incoming) = &incoming {
+                let mut threads = representation.threads().clone();
+                threads.extend(incoming.threads.iter().cloned());
+                let expiry = representation.expiry.most_restrictive(incoming.expiry);
+                representation.with_expiry(expiry).with_threads(threads)
+            } else {
+                representation
+            };
             let mut why = Uncached::default();
             if cacheable_verb {
                 match representation.expiry {
@@ -3746,6 +3760,7 @@ impl Kernel {
                     &representation,
                     taken,
                     self.elapsed_since(started),
+                    incoming.as_ref(),
                 ) {
                     // A chain-keyed entry names its chain in the readout, as a scoped
                     // resolution's does; every other kernel operation is keyed with
@@ -4060,7 +4075,10 @@ impl Kernel {
             // Freshness is evaluated as of `started` — the instant this resolution
             // began, one clock reading shared with the trace event and the
             // constraint window rather than a fresh read per lookup.
-            if let Some(cached) = self.cache.get_answer(&key, started, buffer) {
+            if let Some(cached) = self
+                .cache
+                .get_answer(&key, started, buffer, incoming.as_ref())
+            {
                 // A stored `Replay` is collected by a buffer caller under the run's pool,
                 // admitted here only for such a hit: a buffer hit admits nothing.
                 let cached = cached.budgeted(|| {
@@ -4283,10 +4301,10 @@ impl Kernel {
             // way, so a transform over a piped input is no more cacheable than that
             // input, and inherits its threads.
             let mut upstream = Expiry::Never;
-            if let Some(incoming) = incoming {
+            if let Some(incoming) = &incoming {
                 upstream = incoming.expiry;
                 effective = effective.most_restrictive(incoming.expiry);
-                threads.extend(incoming.threads);
+                threads.extend(incoming.threads.iter().cloned());
             }
             // Every cause of an `Always`, not the first: an endpoint that declared
             // none AND joined a volatile source has two things to fix, and naming
@@ -4370,6 +4388,7 @@ impl Kernel {
                     &representation,
                     taken,
                     self.elapsed_since(started),
+                    incoming.as_ref(),
                 ) {
                     // Remember what the fingerprint meant, for the readout. Off the
                     // empty-chain path entirely: a plain `issue` never takes this lock.
@@ -7797,8 +7816,7 @@ mod tests {
         );
 
         // Uncacheable upstream (Always) → result becomes uncacheable → not cached.
-        let other = Request::new(Verb::Source, iri("urn:test:to-upper"))
-            .with_arg("in", ArgRef::Inline(b"yo".to_vec()));
+        let other = req();
         let volatile_up = Provenance::new(Expiry::Always, BTreeSet::new());
         let rep = block_on(kernel.issue_with_incoming(other, &cap, volatile_up)).unwrap();
         assert_eq!(
@@ -7811,6 +7829,65 @@ mod tests {
             1,
             "the volatile-upstream result was not cached"
         );
+    }
+
+    #[test]
+    fn incoming_provenance_changes_do_not_reuse_another_upstreams_answer() {
+        let space =
+            EndpointSpace::new().bind(Exact::new("urn:test:to-upper"), builtins::to_upper());
+        let kernel = Kernel::new(Arc::new(space)).with_clock(Arc::new(FixedClock::at(10)));
+        let cap = Capability::root();
+        let req = || {
+            Request::new(Verb::Source, iri("urn:test:to-upper"))
+                .with_arg("in", ArgRef::Inline(b"hi".to_vec()))
+        };
+        // Both directions matter: neither a previous deadline nor its threads
+        // may survive a change of upstream for identical content.
+        for (expiry, thread) in [
+            (Expiry::At(Time::from_millis(100)), "urn:up:first"),
+            (Expiry::Always, "urn:up:volatile"),
+            (Expiry::At(Time::from_millis(50)), "urn:up:second"),
+            (Expiry::At(Time::from_millis(200)), "urn:up:second"),
+            (Expiry::Never, "urn:up:third"),
+        ] {
+            let up = Provenance::new(expiry, BTreeSet::from([Thread::new(thread)]));
+            // Repeat each context to exercise both computation and reuse.
+            for _ in 0..2 {
+                let rep = block_on(kernel.issue_with_incoming(req(), &cap, up.clone())).unwrap();
+                assert_eq!(rep.bytes, b"HI");
+                assert_eq!(rep.expiry, expiry);
+                let inherited: BTreeSet<_> = rep
+                    .threads()
+                    .iter()
+                    .filter(|t| t.as_str().starts_with("urn:up:"))
+                    .cloned()
+                    .collect();
+                assert_eq!(inherited, up.threads);
+            }
+        }
+        // A plain issue must not inherit the last pipe's provenance either.
+        let rep = block_on(kernel.issue(req(), &cap)).unwrap();
+        assert_eq!(rep.expiry, Expiry::Never);
+        assert!(rep
+            .threads()
+            .iter()
+            .all(|t| !t.as_str().starts_with("urn:up:")));
+        assert_eq!(kernel.cache_len(), 1, "one bounded slot per public key");
+    }
+
+    #[test]
+    fn kernel_operation_cache_also_respects_incoming_provenance() {
+        let kernel =
+            Kernel::with_meta_renderer(Arc::new(EndpointSpace::new()), Arc::new(EchoIdRenderer));
+        let cap = Capability::root();
+        let req = || Request::new(Verb::Source, iri("urn:kernel:catalog"));
+        let first = Provenance::new(Expiry::Never, BTreeSet::from([Thread::new("urn:up:a")]));
+        block_on(kernel.issue_with_incoming(req(), &cap, first)).unwrap();
+        let volatile = Provenance::new(Expiry::Always, BTreeSet::from([Thread::new("urn:up:b")]));
+        let rep = block_on(kernel.issue_with_incoming(req(), &cap, volatile.clone())).unwrap();
+        assert_eq!(rep.expiry, Expiry::Always);
+        assert!(rep.threads().contains(&Thread::new("urn:up:b")));
+        assert!(!rep.threads().contains(&Thread::new("urn:up:a")));
     }
 
     #[test]
