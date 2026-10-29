@@ -2196,6 +2196,22 @@ pub trait Endpoint: Send + Sync {
         false
     }
 
+    /// What this endpoint forwards every request to, when it is a forwarder — a view or a
+    /// named request (ledger #2513). `None`, the default, for every endpoint that answers
+    /// for itself.
+    ///
+    /// The kernel describes a forwarder by its TARGET's contract wherever it describes
+    /// anything (`Meta`, the catalog, `urn:kernel:actions`, `urn:kernel:validate`,
+    /// [`Kernel::describe`](crate::Kernel::describe)): the target's inputs minus the fixed
+    /// ones, which are listed and marked, its outputs and its `requires`. And it hands a
+    /// forwarder a body attached to the request as it is, never collected, since the
+    /// target is what reads it. An overlay that wraps one endpoint should forward this as
+    /// it forwards [`describe`](Self::describe); one that does not describes the
+    /// forwarder's own contract, which is what it describes about everything else too.
+    fn forwards(&self) -> Option<crate::Forward> {
+        None
+    }
+
     /// The corridor this endpoint confines its sub-requests to, when it is a
     /// [`Confine`](crate::Confine): the confined space's structure, named by the
     /// confinement's name. `None` — the default — for every endpoint that runs in

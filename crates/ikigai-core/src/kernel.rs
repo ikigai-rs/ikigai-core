@@ -4060,7 +4060,11 @@ impl Kernel {
         // cache entry. After the floor, so a refused caller's body is never read; before
         // the identity, which the inline bytes are part of. Boxed and out of line, and only
         // when a body is attached (`settling`).
+        // A forwarder reads nothing itself: an attached body rides on to the target, whose
+        // own declaration says how it is read (ledger #2513).
+        let forwarding = run.attached().is_some() && resolved.endpoint.forwards().is_some();
         let collected = match self.settling(&mut request, &mut run, capability, readers) {
+            _ if forwarding => Vec::new(),
             None => Vec::new(),
             Some(settling) => settling.await?,
         };
@@ -4133,7 +4137,9 @@ impl Kernel {
                 .meta
                 .as_ref()
                 .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
-            let description = resolved.endpoint.describe();
+            // A forwarder (a view, a named request) is described by its TARGET's contract,
+            // the target resolved in this request's chain (ledger #2513; `forward.rs`).
+            let description = self.meta_description(&resolved.endpoint, &scope, capability);
             let target = meta_target(&request);
             let policy = meta_policy(&request)?;
             let rendered = match renderer.render(&description, &target) {
@@ -5606,6 +5612,67 @@ impl Kernel {
     /// changes is what the kernel can SAY about itself — the catalog, the action
     /// manifold, describe-by-id and `urn:kernel:validate` all consume this walk, so
     /// they inherit the kernel from one place instead of nine.
+    /// The description the `Meta` arm answers for `endpoint`: its own, or for a forwarder
+    /// its target's contract projected (ledger #2513), the target resolved in `scope` as
+    /// the forward itself would resolve it, following at most `MAX_FORWARDS` forwards.
+    fn meta_description(
+        &self,
+        endpoint: &Arc<dyn Endpoint>,
+        scope: &Scope,
+        capability: &Capability,
+    ) -> Description {
+        let own = endpoint.describe();
+        let Some(forward) = endpoint.forwards() else {
+            return own;
+        };
+        let target = self.forward_target(
+            &forward.target,
+            scope,
+            capability,
+            crate::forward::MAX_FORWARDS,
+        );
+        crate::forward::project(&forward, own, target.as_ref())
+    }
+
+    /// What a forward's `target` is described as from `scope`: its own description, or a
+    /// forwarder's projection; `None` for a name that resolves to nothing, to ⊥, or to an
+    /// endpoint whose existence is hidden from `capability` (a view must not tell a caller
+    /// what the target's own `Meta` would not), and past `left` forwards.
+    fn forward_target(
+        &self,
+        target: &Iri,
+        scope: &Scope,
+        capability: &Capability,
+        left: usize,
+    ) -> Option<Description> {
+        if let Some(op) = kernel_op(target.as_str()) {
+            return crate::kernel_ops::description(op);
+        }
+        let request = Request::new(Verb::Meta, target.clone());
+        let resolution = if crate::stream::is_stream(target.as_str()) {
+            Ok(self.streams.resolve(&request, &Scope::empty()))
+        } else {
+            scope.resolve_in(&request, &self.root, &self.seals)
+        };
+        let resolved = match resolution {
+            Ok(Resolution::Hit(resolved)) if !resolved.endpoint.is_limiter() => resolved,
+            _ => return None,
+        };
+        let own = resolved.endpoint.describe();
+        if Floor::of(&own).conceals(Verb::Meta, capability) {
+            return None;
+        }
+        match resolved.endpoint.forwards() {
+            None => Some(own),
+            Some(forward) => {
+                let inner = left
+                    .checked_sub(1)
+                    .and_then(|left| self.forward_target(&forward.target, scope, capability, left));
+                Some(crate::forward::project(&forward, own, inner.as_ref()))
+            }
+        }
+    }
+
     fn described(&self) -> Fallback {
         Fallback::new(vec![
             Arc::new(crate::kernel_ops::KernelOps),

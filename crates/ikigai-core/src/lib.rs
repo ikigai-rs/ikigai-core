@@ -122,6 +122,7 @@ mod dynamic;
 mod endpoint;
 mod error;
 mod explain;
+mod forward;
 mod grammar;
 pub(crate) mod hashing;
 mod inspect_graph;
@@ -187,6 +188,7 @@ pub use endpoint::{
     Issuer, Spawner,
 };
 pub use error::{Error, FailureClass, Result};
+pub use forward::Forward;
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
