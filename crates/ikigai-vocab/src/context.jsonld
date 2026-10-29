@@ -152,6 +152,7 @@
       "@id": "ik:cap",
       "@type": "@id"
     },
+    "capture": "ik:capture",
     "chain": {
       "@id": "ik:chain",
       "@type": "@id"
@@ -272,6 +273,11 @@
     "findingCount": {
       "@id": "ik:findingCount",
       "@type": "xsd:nonNegativeInteger"
+    },
+    "fixed": "ik:fixed",
+    "fixes": {
+      "@id": "ik:fixes",
+      "@type": "@id"
     },
     "forkOf": {
       "@id": "ik:forkOf",
