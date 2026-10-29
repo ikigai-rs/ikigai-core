@@ -514,6 +514,12 @@ struct Recorded {
     /// Union of the golden threads of every sub-resource resolved during this
     /// invocation — so the kernel can propagate them onto the result.
     dep_threads: Mutex<BTreeSet<Thread>>,
+    /// The stale answer the kernel offers for revalidation (ledger #2534): set only when
+    /// this request's cache entry expired by time and carries an origin validator. Here
+    /// rather than on the invocation, which every nesting level holds a copy of, so the
+    /// invocation does not grow for it; shared by every reborrow (they serve the same
+    /// request), never by a sub-request.
+    stale: std::sync::OnceLock<Arc<crate::repr::Stale>>,
 }
 
 /// What a resolution depended on before it FAILED: the meet of its sub-requests'
@@ -1246,6 +1252,54 @@ impl<'a> Invocation<'a> {
     pub fn with_clock(mut self, clock: Arc<dyn crate::Clock>) -> Self {
         self.clock = Some(clock);
         self
+    }
+
+    /// **The stale answer offered for revalidation** (ledger #2534), when there is one:
+    /// this request's cache entry expired by time, every golden thread it hangs from
+    /// still stands, and it was stored with an [`OriginValidator`](crate::OriginValidator)
+    /// ([`Representation::validated_by`]). The endpoint may ask its origin whether that
+    /// version is still current and, if it is, answer
+    /// [`Representation::revalidated`] with the new deadline: the kernel then serves the
+    /// stored body without the endpoint producing it again. Any other answer replaces
+    /// the entry as a fresh computation would.
+    ///
+    /// `None` on every other invocation, including every sub-request this one issues: a
+    /// cut entry is never offered (a cut says the content changed), nor is one without a
+    /// validator.
+    ///
+    /// ```
+    /// # use ikigai_core::{Bindings, Capability, Invocation, Iri, OriginValidator, ReprType, Request, Stale, Verb};
+    /// # let request = Request::new(Verb::Source, Iri::parse("urn:example").unwrap());
+    /// # let bindings = Bindings::default();
+    /// # let capability = Capability::root();
+    /// let validator = OriginValidator { etag: Some("\"v1\"".into()), last_modified: None };
+    /// let inv = Invocation::detached(&request, &bindings, &capability).with_stale(Stale {
+    ///     validator: validator.clone(),
+    ///     repr_type: ReprType::new("text/plain"),
+    /// });
+    /// assert_eq!(inv.stale().map(|stale| &stale.validator), Some(&validator));
+    /// ```
+    pub fn stale(&self) -> Option<&crate::repr::Stale> {
+        self.recorded.stale.get().map(Arc::as_ref)
+    }
+
+    /// Offer a stale answer for revalidation (builder): what the kernel does when a
+    /// time-expired entry carries an origin validator, and what a hermetic test of a
+    /// revalidating endpoint does by hand ([`stale`](Self::stale)).
+    ///
+    /// Once per invocation: an invocation already offered something keeps that offer.
+    pub fn with_stale(self, stale: crate::repr::Stale) -> Self {
+        let _ = self.recorded.stale.set(Arc::new(stale));
+        self
+    }
+
+    /// [`with_stale`](Self::with_stale) from the kernel's side: the offer the cache
+    /// made, if it made one. By reference rather than a builder: a builder's by-value invocation is one more
+    /// copy of it in the issue path's frame, which every nesting level pays for.
+    pub(crate) fn offer(&self, offer: Option<&crate::cache::Offer>) {
+        if let Some(offer) = offer {
+            let _ = self.recorded.stale.set(Arc::clone(&offer.stale));
+        }
     }
 
     /// Attach this invocation's trace span (set by the kernel when recording), so
