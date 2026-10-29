@@ -151,6 +151,7 @@
 //!   mentioning the pre-alias prefix. That is the exact silent-failure shape from
 //!   decision 1, turned into a sentence.
 
+use std::cell::Cell;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -582,6 +583,13 @@ impl AliasTable {
         self.walk(target, false)
     }
 
+    /// [`canonicalize`](Self::canonicalize) as the calling thread's resolution asks
+    /// for it: the counter-free [`preview`](Self::preview) inside [`previewing`], the
+    /// counting walk everywhere else.
+    fn canonicalize_here(&self, target: &Iri) -> Canonical {
+        self.walk(target, !PREVIEWING.with(Cell::get))
+    }
+
     /// The walk both faces share; `record` says whether it bumps the counters.
     fn walk(&self, target: &Iri, record: bool) -> Canonical {
         // The reserved namespace is not aliasable, in any case of its prefix (above).
@@ -807,6 +815,29 @@ impl AliasTable {
     }
 }
 
+thread_local! {
+    /// Set while [`previewing`] runs a resolution on this thread.
+    static PREVIEWING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Run `resolve` as an observer's resolution: every [`Alias`] it reaches rewrites
+/// through the counter-free [`AliasTable::preview`], so asking what a name resolves
+/// to never counts as resolving it at `urn:kernel:aliases`. The cache-status probe
+/// ([`Kernel::is_cached_in`](crate::Kernel::is_cached_in)) is that observer: it must
+/// learn the canonical an overlay reports (decision 3) without a hop per probe
+/// (ledger #2503). Resolution is synchronous, so a thread-local reaches every
+/// overlay on the walk without widening `Space::resolve` or the one-word `Scope`.
+pub(crate) fn previewing<R>(resolve: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PREVIEWING.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(PREVIEWING.with(|flag| flag.replace(true)));
+    resolve()
+}
+
 /// A `Space` decorator that rewrites logical names to backing ones before
 /// delegating — the interception-overlay form of [`AliasTable`].
 ///
@@ -959,7 +990,7 @@ impl Space for Alias {
 
 impl Alias {
     fn resolve_through(&self, request: &Request, scope: &Scope) -> Resolution {
-        match self.table.canonicalize(&request.target) {
+        match self.table.canonicalize_here(&request.target) {
             Canonical::Direct => self.inner.resolve(request, scope),
             Canonical::Aliased(hop)
                 if hop

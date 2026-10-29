@@ -1371,8 +1371,15 @@ struct ProbeEntry {
     scope: u64,
     /// `None` where no contract states a default for the verb.
     declared: Option<Defaults>,
+    /// The name a space reported rewriting this one to ([`Resolved::canonical`]), which
+    /// the entry is stored under (ledger #2503); `None` when no space rewrote it.
+    canonical: Option<Iri>,
     keep: Keep,
 }
+
+/// What [`ProbeMemo::lookup`] knows of a name: the defaults it was prefilled with
+/// (`None` where no contract states one) and the canonical a space rewrote it to.
+type Probed = (Option<Defaults>, Option<Iri>);
 
 impl ProbeEntry {
     fn is(&self, verb: Verb, scope: u64) -> bool {
@@ -1384,17 +1391,20 @@ impl ProbeMemo {
     /// Record what the issue path prefilled `target` with for `verb` in the chain
     /// `scope`, kept as `keep` says. Unchanged, it costs a read lock: a hot read writes
     /// nothing.
+    #[allow(clippy::too_many_arguments)]
     fn record(
         &self,
         target: &str,
         verb: Verb,
         scope: u64,
         declared: Option<&Defaults>,
+        canonical: Option<&Iri>,
         keep: Keep,
         now: Option<Time>,
     ) {
         let same = |entry: &ProbeEntry| {
             entry.keep == keep
+                && entry.canonical.as_ref() == canonical
                 && match (&entry.declared, declared) {
                     (None, None) => true,
                     (Some(held), Some(new)) => Arc::ptr_eq(held, new) || held == new,
@@ -1443,6 +1453,7 @@ impl ProbeMemo {
             verb,
             scope,
             declared: declared.cloned(),
+            canonical: canonical.cloned(),
             keep,
         };
         let entries = names.entry(target.to_string()).or_default();
@@ -1458,18 +1469,15 @@ impl ProbeMemo {
     }
 
     /// The defaults the issue path last prefilled `target` with for `verb` in the chain
-    /// `scope`, if it has served that name and the contract may still be kept at `now`:
-    /// `Some(None)` when that contract states none, `None` when the memo cannot say.
-    fn lookup(
-        &self,
-        target: &str,
-        verb: Verb,
-        scope: u64,
-        now: Option<Time>,
-    ) -> Option<Option<Defaults>> {
+    /// `scope`, and the canonical a space rewrote it to, if it has served that name and
+    /// the contract may still be kept at `now`: `None` when the memo cannot say.
+    fn lookup(&self, target: &str, verb: Verb, scope: u64, now: Option<Time>) -> Option<Probed> {
         let names = self.names.read().expect("probe memo lock");
         let entry = names.get(target)?.iter().find(|e| e.is(verb, scope))?;
-        entry.keep.fresh_at(now).then(|| entry.declared.clone())
+        entry
+            .keep
+            .fresh_at(now)
+            .then(|| (entry.declared.clone(), entry.canonical.clone()))
     }
 
     fn clear(&self) {
@@ -4014,6 +4022,7 @@ impl Kernel {
                 request.verb,
                 scope.fingerprint(),
                 declared.as_ref(),
+                probed_as.as_ref().map(|_| &request.target),
                 keep,
                 started,
             );
@@ -5446,23 +5455,25 @@ impl Kernel {
         // decision 3 exists to close. A refused rewrite resolves to nothing, so it
         // is not cached either.
         //
-        // Limit, stated because it is invisible otherwise: this sees only rewrites
-        // the kernel's OWN table performs. A canonical reported by a `Space`
-        // (`Resolved::canonical`) is knowable only by resolving, and resolution is
-        // not side-effect-free for the overlay family — a `RateLimit` spends budget
-        // to answer. A read-only probe must not spend it, so a nested rewrite makes
-        // this answer "not cached" under the logical name while the serving path
-        // correctly serves one entry for both. Conservative in the safe direction:
-        // it under-reports a hit, never invents one.
-        let mut probed = match self.canonicalize(&request.target) {
-            Err(_) => return false,
-            Ok(None) => request.clone(),
-            Ok(Some(hop)) => {
-                let mut canonical = request.clone();
-                canonical.target = hop.canonical().clone();
-                canonical
-            }
-        };
+        // That is the kernel's OWN table, here. A canonical reported by a `Space`
+        // (`Resolved::canonical`, an `Alias` overlay) is adopted below, from the probe
+        // memo or the `Meta` resolution: before ledger #2503 it was not, and every
+        // aliased name probed "not cached" while the serving path served one entry
+        // for both, so the REPL labeled a hit `[computed]`.
+        //
+        // ★ Through the counter-free preview (ledger #2503): a probe is an observer,
+        // and one that counted would move the hop and refusal counts an operator reads
+        // at `urn:kernel:aliases` every time a REPL labeled a read.
+        let mut probed = request.clone();
+        match self
+            .aliases
+            .as_ref()
+            .map(|table| table.preview(&request.target))
+        {
+            None | Some(Canonical::Direct) => {}
+            Some(Canonical::Aliased(hop)) => probed.target = hop.canonical().clone(),
+            Some(Canonical::Refused(_)) => return false,
+        }
         // ★ And with the declared defaults in, as the serving path keys it (ledger #19):
         // otherwise a call that leaves a defaulted input out would probe a key no entry
         // is ever stored under. A kernel operation's contract is static. An endpoint's
@@ -5488,16 +5499,24 @@ impl Kernel {
                 scope.fingerprint(),
                 now,
             ) {
-                Some(declared) => {
+                Some((declared, canonical)) => {
+                    if let Some(canonical) = canonical {
+                        probed.target = canonical;
+                    }
                     if let Some(defaults) = declared {
                         prefill(&mut probed, &defaults);
                     }
                 }
                 None => {
+                    // Previewing: an `Alias` on the walk reports its canonical without
+                    // counting a hop (ledger #2503).
                     let meta = Request::new(Verb::Meta, probed.target.clone());
-                    if let Ok(Resolution::Hit(resolved)) =
+                    if let Ok(Resolution::Hit(mut resolved)) = crate::alias::previewing(|| {
                         scope.resolve_in(&meta, &self.root, &self.seals)
-                    {
+                    }) {
+                        if let Some(canonical) = resolved.canonical.take() {
+                            probed.target = canonical;
+                        }
                         if !resolved.endpoint.is_limiter() {
                             let defaults = self
                                 .floors
