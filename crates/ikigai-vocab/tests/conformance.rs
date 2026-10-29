@@ -12,7 +12,7 @@
 //! workspace root's `[patch.crates-io]`, so the kernel built here and the one the suite
 //! checks against are the same crate.
 
-use ikigai_conformance::Suite;
+use ikigai_conformance::{Expected, Suite};
 use ikigai_core::Kernel;
 use ikigai_vocab::TurtleRenderer;
 use std::sync::Arc;
@@ -22,17 +22,19 @@ const ENDPOINTS: [&str; 1] = ["ikigai-vocab"];
 
 #[test]
 fn conforms() {
-    let kernel =
-        Kernel::with_meta_renderer(Arc::new(ikigai_vocab::space()), Arc::new(TurtleRenderer));
+    let space = Arc::new(ikigai_vocab::space());
+    let kernel = Kernel::with_meta_renderer(space.clone(), Arc::new(TurtleRenderer));
 
     let report = ENDPOINTS
         .iter()
         .fold(Suite::new(), |suite, id| suite.pure(*id).cacheable(*id))
+        .body_space(space)
         .self_named_space("vocab", ikigai_vocab::space)
         .run_blocking(&kernel);
     // Printed so `--nocapture` shows what was probed and what was not, even when clean.
     println!("{report}");
-    assert!(report.is_clean(), "{report}");
+    // This deterministic, input-free endpoint must exercise every applicable check.
+    report.assert_clean_with(&Expected::new().no_opt_outs().nothing_unprobed());
     assert_eq!(
         ikigai_core::space_iri("vocab").as_str(),
         ikigai_vocab::SPACE_ID
