@@ -505,3 +505,25 @@ fn a_streamed_answer_streams_through_the_view() {
     let bytes = block_on(kernel.issue(source("urn:example:counted"), &Capability::root())).unwrap();
     assert_eq!(bytes.bytes, b"1 2 3 ");
 }
+
+// A kernel-held table ─────────────────────────────────────────────────────────────
+
+#[test]
+fn a_named_request_in_the_kernels_own_table_keeps_its_fixed_arguments() {
+    let runs = Arc::new(AtomicU32::new(0));
+    let doors = EndpointSpace::new().bind(Exact::new(SPARQL), echoing("sparql", runs));
+    let table = AliasTable::new()
+        .with_rule(
+            TopologyRule::named_request("urn:example:quakes:count", SPARQL)
+                .fixing(FixedArgument::value("graph", "urn:example:quakes:graph")),
+        )
+        .unwrap();
+    let kernel = Kernel::new(Arc::new(doors)).with_aliases(Arc::new(table));
+    let answer = block_on(kernel.issue(source("urn:example:quakes:count"), &Capability::root()))
+        .map(|r| String::from_utf8(r.bytes).unwrap())
+        .unwrap();
+    assert_eq!(
+        answer, "graph=urn:example:quakes:graph\n",
+        "never the bare target"
+    );
+}

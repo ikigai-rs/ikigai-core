@@ -2833,11 +2833,24 @@ impl Kernel {
         match self
             .aliases
             .as_ref()
-            .map(|table| table.canonicalize(target))
+            .map(|table| (table, table.canonicalize(target)))
         {
-            None | Some(Canonical::Direct) => Ok(None),
-            Some(Canonical::Aliased(hop)) => Ok(Some(hop)),
-            Some(Canonical::Refused(refusal)) => Err(Error::Endpoint(format!(
+            None | Some((_, Canonical::Direct)) => Ok(None),
+            // ★ A NAMED REQUEST IS NOT A RENAMING (ledger #2512). Rewriting its name here,
+            // ahead of resolution, would send the target its caller's arguments WITHOUT the
+            // ones the binding fixes: a silently different request. So a chain through one
+            // is left to the `Alias` overlay `with_aliases` wraps the root in, which
+            // resolves it to the view that merges them.
+            Some((table, Canonical::Aliased(hop)))
+                if hop
+                    .rules()
+                    .iter()
+                    .any(|&i| table.rules()[i].is_named_request()) =>
+            {
+                Ok(None)
+            }
+            Some((_, Canonical::Aliased(hop))) => Ok(Some(hop)),
+            Some((_, Canonical::Refused(refusal))) => Err(Error::Endpoint(format!(
                 "alias table refused `{}`: {refusal}",
                 refusal.logical
             ))),
