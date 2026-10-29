@@ -11,6 +11,16 @@ use crate::iri::Iri;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub enum ArgRef {
     /// A reference to another resolvable resource; identity is its IRI.
+    ///
+    /// **How it reaches the endpoint is settled by the endpoint's contract** (ledger #2511),
+    /// by the kernel, before the endpoint runs: an input declared
+    /// [`reads_body`](crate::ArgSpec::reads_body) receives the reference and reads it
+    /// itself; an input whose class is `xsd:anyURI` receives the IRI's text inline; any
+    /// other declared by-value input, and any argument of an open set, receives the
+    /// referenced representation inline, read under the caller's capability, collected
+    /// under the run's byte budget and recorded as a dependency of the answer. The request's
+    /// identity stays the reference. An argument a closed contract does not declare is
+    /// handed over as it is, for the endpoint to read.
     Reference(Iri),
     /// A small literal value carried inline; identity is the value's bytes.
     Inline(Vec<u8>),
