@@ -375,6 +375,15 @@ fn input_predicates(owner: &str, input: &ikigai_core::ArgSpec) -> String {
     ik:readsBody true",
         );
     }
+    if let Some(fixed) = &input.fixed {
+        // Only on a named request's contract (ledger #2512), so every other input renders
+        // exactly as before.
+        node.push_str(&format!(
+            " ;
+    ik:fixed {}",
+            lit(fixed)
+        ));
+    }
     for value in input.values.keys() {
         node.push_str(&format!(
             " ;
@@ -985,6 +994,36 @@ mod tests {
             2
         );
         assert!(!to_turtle(&sample()).contains("existenceSensitive"));
+    }
+
+    /// Ledger #2512: an input a named request fixes says `ik:fixed "…"` on the endpoint's
+    /// and the contract's input node, a plain string literal, is absent otherwise, and comes
+    /// back from the JSON Meta face as it went in.
+    #[test]
+    fn projects_a_fixed_input_on_the_input_nodes_and_round_trips_the_json() {
+        let d = Description::new("count")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("graph").fixed_to("urn:example:graph"))
+            .input(ArgSpec::new("query").fixed_to("<urn:example:count.rq>"))
+            .input(ArgSpec::new("limit").optional());
+        let ttl = to_turtle(&d);
+        assert_eq!(
+            ttl.matches("ik:fixed \"urn:example:graph\"").count(),
+            2,
+            "{ttl}"
+        );
+        assert_eq!(ttl.matches("ik:fixed ").count(), 4, "{ttl}");
+        let fixed = oxttl::TurtleParser::new()
+            .for_reader(ttl.as_bytes())
+            .map(|t| t.expect("parses"))
+            .filter(|t| t.predicate.as_str() == format!("{NS}fixed"))
+            .count();
+        assert_eq!(fixed, 4);
+        assert!(!to_turtle(&sample()).contains("ik:fixed"));
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["inputs"][0]["fixed"], "urn:example:graph");
+        assert!(json["inputs"][2].get("fixed").is_none());
+        assert_eq!(serde_json::from_value::<Description>(json).unwrap(), d);
     }
 
     /// Ledger #2402: an input read as a body says `ik:readsBody true` on the endpoint's and

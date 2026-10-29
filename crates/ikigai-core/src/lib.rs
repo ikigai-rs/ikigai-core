@@ -143,8 +143,8 @@ mod uncached;
 mod verb;
 
 pub use alias::{
-    Alias, AliasHop, AliasParseError, AliasRefusal, AliasRule, AliasTable, Canonical, ResolveAt,
-    RuleKind, DEFAULT_MAX_HOPS,
+    Alias, AliasHop, AliasParseError, AliasRefusal, AliasRule, AliasTable, Canonical,
+    FixedArgument, FixedValue, ResolveAt, RuleKind, DEFAULT_MAX_HOPS,
 };
 pub use arg::ArgRef;
 pub use body::{Body, ByteStream, Replay};
