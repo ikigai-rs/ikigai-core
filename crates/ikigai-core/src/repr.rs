@@ -559,7 +559,9 @@ impl<B> Representation<B> {
     /// hangs from still stands), the kernel does not evict it: it invokes the endpoint
     /// again with the stale answer offered ([`Invocation::stale`](crate::Invocation::stale)),
     /// and an endpoint that answers [`revalidated`](Representation::revalidated) has the
-    /// stored body served under the new deadline.
+    /// stored body served under the new deadline. An answer whose deadline is already
+    /// at or before now can also be stored for revalidation: it is stale from the
+    /// start, so every read asks the endpoint. Admission and cache bounds still apply.
     pub fn validated_by(mut self, validator: OriginValidator) -> Self {
         Arc::make_mut(self.facts.get_or_insert_with(Default::default))
             .origin
