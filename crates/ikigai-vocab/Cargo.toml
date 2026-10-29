@@ -17,7 +17,7 @@ serde_json = "1"
 # The version is the TRUE minimum, not a family: the path dep satisfies every call
 # locally, so fmt/clippy/test/CI stay green against a pin that cannot resolve on
 # crates.io, and only `cargo publish --dry-run` ever sees it.
-ikigai-core = { path = "../ikigai-core", version = "0.2.3" } # 0.2.3: `ArgSpec::reads_body` and `ik:readsBody` (ledger #2402).
+ikigai-core = { path = "../ikigai-core", version = "0.2.5" } # 0.2.5: `ArgSpec.fixed`, rendered as `ik:fixed` (ledger #2512). Beneath it, 0.2.3: `ArgSpec::reads_body` and `ik:readsBody` (ledger #2402).
 # Under 0.x rules "0.1.108" means <0.2.0, so a vocab 0.2.0 pinned to the 0.1 line would put a second
 # core in every consumer's graph. Earlier floors, kept for the record: 0.1.108 =
 # the failure classes (ledger #1546): `to_turtle` reads `Description::failures` and
