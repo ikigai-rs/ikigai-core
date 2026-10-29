@@ -2036,6 +2036,27 @@ impl<'a> Invocation<'a> {
     /// kernel's write-cut fires on, which a caller holding only the requested (maybe
     /// logical) name could not supply. Drained rather than cloned: the invocation is
     /// over, and this is the last read of its record.
+    /// The same invocation over `request` — the one the kernel settled a by-reference
+    /// argument of into the referent's bytes (ledger #2511) — sharing everything else, the
+    /// recording side included, as [`with_bindings`](Self::with_bindings) does.
+    pub(crate) fn with_request<'b>(&'b self, request: &'b Request) -> Invocation<'b> {
+        Invocation {
+            request,
+            bindings: self.bindings,
+            capability: self.capability,
+            issuer: self.issuer,
+            spawner: self.spawner.clone(),
+            issuer_arc: self.issuer_arc.clone(),
+            clock: self.clock.clone(),
+            span: self.span,
+            trace: self.trace.clone(),
+            scope: self.scope.clone(),
+            depth: self.depth,
+            run: self.run.clone(),
+            recorded: Arc::clone(&self.recorded),
+        }
+    }
+
     pub(crate) fn failure_dependencies(&self, canonical: &Iri) -> Dependencies {
         let mut threads =
             std::mem::take(&mut *self.recorded.dep_threads.lock().expect("dep threads lock"));
