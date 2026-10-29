@@ -121,7 +121,9 @@
 //! transition the catalog advertises only the **new** names, so every consumer
 //! that discovers resources by reading the catalog migrates forward on its own,
 //! while every consumer still holding an old name keeps working. Aliases are not
-//! hidden — they are a resource of their own, at `urn:kernel:aliases`.
+//! hidden — they are a resource of their own, at `urn:kernel:aliases`. A rule that
+//! resolves from the ROOT is not a renaming: a view or a named request is a name of its
+//! own, listed, and described by its target's contract (ledger #2513).
 //!
 //! **5. Chains resolve; cycles are refused, loudly.** `A→B→C` is followed
 //! transitively up to [`AliasTable::max_hops`] (default
@@ -1154,9 +1156,13 @@ impl AliasTable {
 ///   onto a view onto the first) is stopped by the kernel's nesting-depth bound
 ///   ([`Kernel::with_max_depth`](crate::Kernel::with_max_depth)) as
 ///   [`Error::DepthExceeded`].
-/// - `Meta` of a view describes the forwarder (it names its target in its summary):
-///   `Meta` takes no invocation, so it cannot be forwarded. Its argument set is OPEN, since
-///   every argument passes through, so an engine names each `key=value` it is given.
+/// - **`Meta` of a view is its TARGET's contract** (ledger #2513): the view says what it
+///   forwards to ([`Endpoint::forwards`]), and the kernel follows that wherever it
+///   describes anything — `Meta`, the catalog, `urn:kernel:actions` — so a view is listed
+///   under its own name with the target's inputs (a named request's fixed ones listed and
+///   marked), outputs and `requires`. Only a view whose target resolves to nothing shows
+///   the forwarder's own contract, whose argument set is open (every argument passes
+///   through) and whose summary says the target is missing.
 ///
 /// # Named requests
 ///
@@ -1239,10 +1245,19 @@ impl Space for Alias {
     }
 
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
-        // Decision 4: transparent to enumeration. The catalog and the action
-        // manifold see the BACKING names, once each; the aliases are their own
-        // resource at `urn:kernel:aliases`.
-        self.inner.entries()
+        // Decision 4: transparent to enumeration for a renaming. The catalog and the
+        // action manifold see the BACKING names, once each; the aliases are their own
+        // resource at `urn:kernel:aliases`. A ROOT rule is not a renaming but a name of its
+        // own — a view, or a named request — so each exact and template root rule is listed
+        // (ledger #2513), and a walk describes it by its target's contract. A root PREFIX
+        // rule names a family no pattern lists, so it is not.
+        let mut entries = self.inner.entries()?;
+        for rule in &self.table.rules {
+            if rule.at == ResolveAt::Root && rule.match_kind() != MatchKind::Prefix {
+                entries.push(SpaceEntry::new(rule.from.clone(), "alias-view"));
+            }
+        }
+        Some(entries)
     }
 
     fn id(&self) -> Option<Iri> {
@@ -1326,6 +1341,8 @@ struct ViewEndpoint {
     target: Iri,
     /// Each named request the chain passed through, in the order it applied.
     parts: Vec<BoundPart>,
+    /// What it forwards to, as the kernel describes it (ledger #2513).
+    forward: crate::Forward,
 }
 
 /// One named request of a view's chain, with its captures settled.
@@ -1344,10 +1361,39 @@ impl AliasTable {
     fn view(&self, logical: &Iri, hop: &AliasHop) -> Option<ViewEndpoint> {
         let mut current = logical.clone();
         let mut parts = Vec::new();
-        for &index in hop.rules() {
+        // The name the caller's name is bound under: the first rule's logical name (a
+        // template, for a template rule, whose captures the caller supplies).
+        let first = self.rules.get(*hop.rules().first()?)?;
+        let mut forward = crate::Forward::new(first.from.clone(), hop.canonical().clone());
+        if let Some(template) = &first.request.template {
+            for var in template.variables() {
+                forward = forward.capturing(var);
+            }
+        }
+        for (place, &index) in hop.rules().iter().enumerate() {
             let rule = self.rules.get(index)?;
             let (next, captures) = rule.apply_capturing(current.as_str())?;
             if rule.is_named_request() {
+                if forward.verb.is_none() {
+                    forward.verb = rule.request.verb;
+                }
+                for argument in &rule.request.fixes {
+                    // A later rule's capture is of a name the caller never wrote: it is a
+                    // value by then.
+                    let argument = match (&argument.value, place) {
+                        (FixedValue::Capture(var), 1..) => FixedArgument::value(
+                            argument.name.clone(),
+                            captures.get(var).unwrap_or_default(),
+                        ),
+                        _ => argument.clone(),
+                    };
+                    forward = forward.fixing(argument);
+                }
+                for input in &rule.request.inputs {
+                    if !forward.inputs.iter().any(|i| i.name == input.name) {
+                        forward = forward.input(input.clone());
+                    }
+                }
                 let mut fixed = Vec::with_capacity(rule.request.fixes.len());
                 for argument in &rule.request.fixes {
                     let (value, shown) = match &argument.value {
@@ -1377,6 +1423,7 @@ impl AliasTable {
         (current == *hop.canonical()).then_some(ViewEndpoint {
             target: current,
             parts,
+            forward,
         })
     }
 }
@@ -1452,6 +1499,10 @@ impl Endpoint for ViewEndpoint {
 
     fn name(&self) -> &str {
         "alias-view"
+    }
+
+    fn forwards(&self) -> Option<crate::Forward> {
+        Some(self.forward.clone())
     }
 
     fn describe(&self) -> Description {

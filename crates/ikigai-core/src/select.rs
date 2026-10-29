@@ -316,11 +316,36 @@ const PROBE: &str = "probe";
 /// name, by the same resolution the kernel would perform. Without this the catalog
 /// would describe a hole and the manifold would offer a name the kernel refuses —
 /// the over-offer R2.3 forbids.
+///
+/// ★ **And where a forwarder is described by its TARGET** (ledger #2513): a hit whose
+/// endpoint [`forwards`](crate::Endpoint::forwards) comes back with that endpoint standing
+/// behind the projection of its target's contract (`forward.rs`), the target resolved in
+/// this same space, following at most `MAX_FORWARDS` forwards. So every walk through here
+/// — the catalog, the manifold, validate, `Kernel::describe` — describes a view and a
+/// named request alike, with no site patched one by one.
 pub(crate) fn probe(space: &dyn Space, iri: Iri) -> Option<Resolved> {
-    match space.resolve(&Request::new(Verb::Meta, iri), &Scope::empty()) {
-        Resolution::Hit(resolved) if !resolved.endpoint.is_limiter() => Some(resolved),
-        _ => None,
+    probe_within(space, iri, crate::forward::MAX_FORWARDS)
+}
+
+/// [`probe`], following at most `forwards` more forwards.
+fn probe_within(space: &dyn Space, iri: Iri, forwards: usize) -> Option<Resolved> {
+    let mut resolved = match space.resolve(&Request::new(Verb::Meta, iri), &Scope::empty()) {
+        Resolution::Hit(resolved) if !resolved.endpoint.is_limiter() => resolved,
+        _ => return None,
+    };
+    if let Some(forward) = resolved.endpoint.forwards() {
+        let target = forwards
+            .checked_sub(1)
+            .and_then(|left| probe_within(space, forward.target.clone(), left))
+            .map(|target| target.endpoint.describe());
+        let description =
+            crate::forward::project(&forward, resolved.endpoint.describe(), target.as_ref());
+        resolved.endpoint = Arc::new(crate::forward::Projected {
+            inner: resolved.endpoint,
+            description,
+        });
     }
+    Some(resolved)
 }
 
 /// A space entry's self-description, with how its pattern names the endpoint: `None`
