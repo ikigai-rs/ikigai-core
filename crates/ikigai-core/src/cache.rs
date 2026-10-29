@@ -53,7 +53,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::body::Body;
-use crate::repr::{Expiry, Provenance, Representation, Thread, Time};
+use crate::repr::{Expiry, Provenance, Representation, Stale, Thread, Time};
 use crate::request::RequestId;
 use crate::uncached::Declined;
 
@@ -213,6 +213,48 @@ impl Answer {
     }
 }
 
+/// What the kernel's lookup found (ledger #2534): an answer to serve, a stale answer to
+/// offer the endpoint for revalidation, or nothing.
+enum Lookup {
+    /// A live entry, answered in the face asked for.
+    Hit(Answer),
+    /// An entry expired by time only, carrying an origin validator: kept, and offered.
+    /// Shared: the kernel's resolution path and its `Revalidate` wrapper each hold one
+    /// pointer to it.
+    Offer(Arc<Offer>),
+    /// Nothing to serve or offer.
+    Miss,
+}
+
+/// A stale answer offered for revalidation: what the endpoint is told
+/// ([`Invocation::stale`](crate::Invocation::stale)), and a second handle on the stored
+/// body the kernel serves if the endpoint answers "still valid".
+pub(crate) struct Offer {
+    /// The stored validator and type, as the invocation hands them to the endpoint.
+    pub(crate) stale: Arc<Stale>,
+    /// The stored representation: its body, threads and validator. Behind a lock only
+    /// because a [`Body`] is not `Sync` as a type; the one held here can always be read
+    /// again ([`Offer::stored`]).
+    stored: Mutex<Representation<Body>>,
+    /// Which entry it was ([`ReprCache::discard`] forgets only that one).
+    stored_tick: u64,
+}
+
+impl Offer {
+    /// A second handle on the stored representation: what the kernel serves when the
+    /// endpoint answers "still valid".
+    pub(crate) fn stored(&self) -> Option<Representation<Body>> {
+        self.stored.lock().expect("offer lock").share()
+    }
+}
+
+/// [`ReprCache::serve_or_offer`]'s three outcomes.
+enum Served<T> {
+    Hit(T),
+    Offer(Arc<Offer>),
+    Miss,
+}
+
 /// What a body counts against the byte bound: its length, or `usize::MAX` when it does
 /// not know it (see [`Slot::bytes`]).
 fn body_size(body: &Body) -> usize {
@@ -324,7 +366,10 @@ pub enum EntryState {
     /// and recomputes.
     Cut,
     /// Its threads stand but its deadline has passed (or the kernel has no clock to
-    /// say it has not): the next read evicts it and recomputes.
+    /// say it has not): the next read evicts it and recomputes, unless it carries an
+    /// origin validator, in which case the next read offers it to its endpoint for
+    /// revalidation (ledger #2534) and the entry stays until that read refreshes or
+    /// replaces it.
     Expired,
 }
 
@@ -614,47 +659,157 @@ impl ReprCache {
         buffer: bool,
         incoming: Option<&Provenance>,
     ) -> Option<Answer> {
-        self.serve(key, now, |entry| {
-            // Effective expiry/threads already include the upstream. They cannot
-            // be reused under a different upstream, even when the bytes match.
-            if entry.incoming.as_ref() != incoming {
-                return None;
+        match self.lookup(key, now, buffer, incoming, false) {
+            Lookup::Hit(answer) => Some(answer),
+            Lookup::Offer(_) | Lookup::Miss => None,
+        }
+    }
+
+    /// [`get_answer`](Self::get_answer), with the stale answer OFFERED when the entry
+    /// expired by time only and carries an origin validator (ledger #2534): the kernel
+    /// invokes the endpoint with the offer, and either refreshes the entry
+    /// ([`store_outcome`](Self::store_outcome) of the offered body under the new
+    /// deadline) or [`discard`](Self::discard)s it. A cut entry is never offered: it is
+    /// evicted, as every stale entry was before.
+    pub(crate) fn get_or_offer(
+        &self,
+        key: &CacheKey,
+        now: Option<Time>,
+        buffer: bool,
+        incoming: Option<&Provenance>,
+        offer: &mut Option<Arc<Offer>>,
+    ) -> Option<Answer> {
+        match self.lookup(key, now, buffer, incoming, true) {
+            Lookup::Hit(answer) => Some(answer),
+            Lookup::Offer(stale) => {
+                *offer = Some(stale);
+                None
             }
-            let stored = &entry.representation;
-            if buffer {
-                if let Some(copy) = stored.copied() {
-                    return Some(Answer::Buffer(copy));
+            Lookup::Miss => None,
+        }
+    }
+
+    fn lookup(
+        &self,
+        key: &CacheKey,
+        now: Option<Time>,
+        buffer: bool,
+        incoming: Option<&Provenance>,
+        offer: bool,
+    ) -> Lookup {
+        let served = self.serve_or_offer(
+            key,
+            now,
+            |entry| {
+                // Effective expiry/threads already include the upstream. They cannot
+                // be reused under a different upstream, even when the bytes match.
+                if entry.incoming.as_ref() != incoming {
+                    return None;
                 }
+                let stored = &entry.representation;
+                if buffer {
+                    if let Some(copy) = stored.copied() {
+                        return Some(Answer::Buffer(copy));
+                    }
+                }
+                stored.share().map(Answer::Body)
+            },
+            |entry| {
+                // An offer is an answer too: only under the upstream it was stored under.
+                if !offer || entry.incoming.as_ref() != incoming {
+                    return None;
+                }
+                let stored = entry.representation.share()?;
+                let validator = stored.origin_validator()?.clone();
+                Some(Arc::new(Offer {
+                    stale: Arc::new(Stale {
+                        validator,
+                        repr_type: stored.repr_type.clone(),
+                    }),
+                    stored: Mutex::new(stored),
+                    stored_tick: entry.stored_tick,
+                }))
+            },
+        );
+        match served {
+            Served::Hit(answer) => Lookup::Hit(answer),
+            Served::Offer(offer) => Lookup::Offer(offer),
+            Served::Miss => Lookup::Miss,
+        }
+    }
+
+    /// Forget the entry an [`Offer`] was made from, when the endpoint's answer to it was
+    /// anything but "still valid" (ledger #2534): what the lookup would have done before
+    /// revalidation existed. Only that entry: one stored under `key` since (a concurrent
+    /// computation's) is left as it is.
+    pub(crate) fn discard(&self, key: &CacheKey, offer: &Option<Arc<Offer>>) {
+        let Some(offer) = offer else {
+            return;
+        };
+        let mut state = self.state.lock().expect("cache lock");
+        if state
+            .entries
+            .get(key)
+            .is_some_and(|entry| entry.stored_tick == offer.stored_tick)
+        {
+            if let Some(evicted) = state.entries.remove(key) {
+                state.bytes = state.bytes.saturating_sub(evicted.bytes());
             }
-            stored.share().map(Answer::Body)
-        })
+        }
     }
 
     /// The one serving path behind every face: a stale entry is evicted, and a valid one
     /// counts a hit only when `face` can answer from it.
+    ///
+    /// ★ One exception (ledger #2534): an entry expired BY TIME ONLY (every golden thread
+    /// at its pinned generation) that carries an origin validator is NOT evicted. Its body
+    /// and validator are what lets the endpoint ask the origin "has it changed?", so it
+    /// stays until the kernel's revalidation refreshes or discards it (or the policy
+    /// evicts it). It is never served as it is: a face sees only a live entry.
     fn serve<T>(
         &self,
         key: &CacheKey,
         now: Option<Time>,
         face: impl FnOnce(&Slot) -> Option<T>,
     ) -> Option<T> {
+        match self.serve_or_offer(key, now, face, |_| None) {
+            Served::Hit(answer) => Some(answer),
+            Served::Offer(_) | Served::Miss => None,
+        }
+    }
+
+    /// [`serve`](Self::serve), asking `offer` about an entry kept for revalidation.
+    fn serve_or_offer<T>(
+        &self,
+        key: &CacheKey,
+        now: Option<Time>,
+        face: impl FnOnce(&Slot) -> Option<T>,
+        offer: impl FnOnce(&Slot) -> Option<Arc<Offer>>,
+    ) -> Served<T> {
         let mut state = self.state.lock().expect("cache lock");
-        match state.entries.get(key) {
-            None => None,
-            Some(entry) if !state.is_valid(entry, now) => {
-                if let Some(evicted) = state.entries.remove(key) {
-                    state.bytes = state.bytes.saturating_sub(evicted.bytes());
-                }
-                None
-            }
-            Some(entry) => {
-                let answer = face(entry)?;
+        let Some(entry) = state.entries.get(key) else {
+            return Served::Miss;
+        };
+        match state.state_of(entry, now) {
+            EntryState::Live => {
+                let Some(answer) = face(entry) else {
+                    return Served::Miss;
+                };
                 state.tick += 1;
                 let tick = state.tick;
                 let entry = state.entries.get_mut(key).expect("entry present");
                 entry.hits += 1;
                 entry.last_used_tick = tick;
-                Some(answer)
+                Served::Hit(answer)
+            }
+            EntryState::Expired if entry.representation.origin_validator().is_some() => {
+                offer(entry).map_or(Served::Miss, Served::Offer)
+            }
+            _ => {
+                if let Some(evicted) = state.entries.remove(key) {
+                    state.bytes = state.bytes.saturating_sub(evicted.bytes());
+                }
+                Served::Miss
             }
         }
     }

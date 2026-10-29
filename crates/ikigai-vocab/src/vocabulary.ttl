@@ -642,7 +642,12 @@ ik:entryState a rdf:Property ;
     rdfs:domain ik:CacheEntry ;
     rdfs:range xsd:string ;
     rdfs:label "entryState" ;
-    rdfs:comment "Whether a read would be served from an ik:CacheEntry right now: \"live\"; \"cut\" (a thread it hangs from was cut since it was stored); or \"expired\" (its deadline passed). A cut is lazy, so a stale entry stays resident until a read evicts it, and the graph states it rather than hiding it." .
+    rdfs:comment "Whether a read would be served from an ik:CacheEntry right now: \"live\"; \"cut\" (a thread it hangs from was cut since it was stored); or \"expired\" (its deadline passed). A cut is lazy, so a stale entry stays resident until a read evicts it, and the graph states it rather than hiding it. An expired entry that carries an origin validator is not evicted by a read but offered to its endpoint for revalidation, and stays until that read refreshes or replaces it (ikigai-core, ledger #2534)." .
+
+ik:traceState a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "traceState" ;
+    rdfs:comment "How the kernel answered one traced resolution step (ikigai_core::TraceEvent::state): \"computed\" (the endpoint produced the answer, or the step was refused or failed); \"served\" (the representation cache answered without entering the endpoint); or \"revalidated\" (the step's cache entry had expired by time, carried an origin validator, and was offered to the endpoint, which answered that it is still valid: the stored body was served under the new deadline, not produced again; the REPL tallies it [revalidated]). No domain: a trace face's node for one step is a host's to type (ikigai-core, ledger #2534)." .
 
 ik:mediaType a rdf:Property ;
     rdfs:range xsd:string ;

@@ -52,7 +52,7 @@ use async_trait::async_trait;
 use crate::alias::{Alias, AliasHop, AliasTable, Canonical};
 use crate::arg::ArgRef;
 use crate::body::Body;
-use crate::cache::{Answer, CacheKey, CachePolicy, ReprCache};
+use crate::cache::{Answer, CacheKey, CachePolicy, Offer, ReprCache};
 use crate::capability::Capability;
 use crate::describe::{ContractCaching, Description};
 use crate::endpoint::{Dependencies, Endpoint, Invocation, Issuer, Spawner};
@@ -507,6 +507,68 @@ pub const LEVEL_NOTE: &str = "level";
 /// ```
 pub const UNCACHED_NOTE: &str = "uncached";
 
+/// The [`TraceEvent::notes`] key under which the kernel marks a **revalidated** step
+/// (ledger #2534), paired with the deadline the endpoint gave in milliseconds since the
+/// epoch, e.g. `("revalidated", "1000000")`: the request's cache entry had expired by
+/// time, it carried an origin validator, the kernel offered it to the endpoint
+/// ([`Invocation::stale`](crate::Invocation::stale)), and the endpoint answered
+/// [`Representation::revalidated`]. The stored body was served, not produced again.
+///
+/// The event is timed like a computed one (the endpoint ran, typically a round trip to
+/// its origin) and is not a cache hit; [`TraceEvent::state`] reads it as
+/// [`TraceState::Revalidated`]. If the refreshed entry could not be stored (a thread it
+/// hangs from was cut while the endpoint ran), the event carries [`UNCACHED_NOTE`] too.
+pub const REVALIDATED_NOTE: &str = "revalidated";
+
+/// How the kernel answered one traced step ([`TraceEvent::state`]; ledger #2534).
+///
+/// ```
+/// use ikigai_core::TraceState;
+///
+/// assert_eq!(TraceState::Computed.word(), "computed");
+/// assert_eq!(TraceState::Served.word(), "served");
+/// assert_eq!(TraceState::Revalidated.word(), "revalidated");
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TraceState {
+    /// The endpoint produced the answer (or the step was refused or failed).
+    Computed,
+    /// The representation cache answered without entering the endpoint.
+    Served,
+    /// A time-expired entry was offered to its endpoint, which said it is still valid:
+    /// the stored body was served under the new deadline ([`REVALIDATED_NOTE`]).
+    Revalidated,
+}
+
+impl TraceState {
+    /// The word a trace face prints for the state (`ik:traceState`): `computed`,
+    /// `served` or `revalidated`.
+    pub fn word(self) -> &'static str {
+        match self {
+            TraceState::Computed => "computed",
+            TraceState::Served => "served",
+            TraceState::Revalidated => "revalidated",
+        }
+    }
+}
+
+impl TraceEvent {
+    /// How the kernel answered this step: [`Served`](TraceState::Served) for a cache
+    /// hit, [`Revalidated`](TraceState::Revalidated) for an event carrying
+    /// [`REVALIDATED_NOTE`], [`Computed`](TraceState::Computed) otherwise. Read off the
+    /// fields the event already has, so the wire layout is unchanged.
+    pub fn state(&self) -> TraceState {
+        if self.cache_hit {
+            TraceState::Served
+        } else if self.notes.iter().any(|(key, _)| key == REVALIDATED_NOTE) {
+            TraceState::Revalidated
+        } else {
+            TraceState::Computed
+        }
+    }
+}
+
 /// The trace-note key naming the inputs the kernel filled from their declared defaults
 /// before invoking (ledger #19), comma-joined: so a trace, or `urn:kernel:explain`, tells
 /// a caller's value from the contract's. Absent when nothing was filled.
@@ -885,6 +947,24 @@ fn is_any_uri(class: &str) -> bool {
 /// [`SettleReferences`] over it. Never for `Meta` (nothing is invoked; the arm above
 /// answers it) or a forwarder (its target settles a reference by its own contract).
 fn settle_references(
+    endpoint: &Arc<dyn Endpoint>,
+    request: &Request,
+    references: Option<Arc<References>>,
+    offer: Option<&Arc<Offer>>,
+) -> Arc<dyn Endpoint> {
+    let endpoint = settled_by_contract(endpoint, request, references);
+    match offer {
+        None => endpoint,
+        Some(offer) => Arc::new(Revalidate {
+            inner: endpoint,
+            offer: Arc::clone(offer),
+        }),
+    }
+}
+
+/// [`settle_references`] without an offer: the endpoint, wrapped when one of its
+/// by-reference arguments is settled by its contract.
+fn settled_by_contract(
     endpoint: &Arc<dyn Endpoint>,
     request: &Request,
     references: Option<Arc<References>>,
@@ -2909,6 +2989,21 @@ impl Kernel {
         }
     }
 
+    /// The refusal of a [`revalidated`](Representation::revalidated) answer that reached
+    /// the kernel unturned (ledger #2534): `Revalidate` turns every one it is offered into
+    /// the stored body, so one that gets past it answered an invocation that was offered
+    /// nothing, and there is no stored body for it to stand for. The endpoint ran, so a
+    /// mutating verb still cuts its target, as any write that ran and failed does (ledger
+    /// #1105). Out of line, so the issue path's frame holds nothing for it.
+    #[cold]
+    #[inline(never)]
+    fn unoffered(&self, request: &Request) -> Error {
+        if request.verb.is_mutating() {
+            self.cut(request.target.as_str());
+        }
+        Error::Endpoint("answered `revalidated` with no stale answer offered".to_string())
+    }
+
     /// Record one resolution into the rolling constraint window (always-on, bounded
     /// to [`CONSTRAINT_WINDOW`]). `started` is the pre-resolution stamp; the elapsed
     /// compute time is `now − started` (only when the kernel has a clock). A cache
@@ -4354,13 +4449,19 @@ impl Kernel {
         // The whole chain's fingerprint guarantees that (over-partitioned, sound);
         // the empty chain's is 0, so this key is unchanged for plain `issue`.
         let key = CacheKey::new(id, capability_key(capability)).in_scope(scope.fingerprint());
+        // ★ A STALE ANSWER OFFERED, NOT EVICTED (ledger #2534). An entry that expired by
+        // time only and carries an origin validator comes back as an offer: the endpoint
+        // is invoked as usual with it in hand (`Invocation::stale`), through `Revalidate`,
+        // which turns an answer of "still valid until T" into the stored body. A cut entry
+        // is never offered. One pointer in this frame, which every nesting level pays for.
+        let mut offer: Option<Arc<Offer>> = None;
         if cacheable_verb {
             // Freshness is evaluated as of `started` — the instant this resolution
             // began, one clock reading shared with the trace event and the
             // constraint window rather than a fresh read per lookup.
-            if let Some(cached) = self
-                .cache
-                .get_answer(&key, started, buffer, incoming.as_ref())
+            if let Some(cached) =
+                self.cache
+                    .get_or_offer(&key, started, buffer, incoming.as_ref(), &mut offer)
             {
                 // A stored `Replay` is collected by a buffer caller under the run's pool,
                 // admitted here only for such a hit: a buffer hit admits nothing.
@@ -4476,6 +4577,7 @@ impl Kernel {
                 // The run's pools, narrowed to what THIS request's capability is entitled
                 // to (minted here when nothing above minted one), and its deadline.
                 .with_run(admitted);
+            invocation.offer(offer.as_deref());
             // A body attached under a NONCE id (ledger #2239, #2402) makes this request one
             // that can never be asked for again, whether or not the endpoint reads it: its
             // answer is not stored, and the uncached note names the content.
@@ -4484,7 +4586,8 @@ impl Kernel {
             // body follows above: see `SettleReferences`. Only when an argument is a
             // reference the contract says how to settle; the identity above is the
             // reference, so the referent's thread is what invalidates the answer.
-            let endpoint = settle_references(&resolved.endpoint, &request, references);
+            let endpoint =
+                settle_references(&resolved.endpoint, &request, references, offer.as_ref());
             let representation = match endpoint.invoke_body(&invocation).await {
                 Ok(representation) => representation,
                 // ★ A FAILURE CARRIES ITS DEPENDENCIES (ledger #611). What this
@@ -4539,9 +4642,17 @@ impl Kernel {
                     if request.verb.is_mutating() {
                         self.cut(request.target.as_str());
                     }
+                    // A failed revalidation forgets the stale entry, as the lookup did
+                    // before revalidation existed.
+                    self.cache.discard(&key, &offer);
                     return Err(error);
                 }
             };
+            // A `revalidated` answer `Revalidate` did not turn into a stored body answered
+            // an invocation that was offered nothing (ledger #2534).
+            if representation.is_revalidated() {
+                return Err(self.unoffered(&request));
+            }
             let declared = representation.expiry;
             // Effective expiry propagates from the dependencies: the result is no
             // fresher than its most volatile part. The endpoint's own expiry is met
@@ -4668,6 +4779,10 @@ impl Kernel {
             if representation.bytes.is_one_shot() {
                 why.one_shot = true;
             }
+            // The entry an offer was made from goes, whatever came back: a new answer
+            // replaces it, and a refreshed one is stored afresh below, through the same
+            // lost-cut check as any store (ledger #2534).
+            self.cache.discard(&key, &offer);
             if why.is_empty() {
                 // The store may still decline: `taken` predates the invocation, so a
                 // cut that landed while it ran means this representation is already
@@ -6299,6 +6414,88 @@ fn kernel_face(request: &Request) -> Result<bool> {
                 request.target.as_str()
             ),
         }),
+    }
+}
+
+/// ★ **An endpoint offered a stale answer to revalidate** (ledger #2534): what the kernel
+/// invokes in its place when the request's cache entry expired by time and carries an
+/// origin validator. An answer of [`revalidated`](Representation::revalidated) becomes the
+/// stored body it stands for (its threads, and its validator unless the answer carries a
+/// new one) under the answer's deadline, noted [`REVALIDATED_NOTE`] on the step's trace;
+/// from there it is an answer like any other, so its effective expiry and threads are
+/// folded in and its store runs the lost-cut check against the snapshot taken before the
+/// invocation, exactly as for a computed one. Any other answer passes through as it came.
+///
+/// Out of the issue path, as [`SettleReferences`] is: its frame holds one pointer for
+/// this, and only a request that was offered something pays for the wrapper.
+struct Revalidate {
+    inner: Arc<dyn Endpoint>,
+    offer: Arc<Offer>,
+}
+
+impl Revalidate {
+    /// The stored body under the deadline `answer` gives, when `answer` says "still valid".
+    fn refreshed(
+        &self,
+        inv: &Invocation<'_>,
+        answer: Representation<Body>,
+    ) -> Result<Representation<Body>> {
+        if !answer.is_revalidated() {
+            return Ok(answer);
+        }
+        let stored = self.offer.stored().ok_or_else(|| {
+            Error::Endpoint("the offered stale body cannot be read again".to_string())
+        })?;
+        if let Expiry::At(until) = answer.expiry {
+            inv.trace_note(REVALIDATED_NOTE, until.as_millis().to_string());
+        }
+        let refreshed = stored.with_expiry(answer.expiry);
+        Ok(match answer.origin_validator() {
+            Some(validator) => refreshed.validated_by(validator.clone()),
+            None => refreshed,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Endpoint for Revalidate {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let answer = self.invoke_body(inv).await?;
+        match answer.into_buffer() {
+            Ok(buffer) => Ok(buffer),
+            Err(streamed) => {
+                let mut body = None;
+                let shell = streamed.map_body(|streamed| body = Some(streamed));
+                let body = body.expect("map_body hands the body over");
+                let bytes = inv.collect(body).await?.to_vec();
+                Ok(shell.map_body(|()| bytes))
+            }
+        }
+    }
+
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+        let answer = self.inner.invoke_body(inv).await?;
+        self.refreshed(inv, answer)
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn describe(&self) -> Description {
+        self.inner.describe()
+    }
+
+    fn confinement(&self) -> Option<crate::topology::Topology> {
+        self.inner.confinement()
+    }
+
+    fn is_limiter(&self) -> bool {
+        self.inner.is_limiter()
+    }
+
+    fn forwards(&self) -> Option<crate::Forward> {
+        self.inner.forwards()
     }
 }
 

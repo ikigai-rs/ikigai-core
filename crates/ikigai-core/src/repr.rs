@@ -198,6 +198,36 @@ impl Provenance {
     }
 }
 
+/// What an ORIGIN says identifies the version of an answer it gave: an entity tag, a
+/// last-modified date, or both (ledger #2534). Opaque to the kernel, which only keeps it
+/// with the cached entry and hands it back to the endpoint when that entry expires by
+/// time ([`Invocation::stale`](crate::Invocation::stale)), so the endpoint can ask the
+/// origin "has it changed?" instead of fetching the body again.
+///
+/// Not the body's own [`Replay::validator`](crate::Replay::validator), which is a content id the
+/// kernel computes: this one is the origin's, in whatever form the origin speaks (an
+/// HTTP `ETag` / `Last-Modified` pair, a database row version in `etag`), and nothing
+/// in core parses it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct OriginValidator {
+    /// An opaque version tag (an HTTP entity tag, quotes and weak prefix included).
+    pub etag: Option<String>,
+    /// When the origin says the answer last changed, as the origin wrote it.
+    pub last_modified: Option<String>,
+}
+
+/// The answer a time-expired cache entry offers its endpoint for revalidation
+/// ([`Invocation::stale`](crate::Invocation::stale)): the origin validator it was stored
+/// with and the type of the stored body. The body itself stays in the cache: an endpoint
+/// that answers [`Representation::revalidated`] gets it served without producing it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stale {
+    /// The origin validator the stored representation carries.
+    pub validator: OriginValidator,
+    /// The stored representation's type.
+    pub repr_type: ReprType,
+}
+
 /// A typed value produced by an endpoint.
 ///
 /// The body type `B` defaults to today's buffer, `Vec<u8>`, the way `HashMap` defaults
@@ -231,24 +261,56 @@ pub struct Representation<B = Vec<u8>> {
     /// Cache validity; defaults to [`Expiry::Always`] (uncacheable).
     #[serde(default)]
     pub expiry: Expiry,
-    /// Golden threads this representation depends on (its cache *provenance*).
+    /// Golden threads this representation depends on (its cache *provenance*), and
+    /// what it carries about its origin.
     ///
-    /// Set by [`depends_on`](Representation::depends_on) and grown by the kernel,
-    /// which unions in the threads of every sub-resource resolved while producing
-    /// it — so a composite inherits its parts' threads and cutting any of them
-    /// invalidates it. Kernel-local: **not serialized** (cache validity is a
-    /// per-kernel concern, not part of a representation crossing a wire) and **not
-    /// part of representation identity** (see the manual `PartialEq`).
+    /// The threads are set by [`depends_on`](Representation::depends_on) and grown by
+    /// the kernel, which unions in the threads of every sub-resource resolved while
+    /// producing it — so a composite inherits its parts' threads and cutting any of them
+    /// invalidates it. Kernel-local: **not serialized** (cache validity is a per-kernel
+    /// concern, not part of a representation crossing a wire) and **not part of
+    /// representation identity** (see the manual `PartialEq`).
     ///
     /// Shared, not owned: a cache hit clones the representation, and since 0.1.73
     /// every cacheable `Source`/`Exists` answer carries at least one thread (its own
     /// canonical target), so an owned set would cost a tree-node and a string
-    /// allocation on every hit. `None` is the empty set, which is what every
-    /// freshly built representation starts as — no allocation until a thread is
+    /// allocation on every hit. `None` is the empty set and no origin, which is what
+    /// every freshly built representation starts as — no allocation until a thread is
     /// declared or inherited. Measured: the second cut of hole A took the ~7 %
     /// hit-path cost of the first cut back down (formalism §10).
+    ///
+    /// The origin's validator ([`validated_by`](Representation::validated_by), ledger
+    /// #2534) rides behind the same pointer rather than in a field of its own: a
+    /// representation is held on every frame of a deep resolution, and the 65-deep chain
+    /// test has next to no stack to spare for it to grow (ledger #2538).
     #[serde(skip)]
-    threads: Option<Arc<BTreeSet<Thread>>>,
+    facts: Option<Arc<Facts>>,
+}
+
+/// What a representation carries for the kernel and never across a wire: its golden
+/// threads, and its [`Origin`].
+#[derive(Clone, Debug, Default)]
+struct Facts {
+    threads: BTreeSet<Thread>,
+    origin: Origin,
+}
+
+/// What a representation carries about its origin (ledger #2534): the origin's
+/// validator, kept with a cached entry so an entry that expires by time can be
+/// revalidated through its endpoint rather than evicted; and whether it is a
+/// [`revalidated`](Representation::revalidated) answer — not an answer at all but the
+/// endpoint's word that the stale answer it was offered is still valid until the
+/// deadline in `expiry`. The kernel never hands one of those back to a caller.
+#[derive(Clone, Debug, Default)]
+struct Origin {
+    validator: Option<OriginValidator>,
+    revalidated: bool,
+}
+
+impl Origin {
+    fn is_empty(&self) -> bool {
+        self.validator.is_none() && !self.revalidated
+    }
 }
 
 /// The thread set of a representation that depends on nothing — what
@@ -257,7 +319,7 @@ static NO_THREADS: BTreeSet<Thread> = BTreeSet::new();
 
 // Threads are cache provenance, not content: two representations with the same
 // type and bytes are equal regardless of how their validity was tracked. (Also
-// keeps wire round-trips equal, since `threads` is `serde(skip)`.)
+// keeps wire round-trips equal, since `facts` is `serde(skip)`.)
 impl<B: PartialEq> PartialEq for Representation<B> {
     fn eq(&self, other: &Self) -> bool {
         self.repr_type == other.repr_type
@@ -275,7 +337,7 @@ impl Representation<Vec<u8>> {
             repr_type,
             bytes: bytes.into(),
             expiry: Expiry::Always,
-            threads: None,
+            facts: None,
         }
     }
 
@@ -286,6 +348,31 @@ impl Representation<Vec<u8>> {
         feed_str(&mut h, &self.repr_type.canonical());
         feed_bytes(&mut h, &self.bytes);
         ContentId::from_hasher(h)
+    }
+
+    /// The endpoint's answer to a revalidation offer ([`Invocation::stale`]): the stale
+    /// representation it was offered is **still valid until `until`** (ledger #2534). It
+    /// carries no body; the kernel keeps the stored one, moves its deadline to `until`,
+    /// serves it, and traces the step as revalidated
+    /// ([`TraceState::Revalidated`](crate::TraceState::Revalidated)). The stored entry's
+    /// origin validator is kept unless this answer carries one
+    /// ([`validated_by`](Representation::validated_by)), which replaces it.
+    ///
+    /// Only an answer to an offer: an endpoint that answers this when it was offered
+    /// nothing has no stored body to stand for, and the kernel refuses the answer.
+    ///
+    /// [`Invocation::stale`]: crate::Invocation::stale
+    pub fn revalidated(until: Time) -> Self {
+        let mut answer = Representation::new(ReprType::new(""), Vec::new());
+        answer.expiry = Expiry::At(until);
+        answer.facts = Some(Arc::new(Facts {
+            threads: BTreeSet::new(),
+            origin: Origin {
+                validator: None,
+                revalidated: true,
+            },
+        }));
+        answer
     }
 
     /// This representation with its buffer as a [`Body::Bytes`] (no copy), keeping its
@@ -312,7 +399,7 @@ impl Representation<Body> {
             repr_type,
             bytes: body.into(),
             expiry: Expiry::Always,
-            threads: None,
+            facts: None,
         }
     }
 
@@ -323,14 +410,14 @@ impl Representation<Body> {
             repr_type,
             bytes,
             expiry,
-            threads,
+            facts,
         } = self;
         let bytes = bytes.collect(max_bytes).await?;
         Ok(Representation {
             repr_type,
             bytes: Vec::from(bytes),
             expiry,
-            threads,
+            facts,
         })
     }
 
@@ -347,14 +434,14 @@ impl Representation<Body> {
             repr_type,
             bytes,
             expiry,
-            threads,
+            facts,
         } = self;
         let bytes = bytes.collect_within(budget).await?;
         Ok(Representation {
             repr_type,
             bytes: Vec::from(bytes),
             expiry,
-            threads,
+            facts,
         })
     }
 
@@ -369,20 +456,20 @@ impl Representation<Body> {
             repr_type,
             bytes,
             expiry,
-            threads,
+            facts,
         } = self;
         match bytes {
             Body::Bytes(bytes) => Ok(Representation {
                 repr_type,
                 bytes: Vec::from(bytes),
                 expiry,
-                threads,
+                facts,
             }),
             other => Err(Representation {
                 repr_type,
                 bytes: other,
                 expiry,
-                threads,
+                facts,
             }),
         }
     }
@@ -395,7 +482,7 @@ impl Representation<Body> {
             repr_type: self.repr_type.clone(),
             bytes: self.bytes.as_bytes()?.to_vec(),
             expiry: self.expiry,
-            threads: self.threads.clone(),
+            facts: self.facts.clone(),
         })
     }
 
@@ -406,7 +493,7 @@ impl Representation<Body> {
             repr_type: self.repr_type.clone(),
             bytes: self.bytes.share()?,
             expiry: self.expiry,
-            threads: self.threads.clone(),
+            facts: self.facts.clone(),
         })
     }
 }
@@ -425,7 +512,7 @@ impl<B> Representation<B> {
             repr_type: self.repr_type,
             bytes: f(self.bytes),
             expiry: self.expiry,
-            threads: self.threads,
+            facts: self.facts,
         }
     }
 
@@ -460,19 +547,56 @@ impl<B> Representation<B> {
     pub fn depends_on(mut self, thread: impl Into<Thread>) -> Self {
         // Copy-on-write: a set shared with a cache entry is cloned before it is
         // grown, a set this representation owns alone is grown in place.
-        Arc::make_mut(self.threads.get_or_insert_with(Default::default)).insert(thread.into());
+        Arc::make_mut(self.facts.get_or_insert_with(Default::default))
+            .threads
+            .insert(thread.into());
         self
+    }
+
+    /// Attach the origin's validator for this answer (builder; ledger #2534): an
+    /// entity tag, a last-modified date, or both. When the answer is cached with an
+    /// [`At`](Expiry::At) deadline and that deadline passes (and every golden thread it
+    /// hangs from still stands), the kernel does not evict it: it invokes the endpoint
+    /// again with the stale answer offered ([`Invocation::stale`](crate::Invocation::stale)),
+    /// and an endpoint that answers [`revalidated`](Representation::revalidated) has the
+    /// stored body served under the new deadline.
+    pub fn validated_by(mut self, validator: OriginValidator) -> Self {
+        Arc::make_mut(self.facts.get_or_insert_with(Default::default))
+            .origin
+            .validator = Some(validator);
+        self
+    }
+
+    /// The origin validator attached with [`validated_by`](Representation::validated_by).
+    pub fn origin_validator(&self) -> Option<&OriginValidator> {
+        self.facts.as_deref()?.origin.validator.as_ref()
+    }
+
+    /// Whether this is a [`revalidated`](Representation::revalidated) answer: no body,
+    /// only "the stale answer is still valid until this answer's deadline".
+    pub fn is_revalidated(&self) -> bool {
+        self.facts
+            .as_deref()
+            .is_some_and(|facts| facts.origin.revalidated)
     }
 
     /// The golden threads this representation depends on.
     pub fn threads(&self) -> &BTreeSet<Thread> {
-        self.threads.as_deref().unwrap_or(&NO_THREADS)
+        self.facts
+            .as_deref()
+            .map_or(&NO_THREADS, |facts| &facts.threads)
     }
 
     /// Replace the thread set (kernel use: install the effective set after
     /// unioning in dependency threads). An empty set is stored as nothing.
     pub(crate) fn with_threads(mut self, threads: BTreeSet<Thread>) -> Self {
-        self.threads = (!threads.is_empty()).then(|| Arc::new(threads));
+        let origin = self
+            .facts
+            .as_deref()
+            .map(|facts| facts.origin.clone())
+            .unwrap_or_default();
+        self.facts = (!threads.is_empty() || !origin.is_empty())
+            .then(|| Arc::new(Facts { threads, origin }));
         self
     }
 }

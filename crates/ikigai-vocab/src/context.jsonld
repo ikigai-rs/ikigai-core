@@ -580,6 +580,7 @@
       "@id": "ik:totalBytes",
       "@type": "xsd:nonNegativeInteger"
     },
+    "traceState": "ik:traceState",
     "transreptsFrom": "ik:transreptsFrom",
     "transreptsTo": "ik:transreptsTo",
     "uncachedCallCount": {
