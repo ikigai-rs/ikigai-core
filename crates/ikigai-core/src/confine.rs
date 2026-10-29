@@ -136,6 +136,10 @@ impl Endpoint for Confine {
         self.inner.describe()
     }
 
+    fn forwards(&self) -> Option<crate::Forward> {
+        self.inner.forwards()
+    }
+
     /// The corridor, named by the confinement: what a door bound to this endpoint
     /// reports as `ik:confinedTo`.
     fn confinement(&self) -> Option<Topology> {

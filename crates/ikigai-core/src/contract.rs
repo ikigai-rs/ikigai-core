@@ -129,6 +129,7 @@ fn uses_v2(spec: &ActionSpec) -> bool {
                 || !i.examples.is_empty()
                 || (i.is_enumerated() && i.one_of.is_empty())
                 || i.reads_body
+                || i.fixed.is_some()
         })
 }
 
@@ -536,6 +537,21 @@ impl ActionSpec {
     /// assert_ne!(by_value.contract_id("file"), by_body.contract_id("file"));
     /// ```
     ///
+    /// **Inputs a named request fixes** (ledger #2512, [`ArgSpec::fixed`]) put a contract in
+    /// the v2 form too, and are appended after the body readers, only when there are any,
+    /// as the byte `4` and the set of `name`, NUL, `value` strings. A contract that fixes
+    /// none keeps its digest:
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, ArgSpec, Verb};
+    ///
+    /// let open = ActionSpec::new(Verb::Source).input(ArgSpec::new("graph").optional());
+    /// let bound = ActionSpec::new(Verb::Source).input(ArgSpec::new("graph").fixed_to("urn:g"));
+    /// let other = ActionSpec::new(Verb::Source).input(ArgSpec::new("graph").fixed_to("urn:h"));
+    /// assert_ne!(open.contract_id("count"), bound.contract_id("count"));
+    /// assert_ne!(bound.contract_id("count"), other.contract_id("count"));
+    /// ```
+    ///
     /// The endpoint id is part of the contract: two endpoints with different ids and
     /// identical specs are two tools, and the contract node must say which one it
     /// belongs to.
@@ -645,6 +661,19 @@ impl ActionSpec {
         if !readers.is_empty() {
             feed_u8(&mut h, 3);
             feed_set(&mut h, &readers);
+        }
+        // The inputs a named request fixes (ledger #2512) are fed ONLY when there are any,
+        // after the body readers, as the byte `4` and the set of `name` NUL `value` pairs: an
+        // action that fixes none keeps its digest, and `4` is no earlier tail's byte. A NUL
+        // cannot occur in an input name, so the pair is unambiguous.
+        let fixed: Vec<String> = self
+            .inputs
+            .iter()
+            .filter_map(|i| i.fixed.as_ref().map(|v| format!("{}\0{v}", i.name)))
+            .collect();
+        if !fixed.is_empty() {
+            feed_u8(&mut h, 4);
+            feed_set(&mut h, &fixed);
         }
         ContentId::from_hasher(h)
     }

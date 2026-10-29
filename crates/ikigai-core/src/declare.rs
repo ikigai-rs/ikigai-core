@@ -153,10 +153,27 @@ impl Budget {
             }
             SpaceKind::Alias { rules, .. } => {
                 nodes += rules.len();
-                text += rules
-                    .iter()
-                    .map(|r| r.from.len() + r.to.len())
-                    .sum::<usize>();
+                for rule in rules {
+                    // A named request's arguments and inputs are nodes of their own.
+                    nodes += rule.fixes.len() + rule.inputs.len();
+                    text += rule.from.len() + rule.to.len();
+                    text += rule
+                        .fixes
+                        .iter()
+                        .map(|a| a.name.len() + a.value.to_string().len())
+                        .sum::<usize>();
+                    text += rule
+                        .inputs
+                        .iter()
+                        .map(|i| {
+                            i.name.len()
+                                + i.summary.len()
+                                + i.class.as_ref().map_or(0, String::len)
+                                + i.default.as_ref().map_or(0, String::len)
+                                + i.one_of.iter().map(String::len).sum::<usize>()
+                        })
+                        .sum::<usize>();
+                }
             }
             SpaceKind::Mount { prefix } => text += prefix.len(),
             SpaceKind::Limit { family, .. } => text += family.len(),
@@ -776,18 +793,25 @@ impl Builder<'_> {
                         reason: "an alias table follows at least one hop (ik:maxHops ≥ 1)".into(),
                     });
                 }
+                // A named request that cannot mean one thing is refused here, naming
+                // its rule (ledger #2512).
+                for (i, rule) in rules.iter().enumerate() {
+                    crate::alias::check_rule(rule)
+                        .map_err(|e| at_node(e, format!("{me}:rule:{}", i + 1)))?;
+                }
+                let table = alias_table(rules, *max_hops)?;
                 // A view (a root-resolving rule) whose own table cannot terminate is
                 // refused here, where the table shows it, rather than bound to fail on
                 // every request. Walking each view's `from` finds a self-loop, a cycle
-                // through the table and an over-long chain. Child rules keep their
-                // run-time refusal, exactly as before views existed.
+                // through the table and an over-long chain — for a template rule, one
+                // name it matches. Child rules keep their run-time refusal, exactly as
+                // before views existed.
                 if rules.iter().any(|rule| rule.at == ResolveAt::Root) {
-                    let table = alias_table(rules, *max_hops);
                     for (i, rule) in rules.iter().enumerate() {
                         if rule.at != ResolveAt::Root {
                             continue;
                         }
-                        let Ok(from) = Iri::parse(rule.from.as_str()) else {
+                        let Some(from) = sample_name(rule) else {
                             continue;
                         };
                         if let Canonical::Refused(refusal) = table.preview(&from) {
@@ -904,7 +928,7 @@ impl Builder<'_> {
                 })
             }
             SpaceKind::Alias { rules, max_hops } => {
-                let alias = Alias::new(Arc::new(alias_table(rules, *max_hops)), only());
+                let alias = Alias::new(Arc::new(alias_table(rules, *max_hops)?), only());
                 Arc::new(match id {
                     Some(id) => alias.named(id),
                     None => alias,
@@ -953,13 +977,46 @@ impl Builder<'_> {
 
 /// What [`Builder::assemble`] answers for a node [`Builder::check`] should already
 /// have refused — never reached, and a refusal rather than a panic if it ever is.
-/// The table an `ik:Alias` node's rules declare, each resolving where it says.
-fn alias_table(rules: &[TopologyRule], max_hops: usize) -> AliasTable {
+/// The table an `ik:Alias` node's rules declare, each resolving where it says, a named
+/// request with its parts (ledger #2512).
+fn alias_table(rules: &[TopologyRule], max_hops: usize) -> Result<AliasTable, DeclarationError> {
     rules
         .iter()
-        .fold(AliasTable::new().with_max_hops(max_hops), |table, rule| {
-            table.rule_at(rule.kind, rule.from.clone(), rule.to.clone(), rule.at)
+        .try_fold(AliasTable::new().with_max_hops(max_hops), |table, rule| {
+            table.with_rule(rule.clone())
         })
+}
+
+/// One name `rule` matches, to walk the table from: its logical name, or for a template
+/// rule that name with each variable a placeholder. `None` when neither is an IRI.
+fn sample_name(rule: &TopologyRule) -> Option<Iri> {
+    if !rule.template {
+        return Iri::parse(rule.from.as_str()).ok();
+    }
+    let template = UriTemplate::parse(rule.from.as_str()).ok()?;
+    let mut bindings = crate::grammar::Bindings::new();
+    for var in template.variables() {
+        bindings.insert(var, "probe");
+    }
+    Iri::parse(template.expand(&bindings)?).ok()
+}
+
+/// `error`, naming `node` (a rule's cell) as where it was found.
+fn at_node(error: DeclarationError, node: String) -> DeclarationError {
+    match error {
+        DeclarationError::Malformed { reason, .. } => DeclarationError::Malformed {
+            node: Some(node),
+            reason,
+        },
+        DeclarationError::Pattern {
+            pattern, reason, ..
+        } => DeclarationError::Pattern {
+            node,
+            pattern,
+            reason,
+        },
+        other => other,
+    }
 }
 
 fn not_built(me: &str) -> DeclarationError {
@@ -998,9 +1055,11 @@ mod turtle {
     use oxrdf::{NamedOrBlankNode, Term, Triple};
 
     use super::{too_large, Budget, DeclarationBound, DeclarationError, MAX_DECLARATION_DEPTH};
-    use crate::alias::{ResolveAt, RuleKind};
+    use crate::alias::{FixedArgument, FixedValue, ResolveAt, RuleKind};
+    use crate::describe::ArgSpec;
     use crate::iri::Iri;
     use crate::topology::{Door, MatchKind, SpaceKind, Topology, TopologyRule, SKOLEM_PREFIX};
+    use crate::verb::Verb;
 
     const IK: &str = "https://ikigai-rs.dev/ns#";
     const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -1507,13 +1566,17 @@ mod turtle {
                             ));
                         }
                         self.kind(&rule, &["RewriteRule"])?;
-                        let kind = match self.one_str(&rule, &p("ruleKind"))?.as_str() {
-                            "exact" => RuleKind::Exact,
-                            "prefix" => RuleKind::Prefix,
+                        let (kind, template) = match self.one_str(&rule, &p("ruleKind"))?.as_str() {
+                            "exact" => (RuleKind::Exact, false),
+                            "prefix" => (RuleKind::Prefix, false),
+                            "template" => (RuleKind::Exact, true),
                             other => {
                                 return Err(malformed(
                                     &rule,
-                                    format!("ik:ruleKind {other:?} is not exact or prefix"),
+                                    format!(
+                                        "ik:ruleKind {other:?} is not exact, prefix or \
+                                             template"
+                                    ),
                                 ))
                             }
                         };
@@ -1536,8 +1599,11 @@ mod turtle {
                                 }
                             }
                         };
+                        let mut parsed = TopologyRule::new(kind, from, to).resolving_at(at);
+                        parsed.template = template;
+                        self.request_part(&rule, &mut parsed)?;
                         self.no_more(&rule)?;
-                        rules.push(TopologyRule::new(kind, from, to).resolving_at(at));
+                        rules.push(parsed);
                     }
                     SpaceKind::Alias { rules, max_hops }
                 }
@@ -1593,6 +1659,130 @@ mod turtle {
                 children,
                 corridors,
             })
+        }
+
+        /// A named request's parts on the rule `s` (ledger #2512): its verb, the
+        /// arguments it fixes and the inputs it declares, each node read whole.
+        fn request_part(
+            &mut self,
+            s: &str,
+            rule: &mut TopologyRule,
+        ) -> Result<(), DeclarationError> {
+            let p = |local: &str| format!("{IK}{local}");
+            if let Some(term) = self.optional(s, &p("verb"))? {
+                let word = Self::literal_of(s, &p("verb"), term, "string")?;
+                rule.verb = Some(match word.as_str() {
+                    "Source" => Verb::Source,
+                    "Sink" => Verb::Sink,
+                    "Exists" => Verb::Exists,
+                    "Delete" => Verb::Delete,
+                    "Meta" => Verb::Meta,
+                    other => return Err(malformed(s, format!("ik:verb {other:?} is not a verb"))),
+                });
+            }
+            let fixes: BTreeSet<String> = self
+                .take(s, &p("fixes"))
+                .into_iter()
+                .map(|t| Self::iri_of(s, &p("fixes"), t))
+                .collect::<Result<_, _>>()?;
+            for node in fixes {
+                self.kind(&node, &["Argument"])?;
+                let name = self.one_str(&node, &p("inputName"))?;
+                let value = self.optional(&node, &p("value"))?;
+                let reference = self.optional(&node, &p("ref"))?;
+                let capture = self.optional(&node, &p("capture"))?;
+                let value = match (value, reference, capture) {
+                    (Some(term), None, None) => {
+                        FixedValue::Value(Self::literal_of(&node, &p("value"), term, "string")?)
+                    }
+                    (None, Some(term), None) => {
+                        let iri = Self::iri_of(&node, &p("ref"), term)?;
+                        FixedValue::Reference(
+                            Iri::parse(&iri).map_err(|e| {
+                                malformed(&node, format!("ik:ref is not an IRI: {e}"))
+                            })?,
+                        )
+                    }
+                    (None, None, Some(term)) => {
+                        FixedValue::Capture(Self::literal_of(&node, &p("capture"), term, "string")?)
+                    }
+                    _ => {
+                        return Err(malformed(
+                            &node,
+                            "an argument a rule fixes has exactly one of ik:value, ik:ref and \
+                             ik:capture",
+                        ))
+                    }
+                };
+                self.no_more(&node)?;
+                rule.fixes.push(FixedArgument { name, value });
+            }
+            rule.fixes.sort_by(|a, b| a.name.cmp(&b.name));
+            let inputs: BTreeSet<String> = self
+                .take(s, &p("input"))
+                .into_iter()
+                .map(|t| Self::iri_of(s, &p("input"), t))
+                .collect::<Result<_, _>>()?;
+            for node in inputs {
+                let input = self.input(&node)?;
+                rule.inputs.push(input);
+            }
+            rule.inputs.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(())
+        }
+
+        /// A named request's declared input node: the fields `to_turtle` writes on one.
+        /// `ik:source`, when stated, must say `argument`; `ik:required` absent reads as
+        /// the input's default does (optional when it has one).
+        fn input(&mut self, s: &str) -> Result<ArgSpec, DeclarationError> {
+            let p = |local: &str| format!("{IK}{local}");
+            let mut input = ArgSpec::new(self.one_str(s, &p("inputName"))?);
+            if let Some(term) = self.optional(s, &p("source"))? {
+                let source = Self::literal_of(s, &p("source"), term, "string")?;
+                if source != "argument" {
+                    return Err(malformed(
+                        s,
+                        format!(
+                            "ik:source {source:?}: a rule's declared input is an argument (its \
+                             captures are its bindings)"
+                        ),
+                    ));
+                }
+            }
+            if let Some(term) = self.optional(s, &p("summary"))? {
+                input.summary = Self::literal_of(s, &p("summary"), term, "string")?;
+            }
+            if let Some(term) = self.optional(s, &p("class"))? {
+                input.class = Some(Self::iri_of(s, &p("class"), term)?);
+            }
+            if let Some(term) = self.optional(s, &p("default"))? {
+                input.default = Some(Self::literal_of(s, &p("default"), term, "string")?);
+                input.required = false;
+            }
+            let one_of = self.strs(s, &p("oneOf"))?;
+            if !one_of.is_empty() {
+                input = input.one_of(one_of);
+            }
+            if let Some(term) = self.optional(s, &p("enumerated"))? {
+                if Self::literal_of(s, &p("enumerated"), term, "boolean")? == "true" {
+                    input.enumerated = true;
+                }
+            }
+            if let Some(term) = self.optional(s, &p("required"))? {
+                input.required =
+                    match Self::literal_of(s, &p("required"), term, "boolean")?.as_str() {
+                        "true" => true,
+                        "false" => false,
+                        other => {
+                            return Err(malformed(
+                                s,
+                                format!("ik:required {other} is not a boolean"),
+                            ))
+                        }
+                    };
+            }
+            self.no_more(s)?;
+            Ok(input)
         }
 
         fn match_kind(&mut self, s: &str) -> Result<MatchKind, DeclarationError> {

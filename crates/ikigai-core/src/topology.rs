@@ -75,10 +75,12 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::alias::{ResolveAt, RuleKind};
+use crate::alias::{FixedArgument, FixedValue, ResolveAt, RuleKind};
 use crate::declare::DeclarationError;
+use crate::describe::ArgSpec;
 use crate::iri::Iri;
 use crate::space::Space;
+use crate::verb::Verb;
 
 /// Where an anonymous node is skolemized: `{SKOLEM_PREFIX}{n}`, `n` in pre-order.
 /// A node under it is anonymous when a declaration is read back, so a surface that
@@ -193,6 +195,18 @@ pub struct TopologyRule {
     /// Where the rewritten name resolves (`ik:resolveAt`, written only for
     /// [`ResolveAt::Root`]; a rule without it resolves in the alias's child).
     pub at: ResolveAt,
+    /// Whether `from` is a URI template (`ik:ruleKind "template"`, ledger #2512): a named
+    /// request matching one whole name per capture. `kind` is then
+    /// [`Exact`](RuleKind::Exact); see [`match_kind`](Self::match_kind).
+    pub template: bool,
+    /// The one verb a named request forwards, beside `Exists` and `Meta` (`ik:verb`,
+    /// ledger #2512); `None` forwards every verb.
+    pub verb: Option<Verb>,
+    /// The arguments a named request fixes, in name order (`ik:fixes`, ledger #2512).
+    pub fixes: Vec<FixedArgument>,
+    /// The inputs a named request declares itself, in name order (`ik:input`, ledger
+    /// #2512): the plan's parameters a binding copied, or a default such as `as`.
+    pub inputs: Vec<ArgSpec>,
 }
 
 impl TopologyRule {
@@ -203,7 +217,80 @@ impl TopologyRule {
             from: from.into(),
             to: to.into(),
             at: ResolveAt::Child,
+            template: false,
+            verb: None,
+            fixes: Vec::new(),
+            inputs: Vec::new(),
         }
+    }
+
+    /// A NAMED REQUEST binding the exact name `from` to a request on `to` (ledger #2512):
+    /// a view, resolving from the root, to which [`verb`](Self::verb),
+    /// [`fixing`](Self::fixing) and [`input`](Self::input) add the request's parts.
+    ///
+    /// ```
+    /// use ikigai_core::{FixedArgument, MatchKind, ResolveAt, TopologyRule, Verb};
+    ///
+    /// let count = TopologyRule::named_request("urn:example:count", "urn:example:sparql")
+    ///     .verb(Verb::Source)
+    ///     .fixing(FixedArgument::value("graph", "urn:example:graph"));
+    /// assert_eq!((count.at, count.match_kind()), (ResolveAt::Root, MatchKind::Exact));
+    /// assert_eq!(count.fixes[0].name, "graph");
+    /// ```
+    pub fn named_request(from: impl Into<String>, to: impl Into<String>) -> Self {
+        TopologyRule::new(RuleKind::Exact, from, to).resolving_at(ResolveAt::Root)
+    }
+
+    /// A NAMED REQUEST whose logical name `from` is a URI template (ledger #2512): each
+    /// `{var}` it captures may be used in `to` or as a whole argument value
+    /// ([`FixedArgument::capture`]).
+    ///
+    /// ```
+    /// use ikigai_core::{FixedArgument, MatchKind, TopologyRule};
+    ///
+    /// let event = TopologyRule::named_template("urn:example:event:{id}", "urn:example:compose")
+    ///     .fixing(FixedArgument::capture("id", "id"));
+    /// assert_eq!(event.match_kind(), MatchKind::Template);
+    /// ```
+    pub fn named_template(from: impl Into<String>, to: impl Into<String>) -> Self {
+        let mut rule = TopologyRule::named_request(from, to);
+        rule.template = true;
+        rule
+    }
+
+    /// How the rule matches, a template included.
+    pub fn match_kind(&self) -> MatchKind {
+        match (self.template, self.kind) {
+            (true, _) => MatchKind::Template,
+            (false, RuleKind::Exact) => MatchKind::Exact,
+            (false, RuleKind::Prefix) => MatchKind::Prefix,
+        }
+    }
+
+    /// Bind the one verb the named request forwards (builder).
+    pub fn verb(mut self, verb: Verb) -> Self {
+        self.verb = Some(verb);
+        self
+    }
+
+    /// Fix one argument of the target (builder), kept in name order.
+    pub fn fixing(mut self, argument: FixedArgument) -> Self {
+        let at = self.fixes.partition_point(|a| a.name < argument.name);
+        self.fixes.insert(at, argument);
+        self
+    }
+
+    /// Declare one input of the name itself (builder), kept in name order.
+    pub fn input(mut self, input: ArgSpec) -> Self {
+        let at = self.inputs.partition_point(|i| i.name < input.name);
+        self.inputs.insert(at, input);
+        self
+    }
+
+    /// Whether this rule is a named request (a template, a verb, a fixed argument or a
+    /// declared input).
+    pub fn is_named_request(&self) -> bool {
+        self.template || self.verb.is_some() || !self.fixes.is_empty() || !self.inputs.is_empty()
     }
 
     /// Where the rewritten name resolves (builder).
@@ -541,6 +628,17 @@ impl Topology {
             for word in words {
                 cells.extend((1..=n).map(|i| format!("{me}:{word}:{i}")));
             }
+            if let SpaceKind::Alias { rules, .. } = &self.kind {
+                for (i, rule) in rules.iter().enumerate() {
+                    let cell = format!("{me}:rule:{}", i + 1);
+                    cells.extend(rule.fixes.iter().map(|a| format!("{cell}:arg:{}", a.name)));
+                    cells.extend(
+                        rule.inputs
+                            .iter()
+                            .map(|a| format!("{cell}:input:{}", a.name)),
+                    );
+                }
+            }
         }
         match &self.kind {
             SpaceKind::Opaque => {
@@ -613,12 +711,12 @@ impl Topology {
                 }
                 write_space(out, &children);
                 for (i, rule) in rules.iter().enumerate() {
+                    let cell = format!("{me}:rule:{}", i + 1);
                     let _ = write!(
                         out,
-                        "\n<{me}:rule:{}> a ik:RewriteRule ;\n    ik:ruleKind \"{}\" ;\n    \
+                        "\n<{cell}> a ik:RewriteRule ;\n    ik:ruleKind \"{}\" ;\n    \
                          ik:logical \"{}\" ;\n    ik:canonical \"{}\"",
-                        i + 1,
-                        rule.kind.keyword(),
+                        rule.match_kind().keyword(),
                         escape_literal(&rule.from),
                         escape_literal(&rule.to)
                     );
@@ -627,7 +725,35 @@ impl Topology {
                     if rule.at != ResolveAt::Child {
                         let _ = write!(out, " ;\n    ik:resolveAt \"{}\"", rule.at.keyword());
                     }
+                    // A named request's parts (ledger #2512), each only when present, so
+                    // every plain rule renders exactly as before.
+                    if let Some(verb) = rule.verb {
+                        let _ = write!(out, " ;\n    ik:verb \"{verb:?}\"");
+                    }
+                    for argument in &rule.fixes {
+                        let _ = write!(out, " ;\n    ik:fixes <{cell}:arg:{}>", argument.name);
+                    }
+                    for input in &rule.inputs {
+                        let _ = write!(out, " ;\n    ik:input <{cell}:input:{}>", input.name);
+                    }
                     out.push_str(" .\n");
+                    for argument in &rule.fixes {
+                        let (property, object) = match &argument.value {
+                            FixedValue::Value(value) => ("value", turtle_literal(value)),
+                            FixedValue::Reference(iri) => ("ref", format!("<{}>", iri.as_str())),
+                            FixedValue::Capture(var) => ("capture", turtle_literal(var)),
+                        };
+                        let _ = write!(
+                            out,
+                            "<{cell}:arg:{}> a ik:Argument ;\n    ik:inputName {} ;\n    \
+                             ik:{property} {object} .\n",
+                            argument.name,
+                            turtle_literal(&argument.name)
+                        );
+                    }
+                    for input in &rule.inputs {
+                        write_input(out, &format!("{cell}:input:{}", input.name), input);
+                    }
                 }
             }
             SpaceKind::Limit { family, kind } => {
@@ -681,6 +807,34 @@ struct Render {
     skolem: usize,
     seen: std::collections::BTreeSet<String>,
     cells: Option<std::collections::BTreeSet<String>>,
+}
+
+/// A named request's declared input as an input node: the fields the catalog writes on
+/// one (`ikigai-vocab`'s spelling), limited to what a declaration states — its name,
+/// source, required, summary, class, default and enumeration.
+fn write_input(out: &mut String, node: &str, input: &ArgSpec) {
+    let _ = write!(
+        out,
+        "<{node}> ik:inputName {} ;\n    ik:source \"argument\" ;\n    ik:required {}",
+        turtle_literal(&input.name),
+        input.required
+    );
+    if !input.summary.is_empty() {
+        let _ = write!(out, " ;\n    ik:summary {}", turtle_literal(&input.summary));
+    }
+    if let Some(class) = &input.class {
+        let _ = write!(out, " ;\n    ik:class <{class}>");
+    }
+    if let Some(default) = &input.default {
+        let _ = write!(out, " ;\n    ik:default {}", turtle_literal(default));
+    }
+    for value in &input.one_of {
+        let _ = write!(out, " ;\n    ik:oneOf {}", turtle_literal(value));
+    }
+    if input.is_enumerated() && input.one_of.is_empty() {
+        out.push_str(" ;\n    ik:enumerated true");
+    }
+    out.push_str(" .\n");
 }
 
 /// `ik:space <child>` for a one-child node, or close the block for a node whose

@@ -122,6 +122,7 @@ mod dynamic;
 mod endpoint;
 mod error;
 mod explain;
+mod forward;
 mod grammar;
 pub(crate) mod hashing;
 mod inspect_graph;
@@ -143,8 +144,8 @@ mod uncached;
 mod verb;
 
 pub use alias::{
-    Alias, AliasHop, AliasParseError, AliasRefusal, AliasRule, AliasTable, Canonical, ResolveAt,
-    RuleKind, DEFAULT_MAX_HOPS,
+    Alias, AliasHop, AliasParseError, AliasRefusal, AliasRule, AliasTable, Canonical,
+    FixedArgument, FixedValue, ResolveAt, RuleKind, DEFAULT_MAX_HOPS,
 };
 pub use arg::ArgRef;
 pub use body::{Body, ByteStream, Replay};
@@ -187,6 +188,7 @@ pub use endpoint::{
     Issuer, Spawner,
 };
 pub use error::{Error, FailureClass, Result};
+pub use forward::Forward;
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{

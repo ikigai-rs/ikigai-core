@@ -2036,6 +2036,27 @@ impl<'a> Invocation<'a> {
     /// kernel's write-cut fires on, which a caller holding only the requested (maybe
     /// logical) name could not supply. Drained rather than cloned: the invocation is
     /// over, and this is the last read of its record.
+    /// The same invocation over `request` — the one the kernel settled a by-reference
+    /// argument of into the referent's bytes (ledger #2511) — sharing everything else, the
+    /// recording side included, as [`with_bindings`](Self::with_bindings) does.
+    pub(crate) fn with_request<'b>(&'b self, request: &'b Request) -> Invocation<'b> {
+        Invocation {
+            request,
+            bindings: self.bindings,
+            capability: self.capability,
+            issuer: self.issuer,
+            spawner: self.spawner.clone(),
+            issuer_arc: self.issuer_arc.clone(),
+            clock: self.clock.clone(),
+            span: self.span,
+            trace: self.trace.clone(),
+            scope: self.scope.clone(),
+            depth: self.depth,
+            run: self.run.clone(),
+            recorded: Arc::clone(&self.recorded),
+        }
+    }
+
     pub(crate) fn failure_dependencies(&self, canonical: &Iri) -> Dependencies {
         let mut threads =
             std::mem::take(&mut *self.recorded.dep_threads.lock().expect("dep threads lock"));
@@ -2194,6 +2215,22 @@ pub trait Endpoint: Send + Sync {
     /// `match` had to change.
     fn is_limiter(&self) -> bool {
         false
+    }
+
+    /// What this endpoint forwards every request to, when it is a forwarder — a view or a
+    /// named request (ledger #2513). `None`, the default, for every endpoint that answers
+    /// for itself.
+    ///
+    /// The kernel describes a forwarder by its TARGET's contract wherever it describes
+    /// anything (`Meta`, the catalog, `urn:kernel:actions`, `urn:kernel:validate`,
+    /// [`Kernel::describe`](crate::Kernel::describe)): the target's inputs minus the fixed
+    /// ones, which are listed and marked, its outputs and its `requires`. And it hands a
+    /// forwarder a body attached to the request as it is, never collected, since the
+    /// target is what reads it. An overlay that wraps one endpoint should forward this as
+    /// it forwards [`describe`](Self::describe); one that does not describes the
+    /// forwarder's own contract, which is what it describes about everything else too.
+    fn forwards(&self) -> Option<crate::Forward> {
+        None
     }
 
     /// The corridor this endpoint confines its sub-requests to, when it is a

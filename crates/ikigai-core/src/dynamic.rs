@@ -212,12 +212,23 @@ impl Endpoint for ThreadedEndpoint {
         self.inner.invoke(inv).await
     }
 
+    /// The body face too, so a streamed answer streams through the space (ledger #2513):
+    /// without it the default collected the inner endpoint's stream on the way.
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<crate::Body>> {
+        inv.depends_on(self.thread.clone());
+        self.inner.invoke_body(inv).await
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
 
     fn describe(&self) -> Description {
         self.inner.describe()
+    }
+
+    fn forwards(&self) -> Option<crate::Forward> {
+        self.inner.forwards()
     }
 
     fn confinement(&self) -> Option<Topology> {

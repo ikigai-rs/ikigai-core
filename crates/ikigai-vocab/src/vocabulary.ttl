@@ -106,7 +106,7 @@ ik:output a rdf:Property ;
 ik:input a rdf:Property ;
     rdfs:range rdfs:Resource ;
     rdfs:label "input" ;
-    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, ik:oneOf, ik:enumerated, ik:example, ik:valueNote, ik:listSeparator, ik:needs and ik:readsBody. No domain: emitted on all three." .
+    rdfs:comment "A named input the subject accepts — an endpoint, one of its ik:Action nodes, or an ik:Process (its declared parameters, so a stored plan describes itself exactly as an endpoint does and the manifold can offer it). The value is a skolemized ArgSpec node carrying ik:inputName, ik:source, ik:required, and optionally ik:summary, ik:class, ik:default, ik:oneOf, ik:enumerated, ik:example, ik:valueNote, ik:listSeparator, ik:needs, ik:readsBody and ik:fixed. No domain: emitted on all three (and on a named request's ik:RewriteRule, for the inputs it declares)." .
 
 ik:inputName a rdf:Property ;
     rdfs:range xsd:string ;
@@ -198,6 +198,11 @@ ik:readsBody a rdf:Property ;
     rdfs:range xsd:boolean ;
     rdfs:label "readsBody" ;
     rdfs:comment "On an input node: true when the endpoint reads this input as a BODY, answering inline bytes, a reference, a content id (b3:...) and a live body attached to the request exactly alike, so an engine, a door or a wire may hand it any of those. An input without it is read by value: the kernel collects a live body handed to it under the run's byte budget (OverBudget past it, never a shorter value) before the endpoint sees it. Only on a by-value input (ik:source \"argument\"). Emitted only when true." .
+
+ik:fixed a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "fixed" ;
+    rdfs:comment "On an input node of a NAMED REQUEST's contract (a forwarding name bound to a request with arguments, ledger #2512): the value the binding fixes this input to, spelled as the binding wrote it (a literal as it is, a reference as <iri>, a capture as {var}). A caller may not give a fixed input: one who does is refused, naming the binding, never silently overridden or ignored. Listed rather than omitted, so an engine names key=value instead of routing it as a positional value. Emitted only when fixed." .
 
 ik:example a rdf:Property ;
     rdfs:range xsd:string ;
@@ -358,7 +363,7 @@ ik:Alias a rdfs:Class ;
 
 ik:RewriteRule a rdfs:Class ;
     rdfs:label "RewriteRule" ;
-    rdfs:comment "One rule of an ik:Alias table: ik:ruleKind (exact or prefix), ik:logical (the name or prefix it matches), ik:canonical (what it rewrites to) and, for a view, ik:resolveAt \"root\". Skolemized under the alias node as {alias}:rule:{n}, n its position in the table — or, for a rule of the kernel's own table that an ik:DryRun would fire, under the run as {run}:rule:{n}, n the order it fires in." .
+    rdfs:comment "One rule of an ik:Alias table: ik:ruleKind (exact, prefix or template), ik:logical (the name, prefix or URI template it matches), ik:canonical (what it rewrites to) and, for a view, ik:resolveAt \"root\". A view may be a NAMED REQUEST (ledger #2512): it then also carries the verb it forwards (ik:verb), the arguments it fixes (ik:fixes, each an ik:Argument) and the inputs it declares itself (ik:input). Skolemized under the alias node as {alias}:rule:{n}, n its position in the table — or, for a rule of the kernel's own table that an ik:DryRun would fire, under the run as {run}:rule:{n}, n the order it fires in." .
 
 ik:Limit a rdfs:Class ;
     rdfs:subClassOf ik:Space ;
@@ -493,7 +498,7 @@ ik:ruleKind a rdf:Property ;
     rdfs:domain ik:RewriteRule ;
     rdfs:range xsd:string ;
     rdfs:label "ruleKind" ;
-    rdfs:comment "How an ik:RewriteRule matches: \"exact\" (the whole name) or \"prefix\" (a leading namespace, the remainder carried over)." .
+    rdfs:comment "How an ik:RewriteRule matches: \"exact\" (the whole name), \"prefix\" (a leading namespace, the remainder carried over) or \"template\" (ledger #2512: ik:logical is a URI template, RFC 6570 level 1, and each {var} it captures may be used in ik:canonical or as a whole argument value, ik:capture; only on a view, ik:resolveAt \"root\")." .
 
 ik:logical a rdf:Property ;
     rdfs:domain ik:RewriteRule ;
@@ -512,6 +517,18 @@ ik:resolveAt a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "resolveAt" ;
     rdfs:comment "Where an ik:RewriteRule's rewritten name resolves: \"child\" (the default when absent: in the ik:Alias's own enclosed ik:space, the rewrite reported as the canonical name) or \"root\" (a VIEW: from the root of the caller's resolution chain, as a sub-request under the caller's own capability, so it grants nothing and its answer depends on the target's golden threads). A view onto a name lets a dynamic space declare a name its host serves elsewhere." .
+
+ik:fixes a rdf:Property ;
+    rdfs:domain ik:RewriteRule ;
+    rdfs:range ik:Argument ;
+    rdfs:label "fixes" ;
+    rdfs:comment "An argument a named request (an ik:RewriteRule with ik:resolveAt \"root\", ledger #2512) supplies to its target: an ik:Argument with ik:inputName and exactly one of ik:value (by value), ik:ref (by reference) or ik:capture (the whole value its template captured). Partial application: a caller may not give a fixed argument (refused, naming the binding), every other input of the target passes through, and as= is never fixed (it negotiates; declare it as an ik:input with a default). Named {rule}:arg:{name}." .
+
+ik:capture a rdf:Property ;
+    rdfs:domain ik:Argument ;
+    rdfs:range xsd:string ;
+    rdfs:label "capture" ;
+    rdfs:comment "An argument's value, taken from a template rule's capture (ledger #2512): the name of a {var} in the rule's ik:logical template, whose WHOLE captured text is the value, sent by value. Never spliced inside a longer value: that would be string interpolation into a language. Exclusive with ik:value and ik:ref." .
 
 # ---- explanation (urn:kernel:explain — a dry run of resolution) --------------
 # The module author's "why did my endpoint not get called?" as a graph: one
@@ -1547,7 +1564,7 @@ ik:Step a rdfs:Class ;
 
 ik:Argument a rdfs:Class ;
     rdfs:label "Argument" ;
-    rdfs:comment "A named argument of a step: ik:inputName plus exactly one of ik:value (by value, a literal) or ik:ref (by reference, an IRI — a bound name of the same plan, or any resource). Named urn:plan:{plan-id}:step:{n}:arg:{name}." .
+    rdfs:comment "A named argument of a step: ik:inputName plus exactly one of ik:value (by value, a literal) or ik:ref (by reference, an IRI — a bound name of the same plan, or any resource). Named urn:plan:{plan-id}:step:{n}:arg:{name}. Also what a named request fixes (ik:fixes, ledger #2512), named {rule}:arg:{name}, where ik:capture is a third way to give the value." .
 
 ik:Fork a rdfs:Class ;
     rdfs:subClassOf ik:Stage ;

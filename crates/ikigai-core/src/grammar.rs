@@ -106,11 +106,13 @@ impl Grammar for Exact {
 /// variables with no separating literal are rejected at construction as
 /// ambiguous. (Operators like `{+var}`, `{?q}`, `{/p}` are intentionally out of
 /// scope for now; `Grammar` lets richer grammars slot in beside this.)
+#[derive(Clone, Debug)]
 pub struct UriTemplate {
     parts: Vec<Part>,
     source: String,
 }
 
+#[derive(Clone, Debug)]
 enum Part {
     Lit(String),
     Var(String),

@@ -830,10 +830,173 @@ pub(crate) struct Floor {
     /// `content` on `Source` (ledger #2239). An attached body reaches one of these as it
     /// is; any other argument is handed it collected.
     body_readers: Vec<(Verb, Readers)>,
+    /// Each declared verb's by-value inputs whose value is a NAME (`class` `xsd:anyURI`,
+    /// ledger #2511): a reference handed to one of these is given as the IRI's text, never
+    /// read.
+    name_inputs: Vec<(Verb, Readers)>,
+    /// Each declared verb's other by-value inputs (neither read as a body nor a name),
+    /// handed the referenced representation, and whether the verb's argument set is open
+    /// (an undeclared argument is then a by-value one too). A reference to an argument the
+    /// contract does not declare, on a closed set, is the endpoint's own to read, as it
+    /// always was (ledger #2511).
+    value_inputs: Vec<(Verb, Readers)>,
+    open_arguments: Vec<Verb>,
+    /// All of a declared verb's inputs, for telling an open set's undeclared argument from
+    /// a declared one.
+    all_inputs: Vec<(Verb, Readers)>,
 }
 
 /// The names of one verb's inputs read as a body, shared like [`Defaults`].
 type Readers = Arc<[String]>;
+
+/// How a verb's contract settles a by-reference argument (ledger #2511): its by-value
+/// inputs that are names, the other by-value inputs, and whether an undeclared argument is
+/// a by-value one (an open argument set). An input read as a body is in neither list.
+struct References {
+    names: Readers,
+    values: Readers,
+    declared: Readers,
+    open: bool,
+}
+
+impl References {
+    /// What a reference given to `name` becomes: `Some(true)` the IRI's text, `Some(false)`
+    /// the referent's bytes, `None` left as it is (an input read as a body, or an argument
+    /// a closed set does not declare).
+    fn settles(&self, name: &str) -> Option<bool> {
+        let has = |list: &Readers| list.iter().any(|n| n == name);
+        if has(&self.names) {
+            Some(true)
+        } else if has(&self.values) || (self.open && !has(&self.declared)) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
+/// Whether `class` names `xsd:anyURI`, as a full IRI or the usual CURIE.
+fn is_any_uri(class: &str) -> bool {
+    class == "http://www.w3.org/2001/XMLSchema#anyURI" || class == "xsd:anyURI"
+}
+
+/// The endpoint `request` is invoked through: `endpoint` itself, or, when an argument is a
+/// reference its contract says how to settle (`references`, ledger #2511), a
+/// [`SettleReferences`] over it. Never for `Meta` (nothing is invoked; the arm above
+/// answers it) or a forwarder (its target settles a reference by its own contract).
+fn settle_references(
+    endpoint: &Arc<dyn Endpoint>,
+    request: &Request,
+    references: Option<Arc<References>>,
+) -> Arc<dyn Endpoint> {
+    let pending: Vec<(String, Iri, bool)> = match references {
+        None => Vec::new(),
+        Some(references) => request
+            .args
+            .iter()
+            .filter_map(|(name, value)| match value {
+                ArgRef::Reference(iri) => references
+                    .settles(name)
+                    .map(|as_name| (name.clone(), iri.clone(), as_name)),
+                _ => None,
+            })
+            .collect(),
+    };
+    if pending.is_empty() || endpoint.forwards().is_some() {
+        return Arc::clone(endpoint);
+    }
+    Arc::new(SettleReferences {
+        inner: Arc::clone(endpoint),
+        pending,
+    })
+}
+
+/// ★ **An endpoint whose by-reference arguments the kernel settles by its contract**
+/// (ledger #2511, the named-requests design's decision 5), the rule core 0.2.3 made for an
+/// attached body: an input read as a body (`reads_body`) receives the reference and reads
+/// it itself; an input whose value is a name (`xsd:anyURI`) receives the IRI's text; any
+/// other by-value input, and any argument of an open set, receives the REFERENCED
+/// REPRESENTATION. That is read here, through the invocation, so it is exactly what the
+/// endpoint would have got by sourcing it: under the caller's capability, in the chain the
+/// endpoint runs in, collected under the run's byte budget, and recorded as a dependency
+/// (a failure too, so a fallback over a missing referent is cut when it appears). A
+/// reference to an argument a closed set does not declare is left to the endpoint, as it
+/// always was.
+///
+/// Out of the issue path, so its frame — which every nesting level pays for — holds one
+/// pointer for this, not a request.
+struct SettleReferences {
+    inner: Arc<dyn Endpoint>,
+    /// Each reference to settle: the argument, the reference, and whether it is a name.
+    pending: Vec<(String, Iri, bool)>,
+}
+
+impl SettleReferences {
+    /// The request with every pending reference settled.
+    async fn settled(&self, inv: &Invocation<'_>) -> Result<Request> {
+        let mut request = inv.request.clone();
+        for (name, iri, as_name) in &self.pending {
+            let value = if *as_name {
+                iri.as_str().as_bytes().to_vec()
+            } else {
+                let read = async {
+                    let answer = inv
+                        .issue_body(Request::new(Verb::Source, iri.clone()))
+                        .await?;
+                    inv.collect(answer.bytes).await
+                };
+                read.await
+                    .map_err(|error| referent_error(error, name, iri))?
+                    .to_vec()
+            };
+            request.args.insert(name.clone(), ArgRef::Inline(value));
+        }
+        Ok(request)
+    }
+}
+
+#[async_trait::async_trait]
+impl Endpoint for SettleReferences {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let request = self.settled(inv).await?;
+        self.inner.invoke(&inv.with_request(&request)).await
+    }
+
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+        let request = self.settled(inv).await?;
+        self.inner.invoke_body(&inv.with_request(&request)).await
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn describe(&self) -> Description {
+        self.inner.describe()
+    }
+
+    fn confinement(&self) -> Option<crate::topology::Topology> {
+        self.inner.confinement()
+    }
+}
+
+/// A referent's failure, naming the argument and the reference it was given by.
+fn referent_error(error: Error, name: &str, iri: &Iri) -> Error {
+    let refers = format!("argument `{name}` refers to <{}>", iri.as_str());
+    match error {
+        Error::Denied(detail) => Error::Denied(format!(
+            "{refers}, which this caller may not read: {detail}"
+        )),
+        Error::OverBudget { detail } => Error::OverBudget {
+            detail: format!(
+                "{refers}, which the kernel reads because `{name}` is not declared \
+                 `reads_body`: {detail}"
+            ),
+        },
+        Error::NotFound(detail) => Error::NotFound(format!("{refers}: {detail}")),
+        other => other,
+    }
+}
 
 /// The boxed collection of an attached body ([`Kernel::settling`]): the names collected.
 type Settling<'a> =
@@ -890,6 +1053,36 @@ impl Floor {
                 (spec.verb, Readers::from(readers))
             })
             .collect();
+        let by_value = |name_like: bool| -> Vec<(Verb, Readers)> {
+            specs
+                .iter()
+                .map(|spec| {
+                    let names: Vec<String> = spec
+                        .inputs
+                        .iter()
+                        .filter(|i| i.source == crate::describe::InputSource::Argument)
+                        .filter(|i| !i.reads_body)
+                        .filter(|i| i.class.as_deref().is_some_and(is_any_uri) == name_like)
+                        .map(|i| i.name.clone())
+                        .collect();
+                    (spec.verb, Readers::from(names))
+                })
+                .collect()
+        };
+        let name_inputs = by_value(true);
+        let value_inputs = by_value(false);
+        let all_inputs: Vec<(Verb, Readers)> = specs
+            .iter()
+            .map(|spec| {
+                let names: Vec<String> = spec.inputs.iter().map(|i| i.name.clone()).collect();
+                (spec.verb, Readers::from(names))
+            })
+            .collect();
+        let open_arguments: Vec<Verb> = specs
+            .iter()
+            .filter(|spec| !spec.arguments.is_closed())
+            .map(|spec| spec.verb)
+            .collect();
         let declared: Vec<(Verb, Vec<String>)> = specs
             .into_iter()
             .map(|spec| (spec.verb, spec.requires))
@@ -917,6 +1110,57 @@ impl Floor {
             sensitive,
             any_sensitive,
             body_readers,
+            name_inputs,
+            value_inputs,
+            open_arguments,
+            all_inputs,
+        }
+    }
+
+    /// The inputs a request with `verb` takes as a name (ledger #2511), by the rule
+    /// [`body_readers`](Self::body_readers) states.
+    fn name_inputs(&self, verb: Verb) -> Readers {
+        Self::readers_for(&self.name_inputs, verb)
+    }
+
+    /// How a reference to each argument of a request with `verb` is settled (ledger
+    /// #2511), by the rule [`body_readers`](Self::body_readers) states.
+    /// `None` when the contract settles no reference at all (no by-value input, a closed
+    /// set): the common case, which then costs the issue path nothing.
+    fn references(&self, verb: Verb) -> Option<Arc<References>> {
+        let open = match verb {
+            Verb::Meta => false,
+            _ if self.open_arguments.contains(&verb) => true,
+            Verb::Exists if !self.declared.iter().any(|(v, _)| *v == Verb::Exists) => {
+                self.open_arguments.contains(&Verb::Source)
+            }
+            _ => false,
+        };
+        let names = self.name_inputs(verb);
+        let values = Self::readers_for(&self.value_inputs, verb);
+        if !open && names.is_empty() && values.is_empty() {
+            return None;
+        }
+        Some(Arc::new(References {
+            names,
+            values,
+            declared: Self::readers_for(&self.all_inputs, verb),
+            open,
+        }))
+    }
+
+    fn readers_for(table: &[(Verb, Readers)], verb: Verb) -> Readers {
+        let own = |v: Verb| {
+            table
+                .iter()
+                .find(|(declared, _)| *declared == v)
+                .map(|(_, r)| r.clone())
+        };
+        match (verb, own(verb)) {
+            (Verb::Meta, _) => Readers::from(Vec::new()),
+            (_, Some(readers)) => readers,
+            (Verb::Exists, None) => own(Verb::Source).unwrap_or_else(|| Readers::from(Vec::new())),
+            _ => Readers::from(Vec::new()),
         }
     }
 
@@ -1074,6 +1318,8 @@ struct Admission {
     keep: Keep,
     /// The inputs this verb reads as a body ([`Floor::body_readers`], ledger #2402).
     readers: Readers,
+    /// How this verb settles a by-reference argument ([`Floor::references`], ledger #2511).
+    references: Option<Arc<References>>,
 }
 
 /// How long a contract read from a description may be kept, from its
@@ -1226,6 +1472,7 @@ impl FloorMemo {
             Admission {
                 declared: floor.declared_defaults(request.verb).cloned(),
                 readers: floor.body_readers(request.verb),
+                references: floor.references(request.verb),
                 keep,
                 lacking: floor.unsatisfied(request, capability),
                 conceal: floor.conceals(request.verb, capability),
@@ -3985,6 +4232,7 @@ impl Kernel {
             declared,
             keep,
             readers,
+            references,
         } = self.floors.admit(
             &resolved.endpoint,
             &request,
@@ -4069,7 +4317,11 @@ impl Kernel {
         // cache entry. After the floor, so a refused caller's body is never read; before
         // the identity, which the inline bytes are part of. Boxed and out of line, and only
         // when a body is attached (`settling`).
+        // A forwarder reads nothing itself: an attached body rides on to the target, whose
+        // own declaration says how it is read (ledger #2513).
+        let forwarding = run.attached().is_some() && resolved.endpoint.forwards().is_some();
         let collected = match self.settling(&mut request, &mut run, capability, readers) {
+            _ if forwarding => Vec::new(),
             None => Vec::new(),
             Some(settling) => settling.await?,
         };
@@ -4142,7 +4394,9 @@ impl Kernel {
                 .meta
                 .as_ref()
                 .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
-            let description = resolved.endpoint.describe();
+            // A forwarder (a view, a named request) is described by its TARGET's contract,
+            // the target resolved in this request's chain (ledger #2513; `forward.rs`).
+            let description = self.meta_description(&resolved.endpoint, &scope, capability);
             let target = meta_target(&request);
             let policy = meta_policy(&request)?;
             let rendered = match renderer.render(&description, &target) {
@@ -4213,7 +4467,12 @@ impl Kernel {
             // that can never be asked for again, whether or not the endpoint reads it: its
             // answer is not stored, and the uncached note names the content.
             invocation.note_one_shot_attachment();
-            let representation = match resolved.endpoint.invoke_body(&invocation).await {
+            // ★ A REFERENCE IS SETTLED BY THE CONTRACT (ledger #2511), the rule an attached
+            // body follows above: see `SettleReferences`. Only when an argument is a
+            // reference the contract says how to settle; the identity above is the
+            // reference, so the referent's thread is what invalidates the answer.
+            let endpoint = settle_references(&resolved.endpoint, &request, references);
+            let representation = match endpoint.invoke_body(&invocation).await {
                 Ok(representation) => representation,
                 // ★ A FAILURE CARRIES ITS DEPENDENCIES (ledger #611). What this
                 // invocation read before it failed is handed back beside the error, so
@@ -5625,6 +5884,67 @@ impl Kernel {
     /// changes is what the kernel can SAY about itself — the catalog, the action
     /// manifold, describe-by-id and `urn:kernel:validate` all consume this walk, so
     /// they inherit the kernel from one place instead of nine.
+    /// The description the `Meta` arm answers for `endpoint`: its own, or for a forwarder
+    /// its target's contract projected (ledger #2513), the target resolved in `scope` as
+    /// the forward itself would resolve it, following at most `MAX_FORWARDS` forwards.
+    fn meta_description(
+        &self,
+        endpoint: &Arc<dyn Endpoint>,
+        scope: &Scope,
+        capability: &Capability,
+    ) -> Description {
+        let own = endpoint.describe();
+        let Some(forward) = endpoint.forwards() else {
+            return own;
+        };
+        let target = self.forward_target(
+            &forward.target,
+            scope,
+            capability,
+            crate::forward::MAX_FORWARDS,
+        );
+        crate::forward::project(&forward, own, target.as_ref())
+    }
+
+    /// What a forward's `target` is described as from `scope`: its own description, or a
+    /// forwarder's projection; `None` for a name that resolves to nothing, to ⊥, or to an
+    /// endpoint whose existence is hidden from `capability` (a view must not tell a caller
+    /// what the target's own `Meta` would not), and past `left` forwards.
+    fn forward_target(
+        &self,
+        target: &Iri,
+        scope: &Scope,
+        capability: &Capability,
+        left: usize,
+    ) -> Option<Description> {
+        if let Some(op) = kernel_op(target.as_str()) {
+            return crate::kernel_ops::description(op);
+        }
+        let request = Request::new(Verb::Meta, target.clone());
+        let resolution = if crate::stream::is_stream(target.as_str()) {
+            Ok(self.streams.resolve(&request, &Scope::empty()))
+        } else {
+            scope.resolve_in(&request, &self.root, &self.seals)
+        };
+        let resolved = match resolution {
+            Ok(Resolution::Hit(resolved)) if !resolved.endpoint.is_limiter() => resolved,
+            _ => return None,
+        };
+        let own = resolved.endpoint.describe();
+        if Floor::of(&own).conceals(Verb::Meta, capability) {
+            return None;
+        }
+        match resolved.endpoint.forwards() {
+            None => Some(own),
+            Some(forward) => {
+                let inner = left
+                    .checked_sub(1)
+                    .and_then(|left| self.forward_target(&forward.target, scope, capability, left));
+                Some(crate::forward::project(&forward, own, inner.as_ref()))
+            }
+        }
+    }
+
     fn described(&self) -> Fallback {
         Fallback::new(vec![
             Arc::new(crate::kernel_ops::KernelOps),

@@ -121,7 +121,9 @@
 //! transition the catalog advertises only the **new** names, so every consumer
 //! that discovers resources by reading the catalog migrates forward on its own,
 //! while every consumer still holding an old name keeps working. Aliases are not
-//! hidden — they are a resource of their own, at `urn:kernel:aliases`.
+//! hidden — they are a resource of their own, at `urn:kernel:aliases`. A rule that
+//! resolves from the ROOT is not a renaming: a view or a named request is a name of its
+//! own, listed, and described by its target's contract (ledger #2513).
 //!
 //! **5. Chains resolve; cycles are refused, loudly.** `A→B→C` is followed
 //! transitively up to [`AliasTable::max_hops`] (default
@@ -156,15 +158,17 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::describe::Description;
+use crate::arg::ArgRef;
+use crate::declare::DeclarationError;
+use crate::describe::{ArgSpec, Description, InputSource};
 use crate::endpoint::{Endpoint, FnEndpoint, Invocation};
 use crate::error::Error;
-use crate::grammar::Bindings;
+use crate::grammar::{Bindings, Grammar, UriTemplate};
 use crate::iri::Iri;
 use crate::repr::Representation;
 use crate::request::Request;
 use crate::space::{answered, Resolution, Resolved, Scope, Space, SpaceEntry};
-use crate::topology::{SpaceKind, Topology, TopologyRule};
+use crate::topology::{MatchKind, SpaceKind, Topology, TopologyRule};
 use crate::verb::Verb;
 
 /// How many rewrites one canonicalization will follow before refusing. Chains are
@@ -180,6 +184,13 @@ pub const DEFAULT_MAX_HOPS: usize = 8;
 // aliasing one *away* is not.
 
 /// How a rule matches: the whole name, or a leading namespace.
+///
+/// ⚠ A TEMPLATE rule (a named request whose logical name is a URI template, ledger #2512)
+/// reports [`Exact`](RuleKind::Exact) here, because it matches one whole name at a time,
+/// and says it is a template through [`AliasRule::match_kind`] and
+/// [`TopologyRule::template`](crate::TopologyRule::template). This enum is not
+/// `#[non_exhaustive]`, so a third variant would break every exhaustive `match` on it
+/// downstream; making it one is a change for the next minor version.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RuleKind {
     /// The target must equal `from` exactly. `urn:log:config` → `file:/logConfig.yaml`.
@@ -242,6 +253,83 @@ impl ResolveAt {
     }
 }
 
+/// How a named request gives one argument of its target (ledger #2512): `ik:value`,
+/// `ik:ref` or `ik:capture` on the rule's `ik:Argument`.
+///
+/// `#[non_exhaustive]`: another way to give a value is additive.
+///
+/// ```
+/// use ikigai_core::{FixedValue, Iri};
+///
+/// assert_eq!(FixedValue::Value("urn:example:graph".into()).to_string(), "urn:example:graph");
+/// let query = Iri::parse("urn:example:queries/count.rq").unwrap();
+/// assert_eq!(FixedValue::Reference(query).to_string(), "<urn:example:queries/count.rq>");
+/// assert_eq!(FixedValue::Capture("id".into()).to_string(), "{id}");
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FixedValue {
+    /// By value: the literal, sent inline.
+    Value(String),
+    /// By reference: the IRI, sent as [`ArgRef::Reference`].
+    Reference(Iri),
+    /// The WHOLE text one of the rule's template variables captured, sent by value. Never
+    /// spliced inside a longer value: that would be string interpolation into a language.
+    Capture(String),
+}
+
+impl fmt::Display for FixedValue {
+    /// The spelling a binding writes: a value as it is, a reference as `<iri>`, a capture
+    /// as `{var}` — what [`ArgSpec::fixed`](crate::ArgSpec::fixed) carries.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FixedValue::Value(value) => f.write_str(value),
+            FixedValue::Reference(iri) => write!(f, "<{}>", iri.as_str()),
+            FixedValue::Capture(var) => write!(f, "{{{var}}}"),
+        }
+    }
+}
+
+/// One argument a named request fixes (ledger #2512): its name and how it is given.
+/// What the caller may not give, because it is part of what the name MEANS.
+///
+/// `#[non_exhaustive]`: build one with [`value`](Self::value),
+/// [`reference`](Self::reference) or [`capture`](Self::capture).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FixedArgument {
+    /// The target's input it fills.
+    pub name: String,
+    /// How the value is given.
+    pub value: FixedValue,
+}
+
+impl FixedArgument {
+    /// Fix `name` to a literal value.
+    pub fn value(name: impl Into<String>, value: impl Into<String>) -> Self {
+        FixedArgument {
+            name: name.into(),
+            value: FixedValue::Value(value.into()),
+        }
+    }
+
+    /// Fix `name` to the resource at `iri`, passed by reference.
+    pub fn reference(name: impl Into<String>, iri: Iri) -> Self {
+        FixedArgument {
+            name: name.into(),
+            value: FixedValue::Reference(iri),
+        }
+    }
+
+    /// Fix `name` to what the rule's template variable `var` captured.
+    pub fn capture(name: impl Into<String>, var: impl Into<String>) -> Self {
+        FixedArgument {
+            name: name.into(),
+            value: FixedValue::Capture(var.into()),
+        }
+    }
+}
+
 /// One rewrite rule, with the live counters that make it observable.
 #[derive(Debug)]
 pub struct AliasRule {
@@ -249,9 +337,35 @@ pub struct AliasRule {
     from: String,
     to: String,
     at: ResolveAt,
+    /// The rule's part as a NAMED REQUEST (ledger #2512): empty for a plain rewrite.
+    request: RequestPart,
     hops: AtomicU64,
     unresolved: AtomicU64,
     refused: AtomicU64,
+}
+
+/// What makes a root rule a named request: the template its logical name is, the verb it
+/// forwards, the arguments it fixes and the inputs it declares. All empty for a plain
+/// rewrite, which then behaves exactly as it did before named requests.
+#[derive(Clone, Debug, Default)]
+struct RequestPart {
+    /// The logical name as a URI template, for a template rule.
+    template: Option<UriTemplate>,
+    /// The canonical name as a URI template, when it holds variables.
+    target: Option<UriTemplate>,
+    verb: Option<Verb>,
+    fixes: Vec<FixedArgument>,
+    inputs: Vec<ArgSpec>,
+}
+
+impl RequestPart {
+    /// Whether this part carries anything a plain rewrite does not.
+    fn is_empty(&self) -> bool {
+        self.template.is_none()
+            && self.verb.is_none()
+            && self.fixes.is_empty()
+            && self.inputs.is_empty()
+    }
 }
 
 impl AliasRule {
@@ -275,6 +389,49 @@ impl AliasRule {
         self.at
     }
 
+    /// How this rule matches, a template rule included ([`MatchKind::Template`]), where
+    /// [`kind`](Self::kind) can only say exact or prefix.
+    pub fn match_kind(&self) -> MatchKind {
+        match (&self.request.template, self.kind) {
+            (Some(_), _) => MatchKind::Template,
+            (None, RuleKind::Exact) => MatchKind::Exact,
+            (None, RuleKind::Prefix) => MatchKind::Prefix,
+        }
+    }
+
+    /// The one verb a named request forwards (beside `Exists` and `Meta`), or `None` for
+    /// a rule that forwards every verb (ledger #2512).
+    pub fn verb(&self) -> Option<Verb> {
+        self.request.verb
+    }
+
+    /// The arguments a named request fixes, in name order (ledger #2512).
+    pub fn fixes(&self) -> &[FixedArgument] {
+        &self.request.fixes
+    }
+
+    /// The inputs a named request declares itself, in name order (ledger #2512).
+    pub fn inputs(&self) -> &[ArgSpec] {
+        &self.request.inputs
+    }
+
+    /// Whether this rule is a named request: a template, a bound verb, a fixed argument or
+    /// a declared input (ledger #2512). A plain rewrite is not.
+    pub fn is_named_request(&self) -> bool {
+        !self.request.is_empty()
+    }
+
+    /// The rule as the topology reports it.
+    pub(crate) fn summary(&self) -> TopologyRule {
+        let mut rule = TopologyRule::new(self.kind, self.from.as_str(), self.to.as_str())
+            .resolving_at(self.at);
+        rule.template = self.request.template.is_some();
+        rule.verb = self.request.verb;
+        rule.fixes = self.request.fixes.clone();
+        rule.inputs = self.request.inputs.clone();
+        rule
+    }
+
     /// How many rewrites this rule has performed.
     pub fn hops(&self) -> u64 {
         self.hops.load(Ordering::Relaxed)
@@ -295,12 +452,31 @@ impl AliasRule {
 
     /// Apply this rule to `target`, or `None` if it does not match.
     pub(crate) fn apply(&self, target: &str) -> Option<String> {
-        match self.kind {
-            RuleKind::Exact => (target == self.from).then(|| self.to.clone()),
+        self.apply_capturing(target).map(|(next, _)| next)
+    }
+
+    /// Apply this rule to `target`, with what a template rule captured (empty for any
+    /// other rule), or `None` if it does not match.
+    ///
+    /// A capture is IRI text already, so it is substituted into a templated canonical name
+    /// as it is: its own `%XX` escapes are kept rather than encoded twice, and the kernel
+    /// never parses arguments out of a name, so a `?` in a capture carries nothing.
+    fn apply_capturing(&self, target: &str) -> Option<(String, Bindings)> {
+        if let Some(template) = &self.request.template {
+            let captures = template.match_iri(&Iri::parse(target).ok()?)?;
+            let next = match &self.request.target {
+                Some(to) => to.expand(&captures)?,
+                None => self.to.clone(),
+            };
+            return Some((next, captures));
+        }
+        let next = match self.kind {
+            RuleKind::Exact => (target == self.from).then(|| self.to.clone())?,
             RuleKind::Prefix => target
                 .strip_prefix(self.from.as_str())
-                .map(|rest| format!("{}{rest}", self.to)),
-        }
+                .map(|rest| format!("{}{rest}", self.to))?,
+        };
+        Some((next, Bindings::default()))
     }
 }
 
@@ -495,6 +671,54 @@ impl AliasTable {
         self.rule_at(kind, from, to, ResolveAt::Child)
     }
 
+    /// Add a rule as the topology states it (builder, ledger #2512): the form that carries
+    /// a NAMED REQUEST — a template, a bound verb, fixed arguments and declared inputs —
+    /// beside every plain rule [`rule_at`](Self::rule_at) builds.
+    ///
+    /// Refused ([`DeclarationError::Malformed`], or [`DeclarationError::Pattern`] for a
+    /// template that does not parse), naming the rule's logical name, when the rule cannot
+    /// mean one thing: a named request that does not resolve from the root, a template
+    /// prefix rule or one with no variable, a canonical template using a variable the
+    /// logical one does not capture, a `Meta` verb, a fixed or declared name given twice or
+    /// not IRI-safe, a fixed `as` (it negotiates the face: declare it as an input with a
+    /// default), a capture of a variable the template does not have, or a declared input
+    /// that is a binding or carries more than a declaration can state.
+    ///
+    /// ```
+    /// use ikigai_core::{AliasTable, FixedArgument, Iri, MatchKind, TopologyRule, Verb};
+    ///
+    /// let count = TopologyRule::named_request("urn:example:quakes:count", "urn:example:sparql")
+    ///     .verb(Verb::Source)
+    ///     .fixing(FixedArgument::value("graph", "urn:example:quakes:graph"))
+    ///     .fixing(FixedArgument::reference(
+    ///         "query",
+    ///         Iri::parse("urn:example:queries/count.rq").unwrap(),
+    ///     ));
+    /// let event = TopologyRule::named_template("urn:example:quakes:event:{id}", "urn:example:compose")
+    ///     .fixing(FixedArgument::capture("id", "id"));
+    /// let table = AliasTable::new().with_rule(count).unwrap().with_rule(event).unwrap();
+    /// assert_eq!(table.rules()[0].match_kind(), MatchKind::Template);
+    /// assert_eq!(table.rules()[1].fixes().len(), 2);
+    ///
+    /// // `as` is negotiation, not input: never fixed.
+    /// let face = TopologyRule::named_request("urn:example:x", "urn:example:y")
+    ///     .fixing(FixedArgument::value("as", "text/csv"));
+    /// assert!(AliasTable::new().with_rule(face).is_err());
+    /// ```
+    pub fn with_rule(self, rule: TopologyRule) -> Result<Self, DeclarationError> {
+        let request = request_part(&rule)?;
+        Ok(self.insert(AliasRule {
+            kind: rule.kind,
+            from: rule.from,
+            to: rule.to,
+            at: rule.at,
+            request,
+            hops: AtomicU64::new(0),
+            unresolved: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+        }))
+    }
+
     /// Rewrite the single name `from` to `to`, and resolve `to` FROM THE ROOT under the
     /// caller's capability rather than in the alias's child (builder): a view onto a
     /// name served elsewhere. See [`ResolveAt::Root`].
@@ -510,31 +734,37 @@ impl AliasTable {
 
     /// A rule of `kind`, resolved `at` (builder): the general form of the four above.
     pub fn rule_at(
-        mut self,
+        self,
         kind: RuleKind,
         from: impl Into<String>,
         to: impl Into<String>,
         at: ResolveAt,
     ) -> Self {
-        self.rules.push(AliasRule {
+        self.insert(AliasRule {
             kind,
             from: from.into(),
             to: to.into(),
             at,
+            request: RequestPart::default(),
             hops: AtomicU64::new(0),
             unresolved: AtomicU64::new(0),
             refused: AtomicU64::new(0),
-        });
+        })
+    }
+
+    /// Insert one rule in precedence order.
+    fn insert(mut self, rule: AliasRule) -> Self {
+        self.rules.push(rule);
         // Most specific first: the longest `from` wins, and at equal length an
-        // exact rule outranks a prefix one. So a table carrying both
-        // `prefix urn:fn:` and `exact urn:fn:toUpper` sends `toUpper` to its own
-        // destination and everything else under the namespace rule, without the
+        // exact rule outranks a prefix one, and both outrank a template. So a table
+        // carrying both `prefix urn:fn:` and `exact urn:fn:toUpper` sends `toUpper` to
+        // its own destination and everything else under the namespace rule, without the
         // author having to think about declaration order.
         self.rules.sort_by(|a, b| {
             b.from
                 .len()
                 .cmp(&a.from.len())
-                .then_with(|| a.kind.keyword().cmp(b.kind.keyword()))
+                .then_with(|| a.match_kind().keyword().cmp(b.match_kind().keyword()))
                 .then_with(|| a.from.cmp(&b.from))
         });
         self
@@ -726,7 +956,22 @@ impl AliasTable {
     /// ```
     ///
     /// An optional fourth field says where the rewritten name resolves: `child` (the
-    /// default, and never written back) or `root` ([`ResolveAt`]).
+    /// default, and never written back) or `root` ([`ResolveAt`]). A `template` rule (a
+    /// named request whose logical name is a URI template, ledger #2512) is always `root`.
+    ///
+    /// **A rule with arguments has no line form**: its fields cannot hold a quoted value,
+    /// so a line carrying `key=value` words is refused, naming the two forms that can
+    /// write one — a Turtle declaration (`ik:fixes`) and a host's names file.
+    ///
+    /// ```
+    /// use ikigai_core::AliasTable;
+    ///
+    /// let refused = AliasTable::parse("exact urn:example:count urn:example:sparql root graph=urn:g")
+    ///     .unwrap_err();
+    /// assert!(refused.detail.contains("ik:fixes"), "{refused}");
+    /// let template = AliasTable::parse("template urn:example:e:{id} urn:example:page:{id} root").unwrap();
+    /// assert_eq!(template.rules()[0].match_kind().keyword(), "template");
+    /// ```
     ///
     /// Blank lines and `#` comments are ignored. Whitespace-separated, so neither
     /// field may contain a space — IRIs may not either, so nothing is lost.
@@ -746,6 +991,40 @@ impl AliasTable {
                         detail: format!("`{hops}` is not a hop count"),
                     })?;
                     table = table.with_max_hops(hops);
+                }
+                [kind @ ("exact" | "prefix" | "template"), _, _, rest @ ..]
+                    if rest.iter().any(|field| field.contains('=')) =>
+                {
+                    return Err(AliasParseError {
+                        line,
+                        detail: format!(
+                            "`{content}` is a {kind} rule with arguments, which the line form \
+                             cannot write (its fields cannot hold a quoted value): declare it \
+                             as a named request in Turtle (ik:fixes on an ik:RewriteRule) or in \
+                             a host's names file"
+                        ),
+                    })
+                }
+                ["template", from, to, rest @ ..] => {
+                    let at = match rest {
+                        ["root"] => ResolveAt::Root,
+                        _ => {
+                            return Err(AliasParseError {
+                                line,
+                                detail: format!(
+                                    "a template rule is a named request and resolves from the \
+                                     root: write `template {from} {to} root`"
+                                ),
+                            })
+                        }
+                    };
+                    let rule = TopologyRule::new(RuleKind::Exact, *from, *to).resolving_at(at);
+                    let mut rule = rule;
+                    rule.template = true;
+                    table = table.with_rule(rule).map_err(|e| AliasParseError {
+                        line,
+                        detail: e.to_string(),
+                    })?;
                 }
                 [kind @ ("exact" | "prefix"), from, to, rest @ ..] if rest.len() <= 1 => {
                     let at = match rest {
@@ -781,8 +1060,8 @@ impl AliasTable {
                     return Err(AliasParseError {
                         line,
                         detail: format!(
-                            "expected `exact <from> <to> [root]`, `prefix <from> <to> [root]` \
-                             or `max-hops <n>`, got `{content}`"
+                            "expected `exact <from> <to> [root]`, `prefix <from> <to> [root]`, \
+                             `template <from> <to> root` or `max-hops <n>`, got `{content}`"
                         ),
                     })
                 }
@@ -792,8 +1071,10 @@ impl AliasTable {
     }
 
     /// Render the table back to its text form — round-trips through
-    /// [`parse`](AliasTable::parse). Counters are *not* rendered: this is the
-    /// table's definition, not its readout (that is `urn:kernel:aliases`).
+    /// [`parse`](AliasTable::parse) for every rule without arguments. Counters are *not*
+    /// rendered: this is the table's definition, not its readout (that is
+    /// `urn:kernel:aliases`). A named request with arguments is rendered with them as
+    /// `key=value` words, which `parse` refuses by name rather than reading half of.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
         if self.max_hops != DEFAULT_MAX_HOPS {
@@ -802,12 +1083,23 @@ impl AliasTable {
         for rule in &self.rules {
             out.push_str(&format!(
                 "{} {} {}",
-                rule.kind.keyword(),
+                rule.match_kind().keyword(),
                 rule.from,
                 rule.to
             ));
             if rule.at != ResolveAt::Child {
                 out.push_str(&format!(" {}", rule.at.keyword()));
+            }
+            // A named request's arguments, as words [`parse`](Self::parse) REFUSES by
+            // name: a readout of the rule, never a silent half of it on the way back.
+            if let Some(verb) = rule.request.verb {
+                out.push_str(&format!(" verb={verb:?}"));
+            }
+            for fixed in &rule.request.fixes {
+                out.push_str(&format!(" {}={}", fixed.name, fixed.value));
+            }
+            for input in &rule.request.inputs {
+                out.push_str(&format!(" input={}", input.name));
             }
             out.push('\n');
         }
@@ -895,8 +1187,36 @@ pub(crate) fn previewing<R>(resolve: impl FnOnce() -> R) -> R {
 ///   onto a view onto the first) is stopped by the kernel's nesting-depth bound
 ///   ([`Kernel::with_max_depth`](crate::Kernel::with_max_depth)) as
 ///   [`Error::DepthExceeded`].
-/// - `Meta` of a view describes the forwarder (it names its target in its summary):
-///   `Meta` takes no invocation, so it cannot be forwarded.
+/// - **`Meta` of a view is its TARGET's contract** (ledger #2513): the view says what it
+///   forwards to ([`Endpoint::forwards`]), and the kernel follows that wherever it
+///   describes anything — `Meta`, the catalog, `urn:kernel:actions` — so a view is listed
+///   under its own name with the target's inputs (a named request's fixed ones listed and
+///   marked), outputs and `requires`. Only a view whose target resolves to nothing shows
+///   the forwarder's own contract, whose argument set is open (every argument passes
+///   through) and whose summary says the target is missing.
+///
+/// # Named requests
+///
+/// A view may bind its name to a request WITH ARGUMENTS (ledger #2512): a rule added with
+/// [`AliasTable::with_rule`] from a [`TopologyRule::named_request`] or
+/// [`TopologyRule::named_template`], or declared in Turtle (`ik:fixes`, `ik:verb`,
+/// `ik:input`, `ik:ruleKind "template"`). It is partial application, merged into the
+/// forwarded request in the order the chain applied its rules:
+///
+/// - **a fixed argument is the binding's**: a caller who gives one is refused with
+///   [`Error::InvalidArgument`] naming the binding (`fixed by <urn:…> to …`), never
+///   silently overridden and never silently ignored;
+/// - **every other argument passes through** to the target unchanged;
+/// - **a declared input** is the caller's to give, and its default is filled when the
+///   caller leaves it out; `as` is never fixed, and a binding's default face is a
+///   declared `as` with a default, so a caller's `as=` still negotiates;
+/// - **a bound verb** is the one verb forwarded, beside `Exists`; any other is refused
+///   with [`Error::Unsupported`];
+/// - **a template rule's captures** may fill its canonical name and whole argument
+///   values ([`FixedValue::Capture`]), never a part of a longer value.
+///
+/// A bound name's answer is its own cache entry depending on the expansion's, like any
+/// view's; the expansion is the ordinary request, shared with anyone who asks for it.
 ///
 /// ```
 /// use std::sync::Arc;
@@ -956,10 +1276,19 @@ impl Space for Alias {
     }
 
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
-        // Decision 4: transparent to enumeration. The catalog and the action
-        // manifold see the BACKING names, once each; the aliases are their own
-        // resource at `urn:kernel:aliases`.
-        self.inner.entries()
+        // Decision 4: transparent to enumeration for a renaming. The catalog and the
+        // action manifold see the BACKING names, once each; the aliases are their own
+        // resource at `urn:kernel:aliases`. A ROOT rule is not a renaming but a name of its
+        // own — a view, or a named request — so each exact and template root rule is listed
+        // (ledger #2513), and a walk describes it by its target's contract. A root PREFIX
+        // rule names a family no pattern lists, so it is not.
+        let mut entries = self.inner.entries()?;
+        for rule in &self.table.rules {
+            if rule.at == ResolveAt::Root && rule.match_kind() != MatchKind::Prefix {
+                entries.push(SpaceEntry::new(rule.from.clone(), "alias-view"));
+            }
+        }
+        Some(entries)
     }
 
     fn id(&self) -> Option<Iri> {
@@ -972,15 +1301,7 @@ impl Space for Alias {
     /// to see.
     fn topology(&self) -> Topology {
         Topology::new(SpaceKind::Alias {
-            rules: self
-                .table
-                .rules()
-                .iter()
-                .map(|rule| {
-                    TopologyRule::new(rule.kind(), rule.from(), rule.to())
-                        .resolving_at(rule.resolve_at())
-                })
-                .collect(),
+            rules: self.table.rules().iter().map(AliasRule::summary).collect(),
             max_hops: self.table.max_hops(),
         })
         .with_id(self.id.clone())
@@ -1000,13 +1321,18 @@ impl Alias {
             {
                 // A view: forward from the root under the caller's capability. No
                 // canonical is reported — the view's answer is its own entry, hung from
-                // the target's threads by the sub-request (see the type's docs).
-                Resolution::Hit(Resolved::new(
-                    Arc::new(ViewEndpoint {
-                        target: hop.canonical().clone(),
+                // the target's threads by the sub-request (see the type's docs). A named
+                // request's parts ride along, replayed from the chain the walk took.
+                let endpoint: Arc<dyn Endpoint> = match self.table.view(&request.target, &hop) {
+                    Some(view) => Arc::new(view),
+                    None => refused_endpoint(&AliasRefusal {
+                        logical: request.target.clone(),
+                        reason: "a named request's chain did not replay".into(),
+                        trail: vec![request.target.as_str().to_string()],
+                        rules: hop.rules().to_vec(),
                     }),
-                    Bindings::default(),
-                ))
+                };
+                Resolution::Hit(Resolved::new(endpoint, Bindings::default()))
             }
             Canonical::Aliased(hop) => {
                 let mut rewritten = request.clone();
@@ -1040,39 +1366,373 @@ impl Alias {
 }
 
 /// The endpoint a root-resolving rule's match resolves to: it re-issues the request
-/// under the rewritten name, from the root, under the caller's own capability.
+/// under the rewritten name, from the root, under the caller's own capability — with a
+/// named request's arguments merged in (ledger #2512).
 struct ViewEndpoint {
     target: Iri,
+    /// Each named request the chain passed through, in the order it applied.
+    parts: Vec<BoundPart>,
+    /// What it forwards to, as the kernel describes it (ledger #2513).
+    forward: crate::Forward,
+}
+
+/// One named request of a view's chain, with its captures settled.
+struct BoundPart {
+    /// The name the rule matched (for a template rule, the concrete name).
+    name: Iri,
+    verb: Option<Verb>,
+    /// Each fixed argument: its name, the value sent, and how a refusal shows it.
+    fixed: Vec<(String, ArgRef, String)>,
+    inputs: Vec<ArgSpec>,
+}
+
+impl AliasTable {
+    /// The view a root chain resolves to: the chain's final name, and each named request
+    /// it passed through, replayed from `logical` so a template rule's captures are known.
+    fn view(&self, logical: &Iri, hop: &AliasHop) -> Option<ViewEndpoint> {
+        let mut current = logical.clone();
+        let mut parts = Vec::new();
+        // The name the caller's name is bound under: the first rule's logical name (a
+        // template, for a template rule, whose captures the caller supplies).
+        let first = self.rules.get(*hop.rules().first()?)?;
+        let mut forward = crate::Forward::new(first.from.clone(), hop.canonical().clone());
+        if let Some(template) = &first.request.template {
+            for var in template.variables() {
+                forward = forward.capturing(var);
+            }
+        }
+        for (place, &index) in hop.rules().iter().enumerate() {
+            let rule = self.rules.get(index)?;
+            let (next, captures) = rule.apply_capturing(current.as_str())?;
+            if rule.is_named_request() {
+                if forward.verb.is_none() {
+                    forward.verb = rule.request.verb;
+                }
+                for argument in &rule.request.fixes {
+                    // A later rule's capture is of a name the caller never wrote: it is a
+                    // value by then.
+                    let argument = match (&argument.value, place) {
+                        (FixedValue::Capture(var), 1..) => FixedArgument::value(
+                            argument.name.clone(),
+                            captures.get(var).unwrap_or_default(),
+                        ),
+                        _ => argument.clone(),
+                    };
+                    forward = forward.fixing(argument);
+                }
+                for input in &rule.request.inputs {
+                    if !forward.inputs.iter().any(|i| i.name == input.name) {
+                        forward = forward.input(input.clone());
+                    }
+                }
+                let mut fixed = Vec::with_capacity(rule.request.fixes.len());
+                for argument in &rule.request.fixes {
+                    let (value, shown) = match &argument.value {
+                        FixedValue::Value(value) => {
+                            (ArgRef::Inline(value.clone().into_bytes()), value.clone())
+                        }
+                        FixedValue::Reference(iri) => (
+                            ArgRef::Reference(iri.clone()),
+                            format!("<{}>", iri.as_str()),
+                        ),
+                        FixedValue::Capture(var) => {
+                            let captured = captures.get(var)?.to_string();
+                            (ArgRef::Inline(captured.clone().into_bytes()), captured)
+                        }
+                    };
+                    fixed.push((argument.name.clone(), value, shown));
+                }
+                parts.push(BoundPart {
+                    name: current.clone(),
+                    verb: rule.request.verb,
+                    fixed,
+                    inputs: rule.request.inputs.clone(),
+                });
+            }
+            current = Iri::parse(next).ok()?;
+        }
+        (current == *hop.canonical()).then_some(ViewEndpoint {
+            target: current,
+            parts,
+            forward,
+        })
+    }
+}
+
+impl ViewEndpoint {
+    /// The request this view issues for `inv`: the caller's, at the target, with every
+    /// fixed argument merged in and every declared default the caller left out.
+    ///
+    /// **Fixed wins, and says so** (ledger #2512): a caller who gives a fixed argument is
+    /// REFUSED, naming the binding, never silently overridden (that would make the name
+    /// mean any request) and never silently ignored. Every other argument passes through.
+    fn forwarded(&self, inv: &Invocation<'_>) -> crate::error::Result<Request> {
+        let mut forwarded = inv.request.clone();
+        forwarded.target = self.target.clone();
+        for part in &self.parts {
+            if let Some(bound) = part.verb {
+                let verb = inv.request.verb;
+                if verb != bound && verb != Verb::Exists {
+                    return Err(Error::Unsupported {
+                        verb: Some(verb),
+                        detail: format!(
+                            "<{}> is a named request for {bound:?}: it answers {bound:?}, \
+                             Exists and Meta",
+                            part.name.as_str()
+                        ),
+                    });
+                }
+            }
+            for (name, value, shown) in &part.fixed {
+                if forwarded.args.contains_key(name) {
+                    return Err(Error::InvalidArgument {
+                        name: name.clone(),
+                        detail: format!("fixed by <{}> to {shown}", part.name.as_str()),
+                    });
+                }
+                forwarded.args.insert(name.clone(), value.clone());
+            }
+            for input in &part.inputs {
+                if let Some(default) = &input.default {
+                    forwarded
+                        .args
+                        .entry(input.name.clone())
+                        .or_insert_with(|| ArgRef::Inline(default.clone().into_bytes()));
+                }
+            }
+        }
+        Ok(forwarded)
+    }
+
+    /// The one verb the chain binds, if any.
+    fn bound_verb(&self) -> Option<Verb> {
+        self.parts.iter().find_map(|part| part.verb)
+    }
 }
 
 #[async_trait::async_trait]
 impl Endpoint for ViewEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> crate::error::Result<Representation> {
-        let mut forwarded = inv.request.clone();
-        forwarded.target = self.target.clone();
         // `issue`, never an attenuating or widening form: the caller's capability, as
         // it arrived. Its dependencies are recorded, so the view hangs from the target.
-        inv.issue(forwarded).await
+        inv.issue(self.forwarded(inv)?).await
+    }
+
+    /// What the kernel calls: the target's answer as the target produced it, a stream
+    /// included, never collected on the way through the view (ledger #2512). A body the
+    /// caller attached rides the same run, so the target reads it.
+    async fn invoke_body(
+        &self,
+        inv: &Invocation<'_>,
+    ) -> crate::error::Result<Representation<crate::Body>> {
+        inv.issue_body(self.forwarded(inv)?).await
     }
 
     fn name(&self) -> &str {
         "alias-view"
     }
 
-    fn describe(&self) -> Description {
-        Description::new("alias-view")
-            .title("A view onto another name")
-            .summary(format!(
-                "Forwards to <{}>, resolved from the root under the caller's own \
-                 capability (an ik:RewriteRule with ik:resolveAt \"root\").",
-                self.target.as_str()
-            ))
-            .verb(Verb::Source)
-            .verb(Verb::Sink)
-            .verb(Verb::Exists)
-            .verb(Verb::Delete)
-            .verb(Verb::Meta)
+    fn forwards(&self) -> Option<crate::Forward> {
+        Some(self.forward.clone())
     }
+
+    fn describe(&self) -> Description {
+        let mut summary = format!("Forwards to <{}>", self.target.as_str());
+        let fixed: Vec<String> = self
+            .parts
+            .iter()
+            .flat_map(|part| &part.fixed)
+            .map(|(name, _, shown)| format!("{name}={shown}"))
+            .collect();
+        if !fixed.is_empty() {
+            summary.push_str(&format!(" with {}", fixed.join(" ")));
+        }
+        summary.push_str(
+            ", resolved from the root under the caller's own capability (an \
+             ik:RewriteRule with ik:resolveAt \"root\").",
+        );
+        let mut description = Description::new("alias-view")
+            .title(if self.parts.is_empty() {
+                "A view onto another name"
+            } else {
+                "A named request"
+            })
+            .summary(summary)
+            // Every argument a caller gives passes through to the target, so the set is
+            // open: an engine names each `key=value` rather than routing it as a value.
+            .open_arguments("an argument of the target, passed through unchanged");
+        description = match self.bound_verb() {
+            Some(verb) => description.verb(verb).verb(Verb::Exists).verb(Verb::Meta),
+            None => description
+                .verb(Verb::Source)
+                .verb(Verb::Sink)
+                .verb(Verb::Exists)
+                .verb(Verb::Delete)
+                .verb(Verb::Meta),
+        };
+        let mut declared: Vec<&str> = Vec::new();
+        for input in self.parts.iter().flat_map(|part| &part.inputs) {
+            if !declared.contains(&input.name.as_str()) {
+                declared.push(&input.name);
+                description = description.input(input.clone());
+            }
+        }
+        description
+    }
+}
+
+/// Whether `rule` can be added to a table: the refusal [`AliasTable::with_rule`] gives,
+/// without building anything.
+pub(crate) fn check_rule(rule: &TopologyRule) -> Result<(), DeclarationError> {
+    request_part(rule).map(|_| ())
+}
+
+/// The named-request part of `rule`, refused when the rule cannot mean one thing (see
+/// [`AliasTable::with_rule`]).
+fn request_part(rule: &TopologyRule) -> Result<RequestPart, DeclarationError> {
+    let refuse = |reason: String| DeclarationError::Malformed {
+        node: Some(rule.from.clone()),
+        reason,
+    };
+    let named =
+        rule.template || rule.verb.is_some() || !rule.fixes.is_empty() || !rule.inputs.is_empty();
+    if !named {
+        return Ok(RequestPart::default());
+    }
+    if rule.at != ResolveAt::Root {
+        return Err(refuse(
+            "a named request (a template, a bound verb, fixed arguments or declared inputs) \
+             resolves from the root: mark it ik:resolveAt \"root\""
+                .into(),
+        ));
+    }
+    let pattern = |text: &str| {
+        UriTemplate::parse(text).map_err(|e| DeclarationError::Pattern {
+            node: rule.from.clone(),
+            pattern: text.to_string(),
+            reason: format!("is not a URI template: {e}"),
+        })
+    };
+    let template = if rule.template {
+        if rule.kind != RuleKind::Exact {
+            return Err(refuse(
+                "a template rule matches one whole name: it is never a prefix rule".into(),
+            ));
+        }
+        let template = pattern(&rule.from)?;
+        if template.variables().next().is_none() {
+            return Err(refuse(
+                "a template rule captures at least one {var}; with none it is an exact rule".into(),
+            ));
+        }
+        Some(template)
+    } else {
+        None
+    };
+    let vars: Vec<String> = template
+        .as_ref()
+        .map(|t| t.variables().map(str::to_string).collect())
+        .unwrap_or_default();
+    let target = if rule.to.contains('{') {
+        let target = pattern(&rule.to)?;
+        if let Some(var) = target.variables().find(|v| !vars.iter().any(|w| w == v)) {
+            return Err(refuse(format!(
+                "its canonical name uses {{{var}}}, which its logical name does not capture"
+            )));
+        }
+        Some(target)
+    } else {
+        None
+    };
+    if rule.verb == Some(Verb::Meta) {
+        return Err(refuse(
+            "a named request forwards Source, Sink, Exists or Delete: its Meta is answered \
+             from its contract"
+                .into(),
+        ));
+    }
+    let named_ok = |name: &str, what: &str| {
+        if name.is_empty() || !crate::iri::is_iri_safe(name) {
+            Err(refuse(format!(
+                "{what} `{name}` is not a name a declaration can state (empty, or not IRI-safe)"
+            )))
+        } else {
+            Ok(())
+        }
+    };
+    let mut names: Vec<&str> = Vec::new();
+    for argument in &rule.fixes {
+        named_ok(&argument.name, "it fixes")?;
+        if argument.name == "as" {
+            return Err(refuse(
+                "it fixes `as`, which negotiates the face and is never fixed: declare `as` as \
+                 an input with a default, the name's default face"
+                    .into(),
+            ));
+        }
+        if names.contains(&argument.name.as_str()) {
+            return Err(refuse(format!("it fixes `{}` twice", argument.name)));
+        }
+        names.push(&argument.name);
+        if let FixedValue::Capture(var) = &argument.value {
+            if !vars.iter().any(|v| v == var) {
+                return Err(refuse(format!(
+                    "it fixes `{}` to the capture {{{var}}}, which its logical name does not have",
+                    argument.name
+                )));
+            }
+        }
+    }
+    for input in &rule.inputs {
+        named_ok(&input.name, "it declares")?;
+        if names.contains(&input.name.as_str()) {
+            return Err(refuse(format!(
+                "it both fixes and declares `{}`: a declared input is the caller's to give",
+                input.name
+            )));
+        }
+        names.push(&input.name);
+        if input.source == InputSource::Binding {
+            return Err(refuse(format!(
+                "it declares `{}` as a binding: a template rule's captures are its bindings",
+                input.name
+            )));
+        }
+        if !declarable(input) {
+            return Err(refuse(format!(
+                "it declares `{}` with more than a declaration states (an input's name, \
+                 summary, required, class, default and one_of)",
+                input.name
+            )));
+        }
+    }
+    let mut fixes = rule.fixes.clone();
+    fixes.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut inputs = rule.inputs.clone();
+    inputs.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(RequestPart {
+        template,
+        target,
+        verb: rule.verb,
+        fixes,
+        inputs,
+    })
+}
+
+/// Whether a declared input carries only what a declaration's input node states: its
+/// name, summary, required, class, default and enumeration. Anything else would be lost
+/// on the way through Turtle, and a declaration never skips.
+pub(crate) fn declarable(input: &ArgSpec) -> bool {
+    input.examples.is_empty()
+        && input.needs.is_empty()
+        && input.list.is_none()
+        && input.values.is_empty()
+        && !input.reads_body
+        && input.fixed.is_none()
+        && match input.class.as_deref() {
+            Some(class) => crate::iri::is_iri_safe(class),
+            None => true,
+        }
 }
 
 /// The endpoint a refused rewrite resolves to: it errors on invoke with the trail.

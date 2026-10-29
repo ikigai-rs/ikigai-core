@@ -106,6 +106,15 @@ pub struct ArgSpec {
     /// when false, so existing JSON contracts are unchanged; `ik:readsBody true` in Turtle.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reads_body: bool,
+    /// The value a NAMED REQUEST fixes this input to (ledger #2512), when the input is
+    /// listed in a forwarding name's contract: the caller may not give it (a caller who
+    /// does is refused, naming the binding), and it is LISTED rather than omitted so an
+    /// engine names `key=value` instead of routing it as a positional value. Spelled as
+    /// the binding wrote it: a literal value as it is, a reference as `<iri>`, a capture
+    /// as `{var}`. Omitted from serialized output when absent, so existing JSON
+    /// contracts are unchanged; `ik:fixed "…"` in Turtle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed: Option<String>,
 }
 
 /// [`ArgSpec`]'s JSON form: the same fields, with `one_of` written whenever the input is
@@ -133,6 +142,8 @@ struct ArgSpecWire {
     values: BTreeMap<String, ValueNote>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     reads_body: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fixed: Option<String>,
 }
 
 impl From<ArgSpecWire> for ArgSpec {
@@ -151,6 +162,7 @@ impl From<ArgSpecWire> for ArgSpec {
             list: wire.list,
             values: wire.values,
             reads_body: wire.reads_body,
+            fixed: wire.fixed,
         }
     }
 }
@@ -170,6 +182,7 @@ impl From<ArgSpec> for ArgSpecWire {
             list: spec.list,
             values: spec.values,
             reads_body: spec.reads_body,
+            fixed: spec.fixed,
         }
     }
 }
@@ -193,6 +206,7 @@ impl PartialEq for ArgSpec {
             list,
             values,
             reads_body,
+            fixed,
         } = self;
         *name == other.name
             && *summary == other.summary
@@ -207,6 +221,7 @@ impl PartialEq for ArgSpec {
             && *list == other.list
             && *values == other.values
             && *reads_body == other.reads_body
+            && *fixed == other.fixed
     }
 }
 
@@ -509,6 +524,7 @@ impl ArgSpec {
             list: None,
             values: BTreeMap::new(),
             reads_body: false,
+            fixed: None,
         }
     }
 
@@ -684,6 +700,25 @@ impl ArgSpec {
     /// ```
     pub fn reads_body(mut self) -> Self {
         self.reads_body = true;
+        self
+    }
+
+    /// Mark the input fixed by a named request to `value` (builder; ledger #2512): see
+    /// [`fixed`](Self::fixed). A fixed input is optional to the caller, who may not give it.
+    ///
+    /// ```
+    /// use ikigai_core::ArgSpec;
+    ///
+    /// let graph = ArgSpec::new("graph").fixed_to("urn:example:graph");
+    /// assert_eq!(graph.fixed.as_deref(), Some("urn:example:graph"));
+    /// assert!(!graph.required);
+    /// assert_eq!(serde_json::to_value(&graph).unwrap()["fixed"], "urn:example:graph");
+    /// // Unfixed is the absence of the key, so an existing JSON contract is unchanged.
+    /// assert!(serde_json::to_value(ArgSpec::new("graph")).unwrap().get("fixed").is_none());
+    /// ```
+    pub fn fixed_to(mut self, value: impl Into<String>) -> Self {
+        self.fixed = Some(value.into());
+        self.required = false;
         self
     }
 
