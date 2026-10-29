@@ -4746,8 +4746,9 @@ impl Kernel {
         // Store an idempotent result unless it's volatile (`Always`). A time-based
         // `At` deadline is only storable when a clock is present to later evaluate
         // it — otherwise the kernel could never tell when it expired, so it declines
-        // — and only while it is still in the future on that clock: an entry already
-        // expired when it came back would be filed only to be evicted unread.
+        // — and an already expired answer needs an origin validator. Such an entry
+        // is stale from the start: never served as fresh, but offered to the endpoint
+        // for revalidation under the same admission and capacity rules as any entry.
         //
         // Stored BEFORE the event is recorded, so the event can say whether it was:
         // the verbs that store (`is_cacheable`) and the verbs that cut
@@ -4765,7 +4766,7 @@ impl Kernel {
                 Expiry::Never => {}
                 Expiry::At(deadline) => match self.now_stamp() {
                     None => why.declined = Some(Declined::NoClock),
-                    Some(now) if deadline <= now => {
+                    Some(now) if deadline <= now && representation.origin_validator().is_none() => {
                         why.declined = Some(Declined::Expired(deadline));
                     }
                     Some(_) => {}

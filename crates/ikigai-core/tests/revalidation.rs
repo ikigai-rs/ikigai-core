@@ -120,29 +120,38 @@ impl Origin {
 /// it attaches a validator at all.
 fn origin_endpoint(origin: Arc<Origin>, ttl: u64, validated: bool) -> FnEndpoint {
     FnEndpoint::new("origin", move |inv: &Invocation<'_>| {
-        let now = inv.now().expect("a clock");
-        let version = origin.version.lock().unwrap().clone();
-        origin.offers.lock().unwrap().push(
-            inv.stale()
-                .map(|stale| (stale.validator.clone(), stale.repr_type.clone())),
-        );
-        if let Some(stale) = inv.stale() {
-            if stale.validator.etag.as_deref() == Some(version.as_str()) {
-                return Ok(Representation::revalidated(now.plus_millis(ttl)));
-            }
+        origin_answer(&origin, inv, ttl, validated)
+    })
+}
+
+fn origin_answer(
+    origin: &Origin,
+    inv: &Invocation<'_>,
+    ttl: u64,
+    validated: bool,
+) -> ikigai_core::Result<Representation> {
+    let now = inv.now().expect("a clock");
+    let version = origin.version.lock().unwrap().clone();
+    origin.offers.lock().unwrap().push(
+        inv.stale()
+            .map(|stale| (stale.validator.clone(), stale.repr_type.clone())),
+    );
+    if let Some(stale) = inv.stale() {
+        if stale.validator.etag.as_deref() == Some(version.as_str()) {
+            return Ok(Representation::revalidated(now.plus_millis(ttl)));
         }
-        origin.produced.fetch_add(1, Ordering::SeqCst);
-        let answer = Representation::new(
-            ReprType::new("text/plain"),
-            format!("body-{version}").into_bytes(),
-        )
-        .cacheable_until(now.plus_millis(ttl))
-        .depends_on("urn:origin:state");
-        Ok(if validated {
-            answer.validated_by(etag(&version))
-        } else {
-            answer
-        })
+    }
+    origin.produced.fetch_add(1, Ordering::SeqCst);
+    let answer = Representation::new(
+        ReprType::new("text/plain"),
+        format!("body-{version}").into_bytes(),
+    )
+    .cacheable_until(now.plus_millis(ttl))
+    .depends_on("urn:origin:state");
+    Ok(if validated {
+        answer.validated_by(etag(&version))
+    } else {
+        answer
     })
 }
 
@@ -512,5 +521,165 @@ fn a_still_valid_answer_with_a_new_validator_replaces_the_stored_one() {
         offered.lock().unwrap().clone(),
         vec![None, Some(etag("\"v1\"")), Some(etag("W/\"v1\""))],
         "the next offer carries the validator the refresh gave"
+    );
+}
+
+// Ledger #2553: zero freshness still needs a stored body for conditional reads.
+#[test]
+fn an_immediately_expired_validated_answer_is_stored_and_revalidated_on_every_read() {
+    for deadline in [999, 1_000] {
+        let clock = TestClock::at(1_000);
+        let origin = Origin::at("v1");
+        let endpoint_origin = Arc::clone(&origin);
+        let doc = FnEndpoint::new("past", move |inv: &Invocation<'_>| {
+            // Pin both the original answer and every refresh at or before now.
+            let answer = origin_answer(&endpoint_origin, inv, 0, true)?;
+            Ok(answer.with_expiry(Expiry::At(Time::from_millis(deadline))))
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:origin:doc"), doc),
+        ))
+        .with_clock(Arc::new(clock));
+        let root = Capability::root();
+        for read in 0..3 {
+            let recorder = Arc::new(Recorder::default());
+            let answer =
+                block_on(kernel.issue_traced(source("urn:origin:doc"), &root, recorder.clone()))
+                    .unwrap();
+            assert_eq!(answer.bytes, b"body-v1");
+            assert_eq!(answer.origin_validator(), Some(&etag("v1")));
+            assert_eq!(answer.expiry, Expiry::At(Time::from_millis(deadline)));
+            assert_eq!(kernel.cache_len(), 1, "stored even with no freshness");
+            assert_eq!(origin.produced(), 1, "refresh produces no body bytes");
+            assert_eq!(origin.offers().len(), read + 1, "endpoint asked every time");
+            let event = recorder.only("urn:origin:doc");
+            assert!(!event.cache_hit, "never served as fresh");
+            assert_eq!(note(&event, UNCACHED_NOTE), None, "stored for revalidation");
+            if read > 0 {
+                assert_eq!(event.state(), TraceState::Revalidated);
+                assert_eq!(
+                    origin.offers()[read],
+                    Some((etag("v1"), ReprType::new("text/plain")))
+                );
+            }
+        }
+        let uncached = block_on(kernel.issue(source("urn:kernel:uncached"), &root)).unwrap();
+        assert!(!String::from_utf8(uncached.bytes)
+            .unwrap()
+            .contains("urn:origin:doc"));
+    }
+}
+
+#[test]
+fn an_immediately_expired_answer_without_a_validator_is_declined() {
+    let origin = Origin::at("v1");
+    let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(
+        Exact::new("urn:origin:doc"),
+        origin_endpoint(Arc::clone(&origin), 0, false),
+    )))
+    .with_clock(Arc::new(TestClock::at(1_000)));
+    for _ in 0..2 {
+        let recorder = Arc::new(Recorder::default());
+        block_on(kernel.issue_traced(
+            source("urn:origin:doc"),
+            &Capability::root(),
+            recorder.clone(),
+        ))
+        .unwrap();
+        assert_eq!(kernel.cache_len(), 0);
+        assert_eq!(
+            note(&recorder.only("urn:origin:doc"), UNCACHED_NOTE),
+            Some("expired 1000")
+        );
+    }
+    assert_eq!(origin.offers(), vec![None, None]);
+    assert_eq!(origin.produced(), 2);
+}
+
+#[test]
+fn a_zero_freshness_refresh_of_a_previously_fresh_entry_keeps_the_body() {
+    let clock = TestClock::at(1_000);
+    let origin = Origin::at("v1");
+    let endpoint_origin = Arc::clone(&origin);
+    let doc = FnEndpoint::new("zero-refresh", move |inv: &Invocation<'_>| {
+        let ttl = if inv.stale().is_some() { 0 } else { 100 };
+        origin_answer(&endpoint_origin, inv, ttl, true)
+    });
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:origin:doc"), doc),
+    ))
+    .with_clock(Arc::new(clock.clone()));
+    let root = Capability::root();
+    block_on(kernel.issue(source("urn:origin:doc"), &root)).unwrap();
+    clock.set(1_100);
+    for _ in 0..2 {
+        let answer = block_on(kernel.issue(source("urn:origin:doc"), &root)).unwrap();
+        assert_eq!(answer.bytes, b"body-v1");
+        assert_eq!(answer.origin_validator(), Some(&etag("v1")));
+        assert_eq!(answer.expiry, Expiry::At(Time::from_millis(1_100)));
+        assert_eq!(kernel.cache_len(), 1, "zero freshness refresh retained");
+        assert_eq!(origin.produced(), 1);
+    }
+    assert_eq!(origin.offers().len(), 3, "each refresh asked the endpoint");
+}
+
+#[test]
+fn immediately_stale_entries_obey_admission_and_eviction() {
+    use ikigai_core::{CacheBound, Lru};
+
+    // Too small to admit the body, then enough bytes but only one entry.
+    for (byte_bound, admitted) in [(1, false), (1_024, true)] {
+        let origin = Origin::at("v1");
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:origin:doc"),
+                    origin_endpoint(Arc::clone(&origin), 0, true),
+                )
+                .bind(
+                    Exact::new("urn:other"),
+                    FnEndpoint::new("other", |_| {
+                        Ok(Representation::new(ReprType::new("text/plain"), vec![0]).cacheable())
+                    }),
+                ),
+        ))
+        .with_clock(Arc::new(TestClock::at(1_000)))
+        .with_cache_policy(Arc::new(Lru::with_bound(CacheBound::new(1, byte_bound))));
+        let root = Capability::root();
+        block_on(kernel.issue(source("urn:origin:doc"), &root)).unwrap();
+        assert_eq!(kernel.cache_len(), usize::from(admitted));
+        // Eviction removes the body entirely; the next read must fetch in full.
+        block_on(kernel.issue(source("urn:other"), &root)).unwrap();
+        assert_eq!(kernel.cache_len(), 1);
+        block_on(kernel.issue(source("urn:origin:doc"), &root)).unwrap();
+        assert_eq!(origin.offers(), vec![None, None]);
+        assert_eq!(origin.produced(), 2);
+        assert_eq!(kernel.cache_len(), 1);
+    }
+}
+
+#[test]
+fn a_validator_does_not_make_a_deadline_storable_without_a_clock() {
+    let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(
+        Exact::new("urn:origin:doc"),
+        FnEndpoint::new("clockless", |_| {
+            Ok(
+                Representation::new(ReprType::new("text/plain"), b"body".to_vec())
+                    .cacheable_until(Time::from_millis(0))
+                    .validated_by(etag("v1")),
+            )
+        }),
+    )));
+    let recorder = Arc::new(Recorder::default());
+    block_on(kernel.issue_traced(
+        source("urn:origin:doc"),
+        &Capability::root(),
+        recorder.clone(),
+    ))
+    .unwrap();
+    assert_eq!(kernel.cache_len(), 0);
+    assert_eq!(
+        note(&recorder.only("urn:origin:doc"), UNCACHED_NOTE),
+        Some("no-clock")
     );
 }
