@@ -1,8 +1,7 @@
 [package]
 name = "ikigai-core"
 description = "Identity, representations, resolution, content-addressed caching, and capabilities."
-# Core-only patch: the vocabulary stays at the workspace version.
-version = "0.2.7"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
