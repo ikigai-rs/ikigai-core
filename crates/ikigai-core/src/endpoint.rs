@@ -1133,6 +1133,30 @@ impl<'a> Invocation<'a> {
         &self.run
     }
 
+    /// Whether every body attached to this request can be opened again, without taking,
+    /// opening, or reading any body. A retry or failover overlay can check this before
+    /// re-issuing the request.
+    ///
+    /// Returns `false` for an attached [`Body::Once`](crate::Body::Once), even after
+    /// [`content_body`](Self::content_body) has taken it. Buffered and
+    /// [`Body::Replay`](crate::Body::Replay) attachments return `true`, including a
+    /// replay body without a validator. With no attachment carried by this request,
+    /// returns `true`; an attachment inherited in the run but absent from the request's
+    /// arguments does not count.
+    ///
+    /// This checks attached bodies only. It does not resolve referenced resources or
+    /// content-store entries, or promise that re-issuing the operation is otherwise safe.
+    pub fn attachments_reopenable(&self) -> bool {
+        self.run.attached().is_none_or(|attached| {
+            attached.is_reopenable()
+                || !self
+                    .request
+                    .args
+                    .values()
+                    .any(|value| matches!(value, ArgRef::Content(id) if id == attached.id()))
+        })
+    }
+
     /// **The same invocation, with at most `retries` re-issues left for what it issues**:
     /// a reborrow like [`with_bindings`](Self::with_bindings) whose sub-requests draw from a
     /// child of this run's pool, limited to `retries` and spending from the pool above too.
@@ -2481,6 +2505,41 @@ mod tests {
 
     fn iri(s: &str) -> Iri {
         Iri::parse(s).unwrap()
+    }
+
+    #[test]
+    fn reopenability_only_counts_attachments_carried_by_the_request() {
+        let id = crate::ContentId::of(b"attached");
+        let run = crate::IssueContext::new().with_attached(
+            id,
+            crate::Body::once(futures::stream::empty()),
+            true,
+        );
+        let bindings = Bindings::new();
+        let capability = Capability::root();
+        for argument in [
+            None,
+            Some(ArgRef::Inline(b"attached".to_vec())),
+            Some(ArgRef::Content(crate::ContentId::of(b"other"))),
+            Some(ArgRef::Reference(iri("urn:other"))),
+        ] {
+            let mut request = Request::new(Verb::Source, iri("urn:test"));
+            if let Some(argument) = argument {
+                request = request.with_arg("content", argument);
+            }
+            let mut inv = Invocation::detached(&request, &bindings, &capability);
+            inv.run = run.clone();
+            assert!(inv.attachments_reopenable());
+        }
+        let request =
+            Request::new(Verb::Source, iri("urn:test")).with_arg("content", ArgRef::Content(id));
+        let mut inv = Invocation::detached(&request, &bindings, &capability);
+        inv.run = run.clone();
+        assert!(!inv.attachments_reopenable());
+        block_on(inv.content_body("content")).unwrap();
+        // A separately cloned context must retain the original body's kind too.
+        inv.run = run;
+        assert!(!inv.attachments_reopenable());
     }
 
     #[test]

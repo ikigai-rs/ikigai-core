@@ -675,6 +675,8 @@ pub(crate) struct Attached {
     id: crate::content::ContentId,
     /// The body; taken by the first reader when it is one-shot.
     body: std::sync::Mutex<Option<crate::Body>>,
+    /// Retained after a one-shot body is taken; independent of content identity.
+    reopenable: bool,
     /// Whether `id` is a nonce rather than the digest of the bytes (a body whose digest is
     /// not known before it is read): a request carrying it can never repeat, so nothing
     /// built on it is worth storing.
@@ -682,6 +684,10 @@ pub(crate) struct Attached {
 }
 
 impl Attached {
+    pub(crate) fn is_reopenable(&self) -> bool {
+        self.reopenable
+    }
+
     /// The attached body for `id`, when it is this one: a second handle on a body that can
     /// be read again, or a one-shot body taken by its first reader (a second reader gets
     /// `Some(None)`).
@@ -815,6 +821,7 @@ impl IssueContext {
     ) -> Self {
         self.attached = Some(Arc::new(Attached {
             id,
+            reopenable: !body.is_one_shot(),
             body: std::sync::Mutex::new(Some(body)),
             nonce,
         }));

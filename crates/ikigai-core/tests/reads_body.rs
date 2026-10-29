@@ -615,3 +615,90 @@ fn a_live_body_spilled_through_the_kernel_makes_the_next_stage_cacheable() {
     let events = tracer.0.lock().unwrap();
     assert!(events.iter().any(|e| e.target == "urn:join" && e.cache_hit));
 }
+
+/// Retry/failover guards must inspect attachments without taking or opening them.
+#[test]
+fn attachment_reopenability_survives_reads() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct WithoutValidator(Arc<AtomicUsize>);
+    impl Replay for WithoutValidator {
+        fn open(&self) -> ByteStream {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(futures::stream::iter([Ok(Bytes::from_static(b"input"))]))
+        }
+    }
+
+    let opens = Arc::new(AtomicUsize::new(0));
+
+    let reader = AsyncFnEndpoint::new("inspect", |inv| {
+        Box::pin(async move {
+            let expected = inv.inline_arg("expected")? == b"yes";
+            assert_eq!(inv.attachments_reopenable(), expected);
+            assert_eq!(inv.attachments_reopenable(), expected);
+            let body = inv.content_body("content").await?;
+            // Once has already been taken, even before its stream is polled.
+            assert_eq!(inv.attachments_reopenable(), expected);
+            assert_eq!(body.collect(32).await?, b"input"[..]);
+            assert_eq!(inv.attachments_reopenable(), expected);
+            if expected {
+                assert_eq!(
+                    inv.content_body("content").await?.collect(32).await?,
+                    b"input"[..]
+                );
+            } else {
+                assert!(matches!(
+                    inv.content_body("content").await,
+                    Err(Error::Conflict(_))
+                ));
+            }
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                b"ok".to_vec(),
+            ))
+        })
+    })
+    .with_description(
+        Description::new("inspect")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("content").reads_body())
+            .input(ArgSpec::new("expected")),
+    );
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:inspect"), reader),
+    ));
+    for (body, expected) in [
+        (
+            Body::once(futures::stream::iter([Ok(Bytes::from_static(b"input"))])),
+            false,
+        ),
+        (Body::replay(Spilled(Bytes::from_static(b"input"))), true),
+        (Body::replay(WithoutValidator(Arc::clone(&opens))), true),
+        (Body::from(b"input".to_vec()), true),
+    ] {
+        let request = source("urn:inspect").with_arg(
+            "expected",
+            ArgRef::Inline(if expected {
+                b"yes".to_vec()
+            } else {
+                b"no".to_vec()
+            }),
+        );
+        block_on(kernel.issue_with(
+            request,
+            &Capability::root(),
+            BodyIssue::new().attach("content", body),
+        ))
+        .unwrap();
+    }
+    assert_eq!(
+        opens.load(Ordering::SeqCst),
+        2,
+        "queries must not open a replay body"
+    );
+
+    let request = source("urn:inspect")
+        .with_arg("content", ArgRef::Inline(b"input".to_vec()))
+        .with_arg("expected", ArgRef::Inline(b"yes".to_vec()));
+    block_on(kernel.issue(request, &Capability::root())).unwrap();
+}
