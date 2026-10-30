@@ -1170,6 +1170,73 @@
         ],
         "existence_sensitive": true
       }
+    },
+    {
+      "name": "core/reads-body",
+      "pattern": "urn:core:reads-body",
+      "description": {
+        "id": "reads-body",
+        "title": "",
+        "summary": "body reader and ordinary inputs, flat and per action (ledger #2470)",
+        "verbs": [
+          "Sink",
+          "Meta"
+        ],
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": true
+          },
+          {
+            "name": "ordinary",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          },
+          {
+            "name": "explicit-false",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": false
+          }
+        ],
+        "outputs": [],
+        "actions": [
+          {
+            "verb": "Sink",
+            "inputs": [
+              {
+                "name": "content",
+                "summary": "",
+                "required": true,
+                "source": "argument",
+                "reads_body": true
+              },
+              {
+                "name": "ordinary",
+                "summary": "",
+                "required": true,
+                "source": "argument"
+              },
+              {
+                "name": "explicit-false",
+                "summary": "",
+                "required": true,
+                "source": "argument",
+                "reads_body": false
+              }
+            ],
+            "failures": [
+              "transient"
+            ],
+            "existence_sensitive": true
+          }
+        ]
+      }
     }
   ],
   "contracts": [
@@ -1827,6 +1894,250 @@
           "urn:cap:vault:read"
         ],
         "failures": [],
+        "existence_sensitive": true
+      }
+    },
+    {
+      "name": "body/unflagged",
+      "id": "bodySink",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          },
+          {
+            "name": "z",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          }
+        ],
+        "outputs": []
+      }
+    },
+    {
+      "name": "body/false-is-absent",
+      "id": "bodySink",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": false
+          },
+          {
+            "name": "z",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          }
+        ],
+        "outputs": []
+      }
+    },
+    {
+      "name": "body/flagged",
+      "id": "bodySink",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": true
+          },
+          {
+            "name": "z",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          }
+        ],
+        "outputs": []
+      }
+    },
+    {
+      "name": "body/other-input",
+      "id": "bodySink",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          },
+          {
+            "name": "z",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": true
+          }
+        ],
+        "outputs": []
+      }
+    },
+    {
+      "name": "body/multiple",
+      "id": "bodySink",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": true
+          },
+          {
+            "name": "z",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": true
+          }
+        ],
+        "outputs": []
+      }
+    },
+    {
+      "name": "body/reordered",
+      "id": "bodySink",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "z",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": true
+          },
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": true
+          }
+        ],
+        "outputs": []
+      }
+    },
+    {
+      "name": "body/v2-unflagged",
+      "id": "bodySink",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          },
+          {
+            "name": "z",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          }
+        ],
+        "outputs": [],
+        "arguments": {
+          "open": "additional arguments"
+        }
+      }
+    },
+    {
+      "name": "body/v2-false-is-absent",
+      "id": "bodySink",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": false
+          },
+          {
+            "name": "z",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          }
+        ],
+        "outputs": [],
+        "arguments": {
+          "open": "additional arguments"
+        }
+      }
+    },
+    {
+      "name": "body/v2-flagged",
+      "id": "bodySink",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": true
+          },
+          {
+            "name": "z",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          }
+        ],
+        "outputs": [],
+        "arguments": {
+          "open": "additional arguments"
+        }
+      }
+    },
+    {
+      "name": "body/failures-and-sensitive",
+      "id": "bodySink",
+      "action": {
+        "verb": "Sink",
+        "inputs": [
+          {
+            "name": "content",
+            "summary": "",
+            "required": true,
+            "source": "argument",
+            "reads_body": true
+          },
+          {
+            "name": "z",
+            "summary": "",
+            "required": true,
+            "source": "argument"
+          }
+        ],
+        "outputs": [],
+        "failures": [
+          "retry-after",
+          "transient"
+        ],
         "existence_sensitive": true
       }
     }
