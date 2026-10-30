@@ -174,6 +174,20 @@ impl Expiry {
     }
 }
 
+/// Why an endpoint's answer is held uncached by this kernel.
+///
+/// Kernel-local diagnostic metadata, not serialized or part of representation
+/// identity. Dependencies and other kernel causes are reported separately.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum UncachedReason {
+    /// The endpoint itself declared the answer uncacheable (the default).
+    Declared,
+    /// A peer's answer, held here uncached because the peer's cuts do not reach
+    /// this kernel. The peer may itself have declared the answer cacheable.
+    Mounted,
+}
+
 /// The cache **provenance** an upstream pipe stage hands to the next: the expiry
 /// and golden threads of whatever produced this request's *input*.
 ///
@@ -261,8 +275,8 @@ pub struct Representation<B = Vec<u8>> {
     /// Cache validity; defaults to [`Expiry::Always`] (uncacheable).
     #[serde(default)]
     pub expiry: Expiry,
-    /// Golden threads this representation depends on (its cache *provenance*), and
-    /// what it carries about its origin.
+    /// Golden threads this representation depends on (its cache *provenance*),
+    /// what it carries about its origin, and an optional uncached reason.
     ///
     /// The threads are set by [`depends_on`](Representation::depends_on) and grown by
     /// the kernel, which unions in the threads of every sub-resource resolved while
@@ -288,11 +302,12 @@ pub struct Representation<B = Vec<u8>> {
 }
 
 /// What a representation carries for the kernel and never across a wire: its golden
-/// threads, and its [`Origin`].
+/// threads, its [`Origin`], and an endpoint-supplied uncached reason.
 #[derive(Clone, Debug, Default)]
 struct Facts {
     threads: BTreeSet<Thread>,
     origin: Origin,
+    uncached_reason: Option<UncachedReason>,
 }
 
 /// What a representation carries about its origin (ledger #2534): the origin's
@@ -371,6 +386,7 @@ impl Representation<Vec<u8>> {
                 validator: None,
                 revalidated: true,
             },
+            uncached_reason: None,
         }));
         answer
     }
@@ -537,6 +553,39 @@ impl<B> Representation<B> {
         self
     }
 
+    /// Hold this answer uncached for the given reason (builder).
+    ///
+    /// Sets [`Expiry::Always`]. A mount forwarding a peer's answer uses
+    /// [`UncachedReason::Mounted`] because cuts on the peer cannot invalidate this
+    /// kernel's cache. Plain uncacheable answers still report `declared`.
+    /// The reason survives body conversions and cloning, but never crosses a wire.
+    ///
+    /// ```
+    /// use ikigai_core::{Expiry, ReprType, Representation, UncachedReason};
+    /// let peer = Representation::new(ReprType::new("text/plain"), b"hello".to_vec())
+    ///     .cacheable();
+    /// let held = peer.with_uncached_reason(UncachedReason::Mounted);
+    /// assert_eq!(held.expiry, Expiry::Always);
+    /// assert_eq!(held.uncached_reason(), Some(UncachedReason::Mounted));
+    /// ```
+    pub fn with_uncached_reason(mut self, reason: UncachedReason) -> Self {
+        self.expiry = Expiry::Always;
+        Arc::make_mut(self.facts.get_or_insert_with(Default::default)).uncached_reason =
+            Some(reason);
+        self
+    }
+
+    /// The endpoint's reason for an uncacheable answer. `None` when the answer's
+    /// expiry allows caching; otherwise defaults to [`UncachedReason::Declared`].
+    pub fn uncached_reason(&self) -> Option<UncachedReason> {
+        (self.expiry == Expiry::Always).then(|| {
+            self.facts
+                .as_deref()
+                .and_then(|facts| facts.uncached_reason)
+                .unwrap_or(UncachedReason::Declared)
+        })
+    }
+
     /// Declare that this representation depends on a golden [`Thread`] (builder).
     ///
     /// When it is cached, cutting that thread invalidates it. A handler reading
@@ -597,8 +646,18 @@ impl<B> Representation<B> {
             .as_deref()
             .map(|facts| facts.origin.clone())
             .unwrap_or_default();
-        self.facts = (!threads.is_empty() || !origin.is_empty())
-            .then(|| Arc::new(Facts { threads, origin }));
+        let uncached_reason = self
+            .facts
+            .as_deref()
+            .and_then(|facts| facts.uncached_reason);
+        self.facts =
+            (!threads.is_empty() || !origin.is_empty() || uncached_reason.is_some()).then(|| {
+                Arc::new(Facts {
+                    threads,
+                    origin,
+                    uncached_reason,
+                })
+            });
         self
     }
 }
@@ -606,6 +665,26 @@ impl<B> Representation<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncached_reason_is_local_metadata_preserved_with_the_body_and_threads() {
+        let plain = Representation::new(ReprType::new("text/plain"), b"hello".to_vec());
+        let mounted = plain.clone().with_uncached_reason(UncachedReason::Mounted);
+        assert_eq!(plain.uncached_reason(), Some(UncachedReason::Declared));
+        assert_eq!(mounted, plain);
+        assert_eq!(mounted.content_id(), plain.content_id());
+        let wire = postcard::to_stdvec(&mounted).unwrap();
+        assert_eq!(wire, postcard::to_stdvec(&plain).unwrap());
+        let decoded: Representation = postcard::from_bytes(&wire).unwrap();
+        assert_eq!(decoded.uncached_reason(), Some(UncachedReason::Declared));
+        let converted = mounted
+            .into_body()
+            .with_threads(BTreeSet::new())
+            .into_buffer()
+            .unwrap();
+        assert_eq!(converted.uncached_reason(), Some(UncachedReason::Mounted));
+        assert_eq!(converted.cacheable().uncached_reason(), None);
+    }
 
     #[test]
     fn canonical_sorts_params() {

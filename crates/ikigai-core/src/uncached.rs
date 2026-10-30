@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::iri::Iri;
-use crate::repr::Time;
+use crate::repr::{Time, UncachedReason};
 use crate::request::RequestId;
 
 /// How many sub-request names one reason carries before it counts the rest. A
@@ -109,8 +109,8 @@ pub(crate) enum Declined {
 /// rendering lists them in a fixed order (see [`UNCACHED_NOTE`](crate::UNCACHED_NOTE)).
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub(crate) struct Uncached {
-    /// The endpoint's own answer was `Always` — it declared no caching.
-    pub(crate) declared: bool,
+    /// Why the endpoint's own answer was `Always`.
+    pub(crate) reason: Option<UncachedReason>,
     /// Sub-requests that were `Always`, refused or failed.
     pub(crate) deps: VolatileDeps,
     /// The piped input the stage folded in was `Always`.
@@ -126,7 +126,7 @@ impl Uncached {
     /// Whether nothing was found to blame — never true of a result the kernel
     /// reports, and the guard that keeps an empty note off an event.
     pub(crate) fn is_empty(&self) -> bool {
-        !self.declared
+        self.reason.is_none()
             && self.deps.is_empty()
             && !self.upstream
             && !self.one_shot
@@ -137,8 +137,14 @@ impl Uncached {
 impl fmt::Display for Uncached {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut clauses: Vec<String> = Vec::new();
-        if self.declared {
-            clauses.push("declared".to_string());
+        if let Some(reason) = self.reason {
+            clauses.push(
+                match reason {
+                    UncachedReason::Declared => "declared",
+                    UncachedReason::Mounted => "mounted",
+                }
+                .to_string(),
+            );
         }
         for kind in [
             DepKind::Volatile,
