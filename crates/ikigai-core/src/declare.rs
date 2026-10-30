@@ -1691,11 +1691,12 @@ mod turtle {
                 let value = self.optional(&node, &p("value"))?;
                 let reference = self.optional(&node, &p("ref"))?;
                 let capture = self.optional(&node, &p("capture"))?;
-                let value = match (value, reference, capture) {
-                    (Some(term), None, None) => {
+                let reference_template = self.optional(&node, &p("refTemplate"))?;
+                let value = match (value, reference, capture, reference_template) {
+                    (Some(term), None, None, None) => {
                         FixedValue::Value(Self::literal_of(&node, &p("value"), term, "string")?)
                     }
-                    (None, Some(term), None) => {
+                    (None, Some(term), None, None) => {
                         let iri = Self::iri_of(&node, &p("ref"), term)?;
                         FixedValue::Reference(
                             Iri::parse(&iri).map_err(|e| {
@@ -1703,13 +1704,18 @@ mod turtle {
                             })?,
                         )
                     }
-                    (None, None, Some(term)) => {
+                    (None, None, Some(term), None) => {
                         FixedValue::Capture(Self::literal_of(&node, &p("capture"), term, "string")?)
+                    }
+                    (None, None, None, Some(term)) => {
+                        let text = Self::literal_of(&node, &p("refTemplate"), term, "string")?;
+                        FixedValue::ReferenceTemplate(crate::UriTemplate::parse(text)
+                            .map_err(|e| malformed(&node, format!("ik:refTemplate: {e}")))?)
                     }
                     _ => {
                         return Err(malformed(
                             &node,
-                            "an argument a rule fixes has exactly one of ik:value, ik:ref and \
+                            "an argument a rule fixes has exactly one of ik:value, ik:ref, ik:refTemplate and \
                              ik:capture",
                         ))
                     }

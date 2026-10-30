@@ -741,6 +741,9 @@ impl Topology {
                         let (property, object) = match &argument.value {
                             FixedValue::Value(value) => ("value", turtle_literal(value)),
                             FixedValue::Reference(iri) => ("ref", format!("<{}>", iri.as_str())),
+                            FixedValue::ReferenceTemplate(template) => {
+                                ("refTemplate", turtle_literal(template.source()))
+                            }
                             FixedValue::Capture(var) => ("capture", turtle_literal(var)),
                         };
                         let _ = write!(
