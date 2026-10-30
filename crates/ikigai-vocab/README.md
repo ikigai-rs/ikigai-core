@@ -65,7 +65,8 @@ stored = sink urn:cms:linkstatus content=@checks checked=@count
 `SHAPES` (`src/shapes.ttl`) is the SHACL contract: one verb from the five per step, one
 target, one result, an argument by value or by reference but not both, every edge and
 `@name` inside the plan, each name bound once. The shapes are data here — this crate has
-no SHACL engine — and `ikigai-shacl` runs them. `tests/fixtures/plan-linkcheck*.ttl` is
+no runtime SHACL engine — and tests run the published shapes through `ikigai-shacl`
+with its default rudof backend (the same validator as `urn:plan:validate`). `tests/fixtures/plan-linkcheck*.ttl` is
 the CMS link-check pass written as a plan, with three variants that are three kinds of
 edit (a stricter policy, repair instead of removal, a narrower scope) and no new Rust.
 

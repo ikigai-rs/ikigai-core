@@ -4,12 +4,11 @@
 //! declared without an example, an example cannot use an undeclared term, and the text
 //! face in each fixture's header must match its graph step for step.
 //!
-//! The structural checks at the end mirror `shapes.ttl` by hand (this crate has no SHACL
-//! engine, deliberately) so the fixtures are known to satisfy the shapes before the
-//! `ikigai-shacl` arc runs them for real — and they go one step further than SHACL can:
-//! acyclicity through `@name` references.
+//! `shapes.rs` validates these fixtures against the published shapes with the real
+//! SHACL engine. The dependency walk here additionally checks cycles through names,
+//! which the shapes cannot express.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use ikigai_vocab::{plan, NS, SHAPES, VOCABULARY};
 use oxrdf::{NamedNode, NamedOrBlankNode, Term, Triple};
@@ -402,6 +401,10 @@ fn text_face_matches_the_graph_step_for_step() {
         let process = g.process();
         let plan_id = process.strip_prefix("urn:plan:").expect("plan IRI scheme");
         assert_eq!(process, plan::process_iri(plan_id));
+        for parameter in g.iris(&process, "input") {
+            let name = g.str(&parameter, "inputName").expect("parameter name");
+            assert_eq!(parameter, plan::input_iri(plan_id, &name));
+        }
         let mut next_step = 1;
         let mut next_fork = 1;
         for line in text_face(&text) {
@@ -447,104 +450,15 @@ fn text_face_matches_the_graph_step_for_step() {
     }
 }
 
-// ---- the shapes, by hand ----------------------------------------------------------
+// ---- cycles through named references ----------------------------------------------
 
 #[test]
-fn fixtures_satisfy_the_shapes() {
-    const VERBS: [&str; 5] = ["Source", "Sink", "Exists", "Delete", "Meta"];
+fn fixtures_have_no_cycles_through_named_references() {
     for name in FIXTURES {
         let (_, g) = Graph::load(name);
         let process = g.process();
         let steps: BTreeSet<String> = g.iris(&process, "step").into_iter().collect();
         let forks: BTreeSet<String> = steps.iter().filter_map(|s| g.iri(s, "forkOf")).collect();
-        let local = |iri: &str| steps.contains(iri) || forks.contains(iri);
-
-        // process: exactly one result, local; parameters well-formed; requires are IRIs
-        let result = g.iri(&process, "result").expect("exactly one ik:result");
-        assert!(local(&result), "{name}: result {result} is local");
-        let mut names: BTreeMap<String, usize> = BTreeMap::new();
-        for p in g.iris(&process, "input") {
-            let pname = g.str(&p, "inputName").expect("parameter name");
-            assert_eq!(
-                p,
-                plan::input_iri(process.strip_prefix("urn:plan:").unwrap(), &pname)
-            );
-            assert!(matches!(
-                g.str(&p, "source").as_deref(),
-                None | Some("argument" | "binding")
-            ));
-            *names.entry(pname).or_default() += 1;
-        }
-        let _ = g.iris(&process, "requires"); // panics if any is a literal
-
-        // steps
-        for s in &steps {
-            let verb = g.str(s, "verb").expect("one verb");
-            assert!(VERBS.contains(&verb.as_str()), "{s} verb {verb}");
-            g.iri(s, "resolves").expect("one target");
-            if let Some(b) = g.str(s, "binds") {
-                assert!(
-                    b.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
-                    "{s} binds an identifier"
-                );
-                *names.entry(b).or_default() += 1;
-            }
-            let feeds = [
-                g.iri(s, "pipeFrom"),
-                g.iri(s, "mapOver"),
-                g.iri(s, "forkOf"),
-            ];
-            assert!(feeds.iter().flatten().count() <= 1, "{s} has one feed");
-            for up in feeds[..2].iter().flatten() {
-                assert!(local(up), "{s} upstream {up} is local");
-            }
-            assert_eq!(
-                g.iri(s, "forkOf").is_some(),
-                g.str(s, "order").is_some(),
-                "{s}: ik:order iff ik:forkOf"
-            );
-            let mut arg_names = BTreeSet::new();
-            for a in g.iris(s, "argument") {
-                let an = g.str(&a, "inputName").expect("argument name");
-                assert!(arg_names.insert(an), "{s} argument given twice");
-                let (v, r) = (g.str(&a, "value"), g.iri(&a, "ref"));
-                assert!(v.is_some() != r.is_some(), "{a}: exactly one of value/ref");
-                if let Some(r) = r {
-                    if let Some(var) = r.strip_prefix(&format!("{process}:var:")) {
-                        assert!(
-                            names.contains_key(var)
-                                || steps
-                                    .iter()
-                                    .any(|s| g.str(s, "binds").as_deref() == Some(var)),
-                            "{a} references unbound name {var}"
-                        );
-                    }
-                }
-            }
-        }
-        // single assignment across steps and parameters
-        for (n, count) in &names {
-            assert_eq!(*count, 1, "{name}: {n} bound {count} times");
-        }
-        // forks: at least one branch, distinct orders, local upstream, a known join
-        for f in &forks {
-            let branches: Vec<&String> = steps
-                .iter()
-                .filter(|s| g.iri(s, "forkOf").as_deref() == Some(f))
-                .collect();
-            assert!(!branches.is_empty());
-            let orders: BTreeSet<String> =
-                branches.iter().filter_map(|b| g.str(b, "order")).collect();
-            assert_eq!(orders.len(), branches.len(), "{f}: distinct orders");
-            if let Some(up) = g.iri(f, "upstream") {
-                assert!(local(&up), "{f} upstream is local");
-            }
-            assert!(matches!(
-                g.str(f, "join").as_deref(),
-                None | Some("newline")
-            ));
-        }
 
         // Acyclicity, INCLUDING the hop the shapes cannot take: an argument reference to a
         // bound name is an edge to the step that binds it. Every step's dependencies are
