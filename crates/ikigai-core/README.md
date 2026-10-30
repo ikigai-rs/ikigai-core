@@ -19,7 +19,9 @@ assert_eq!(rep.bytes, b"IKIGAI");
 # Ok(()) }
 ```
 
-## What's here
+<a id="whats-here"></a>
+
+## Kernel features
 
 - **Identity & representations** — validated IRIs, request verbs, content-addressed
   `RequestId`/`ContentId`, and typed `Representation`s with opt-in caching.
