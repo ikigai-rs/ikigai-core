@@ -965,6 +965,43 @@ impl BodyIssue {
         self.attach = Some((name.into(), body));
         self
     }
+
+    /// The resolution chain supplied by [`Self::in_scope`].
+    pub fn scope(&self) -> &crate::space::Scope {
+        &self.scope
+    }
+
+    /// The upstream provenance, if supplied by [`Self::with_incoming`].
+    pub fn incoming(&self) -> Option<&crate::repr::Provenance> {
+        self.incoming.as_ref()
+    }
+
+    /// The run context, including any shared memory and retry budgets.
+    pub fn context(&self) -> &IssueContext {
+        &self.context
+    }
+
+    /// The per-issue tracer, or `None` to use the kernel's global tracer.
+    pub fn tracer(&self) -> Option<&Arc<dyn crate::kernel::Tracer>> {
+        self.tracer.as_ref()
+    }
+
+    /// The attached argument name and body, without consuming either.
+    pub fn attachment(&self) -> Option<(&str, &crate::Body)> {
+        self.attach
+            .as_ref()
+            .map(|(name, body)| (name.as_str(), body))
+    }
+
+    /// Take the attached argument name and body, leaving no attachment.
+    ///
+    /// A resolver default can collect the body through [`Self::context`]'s memory
+    /// budget and forward the remaining issue with the collected argument. The
+    /// scope, provenance, run context and tracer are retained. A second take
+    /// returns `None`; a one-shot body is moved, never cloned or read here.
+    pub fn take_attachment(&mut self) -> Option<(String, crate::Body)> {
+        self.attach.take()
+    }
 }
 
 impl fmt::Debug for BodyIssue {
