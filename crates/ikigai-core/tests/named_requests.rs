@@ -101,6 +101,21 @@ fn echoing(name: &'static str, runs: Arc<AtomicU32>) -> FnEndpoint {
     .with_description(Description::new(name).verb(Verb::Source))
 }
 
+struct JsonRenderer;
+
+impl ikigai_core::MetaRenderer for JsonRenderer {
+    fn render(
+        &self,
+        description: &Description,
+        _target: &ReprType,
+    ) -> ikigai_core::Result<Representation> {
+        Ok(Representation::new(
+            ReprType::new("application/json"),
+            serde_json::to_vec(description).unwrap(),
+        ))
+    }
+}
+
 struct Host {
     kernel: Kernel,
     runs: Arc<AtomicU32>,
@@ -115,7 +130,7 @@ fn host(names: &Topology) -> Host {
     let names = build(names, &Registry::new()).expect("the names declaration builds");
     let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![Arc::new(doors), names]));
     Host {
-        kernel: Kernel::new(root),
+        kernel: Kernel::with_meta_renderer(root, Arc::new(JsonRenderer)),
         runs,
     }
 }
@@ -548,4 +563,158 @@ fn reference_template_declaration_resolves_by_reference() {
             .unwrap(),
         "as=text/csv\ngraph=urn:example:quakes:graph\nquery=<urn:example:queries/since.rq>\n"
     );
+}
+
+fn reference_rule(template: &str) -> TopologyRule {
+    TopologyRule::named_template("urn:example:search:{file}", SPARQL)
+        .verb(Verb::Source)
+        .fixing(FixedArgument::reference_template(
+            "query",
+            ikigai_core::UriTemplate::parse(template).unwrap(),
+        ))
+}
+
+#[test]
+fn reference_templates_encode_captures_and_report_fixed_contracts() {
+    let table = AliasTable::new()
+        .with_rule(reference_rule("urn:example:files/searches/{file}"))
+        .unwrap();
+    let alias = Alias::new(Arc::new(table), Arc::new(EndpointSpace::new()));
+    let topology = alias.topology();
+    assert_eq!(
+        Topology::from_turtle(&topology.to_turtle()).unwrap(),
+        topology
+    );
+    let host = host(&topology);
+    for (captured, encoded) in [
+        ("since.rq", "since.rq"),
+        ("a/b", "a%2Fb"),
+        ("../x", "..%2Fx"),
+        ("x?y", "x%3Fy"),
+        ("x#y", "x%23y"),
+        ("50%25", "50%2525"),
+        ("ü", "%C3%BC"),
+        ("a:b", "a%3Ab"),
+        ("a@b", "a%40b"),
+    ] {
+        assert_eq!(
+            host.issue(source(&format!("urn:example:search:{captured}")))
+                .unwrap(),
+            format!("query=<urn:example:files/searches/{encoded}>\n")
+        );
+    }
+    for capture in [".", "..", ""] {
+        let error = host
+            .issue(source(&format!("urn:example:search:{capture}")))
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidArgument { name, .. } if name == "query"),
+            "{error}"
+        );
+    }
+    let description = host
+        .kernel
+        .describe(&iri("urn:example:search:since.rq"))
+        .unwrap();
+    let specs = description.action_specs();
+    let source = specs.iter().find(|v| v.verb == Verb::Source).unwrap();
+    let query = source.inputs.iter().find(|i| i.name == "query").unwrap();
+    assert_eq!(
+        query.fixed.as_deref(),
+        Some("<urn:example:files/searches/{file}>")
+    );
+    assert!(!query.required);
+    let catalog = host
+        .issue(Request::new(Verb::Source, iri("urn:kernel:catalog")))
+        .unwrap();
+    assert!(
+        catalog.contains("urn:example:files/searches/{file}"),
+        "{catalog}"
+    );
+}
+
+#[test]
+fn reference_template_bind_time_refusals_name_the_problem() {
+    for (template, reason) in [
+        ("urn:example:files/{other}", "other"),
+        ("not an iri/{file}", "not an IRI"),
+        ("urn:example:files/plain", "at least one variable"),
+    ] {
+        let error = AliasTable::new()
+            .with_rule(reference_rule(template))
+            .unwrap_err();
+        assert!(error.to_string().contains(reason), "{error}");
+    }
+}
+
+#[test]
+fn reference_template_is_exclusive_with_every_other_argument_value() {
+    for other in [
+        "ik:value \"x\"",
+        "ik:ref <urn:example:x>",
+        "ik:capture \"id\"",
+    ] {
+        let declaration = NAMES.replace(
+            "ik:capture \"id\"",
+            &format!("ik:refTemplate \"urn:example:files/{{id}}\" ; {other}"),
+        );
+        let error = Topology::from_turtle(&declaration).unwrap_err();
+        assert!(error.to_string().contains("exactly one"), "{error}");
+    }
+}
+
+#[test]
+fn saved_search_motivating_binding_passes_query_by_reference() {
+    let rule = TopologyRule::named_template("urn:river:search:{file}", "urn:sparql:select")
+        .verb(Verb::Source)
+        .fixing(FixedArgument::value("graph", "urn:file:river.nt"))
+        .fixing(FixedArgument::reference_template(
+            "query",
+            ikigai_core::UriTemplate::parse("urn:file:searches/{file}").unwrap(),
+        ));
+    let table = AliasTable::new().with_rule(rule).unwrap();
+    let endpoint = FnEndpoint::new("select", |inv| {
+        assert_eq!(
+            inv.request.args.get("query"),
+            Some(&ArgRef::Reference(iri("urn:file:searches/since.rq")))
+        );
+        Ok(Representation::new(
+            ReprType::new("text/plain"),
+            b"recorded reference".to_vec(),
+        ))
+    });
+    let doors = EndpointSpace::new().bind(Exact::new("urn:sparql:select"), endpoint);
+    let kernel = Kernel::new(Arc::new(doors)).with_aliases(Arc::new(table));
+    let answer =
+        block_on(kernel.issue(source("urn:river:search:since.rq"), &Capability::root())).unwrap();
+    assert_eq!(answer.bytes, b"recorded reference");
+}
+
+#[test]
+fn a_later_rules_reference_template_has_its_own_captures_settled() {
+    let table = AliasTable::new()
+        .with_rule(TopologyRule::named_request(
+            "urn:example:saved",
+            "urn:example:search:since.rq",
+        ))
+        .unwrap()
+        .with_rule(reference_rule("urn:example:files/{file}"))
+        .unwrap();
+    let topology = Alias::new(Arc::new(table), Arc::new(EndpointSpace::new())).topology();
+    let host = host(&topology);
+    assert_eq!(
+        host.issue(source("urn:example:saved")).unwrap(),
+        "query=<urn:example:files/since.rq>\n"
+    );
+    let description = host.kernel.describe(&iri("urn:example:saved")).unwrap();
+    let specs = description.action_specs();
+    let query = specs
+        .iter()
+        .find(|v| v.verb == Verb::Source)
+        .unwrap()
+        .inputs
+        .iter()
+        .find(|i| i.name == "query")
+        .unwrap();
+    assert_eq!(query.fixed.as_deref(), Some("<urn:example:files/since.rq>"));
 }

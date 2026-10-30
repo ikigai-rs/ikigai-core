@@ -106,13 +106,13 @@ impl Grammar for Exact {
 /// variables with no separating literal are rejected at construction as
 /// ambiguous. (Operators like `{+var}`, `{?q}`, `{/p}` are intentionally out of
 /// scope for now; `Grammar` lets richer grammars slot in beside this.)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UriTemplate {
     parts: Vec<Part>,
     source: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Part {
     Lit(String),
     Var(String),
@@ -184,10 +184,42 @@ impl UriTemplate {
         Some(out)
     }
 
+    /// RFC 6570 simple string expansion: captured UTF-8 bytes are percent-encoded
+    /// except ASCII letters, digits and `-._~`. Literal template text is unchanged.
+    /// Returns `None` if a variable is missing. Unlike [`expand`](Self::expand),
+    /// reserved characters in a binding cannot introduce URI delimiters.
+    pub fn expand_encoded(&self, bindings: &Bindings) -> Option<String> {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        let mut out = String::new();
+        for part in &self.parts {
+            match part {
+                Part::Lit(lit) => out.push_str(lit),
+                Part::Var(var) => {
+                    for byte in bindings.get(var)?.bytes() {
+                        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                            out.push(char::from(byte));
+                        } else {
+                            out.push('%');
+                            out.push(char::from(HEX[usize::from(byte >> 4)]));
+                            out.push(char::from(HEX[usize::from(byte & 15)]));
+                        }
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
     fn match_str(&self, input: &str) -> Option<Bindings> {
+        self.match_with_empty(input, &[])
+    }
+
+    /// Permit empty values only for captures whose consumer must report an argument
+    /// error. Ordinary grammar matching continues to require non-empty captures.
+    pub(crate) fn match_with_empty(&self, input: &str, empty: &[&str]) -> Option<Bindings> {
         let mut captures: Vec<(usize, usize)> = Vec::new();
         let mut failed = std::collections::HashSet::new();
-        if !self.match_from(input, 0, 0, &mut captures, &mut failed) {
+        if !self.match_from(input, 0, 0, &mut captures, &mut failed, empty) {
             return None;
         }
         let mut bindings = Bindings::new();
@@ -216,6 +248,7 @@ impl UriTemplate {
         pos: usize,
         captures: &mut Vec<(usize, usize)>,
         failed: &mut std::collections::HashSet<(usize, usize)>,
+        empty: &[&str],
     ) -> bool {
         let Some(part) = self.parts.get(i) else {
             return pos == input.len();
@@ -226,9 +259,9 @@ impl UriTemplate {
         let matched = match part {
             Part::Lit(lit) => {
                 input[pos..].starts_with(lit.as_str())
-                    && self.match_from(input, i + 1, pos + lit.len(), captures, failed)
+                    && self.match_from(input, i + 1, pos + lit.len(), captures, failed, empty)
             }
-            Part::Var(_) => match self.parts.get(i + 1) {
+            Part::Var(var) => match self.parts.get(i + 1) {
                 Some(Part::Lit(next)) => {
                     // Every occurrence of the next literal — overlapping ones too —
                     // after a non-empty capture, leftmost first.
@@ -236,9 +269,9 @@ impl UriTemplate {
                     let mut from = pos;
                     while let Some(rel) = input[from..].find(next.as_str()) {
                         let at = from + rel;
-                        if at > pos {
+                        if at > pos || empty.contains(&var.as_str()) {
                             captures.push((pos, at));
-                            if self.match_from(input, i + 1, at, captures, failed) {
+                            if self.match_from(input, i + 1, at, captures, failed, empty) {
                                 found = true;
                                 break;
                             }
@@ -251,7 +284,7 @@ impl UriTemplate {
                 }
                 // A final variable captures the (non-empty) remainder.
                 _ => {
-                    if pos == input.len() {
+                    if pos == input.len() && !empty.contains(&var.as_str()) {
                         false
                     } else {
                         captures.push((pos, input.len()));
@@ -299,6 +332,23 @@ mod tests {
 
     fn iri(s: &str) -> Iri {
         Iri::parse(s).unwrap()
+    }
+
+    #[test]
+    fn simple_expansion_encodes_only_captures_and_preserves_raw_expansion() {
+        let template =
+            UriTemplate::parse("https://example.test/{value}?literal=yes#fragment").unwrap();
+        let mut bindings = Bindings::new();
+        bindings.insert("value", "AZaz09-._~/?:#%@ ü");
+        assert_eq!(
+            template.expand_encoded(&bindings).unwrap(),
+            "https://example.test/AZaz09-._~%2F%3F%3A%23%25%40%20%C3%BC?literal=yes#fragment"
+        );
+        assert_eq!(
+            template.expand(&bindings).unwrap(),
+            "https://example.test/AZaz09-._~/?:#%@ ü?literal=yes#fragment"
+        );
+        assert!(template.expand_encoded(&Bindings::new()).is_none());
     }
 
     /// Ledger #750, C3: a template matches every IRI it expands to, even when a value

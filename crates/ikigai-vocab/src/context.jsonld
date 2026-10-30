@@ -444,6 +444,7 @@
       "@id": "ik:ref",
       "@type": "@id"
     },
+    "refTemplate": "ik:refTemplate",
     "refusal": "ik:refusal",
     "repo": "ik:repo",
     "repository": {

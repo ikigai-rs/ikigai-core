@@ -480,7 +480,7 @@ ik:endpointName a rdf:Property ;
 ik:matchKind a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "matchKind" ;
-    rdfs:comment "How an ik:Door's ik:pattern, or an ik:Limit's ik:family, matches a name: \"exact\" (the whole name), \"template\" (a URI template, RFC 6570 level 1), \"prefix\" (every name under it; a limiter only), or \"custom\" (a grammar the graph describes but cannot define — its pattern is a description, and an arrangement cannot be rebuilt from it). No domain: it sits on doors and on limiters." .
+    rdfs:comment "How an ik:Door's ik:pattern, or an ik:Limit's ik:family, matches a name: \"exact\" (the whole name), \"template\" (a URI template, RFC 6570 level 1; captures may also fill a named request's ik:refTemplate with encoded simple string expansion), \"prefix\" (every name under it; a limiter only), or \"custom\" (a grammar the graph describes but cannot define — its pattern is a description, and an arrangement cannot be rebuilt from it). No domain: it sits on doors and on limiters." .
 
 ik:confinedTo a rdf:Property ;
     rdfs:domain ik:Door ;
@@ -498,7 +498,7 @@ ik:ruleKind a rdf:Property ;
     rdfs:domain ik:RewriteRule ;
     rdfs:range xsd:string ;
     rdfs:label "ruleKind" ;
-    rdfs:comment "How an ik:RewriteRule matches: \"exact\" (the whole name), \"prefix\" (a leading namespace, the remainder carried over) or \"template\" (ledger #2512: ik:logical is a URI template, RFC 6570 level 1, and each {var} it captures may be used in ik:canonical or as a whole argument value, ik:capture; only on a view, ik:resolveAt \"root\")." .
+    rdfs:comment "How an ik:RewriteRule matches: \"exact\" (the whole name), \"prefix\" (a leading namespace, the remainder carried over) or \"template\" (ledger #2512: ik:logical is a URI template, RFC 6570 level 1, and each {var} it captures may be used in ik:canonical or as a whole argument value, ik:capture, or in an encoded reference IRI, ik:refTemplate; only on a view, ik:resolveAt \"root\")." .
 
 ik:logical a rdf:Property ;
     rdfs:domain ik:RewriteRule ;
@@ -522,7 +522,13 @@ ik:fixes a rdf:Property ;
     rdfs:domain ik:RewriteRule ;
     rdfs:range ik:Argument ;
     rdfs:label "fixes" ;
-    rdfs:comment "An argument a named request (an ik:RewriteRule with ik:resolveAt \"root\", ledger #2512) supplies to its target: an ik:Argument with ik:inputName and exactly one of ik:value (by value), ik:ref (by reference) or ik:capture (the whole value its template captured). Partial application: a caller may not give a fixed argument (refused, naming the binding), every other input of the target passes through, and as= is never fixed (it negotiates; declare it as an ik:input with a default). Named {rule}:arg:{name}." .
+    rdfs:comment "An argument a named request (an ik:RewriteRule with ik:resolveAt \"root\", ledger #2512) supplies to its target: an ik:Argument with ik:inputName and exactly one of ik:value (by value), ik:ref (by reference), ik:capture (the whole value its template captured) or ik:refTemplate (an IRI template filled by reference with RFC 6570 simple string expansion). Partial application: a caller may not give a fixed argument (refused, naming the binding), every other input of the target passes through, and as= is never fixed (it negotiates; declare it as an ik:input with a default). Named {rule}:arg:{name}." .
+
+ik:refTemplate a rdf:Property ;
+    rdfs:domain ik:Argument ;
+    rdfs:range xsd:string ;
+    rdfs:label "refTemplate" ;
+    rdfs:comment "On an argument fixed by a named request: an IRI template using only the rule's captures, passed by reference after RFC 6570 simple string expansion (UTF-8 percent-encoding except unreserved characters). Must have at least one variable and form an IRI with sample segments. Empty captures and captures forming whole dot path segments (. or ..) are refused. Exactly one of ik:value, ik:ref, ik:capture or ik:refTemplate gives the argument. Not a plan step argument." .
 
 ik:capture a rdf:Property ;
     rdfs:domain ik:Argument ;
@@ -1569,7 +1575,7 @@ ik:Step a rdfs:Class ;
 
 ik:Argument a rdfs:Class ;
     rdfs:label "Argument" ;
-    rdfs:comment "A named argument of a step: ik:inputName plus exactly one of ik:value (by value, a literal) or ik:ref (by reference, an IRI — a bound name of the same plan, or any resource). Named urn:plan:{plan-id}:step:{n}:arg:{name}. Also what a named request fixes (ik:fixes, ledger #2512), named {rule}:arg:{name}, where ik:capture is a third way to give the value." .
+    rdfs:comment "A named argument of a step: ik:inputName plus exactly one of ik:value (by value, a literal) or ik:ref (by reference, an IRI — a bound name of the same plan, or any resource). Named urn:plan:{plan-id}:step:{n}:arg:{name}. Also what a named request fixes (ik:fixes, ledger #2512), named {rule}:arg:{name}, where exactly one of ik:value, ik:ref, ik:capture (a whole capture by value) or ik:refTemplate (an encoded reference template) gives the value." .
 
 ik:Fork a rdfs:Class ;
     rdfs:subClassOf ik:Stage ;

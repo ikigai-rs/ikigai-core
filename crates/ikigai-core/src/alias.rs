@@ -254,7 +254,7 @@ impl ResolveAt {
 }
 
 /// How a named request gives one argument of its target (ledger #2512): `ik:value`,
-/// `ik:ref` or `ik:capture` on the rule's `ik:Argument`.
+/// `ik:ref`, `ik:refTemplate` or `ik:capture` on the rule's `ik:Argument`.
 ///
 /// `#[non_exhaustive]`: another way to give a value is additive.
 ///
@@ -273,6 +273,10 @@ pub enum FixedValue {
     Value(String),
     /// By reference: the IRI, sent as [`ArgRef::Reference`].
     Reference(Iri),
+    /// By reference: an IRI template filled from captures with RFC 6570 simple
+    /// string expansion. Empty captures and captures forming dot path segments
+    /// are refused; reserved characters are encoded as data.
+    ReferenceTemplate(UriTemplate),
     /// The WHOLE text one of the rule's template variables captured, sent by value. Never
     /// spliced inside a longer value: that would be string interpolation into a language.
     Capture(String),
@@ -280,11 +284,12 @@ pub enum FixedValue {
 
 impl fmt::Display for FixedValue {
     /// The spelling a binding writes: a value as it is, a reference as `<iri>`, a capture
-    /// as `{var}` — what [`ArgSpec::fixed`](crate::ArgSpec::fixed) carries.
+    /// as `{var}`, and a reference template as `<template>` — what [`ArgSpec::fixed`](crate::ArgSpec::fixed) carries.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FixedValue::Value(value) => f.write_str(value),
             FixedValue::Reference(iri) => write!(f, "<{}>", iri.as_str()),
+            FixedValue::ReferenceTemplate(template) => write!(f, "<{}>", template.source()),
             FixedValue::Capture(var) => write!(f, "{{{var}}}"),
         }
     }
@@ -294,7 +299,8 @@ impl fmt::Display for FixedValue {
 /// What the caller may not give, because it is part of what the name MEANS.
 ///
 /// `#[non_exhaustive]`: build one with [`value`](Self::value),
-/// [`reference`](Self::reference) or [`capture`](Self::capture).
+/// [`reference`](Self::reference), [`reference_template`](Self::reference_template)
+/// or [`capture`](Self::capture).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FixedArgument {
@@ -318,6 +324,22 @@ impl FixedArgument {
         FixedArgument {
             name: name.into(),
             value: FixedValue::Reference(iri),
+        }
+    }
+
+    /// Fix `name` to a reference IRI template filled from the rule's captures.
+    /// The rule validates its variables and IRI shape when bound.
+    ///
+    /// ```
+    /// use ikigai_core::{FixedArgument, UriTemplate};
+    /// let query = FixedArgument::reference_template(
+    ///     "query", UriTemplate::parse("urn:example:searches/{file}").unwrap());
+    /// assert_eq!(query.value.to_string(), "<urn:example:searches/{file}>");
+    /// ```
+    pub fn reference_template(name: impl Into<String>, template: UriTemplate) -> Self {
+        FixedArgument {
+            name: name.into(),
+            value: FixedValue::ReferenceTemplate(template),
         }
     }
 
@@ -463,7 +485,23 @@ impl AliasRule {
     /// never parses arguments out of a name, so a `?` in a capture carries nothing.
     fn apply_capturing(&self, target: &str) -> Option<(String, Bindings)> {
         if let Some(template) = &self.request.template {
-            let captures = template.match_iri(&Iri::parse(target).ok()?)?;
+            let captures = template.match_iri(&Iri::parse(target).ok()?).or_else(|| {
+                let empty: Vec<&str> = self
+                    .request
+                    .fixes
+                    .iter()
+                    .filter_map(|argument| match &argument.value {
+                        FixedValue::ReferenceTemplate(t) => Some(t),
+                        _ => None,
+                    })
+                    .flat_map(UriTemplate::variables)
+                    .collect();
+                if empty.is_empty() {
+                    None
+                } else {
+                    template.match_with_empty(target, &empty)
+                }
+            })?;
             let next = match &self.request.target {
                 Some(to) => to.expand(&captures)?,
                 None => self.to.clone(),
@@ -1213,7 +1251,8 @@ pub(crate) fn previewing<R>(resolve: impl FnOnce() -> R) -> R {
 /// - **a bound verb** is the one verb forwarded, beside `Exists`; any other is refused
 ///   with [`Error::Unsupported`];
 /// - **a template rule's captures** may fill its canonical name and whole argument
-///   values ([`FixedValue::Capture`]), never a part of a longer value.
+///   values ([`FixedValue::Capture`]), or encoded reference IRIs
+///   ([`FixedValue::ReferenceTemplate`]).
 ///
 /// A bound name's answer is its own cache entry depending on the expansion's, like any
 /// view's; the expansion is the ordinary request, shared with anyone who asks for it.
@@ -1382,7 +1421,7 @@ struct BoundPart {
     name: Iri,
     verb: Option<Verb>,
     /// Each fixed argument: its name, the value sent, and how a refusal shows it.
-    fixed: Vec<(String, ArgRef, String)>,
+    fixed: Vec<(String, Result<ArgRef, String>, String)>,
     inputs: Vec<ArgSpec>,
 }
 
@@ -1416,6 +1455,14 @@ impl AliasTable {
                             argument.name.clone(),
                             captures.get(var).unwrap_or_default(),
                         ),
+                        (FixedValue::ReferenceTemplate(template), 1..) => {
+                            match reference_from_template(template, &captures) {
+                                Ok(iri) => FixedArgument::reference(argument.name.clone(), iri),
+                                // The invoke path reports the invalid capture by argument
+                                // name; keep the authored template in its description.
+                                Err(_) => argument.clone(),
+                            }
+                        }
                         _ => argument.clone(),
                     };
                     forward = forward.fixing(argument);
@@ -1428,16 +1475,21 @@ impl AliasTable {
                 let mut fixed = Vec::with_capacity(rule.request.fixes.len());
                 for argument in &rule.request.fixes {
                     let (value, shown) = match &argument.value {
-                        FixedValue::Value(value) => {
-                            (ArgRef::Inline(value.clone().into_bytes()), value.clone())
-                        }
+                        FixedValue::Value(value) => (
+                            Ok(ArgRef::Inline(value.clone().into_bytes())),
+                            value.clone(),
+                        ),
                         FixedValue::Reference(iri) => (
-                            ArgRef::Reference(iri.clone()),
+                            Ok(ArgRef::Reference(iri.clone())),
                             format!("<{}>", iri.as_str()),
+                        ),
+                        FixedValue::ReferenceTemplate(template) => (
+                            reference_from_template(template, &captures).map(ArgRef::Reference),
+                            argument.value.to_string(),
                         ),
                         FixedValue::Capture(var) => {
                             let captured = captures.get(var)?.to_string();
-                            (ArgRef::Inline(captured.clone().into_bytes()), captured)
+                            (Ok(ArgRef::Inline(captured.clone().into_bytes())), captured)
                         }
                     };
                     fixed.push((argument.name.clone(), value, shown));
@@ -1457,6 +1509,34 @@ impl AliasTable {
             forward,
         })
     }
+}
+
+/// Bind-time validation guarantees the shape; runtime validation guards captured data.
+fn reference_from_template(template: &UriTemplate, captures: &Bindings) -> Result<Iri, String> {
+    for var in template.variables() {
+        if captures.get(var).is_none_or(str::is_empty) {
+            return Err(format!("reference template capture {{{var}}} is empty"));
+        }
+    }
+    // Parse only the structure here: braces in the authored template stand for
+    // variables, and bind-time validation has checked the same structure with samples.
+    // Inspect only path segments, so a dot in a query or a fragment stays legal.
+    let structure = oxiri::Iri::parse_unchecked(template.source());
+    for segment in structure.path().split('/') {
+        if segment.contains('{') {
+            let segment = UriTemplate::parse(segment).map_err(|e| e.to_string())?;
+            if matches!(
+                segment.expand_encoded(captures).as_deref(),
+                Some("." | "..")
+            ) {
+                return Err("reference template capture forms a dot path segment".into());
+            }
+        }
+    }
+    let expanded = template
+        .expand_encoded(captures)
+        .ok_or_else(|| "reference template capture is missing".to_string())?;
+    Iri::parse(expanded).map_err(|e| format!("expanded reference template is not an IRI: {e}"))
 }
 
 impl ViewEndpoint {
@@ -1490,6 +1570,10 @@ impl ViewEndpoint {
                         detail: format!("fixed by <{}> to {shown}", part.name.as_str()),
                     });
                 }
+                let value = value.as_ref().map_err(|detail| Error::InvalidArgument {
+                    name: name.clone(),
+                    detail: detail.clone(),
+                })?;
                 forwarded.args.insert(name.clone(), value.clone());
             }
             for input in &part.inputs {
@@ -1674,6 +1758,35 @@ fn request_part(rule: &TopologyRule) -> Result<RequestPart, DeclarationError> {
             return Err(refuse(format!("it fixes `{}` twice", argument.name)));
         }
         names.push(&argument.name);
+        if let FixedValue::ReferenceTemplate(template) = &argument.value {
+            let mut samples = Bindings::new();
+            for var in template.variables() {
+                if !vars.iter().any(|v| v == var) {
+                    return Err(refuse(format!(
+                        "it fixes `{}` with unknown capture {{{var}}}",
+                        argument.name
+                    )));
+                }
+                samples.insert(var, "segment");
+            }
+            if samples.is_empty() {
+                return Err(refuse(format!(
+                    "reference template for `{}` needs at least one variable; use a plain reference",
+                    argument.name
+                )));
+            }
+            Iri::parse(
+                template
+                    .expand_encoded(&samples)
+                    .expect("all variables supplied"),
+            )
+            .map_err(|e| {
+                refuse(format!(
+                    "reference template for `{}` is not an IRI: {e}",
+                    argument.name
+                ))
+            })?;
+        }
         if let FixedValue::Capture(var) = &argument.value {
             if !vars.iter().any(|v| v == var) {
                 return Err(refuse(format!(
@@ -1763,6 +1876,54 @@ mod tests {
 
     fn iri(s: &str) -> Iri {
         Iri::parse(s).unwrap()
+    }
+
+    #[test]
+    fn reference_template_capture_safety() {
+        let template = UriTemplate::parse("urn:example:files/searches/{file}").unwrap();
+        for (capture, encoded) in [
+            ("a/b", "a%2Fb"),
+            ("../x", "..%2Fx"),
+            ("x?y", "x%3Fy"),
+            ("x#y", "x%23y"),
+            ("50%", "50%25"),
+            ("a b", "a%20b"),
+            ("ü", "%C3%BC"),
+            ("a:b", "a%3Ab"),
+            ("a@b", "a%40b"),
+        ] {
+            let mut captures = Bindings::new();
+            captures.insert("file", capture);
+            assert_eq!(
+                reference_from_template(&template, &captures)
+                    .unwrap()
+                    .as_str(),
+                format!("urn:example:files/searches/{encoded}")
+            );
+        }
+        for capture in [".", "..", ""] {
+            let mut captures = Bindings::new();
+            captures.insert("file", capture);
+            assert!(reference_from_template(&template, &captures).is_err());
+        }
+        let mut captures = Bindings::new();
+        captures.insert("file", ".");
+        // A dot is legal data unless it would form a whole path segment.
+        for source in [
+            "urn:example:files/{file}.rq",
+            "https://example.test/?q={file}",
+            "https://example.test/#{file}",
+        ] {
+            assert!(
+                reference_from_template(&UriTemplate::parse(source).unwrap(), &captures).is_ok()
+            );
+        }
+        // A partial capture can also complete a dot segment.
+        assert!(reference_from_template(
+            &UriTemplate::parse("https://example.test/.{file}").unwrap(),
+            &captures
+        )
+        .is_err());
     }
 
     #[test]
