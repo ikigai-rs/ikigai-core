@@ -3858,6 +3858,39 @@ impl Kernel {
         .map(Answer::into_body)
     }
 
+    /// [`issue_body_with_context`](Self::issue_body_with_context), recording this
+    /// resolution into `tracer` with the same per-call isolation and private span-id
+    /// space as [`issue_traced`](Self::issue_traced). The body is handed over without
+    /// collecting it; the run's deadline still bounds a one-shot stream.
+    ///
+    /// A door keeps its own handle to the collector and reads it when the body ends,
+    /// carrying the trace in its END frame or trailer. Keep that handle on failure
+    /// too: an invocation error returns `Err` here but its events remain in `tracer`
+    /// (ledger #1153). If reading the body fails later, the door sends that failure
+    /// alongside the collected trace rather than a successful end. Trace events
+    /// describe invocations; handing over a body does not imply its bytes were read
+    /// successfully.
+    pub async fn issue_body_traced_with_context(
+        &self,
+        request: Request,
+        capability: &Capability,
+        tracer: Arc<dyn Tracer>,
+        context: crate::run::IssueContext,
+    ) -> Result<Representation<Body>> {
+        self.issue_answer(
+            request,
+            capability,
+            IssueCtx {
+                trace: Some(TraceScope::new(tracer)),
+                run: context,
+                buffer: false,
+                ..IssueCtx::top()
+            },
+        )
+        .await
+        .map(Answer::into_body)
+    }
+
     /// Issue a request as `issue` describes it (ledger #2402), answering with the body **as
     /// the endpoint produced it** ([`issue_body`](Self::issue_body)): in a resolution chain,
     /// with an upstream stage's provenance folded in, as part of a run, traced, and with a

@@ -501,3 +501,126 @@ fn a_sink_reads_referenced_content_as_a_body() {
         "{err:?}"
     );
 }
+
+#[test]
+fn traced_body_is_lazy_and_isolated_from_the_global_trace() {
+    let polled = Arc::new(AtomicUsize::new(0));
+    let count = polled.clone();
+    let (endpoint, _) = streamer(false, move || {
+        let count = count.clone();
+        Body::once(futures::stream::once(async move {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(Bytes::from_static(b"larger than the collect budget"))
+        }))
+    });
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:traced"), endpoint),
+    ));
+    let global = Arc::new(Collect::default());
+    kernel.set_tracer(global.clone());
+    let mine = Arc::new(Collect::default());
+    let answer = block_on(kernel.issue_body_traced_with_context(
+        source("urn:traced"),
+        &Capability::root(),
+        mine.clone(),
+        IssueContext::new().with_memory_limit(1),
+    ))
+    .unwrap();
+    assert!(answer.bytes.is_one_shot());
+    assert_eq!(polled.load(Ordering::SeqCst), 0, "issue must not collect");
+    assert_eq!(
+        block_on(answer.bytes.collect(100)).unwrap(),
+        b"larger than the collect budget"[..]
+    );
+    assert_eq!(polled.load(Ordering::SeqCst), 1);
+    let events = mine.0.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].target, "urn:traced");
+    assert_eq!(events[0].span, 0);
+    assert!(global.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn traced_body_failure_keeps_the_failed_invocation_trace() {
+    let endpoint = FnEndpoint::new("fail", |_| Err(Error::NotFound("failed".into())));
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:fail"), endpoint),
+    ));
+    let mine = Arc::new(Collect::default());
+    let result = block_on(kernel.issue_body_traced_with_context(
+        source("urn:fail"),
+        &Capability::root(),
+        mine.clone(),
+        IssueContext::new(),
+    ));
+    assert!(matches!(result, Err(Error::NotFound(_))));
+    let events = mine.0.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0]
+        .notes
+        .iter()
+        .any(|(key, _)| key == ikigai_core::FAILED_NOTE));
+}
+
+#[test]
+fn traced_body_read_failure_keeps_trace_for_the_error_trailer() {
+    let (endpoint, _) = streamer(false, || {
+        Body::once(futures::stream::iter([
+            Ok(Bytes::from_static(b"partial")),
+            Err(Error::NotFound("stream failed".into())),
+        ]))
+    });
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:broken"), endpoint),
+    ));
+    let mine = Arc::new(Collect::default());
+    let answer = block_on(kernel.issue_body_traced_with_context(
+        source("urn:broken"),
+        &Capability::root(),
+        mine.clone(),
+        IssueContext::new(),
+    ))
+    .unwrap();
+    let mut stream = answer.bytes.into_stream();
+    assert_eq!(block_on(stream.next()).unwrap().unwrap(), b"partial"[..]);
+    assert!(matches!(
+        block_on(stream.next()),
+        Some(Err(Error::NotFound(_)))
+    ));
+    let events = mine.0.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].target, "urn:broken");
+}
+
+#[test]
+fn traced_body_honors_the_run_deadline() {
+    let clock = Arc::new(Hand(AtomicU64::new(1_000)));
+    let tick = clock.clone();
+    let (endpoint, _) = streamer(false, move || {
+        let tick = tick.clone();
+        Body::once(futures::stream::iter(0..).map(move |_| {
+            tick.0.fetch_add(100, Ordering::SeqCst);
+            Ok(Bytes::from_static(b"chunk"))
+        }))
+    });
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:deadline"), endpoint),
+    ))
+    .with_clock(clock);
+    let mine = Arc::new(Collect::default());
+    let answer = block_on(kernel.issue_body_traced_with_context(
+        source("urn:deadline"),
+        &Capability::root(),
+        mine.clone(),
+        IssueContext::new().with_not_after(Time::from_millis(1_200)),
+    ))
+    .unwrap();
+    let mut stream = answer.bytes.into_stream();
+    assert_eq!(block_on(stream.next()).unwrap().unwrap(), b"chunk"[..]);
+    assert!(matches!(
+        block_on(stream.next()),
+        Some(Err(Error::OverBudget { .. }))
+    ));
+    assert!(block_on(stream.next()).is_none());
+    assert_eq!(mine.0.lock().unwrap().len(), 1);
+}
