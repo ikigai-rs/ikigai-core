@@ -430,7 +430,9 @@ pub const LEVEL_NOTE: &str = "level";
 /// The value is one or more clauses joined by `"; "`, in this order:
 ///
 /// - `declared` — the endpoint's own answer was [`Expiry::Always`]: it declared no
-///   caching.
+///   caching, with no other reason attached.
+/// - `mounted` — a peer's answer, held here uncached because the peer's cuts do not
+///   reach this kernel (see [`crate::UncachedReason::Mounted`]).
 /// - `dependency <iri>…` — sub-requests that answered `Always`, by the name the
 ///   endpoint requested, each once, in the order first seen.
 /// - `denied <iri>…` — sub-requests refused on capability: a grant change has no
@@ -4117,7 +4119,7 @@ impl Kernel {
             let mut why = Uncached::default();
             if cacheable_verb {
                 match representation.expiry {
-                    Expiry::Always => why.declared = true,
+                    Expiry::Always => why.reason = representation.uncached_reason(),
                     Expiry::Never => {}
                     Expiry::At(_) if self.clock.is_none() => {
                         why.declined = Some(Declined::NoClock);
@@ -4653,7 +4655,7 @@ impl Kernel {
             if representation.is_revalidated() {
                 return Err(self.unoffered(&request));
             }
-            let declared = representation.expiry;
+            let reason = representation.uncached_reason();
             // Effective expiry propagates from the dependencies: the result is no
             // fresher than its most volatile part. The endpoint's own expiry is met
             // with the combined dependency expiry — `Always` if either is volatile,
@@ -4711,7 +4713,7 @@ impl Kernel {
             // none AND joined a volatile source has two things to fix, and naming
             // one hides the other until the first is fixed.
             if effective == Expiry::Always {
-                why.declared = declared == Expiry::Always;
+                why.reason = reason;
                 why.deps = invocation.take_volatile_dependencies();
                 why.upstream = upstream == Expiry::Always;
             }
@@ -4760,7 +4762,7 @@ impl Kernel {
                     // The Meta arm, or any path the invocation arm did not name:
                     // the answer itself was volatile.
                     if why.is_empty() {
-                        why.declared = true;
+                        why.reason = representation.uncached_reason();
                     }
                 }
                 Expiry::Never => {}

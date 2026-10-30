@@ -204,6 +204,7 @@ pub use listen::{
 pub use meta::MetaRenderer;
 pub use repr::{
     Expiry, OriginValidator, Provenance, ReprType, Representation, Stale, Thread, Time,
+    UncachedReason,
 };
 pub use request::{Request, RequestId};
 pub use run::{

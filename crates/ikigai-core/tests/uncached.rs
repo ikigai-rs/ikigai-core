@@ -14,8 +14,8 @@ use futures::executor::block_on;
 use ikigai_core::{
     AsyncFnEndpoint, CacheBound, CachePolicy, Capability, Description, EndpointSpace, EntryFacts,
     Error, Exact, Expiry, FixedClock, FnEndpoint, Iri, Kernel, Provenance, ReprType,
-    Representation, Request, Scope, Space, Time, TraceEvent, Tracer, UriTemplate, Verb,
-    UNCACHED_NOTE,
+    Representation, Request, Scope, Space, Time, TraceEvent, Tracer, UncachedReason, UriTemplate,
+    Verb, UNCACHED_NOTE,
 };
 
 fn iri(s: &str) -> Iri {
@@ -431,4 +431,34 @@ fn target_keeps_one_names_rows_as_asked_or_by_its_canonical_name() {
     let all = readout(&kernel);
     assert!(all.starts_with("uncached (why"), "{all}");
     assert!(all.contains("urn:tags:overlay:extra"), "{all}");
+}
+
+#[test]
+fn a_peer_answer_held_here_uncached_reports_mounted_instead_of_declared() {
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new()
+            .bind(
+                Exact::new("urn:peer:hello"),
+                FnEndpoint::new("peer", |_| {
+                    // The mount boundary can now name why it replaces the peer's expiry.
+                    Ok(text("hello")
+                        .cacheable()
+                        .with_uncached_reason(UncachedReason::Mounted))
+                }),
+            )
+            .bind(Exact::new("urn:local:live"), live("local")),
+    ));
+    for _ in 0..2 {
+        assert_eq!(why(&kernel, "urn:peer:hello").as_deref(), Some("mounted"));
+        assert!(!kernel.is_cached(&source("urn:peer:hello"), &Capability::root()));
+    }
+    assert_eq!(why(&kernel, "urn:local:live").as_deref(), Some("declared"));
+    let body = readout(&kernel);
+    let row = body
+        .lines()
+        .find(|l| l.trim_start().starts_with("urn:peer:hello"))
+        .unwrap();
+    assert!(row.contains("×2"), "{row}");
+    assert!(row.contains("mounted"), "{row}");
+    assert!(!row.contains("declared"), "{row}");
 }

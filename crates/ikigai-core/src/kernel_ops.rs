@@ -426,7 +426,7 @@ fn uncached() -> Description {
         .summary(
             "The last few resources the kernel computed and did NOT cache, most recent first: \
              the IRI, how many times it has been computed uncached, the reason (the endpoint \
-             declared no caching; a named dependency, refusal or failure made it volatile; a \
+             declared no caching or a mounted peer's cuts do not reach this kernel; a named dependency, refusal or failure made it volatile; a \
              volatile piped input; a deadline with no clock or already past; a cut while it \
              computed; the cache policy), and the chain it was computed in. Needs no tracer \
              installed. `target=` keeps only that name's rows, so a caller asking about one \
