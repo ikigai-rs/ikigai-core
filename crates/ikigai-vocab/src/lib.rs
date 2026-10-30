@@ -29,8 +29,8 @@ pub const VOCABULARY: &str = include_str!("vocabulary.ttl");
 /// step runs: one verb from the five per step, one target, one result, an argument by
 /// value or by reference but not both, every edge and `@name` reference inside the plan,
 /// each name bound once. Hand-maintained in `src/shapes.ttl`, bundled at compile time,
-/// parsed for syntax by a test. **Data only**: this crate has no SHACL engine and must
-/// not gain one; `ikigai-shacl` runs them. What they cannot say (full acyclicity — a
+/// validated in tests by `ikigai-shacl` with its default rudof backend. **Data only**:
+/// the published library has no SHACL engine. What they cannot say (full acyclicity — a
 /// reference goes through a name, a hop a property path cannot take; catalog binding;
 /// ArgSpec fit; transreption routes; capability) is stated in the file's header and
 /// belongs to the plan validator.

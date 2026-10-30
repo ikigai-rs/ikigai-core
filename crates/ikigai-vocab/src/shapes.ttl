@@ -7,8 +7,8 @@
 # and ik:Stage, what a step and a fork share).
 # They say formally what vocabulary.ttl says in prose, so a plan can be REFUSED before a
 # single step runs. Bundled as `ikigai_vocab::SHAPES`; served as `urn:ikigai:shapes` by a
-# later arc; exercised for real by ikigai-shacl (this crate parses them for syntax only —
-# it has no SHACL engine and must not gain one). Every shape is a named IRI, no blank
+# later arc; exercised by this crate's tests using ikigai-shacl (test-only; the
+# published library has no SHACL engine). Every shape is a named IRI, no blank
 # nodes: the shapes are a resource like anything else, so they diff.
 #
 # What the shapes CAN say: cardinalities, verbs from the five, the value-or-ref
@@ -116,8 +116,8 @@
     """ .
 
 # Every `@name` reference into this plan's var namespace names a bound name of this plan
-# (a step's ik:binds or a parameter). A reference outside the namespace is any resource
-# IRI and is not constrained here. Names in the IRI are `escape_iri_fragment`-encoded;
+# (a step's or fork's ik:binds or a parameter). A reference outside the namespace is
+# any resource IRI and is not constrained here. Names in the IRI are `escape_iri_fragment`-encoded;
 # the comparison assumes a name needs no encoding, which the step shape's pattern ensures.
 <urn:ikigai:shape:process:local-refs> a sh:SPARQLConstraint ;
     sh:message "{?value} references a name this plan never binds" ;
@@ -126,10 +126,12 @@
         SELECT $this ?value WHERE {
             $this ik:step ?s . ?s ik:argument ?a . ?a ik:ref ?value .
             FILTER (STRSTARTS(STR(?value), CONCAT(STR($this), ":var:")))
+            # Use a separate branch variable: ?s is the citing step, which need not
+            # be a branch of the fork that binds the referenced name.
             FILTER NOT EXISTS {
                 { $this ik:step ?b . ?b ik:binds ?name }
                 UNION
-                { $this ik:step ?s . ?s ik:forkOf+ ?f . ?f ik:binds ?name }
+                { $this ik:step ?branch . ?branch ik:forkOf+ ?f . ?f ik:binds ?name }
                 UNION
                 { $this ik:input ?p . ?p ik:inputName ?name }
                 FILTER (STR(?value) = CONCAT(STR($this), ":var:", ?name))

@@ -4,14 +4,12 @@
 //! types), and under RDFS entailment typed the fork an `ik:Step`: a graph that lints clean
 //! and means something false. `ik:Stage` (a superclass of both) is the domain now.
 //!
-//! These tests pin the vocabulary half (the entailment), and run the three new plan
-//! shapes through a hand mirror of `shapes.ttl` generalized to stages, as `plans.rs` does
-//! for the step-only fixtures (this crate has no SHACL engine; ikigai-shacl runs the
-//! shapes for real).
+//! These tests pin the vocabulary half (the entailment). `shapes.rs` runs all
+//! plan fixtures against the published shapes with the real SHACL engine.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ikigai_vocab::{NS, SHAPES, VOCABULARY};
+use ikigai_vocab::{NS, VOCABULARY};
 use oxrdf::{NamedOrBlankNode, Term, Triple};
 
 const STAGE_FIXTURES: [&str; 3] = ["plan-fork-binds", "plan-fork-branch", "plan-fork-mapped"];
@@ -127,145 +125,4 @@ fn a_fork_that_binds_branches_or_maps_is_a_stage_and_never_a_step() {
     assert!(!vocabulary
         .iter()
         .any(|t| subject(t) == Some(&ik("order")) && t.predicate.as_str() == RDFS_DOMAIN));
-}
-
-#[test]
-fn the_stage_fixtures_satisfy_the_shapes_generalized_to_stages() {
-    // The shapes mention the stage property shapes from both the step and the fork shape.
-    for shape in ["step", "fork"] {
-        let block = SHAPES
-            .split("\n\n")
-            .find(|b| b.contains(&format!("<urn:ikigai:shape:{shape}> a sh:NodeShape")))
-            .unwrap_or_else(|| panic!("the {shape} shape"));
-        for stage in ["binds", "mapOver", "forkOf", "order", "order-with-fork"] {
-            assert!(
-                block.contains(&format!("<urn:ikigai:shape:stage:{stage}>")),
-                "the {shape} shape lists stage:{stage}"
-            );
-        }
-    }
-    for name in STAGE_FIXTURES {
-        let g = fixture(name);
-        let objects = |s: &str, p: &str| -> Vec<Term> {
-            let p = ik(p);
-            g.iter()
-                .filter(|t| subject(t) == Some(s) && t.predicate.as_str() == p)
-                .map(|t| t.object.clone())
-                .collect()
-        };
-        let iri = |s: &str, p: &str| -> Option<String> {
-            let os = objects(s, p);
-            assert!(os.len() <= 1, "{name}: {s} has {} {p}", os.len());
-            os.first().map(|o| match o {
-                Term::NamedNode(n) => n.as_str().to_string(),
-                other => panic!("{name}: {s} {p} is not an IRI: {other}"),
-            })
-        };
-        let lit = |s: &str, p: &str| -> Option<String> {
-            let os = objects(s, p);
-            assert!(os.len() <= 1, "{name}: {s} has {} {p}", os.len());
-            os.first().map(|o| match o {
-                Term::Literal(l) => l.value().to_string(),
-                other => panic!("{name}: {s} {p} is not a literal: {other}"),
-            })
-        };
-        let process = g
-            .iter()
-            .find(|t| t.predicate.as_str() == RDF_TYPE && object_iri(t) == Some(&ik("Process")))
-            .and_then(subject)
-            .expect("a process")
-            .to_string();
-        let steps: BTreeSet<String> = objects(&process, "step")
-            .into_iter()
-            .filter_map(|o| match o {
-                Term::NamedNode(n) => Some(n.as_str().to_string()),
-                _ => None,
-            })
-            .collect();
-        // The plan's forks: reached from its steps through ik:forkOf+.
-        let mut forks: BTreeSet<String> = BTreeSet::new();
-        let mut frontier: Vec<String> = steps.iter().filter_map(|s| iri(s, "forkOf")).collect();
-        while let Some(f) = frontier.pop() {
-            if forks.insert(f.clone()) {
-                frontier.extend(iri(&f, "forkOf"));
-            }
-        }
-        assert!(
-            !forks.is_empty(),
-            "{name}: its forks are reachable from its steps"
-        );
-        let stages: BTreeSet<String> = steps.union(&forks).cloned().collect();
-        let local = |x: &str| stages.contains(x);
-
-        let mut names: BTreeMap<String, usize> = BTreeMap::new();
-        for stage in &stages {
-            // At most one name, an identifier.
-            if let Some(b) = lit(stage, "binds") {
-                assert!(
-                    b.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
-                    "{stage} binds an identifier"
-                );
-                *names.entry(b).or_default() += 1;
-            }
-            // A branch has a position, and only a branch does.
-            assert_eq!(
-                iri(stage, "forkOf").is_some(),
-                lit(stage, "order").is_some(),
-                "{name}: {stage}: ik:order iff ik:forkOf"
-            );
-            if let Some(f) = iri(stage, "forkOf") {
-                assert!(
-                    forks.contains(&f),
-                    "{stage} is a branch of a fork of this plan"
-                );
-            }
-            // One feed: a step's pipe / map / fork; a fork's upstream / map / fork.
-            let feed = if forks.contains(stage) {
-                "upstream"
-            } else {
-                "pipeFrom"
-            };
-            let feeds = [
-                iri(stage, feed),
-                iri(stage, "mapOver"),
-                iri(stage, "forkOf"),
-            ];
-            assert!(
-                feeds.iter().flatten().count() <= 1,
-                "{name}: {stage} has one feed"
-            );
-            for up in feeds[..2].iter().flatten() {
-                assert!(local(up), "{name}: {stage}'s upstream {up} is local");
-            }
-        }
-        let result = iri(&process, "result").expect("one result");
-        assert!(local(&result), "{name}: the result is a stage of the plan");
-        // Single assignment, across steps and forks.
-        for (n, count) in &names {
-            assert_eq!(*count, 1, "{name}: {n} bound {count} times");
-        }
-        // Every fork has a branch (a step or a fork), with distinct positions.
-        for f in &forks {
-            let orders: Vec<String> = stages
-                .iter()
-                .filter(|s| iri(s, "forkOf").as_deref() == Some(f.as_str()))
-                .filter_map(|s| lit(s, "order"))
-                .collect();
-            assert!(!orders.is_empty(), "{name}: {f} has a branch");
-            let distinct: BTreeSet<&String> = orders.iter().collect();
-            assert_eq!(distinct.len(), orders.len(), "{name}: {f}: distinct orders");
-        }
-        // Every reference into the plan's names cites a name a stage binds.
-        for t in g.iter().filter(|t| t.predicate.as_str() == ik("ref")) {
-            let Some(var) = object_iri(t).and_then(|r| r.strip_prefix(&format!("{process}:var:")))
-            else {
-                continue;
-            };
-            assert!(
-                names.contains_key(var),
-                "{name}: @{var} is bound by a stage"
-            );
-        }
-    }
 }
