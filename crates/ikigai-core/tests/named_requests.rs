@@ -527,3 +527,25 @@ fn a_named_request_in_the_kernels_own_table_keeps_its_fixed_arguments() {
         "never the bare target"
     );
 }
+
+#[test]
+fn reference_template_declaration_resolves_by_reference() {
+    let declaration = NAMES
+        .replace(
+            "ik:ref <urn:example:queries/count.rq>",
+            "ik:refTemplate \"urn:example:queries/{id}\"",
+        )
+        .replace(
+            "urn:example:quakes:count\"",
+            "urn:example:quakes:count:{id}\"",
+        );
+    // The second rule becomes a template as well.
+    let declaration = declaration.replace("ik:ruleKind \"exact\"", "ik:ruleKind \"template\"");
+    let topology = Topology::from_turtle(&declaration).unwrap();
+    let host = host(&topology);
+    assert_eq!(
+        host.issue(source("urn:example:quakes:count:since.rq"))
+            .unwrap(),
+        "as=text/csv\ngraph=urn:example:quakes:graph\nquery=<urn:example:queries/since.rq>\n"
+    );
+}
