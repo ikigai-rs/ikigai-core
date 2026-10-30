@@ -612,6 +612,77 @@ fn existence_sensitivity_is_its_own_contract_and_an_explicit_action_replaces_the
     );
 }
 
+/// Ledger #2470: shared rows must exercise the reads-body tail and its Turtle term,
+/// including compatibility when unset, input-name set order, and earlier v2 tails.
+#[test]
+fn reads_body_vectors_pin_the_tail_and_input_triples() {
+    let doc: Value = serde_json::from_str(&compute()).unwrap();
+    let contract = |name: &str| -> &str {
+        doc["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no contract case {name}"))["contract"]
+            .as_str()
+            .unwrap()
+    };
+    assert_eq!(contract("body/unflagged"), contract("body/false-is-absent"));
+    assert_eq!(
+        contract("body/v2-unflagged"),
+        contract("body/v2-false-is-absent")
+    );
+    assert_eq!(contract("body/multiple"), contract("body/reordered"));
+    let distinct = [
+        "body/unflagged",
+        "body/flagged",
+        "body/other-input",
+        "body/multiple",
+        "body/v2-unflagged",
+        "body/v2-flagged",
+        "body/failures-and-sensitive",
+    ]
+    .map(contract);
+    assert_eq!(
+        distinct.iter().collect::<BTreeSet<_>>().len(),
+        distinct.len()
+    );
+
+    let door = doc["doors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "core/reads-body")
+        .expect("reads-body door");
+    let triples = door_triples(&doc, "core/reads-body");
+    let readers: BTreeSet<_> = triples
+        .iter()
+        .filter(|t| t.predicate.as_str() == format!("{}readsBody", ikigai_vocab::NS))
+        .map(|t| {
+            match &t.object {
+                Term::Literal(l) => {
+                    assert_eq!(l.value(), "true");
+                    assert_eq!(
+                        l.datatype().as_str(),
+                        "http://www.w3.org/2001/XMLSchema#boolean"
+                    );
+                }
+                other => panic!("readsBody must be a boolean: {other}"),
+            }
+            t.subject.to_string()
+        })
+        .collect();
+    let mut expected =
+        BTreeSet::from(["<urn:ikigai:endpoint:reads-body:input:content>".to_string()]);
+    for action in door["actions"].as_array().unwrap() {
+        expected.insert(format!(
+            "<{}:input:content>",
+            action["contract"].as_str().unwrap()
+        ));
+    }
+    assert_eq!(readers, expected);
+}
+
 /// Regenerate `contract_vectors.json`./// Regenerate `contract_vectors.json`. Ignored so a normal run only CHECKS; run it with
 /// `-- --ignored` after editing the cases.
 #[test]
