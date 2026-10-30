@@ -48,9 +48,10 @@ pub enum Error {
     /// a change of state, not a retry. Carries a message only, like
     /// [`NotFound`](Error::NotFound) — a precondition has no single argument to name,
     /// which is exactly why [`InvalidArgument`](Error::InvalidArgument) was the wrong
-    /// home for it. Never cached, like every error, and a composite that swallows one
-    /// and returns a cacheable fallback is forced uncacheable (see
-    /// `Invocation::issue` on failed sub-requests).
+    /// home for it. Never cached, like every error its endpoint states no expiry for
+    /// (`Invocation::failure_expires_at`), and a composite that swallows one and returns
+    /// a cacheable fallback is forced uncacheable (see `Invocation::issue` on failed
+    /// sub-requests).
     ///
     /// **Which refusal is which.** Four variants refuse a request an author might
     /// confuse, and each answers a different question:
@@ -104,8 +105,10 @@ pub enum Error {
     /// recurse until the stack died. **Permanent**: re-issuing the same request
     /// takes the same path. `depth` is the nesting depth the refused request would
     /// have run at (a host's own request is 0; each sub-request is one deeper);
-    /// `target` is the canonical name it asked for. Never cached: errors never
-    /// reach the representation store, and a composite that swallows this error
+    /// `target` is the canonical name it asked for. Never cached, not even by an
+    /// endpoint that propagates it after stating a failure expiry
+    /// (`Invocation::failure_expires_at`): the cache key does not carry depth, so a
+    /// cached refusal could reach a shallower request. And a composite that swallows this error
     /// and returns a cacheable fallback is forced uncacheable (see
     /// `Invocation::issue` on failed sub-requests).
     DepthExceeded {
