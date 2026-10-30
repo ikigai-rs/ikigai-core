@@ -520,6 +520,10 @@ struct Recorded {
     /// invocation does not grow for it; shared by every reborrow (they serve the same
     /// request), never by a sub-request.
     stale: std::sync::OnceLock<Arc<crate::repr::Stale>>,
+    /// The time until which a FAILURE of this invocation may be cached (ledger #2657),
+    /// when the endpoint stated one ([`Invocation::failure_expires_at`]). Read by the
+    /// kernel only if the endpoint then answers an error.
+    failure_until: Mutex<Option<Time>>,
 }
 
 /// What a resolution depended on before it FAILED: the meet of its sub-requests'
@@ -549,6 +553,14 @@ pub struct Dependencies {
     pub expiry: Expiry,
     /// The golden threads it hung from before it failed.
     pub threads: BTreeSet<Thread>,
+    /// When the failure ITSELF is cached until a stated time (ledger #2657, negative
+    /// caching): the endpoint answered it with an expiry
+    /// ([`Invocation::failure_expires_at`]) and the kernel stored it, so it is served
+    /// unchanged until then or until a cut of one of [`threads`](Self::threads). A
+    /// caller that catches such a failure stays cacheable until this time instead of
+    /// becoming uncacheable at once. `None` for every other failure, which is never
+    /// cached.
+    pub failure_until: Option<Time>,
 }
 
 impl Dependencies {
@@ -558,6 +570,7 @@ impl Dependencies {
         Dependencies {
             expiry: Expiry::Never,
             threads: BTreeSet::new(),
+            failure_until: None,
         }
     }
 }
@@ -628,6 +641,12 @@ impl Recorded {
     ///   carries nothing; one an endpoint propagated carries what that endpoint read.
     /// - [`Error::Denied`]: [`Expiry::Always`]. A grant change has no thread, so a
     ///   result built on a refusal must not be cached at all.
+    /// - A failure the kernel CACHED until a stated time (`carried.failure_until`,
+    ///   ledger #2657): an `At` that time, met with what the failure depended on, and
+    ///   its threads — the failing resource's own among them, so a cut on it drops
+    ///   this answer with the cached failure. The failure is served unchanged until
+    ///   then, so a fallback built on it is exactly as fresh as the failure is, and
+    ///   recomputes when it expires. Never for `Denied`, which has no thread to cut.
     /// - Every other error (`Endpoint`, `Timeout`, `Unavailable`, `DepthExceeded`,
     ///   `Conflict`, a bad argument): `Always` as well, conservatively — the kernel
     ///   cannot name what would make the failure go away, and not caching is never
@@ -672,9 +691,23 @@ impl Recorded {
                     Error::Denied(_) => DepKind::Denied,
                     _ => DepKind::Failed,
                 };
+                let cached = match carried.failure_until {
+                    Some(until) if kind == DepKind::Failed => {
+                        Expiry::At(until).most_restrictive(carried.expiry)
+                    }
+                    _ => Expiry::Always,
+                };
                 let mut deps = self.deps.lock().expect("deps lock");
-                deps.meet(Expiry::Always);
-                deps.volatile.note(kind, requested);
+                deps.meet(cached);
+                if cached == Expiry::Always {
+                    deps.volatile.note(kind, requested);
+                    return;
+                }
+                drop(deps);
+                self.dep_threads
+                    .lock()
+                    .expect("dep threads lock")
+                    .extend(carried.threads);
             }
         }
     }
@@ -1434,7 +1467,9 @@ impl<'a> Invocation<'a> {
     /// **A failed sub-request is recorded too.** `Unresolved` and `NotFound` add a
     /// golden thread named after the missing resource, so a fallback built on its
     /// absence is cut when it appears; `Denied` and every other error make this
-    /// invocation's result uncacheable. An endpoint that catches an error and
+    /// invocation's result uncacheable — unless the failure was cached until a stated
+    /// time ([`failure_expires_at`](Self::failure_expires_at), ledger #2657), which
+    /// keeps this result cacheable until that time. An endpoint that catches an error and
     /// returns `.cacheable()` therefore gets exactly the cacheability its inputs
     /// warrant — which, for a swallowed denial, is none. The rules and the reason
     /// for each are on `Recorded::record` in this file.
@@ -1551,7 +1586,8 @@ impl<'a> Invocation<'a> {
     /// ★ **The dependency is recorded when the answer arrives, not when the body has been
     /// read.** A stream that fails part-way while this endpoint reads it fails this
     /// endpoint's read, and the endpoint returns that error: nothing built on it is
-    /// stored, because errors never reach the cache.
+    /// stored: a stream's failure is not one its endpoint stated an expiry for
+    /// ([`failure_expires_at`](Self::failure_expires_at)) unless it says so.
     pub async fn issue_body(&self, request: Request) -> Result<Representation<crate::Body>> {
         self.issue_body_in(request, self.run.clone()).await
     }
@@ -2080,6 +2116,93 @@ impl<'a> Invocation<'a> {
             .or_else(|| self.issuer.and_then(|issuer| issuer.now()))
     }
 
+    /// **State how long a failure of this invocation may be cached** (negative
+    /// caching, ledger #2657): if the endpoint then answers an error, the kernel
+    /// stores that error until `until` and serves it unchanged to every repeat of the
+    /// request, instead of invoking the endpoint again. An upstream's 500 with a
+    /// `Retry-After`, a refused fetch held off for a bounded while: the failure is
+    /// recomputed on schedule, not on every read.
+    ///
+    /// What it buys is the CALLER's cacheability. A composite that catches a failed
+    /// sub-request and returns a fallback is uncacheable while the failure is not
+    /// cached, because nothing could say when the failure goes away; a failure cached
+    /// until `T` says exactly that, so the composite is cached until `T` (or earlier,
+    /// as its other dependencies say) and recomputes then.
+    ///
+    /// The rules are an expiring answer's:
+    ///
+    /// - The kernel clamps `until` to its ceiling
+    ///   ([`Kernel::with_failure_ceiling`](crate::Kernel::with_failure_ceiling), five
+    ///   minutes unless the host says otherwise), so a misbehaving origin cannot pin a
+    ///   failure for days.
+    /// - A cut of a thread the failed invocation hung from — its own target's among
+    ///   them — drops the cached failure at once.
+    /// - Nothing the invocation read may have been volatile, and the kernel needs a
+    ///   clock; otherwise the failure is not cached, as before.
+    /// - A [`Denied`](Error::Denied), [`NotFound`](Error::NotFound),
+    ///   [`Unresolved`](Error::Unresolved) or [`DepthExceeded`](Error::DepthExceeded)
+    ///   answer is never cached this way: a denial has no thread to cut, a miss
+    ///   already hangs its caller from a thread named after it, and a depth refusal
+    ///   must never reach a shallower request. Neither is a write's failure: only a
+    ///   cacheable verb's.
+    ///
+    /// Stating it more than once keeps the earliest. A failure WITHOUT a stated expiry
+    /// is never cached, exactly as before this existed.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicUsize, Ordering};
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     AsyncFnEndpoint, Capability, EndpointSpace, Error, Exact, FixedClock, Iri, Kernel,
+    ///     Request, Verb,
+    /// };
+    ///
+    /// let calls = Arc::new(AtomicUsize::new(0));
+    /// let counted = Arc::clone(&calls);
+    /// let feed = AsyncFnEndpoint::new("feed", move |inv| {
+    ///     let counted = Arc::clone(&counted);
+    ///     Box::pin(async move {
+    ///         counted.fetch_add(1, Ordering::SeqCst);
+    ///         // The origin answered 500 with `Retry-After: 60`.
+    ///         let now = inv.now().expect("the kernel has a clock");
+    ///         inv.failure_expires_at(now.plus_millis(60_000));
+    ///         Err(Error::Unavailable("origin answered 500".into()))
+    ///     })
+    /// });
+    /// let kernel = Kernel::new(Arc::new(
+    ///     EndpointSpace::new().bind(Exact::new("urn:feed:a"), feed),
+    /// ))
+    /// .with_clock(Arc::new(FixedClock::at(1_000)));
+    /// let read = || {
+    ///     block_on(kernel.issue(
+    ///         Request::new(Verb::Source, Iri::parse("urn:feed:a").unwrap()),
+    ///         &Capability::root(),
+    ///     ))
+    /// };
+    /// assert!(read().is_err());
+    /// assert!(read().is_err());
+    /// assert_eq!(calls.load(Ordering::SeqCst), 1, "the second read was served the cached failure");
+    /// ```
+    pub fn failure_expires_at(&self, until: Time) {
+        let mut stated = self
+            .recorded
+            .failure_until
+            .lock()
+            .expect("failure expiry lock");
+        *stated = Some(stated.map_or(until, |earlier| earlier.min(until)));
+    }
+
+    /// [`failure_expires_at`](Self::failure_expires_at) `ttl` from
+    /// [`now`](Self::now) — a `Retry-After` in seconds, a bounded default. A no-op
+    /// when this invocation has no time: nothing could tell when it expired.
+    pub fn failure_expires_in(&self, ttl: std::time::Duration) {
+        if let Some(now) = self.now() {
+            let millis = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+            self.failure_expires_at(now.plus_millis(millis));
+        }
+    }
+
     /// Combined expiry of the dependencies issued during this invocation: the
     /// [meet](Expiry::most_restrictive) of them all, so the result is no fresher
     /// than its most volatile dependency. `Always` if any is volatile, the earliest
@@ -2142,7 +2265,18 @@ impl<'a> Invocation<'a> {
         Dependencies {
             expiry: self.dependency_expiry(),
             threads,
+            failure_until: None,
         }
+    }
+
+    /// The time this invocation's endpoint stated its failure may be cached until, if
+    /// it stated one ([`failure_expires_at`](Self::failure_expires_at)).
+    pub(crate) fn stated_failure_expiry(&self) -> Option<Time> {
+        *self
+            .recorded
+            .failure_until
+            .lock()
+            .expect("failure expiry lock")
     }
 }
 

@@ -40,7 +40,9 @@ pub(crate) enum DepKind {
     /// grant change has no thread, so a result built on a refusal is never cached.
     Denied,
     /// It failed with any other error but a miss (`Unresolved` / `NotFound` hang a
-    /// thread instead): the kernel cannot name what would make the failure go away.
+    /// thread instead), and its endpoint stated no expiry the kernel could cache the
+    /// failure until (ledger #2657): the kernel cannot name what would make the failure
+    /// go away.
     Failed,
     /// It is a body handed over by a content id that is not the bytes' digest (a
     /// one-shot or unhashed body a plan attached, ledger #2239): a request carrying it

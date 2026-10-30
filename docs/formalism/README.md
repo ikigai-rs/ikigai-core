@@ -699,6 +699,32 @@ It changes no rule above: an issuing invocation folds a failure's carried set in
 only, so a thread attached to a `Denied`, a timeout, a depth refusal or any other error is
 dropped and the composite stays unstored.
 
+**And a failure can be cached for a stated time** (negative caching, ledger #2657, after 0.2.8).
+The rule above made a composite that returns one failing branch as a value — a feed stream with
+one feed down — recompute on every read for as long as that branch fails, though every other
+branch still hit its cache. An endpoint may now answer a failure WITH an expiry
+(`Invocation::failure_expires_at` / `failure_expires_in`: a 500's `Retry-After`, a bounded
+default), and the kernel caches the failure until then, exactly as it would an `At` answer: keyed
+like one, pinned to the threads the failed invocation hung from (its own canonical target's
+among them, so a cut on it drops the cached failure), clamped to `now + ceiling`
+(`Kernel::with_failure_ceiling`, `DEFAULT_FAILURE_CEILING` five minutes), never past what the
+failure depended on, and never on a clock-free kernel. A failure served from the cache hands
+back `Dependencies::failure_until`, and an issuing invocation that catches it meets `At(that
+time)` with the failure's carried set instead of `Always`: the composite is cached until the
+earliest of its dependencies' expiries, and recomputes on schedule. Three things do not change.
+A failure with no stated expiry is `Always`, as above. A `Denied` is never cached (a grant change
+has no thread), nor is a miss, which already hangs a thread. And a failure that read something
+volatile is not cached, since the meet with its carried expiry is `Always`. The readouts name
+what is held: `urn:kernel:cache` and `urn:kernel:uncached` end with the cached failures, each
+with its state, the time it is served until and its error's kind, and its trace event carries
+`FAILURE_CACHED_NOTE` beside `FAILED_NOTE`.
+
+    pin: `negative_caching::a_composite_catching_an_expiring_failure_is_cached_until_the_expiry_then_recomputes` (crates/ikigai-core/tests/negative_caching.rs)
+    pin: `negative_caching::a_failure_with_no_stated_expiry_is_never_cached` (crates/ikigai-core/tests/negative_caching.rs)
+    pin: `negative_caching::a_cut_on_the_failing_resource_drops_the_cached_failure` (crates/ikigai-core/tests/negative_caching.rs)
+    pin: `negative_caching::the_ceiling_clamps_a_stated_expiry` (crates/ikigai-core/tests/negative_caching.rs)
+    pin: `negative_caching::a_denial_a_miss_a_depth_refusal_or_a_clock_free_kernel_caches_no_failure` (crates/ikigai-core/tests/negative_caching.rs)
+    doctest: `Invocation::failure_expires_at`
     pin: `depends_on::a_fallback_over_a_declared_absence_is_cut_by_the_publish` (crates/ikigai-core/tests/depends_on.rs)
     pin: `depends_on::every_other_error_stays_uncached_whatever_thread_is_attached` (crates/ikigai-core/tests/depends_on.rs)
     doctest: `Invocation::depends_on`
@@ -860,7 +886,8 @@ parent is the invocation that asked for one level too many. So an endpoint that 
 IRI, or a transclusion cycle, terminates at the bound with the trace saying where, and a
 legitimate chain shorter than the bound is unaffected. B.7's caching obligation — a refusal at
 the bound must not be served to a shallower request — holds twice over: the refusal never
-reaches the store (errors do not), and a composite that swallows it and returns a cacheable
+reaches the store (the kernel's own refusals never do; only a failure an endpoint answered with a
+stated expiry is cached, R4.5), and a composite that swallows it and returns a cacheable
 fallback is forced uncacheable by R4.5.
 
     pin: `kernel::tests::a_self_issuing_endpoint_is_refused_at_the_bound_and_the_trace_says_where` (crates/ikigai-core/src/kernel.rs)

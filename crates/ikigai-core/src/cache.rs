@@ -47,12 +47,13 @@
 //!   guessed at.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::body::Body;
+use crate::error::Error;
 use crate::repr::{Expiry, Provenance, Representation, Stale, Thread, Time};
 use crate::request::RequestId;
 use crate::uncached::Declined;
@@ -61,6 +62,11 @@ use crate::uncached::Declined;
 /// the oldest retained cut is declined (see the module docs): the bound costs
 /// missed caching under an implausible burst, never correctness.
 pub const CUT_LOG: usize = 4096;
+
+/// How many failures the cache holds at once (ledger #2657). A failure is small (an
+/// error and its edges), but a misbehaving origin can fail under many names; past
+/// this the soonest-expiring is forgotten first, which only costs a recompute.
+pub(crate) const CACHED_FAILURES: usize = 1024;
 
 /// A cached representation's key: the content-addressed request, the
 /// fingerprint of the authority that computed it, **and** the fingerprint of the
@@ -173,6 +179,37 @@ struct Slot {
     hits: u64,
     stored_tick: u64,
     last_used_tick: u64,
+}
+
+/// One failure the cache holds until a stated time (ledger #2657).
+#[derive(Debug)]
+struct FailedSlot {
+    incoming: Option<Provenance>,
+    target: String,
+    error: Error,
+    until: Time,
+    threads: BTreeSet<Thread>,
+    edges: Vec<(Thread, u64)>,
+}
+
+/// A failure served from the cache (ledger #2657): the error as the endpoint answered
+/// it, when it stops being served, and the threads a cut drops it by — what a caller
+/// that catches it hangs its own answer from.
+#[derive(Clone, Debug)]
+pub(crate) struct CachedFailure {
+    pub(crate) error: Error,
+    pub(crate) until: Time,
+    pub(crate) threads: BTreeSet<Thread>,
+}
+
+/// One cached failure for the readouts (`urn:kernel:cache`, `urn:kernel:uncached`):
+/// the IRI that failed, the error it answered, and the time it is served until.
+#[derive(Clone, Debug)]
+pub(crate) struct FailureRow {
+    pub(crate) target: String,
+    pub(crate) error: Error,
+    pub(crate) until: Time,
+    pub(crate) state: EntryState,
 }
 
 /// What the kernel's resolution path answers with (ledger #2237): a body, or, for a
@@ -579,10 +616,19 @@ pub struct ReprCache {
     /// or the old one — in which case the cut's sequence is greater than the
     /// snapshot and the race check catches it anyway. Both readings are safe.
     cut_seq: AtomicU64,
+    /// Set the first time a failure is stored (ledger #2657) and never cleared: the
+    /// resolution path looks a failure up only on a cache that has ever held one, so a
+    /// kernel whose endpoints state no failure expiry pays one atomic load for it.
+    failed_once: AtomicBool,
 }
 
 struct CacheState {
     entries: HashMap<CacheKey, Slot>,
+    /// Failures answered with a stated expiry (ledger #2657), beside the entries and
+    /// judged by the same rules: every edge at its pinned generation, the deadline
+    /// in the future. Apart from `entries` so a failure is never a `CacheEntry`, never
+    /// counted against the byte bound, and never handed to a [`CachePolicy`].
+    failures: HashMap<CacheKey, FailedSlot>,
     /// Current generation of each golden thread (absent ⇒ generation 0).
     generations: HashMap<Thread, u64>,
     /// The most recent cuts, oldest first, as `(thread, sequence)`.
@@ -611,6 +657,7 @@ impl ReprCache {
         ReprCache {
             state: Mutex::new(CacheState {
                 entries: HashMap::new(),
+                failures: HashMap::new(),
                 generations: HashMap::new(),
                 cuts: VecDeque::new(),
                 horizon: 0,
@@ -620,6 +667,7 @@ impl ReprCache {
             }),
             policy,
             cut_seq: AtomicU64::new(0),
+            failed_once: AtomicBool::new(false),
         }
     }
 
@@ -923,6 +971,8 @@ impl ReprCache {
             last_used_tick: state.tick,
         };
         let bytes = entry.bytes();
+        // An answer supersedes a failure cached under the same key (ledger #2657).
+        state.failures.remove(&key);
         if let Some(replaced) = state.entries.insert(key, entry) {
             state.bytes = state.bytes.saturating_sub(replaced.bytes());
         }
@@ -930,6 +980,104 @@ impl ReprCache {
         self.enforce_bound(&mut state);
         state.sweep_generations(self.policy.capacity().max_entries);
         Ok(())
+    }
+
+    /// Store a failure the endpoint answered with a stated expiry (ledger #2657), to be
+    /// served instead of recomputing until `until` or until a cut of one of `threads`
+    /// — the same two rules every entry is judged by. Declined, as an entry is, when a
+    /// thread it depends on was cut since `taken`. The kernel clamps `until` to its
+    /// ceiling before it gets here; the cache holds what it is given.
+    #[allow(clippy::too_many_arguments)] // the key, the failure, its validity, its race check
+    pub(crate) fn store_failure(
+        &self,
+        key: CacheKey,
+        target: String,
+        error: &Error,
+        until: Time,
+        threads: &BTreeSet<Thread>,
+        taken: CutSnapshot,
+        incoming: Option<&Provenance>,
+    ) -> Result<(), Declined> {
+        let mut state = self.state.lock().expect("cache lock");
+        if state.cut_since(threads, taken) {
+            return Err(Declined::CutInFlight);
+        }
+        let edges = threads
+            .iter()
+            .map(|thread| (thread.clone(), state.generation_of(thread)))
+            .collect();
+        if state.failures.len() >= CACHED_FAILURES && !state.failures.contains_key(&key) {
+            if let Some(soonest) = state
+                .failures
+                .iter()
+                .min_by_key(|(_, slot)| slot.until)
+                .map(|(key, _)| *key)
+            {
+                state.failures.remove(&soonest);
+            }
+        }
+        self.failed_once.store(true, Ordering::Release);
+        state.failures.insert(
+            key,
+            FailedSlot {
+                incoming: incoming.cloned(),
+                target,
+                error: error.clone(),
+                until,
+                threads: threads.clone(),
+                edges,
+            },
+        );
+        Ok(())
+    }
+
+    /// Whether a failure has ever been stored here — one atomic load, so the resolution
+    /// path looks a failure up only on a cache that has held one.
+    pub(crate) fn has_failures(&self) -> bool {
+        self.failed_once.load(Ordering::Acquire)
+    }
+
+    /// The failure cached under `key`, if it is still to be served as of `now` (and was
+    /// stored under the same upstream); a stale one is forgotten. `None` on a
+    /// clock-free kernel, which can never tell a deadline has not passed.
+    pub(crate) fn get_failure(
+        &self,
+        key: &CacheKey,
+        now: Option<Time>,
+        incoming: Option<&Provenance>,
+    ) -> Option<CachedFailure> {
+        let mut state = self.state.lock().expect("cache lock");
+        let slot = state.failures.get(key)?;
+        match state.failure_state(slot, now) {
+            EntryState::Live if slot.incoming.as_ref() == incoming => Some(CachedFailure {
+                error: slot.error.clone(),
+                until: slot.until,
+                threads: slot.threads.clone(),
+            }),
+            EntryState::Live => None,
+            _ => {
+                state.failures.remove(key);
+                None
+            }
+        }
+    }
+
+    /// One row per cached failure, marked as of `now`. Read-only, like
+    /// [`rows_at`](Self::rows_at).
+    pub(crate) fn failure_rows_at(&self, now: Option<Time>) -> Vec<FailureRow> {
+        let state = self.state.lock().expect("cache lock");
+        let mut rows: Vec<FailureRow> = state
+            .failures
+            .values()
+            .map(|slot| FailureRow {
+                target: slot.target.clone(),
+                error: slot.error.clone(),
+                until: slot.until,
+                state: state.failure_state(slot, now),
+            })
+            .collect();
+        rows.sort_by(|a, b| a.until.cmp(&b.until).then_with(|| a.target.cmp(&b.target)));
+        rows
     }
 
     /// Cut a golden thread: bump its generation (invalidating every entry pinned to
@@ -1216,6 +1364,23 @@ impl CacheState {
         }
     }
 
+    /// [`state_of`](Self::state_of) for a cached failure: cut first, then its
+    /// deadline, which a clock-free kernel always reads as passed.
+    fn failure_state(&self, slot: &FailedSlot, now: Option<Time>) -> EntryState {
+        if !slot
+            .edges
+            .iter()
+            .all(|(thread, generation)| self.generation_of(thread) == *generation)
+        {
+            return EntryState::Cut;
+        }
+        if now.is_some_and(|now| now < slot.until) {
+            EntryState::Live
+        } else {
+            EntryState::Expired
+        }
+    }
+
     /// Whether any of `threads` was cut after `taken` — or whether the log can no
     /// longer answer, in which case the answer is yes.
     fn cut_since(&self, threads: &BTreeSet<Thread>, taken: CutSnapshot) -> bool {
@@ -1253,6 +1418,11 @@ impl CacheState {
             .entries
             .values()
             .flat_map(|entry| entry.edges.iter().map(|(thread, _)| thread.clone()))
+            .chain(
+                self.failures
+                    .values()
+                    .flat_map(|slot| slot.edges.iter().map(|(thread, _)| thread.clone())),
+            )
             .collect();
         self.generations.retain(|thread, _| live.contains(thread));
     }

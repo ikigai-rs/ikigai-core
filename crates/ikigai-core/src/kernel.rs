@@ -305,6 +305,20 @@ pub const UNDECLARED_FAILURE_NOTE: &str = "undeclared-failure";
 /// that also pays for resolution hops; ikigai's counts sub-request nesting only.
 pub const DEFAULT_MAX_DEPTH: u32 = 64;
 
+/// The longest a [`Kernel`] caches a failure for, unless the host says otherwise
+/// ([`Kernel::with_failure_ceiling`]): five minutes. An endpoint states a failure's
+/// expiry ([`Invocation::failure_expires_at`](crate::Invocation::failure_expires_at));
+/// a later one is clamped to this, so a misbehaving origin's `Retry-After` of a week
+/// costs a recompute every five minutes, not a week of a stale failure (ledger #2657).
+pub const DEFAULT_FAILURE_CEILING: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The [`TraceEvent::notes`] key under which the kernel says a **failure is cached**
+/// (ledger #2657) — on the event of an invocation that failed with a stated expiry
+/// the kernel stored, and on every event served that failure from the cache, paired
+/// with the time it is served until in milliseconds, e.g. `("failure-cached", "until
+/// 61000")`. Beside [`FAILED_NOTE`], which still names the error's kind.
+pub const FAILURE_CACHED_NOTE: &str = "failure-cached";
+
 /// The [`TraceEvent::notes`] key under which the kernel reports that a request's
 /// target arrived through a **logical rewrite**, paired with the hop — e.g.
 /// `("alias", "urn:fn:toUpper -> urn:iki:fn:toUpper")`. Public so an observer can
@@ -438,7 +452,10 @@ pub const LEVEL_NOTE: &str = "level";
 /// - `denied <iri>…` — sub-requests refused on capability: a grant change has no
 ///   thread, so a result built on a refusal is never cached.
 /// - `failed <iri>…` — sub-requests that failed with any other error but a miss (a
-///   miss hangs a thread instead, and does not make the result volatile).
+///   miss hangs a thread instead, and does not make the result volatile), and whose
+///   failure was not cached until a stated expiry (ledger #2657): a cached failure
+///   holds its catcher cacheable until that expiry instead, and is listed at the end
+///   of `urn:kernel:uncached` and `urn:kernel:cache` with it.
 /// - `+<n> more` — the three lists above name at most eight sub-requests between
 ///   them; this counts the rest, so a list that is not whole never reads as whole.
 /// - `upstream` — the piped input the stage folded in was `Always`.
@@ -780,6 +797,9 @@ pub struct Kernel {
     /// [`with_max_depth`](Self::with_max_depth) for what it does and does not
     /// bound.
     max_depth: u32,
+    /// The longest a failure with a stated expiry is cached for (ledger #2657); see
+    /// [`with_failure_ceiling`](Self::with_failure_ceiling).
+    failure_ceiling: std::time::Duration,
     /// The host's retry policy, when it set one ([`with_retry_budget`](Self::with_retry_budget)):
     /// every request then runs with a shared retry pool narrowed to its capability's
     /// entitlement. `None` (the default) is today's behavior: no pool, so each retry
@@ -1952,6 +1972,7 @@ impl Kernel {
             aliases: None,
             subclass_closure: BTreeMap::new(),
             max_depth: DEFAULT_MAX_DEPTH,
+            failure_ceiling: DEFAULT_FAILURE_CEILING,
             retry: None,
             memory: crate::run::MemoryLimits::default(),
             streams: Arc::new(crate::stream::space()),
@@ -2603,7 +2624,9 @@ impl Kernel {
     /// mount each other stay unbounded by this budget. Carrying it across a peer
     /// is a wire-protocol bump, decided separately.
     ///
-    /// A refusal is never cached — errors never reach the store — and a composite
+    /// A refusal is never cached — not even under an endpoint that states a failure
+    /// expiry ([`Invocation::failure_expires_at`](crate::Invocation::failure_expires_at))
+    /// and propagates it — and a composite
     /// that swallows one and returns a cacheable fallback is forced uncacheable,
     /// so a refusal at the bound is never served to a shallower request.
     ///
@@ -2634,6 +2657,17 @@ impl Kernel {
     /// ```
     pub fn with_max_depth(mut self, max_depth: u32) -> Self {
         self.max_depth = max_depth;
+        self
+    }
+
+    /// Set the **failure ceiling** (builder; ledger #2657): the longest this kernel
+    /// caches a failure an endpoint answered with a stated expiry
+    /// ([`Invocation::failure_expires_at`](crate::Invocation::failure_expires_at)).
+    /// A later expiry is clamped to `now + ceiling`; [`DEFAULT_FAILURE_CEILING`] (five
+    /// minutes) unless set. A ceiling of zero caches no failure at all: every failure
+    /// recomputes on every read, as before negative caching existed.
+    pub fn with_failure_ceiling(mut self, ceiling: std::time::Duration) -> Self {
+        self.failure_ceiling = ceiling;
         self
     }
 
@@ -2974,6 +3008,215 @@ impl Kernel {
 
     /// The clock's "now", or `None` if the kernel has no clock — the start stamp
     /// shared by a [`TraceEvent`] and the always-on `urn:kernel:constraint` window.
+    /// The representation-cache lookup of the resolution path (idempotent verbs only),
+    /// out of line to keep that path's frame, which every nesting level pays for, as
+    /// small as it was: `Some` with what to answer when the cache answers, recorded as
+    /// a hit.
+    ///
+    /// Freshness is evaluated as of `hit.started` — the instant this resolution
+    /// began, one clock reading shared with the trace event and the constraint window
+    /// rather than a fresh read per lookup.
+    ///
+    /// A failure cached until a stated expiry (ledger #2657) is served first, as an
+    /// error, its event noting the error's kind and the time it is served until; what
+    /// it depends on is handed to a caller that asked, so one that catches it is cached
+    /// until the same time.
+    #[inline(never)]
+    #[allow(clippy::type_complexity)]
+    fn served_from_cache(
+        &self,
+        (key, buffer, incoming, offer, run): (
+            CacheKey,
+            bool,
+            Option<&Provenance>,
+            &mut Option<Arc<Offer>>,
+            &crate::run::IssueContext,
+        ),
+        failed: Option<&mut Dependencies>,
+        hit: Hit<'_>,
+    ) -> Option<Result<Answer>> {
+        let Hit {
+            trace,
+            request,
+            capability,
+            span,
+            parent,
+            started,
+            scope,
+            ..
+        } = hit;
+        if self.cache.has_failures() {
+            if let Some(cached) = self.cache.get_failure(&key, started, incoming) {
+                if trace.is_some() {
+                    let mut notes = vec![
+                        (FAILED_NOTE.to_string(), cached.error.kind().to_string()),
+                        (
+                            FAILURE_CACHED_NOTE.to_string(),
+                            format!("until {}", cached.until.as_millis()),
+                        ),
+                    ];
+                    notes.extend(hit.provenance());
+                    self.trace_record(
+                        trace, request, capability, span, parent, started, true, notes, scope,
+                    );
+                }
+                self.record_resolution(request, started, true);
+                if let Some(failed) = failed {
+                    *failed = Dependencies {
+                        expiry: Expiry::At(cached.until),
+                        threads: cached.threads,
+                        failure_until: Some(cached.until),
+                    };
+                }
+                return Some(Err(cached.error));
+            }
+        }
+        let cached = self
+            .cache
+            .get_or_offer(&key, started, buffer, incoming, offer)?;
+        // A stored `Replay` is collected by a buffer caller under the run's pool,
+        // admitted here only for such a hit: a buffer hit admits nothing.
+        let cached = cached.budgeted(|| {
+            run.clone()
+                .admitted(self.retry.as_ref(), &self.memory, capability)
+                .memory_budget()
+                .cloned()
+        });
+        self.trace_record(
+            trace,
+            request,
+            capability,
+            span,
+            parent,
+            started,
+            true,
+            hit.provenance(),
+            scope,
+        );
+        self.record_resolution(request, started, true);
+        Some(Ok(cached))
+    }
+
+    /// What a failed invocation depended on ([`Invocation::failure_dependencies`]),
+    /// with the failure cached when its endpoint stated an expiry and `key` is given (a
+    /// cacheable verb): its expiry is then the time it is served until.
+    #[inline(never)]
+    fn failed_dependencies(
+        &self,
+        invocation: &Invocation<'_>,
+        key: Option<CacheKey>,
+        error: &Error,
+        taken: crate::cache::CutSnapshot,
+        incoming: Option<&Provenance>,
+    ) -> Dependencies {
+        let request = invocation.request;
+        let mut depended = invocation.failure_dependencies(&request.target);
+        if let Some(key) = key {
+            depended.failure_until = self.cache_failure(
+                key,
+                request,
+                error,
+                invocation.stated_failure_expiry(),
+                &depended,
+                taken,
+                incoming,
+            );
+        }
+        if let Some(until) = depended.failure_until {
+            depended.expiry = Expiry::At(until);
+        }
+        depended
+    }
+
+    /// Store a failure its endpoint answered with a stated expiry (ledger #2657), and
+    /// say until when — `None` when it is not cached, which is every failure but one
+    /// that: stated an expiry; is not a denial or a miss; was answered on a kernel with
+    /// a clock, before its expiry; depended on nothing volatile; and was not raced by a
+    /// cut. The expiry is clamped to `now + failure_ceiling` and met with what the
+    /// failure depended on, so it is never served past either.
+    #[allow(clippy::too_many_arguments)]
+    fn cache_failure(
+        &self,
+        key: CacheKey,
+        request: &Request,
+        error: &Error,
+        stated: Option<Time>,
+        depended: &Dependencies,
+        taken: crate::cache::CutSnapshot,
+        incoming: Option<&Provenance>,
+    ) -> Option<Time> {
+        let stated = stated?;
+        // A denial has no thread to cut; a miss already hangs one; a depth refusal must
+        // never be served to a shallower request (B.7), and the key does not carry depth.
+        if matches!(
+            error,
+            Error::Denied(_)
+                | Error::NotFound(_)
+                | Error::Unresolved(_)
+                | Error::DepthExceeded { .. }
+        ) {
+            return None;
+        }
+        let now = self.now_stamp()?;
+        let ceiling = u64::try_from(self.failure_ceiling.as_millis()).unwrap_or(u64::MAX);
+        let mut expiry =
+            Expiry::At(stated.min(now.plus_millis(ceiling))).most_restrictive(depended.expiry);
+        let mut threads = depended.threads.clone();
+        if let Some(incoming) = incoming {
+            expiry = expiry.most_restrictive(incoming.expiry);
+            threads.extend(incoming.threads.iter().cloned());
+        }
+        let Expiry::At(until) = expiry else {
+            return None;
+        };
+        if until <= now {
+            return None;
+        }
+        self.cache
+            .store_failure(
+                key,
+                request.target.as_str().to_string(),
+                error,
+                until,
+                &threads,
+                taken,
+                incoming,
+            )
+            .ok()?;
+        Some(until)
+    }
+
+    /// The cached failures (ledger #2657) as the `urn:kernel:cache` and
+    /// `urn:kernel:uncached` readouts end with them: a header, then one line per failure,
+    /// soonest to expire first — its target, its state, the time it is served until in
+    /// milliseconds, and the error's kind. Empty when the cache holds none, so a kernel
+    /// that never cached a failure reads exactly as before.
+    fn cached_failures_text(&self) -> String {
+        let rows = self.cache.failure_rows_at(self.now_stamp());
+        if rows.is_empty() {
+            return String::new();
+        }
+        let stale = rows.iter().filter(|row| !row.state.is_live()).count();
+        let mut body = format!(
+            "failures (cached until a stated expiry)\n  entries  {} ({stale} stale)\n",
+            rows.len()
+        );
+        let width = rows
+            .iter()
+            .map(|row| row.target.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(48);
+        for row in rows {
+            let (target, state, until) = (&row.target, row.state.word(), row.until.as_millis());
+            let kind = row.error.kind();
+            body.push_str(&format!(
+                "  {target:<width$}  {state:<7}  until {until}  failed {kind}\n"
+            ));
+        }
+        body
+    }
+
     fn now_stamp(&self) -> Option<Time> {
         self.clock.as_ref().map(|clock| clock.now())
     }
@@ -3941,7 +4184,7 @@ impl Kernel {
             scope,
             depth,
             mut run,
-            failed,
+            mut failed,
             buffer,
         } = ctx;
         // ★ THE CUT SNAPSHOT, BEFORE ANYTHING ELSE. Everything this request is
@@ -4457,35 +4700,27 @@ impl Kernel {
         // which turns an answer of "still valid until T" into the stored body. A cut entry
         // is never offered. One pointer in this frame, which every nesting level pays for.
         let mut offer: Option<Arc<Offer>> = None;
+        // ★ A CACHED FAILURE IS SERVED LIKE AN ENTRY (ledger #2657): an error the
+        // endpoint answered with a stated expiry, until that expiry or a cut of a thread
+        // it hung from (`served_from_cache`).
         if cacheable_verb {
-            // Freshness is evaluated as of `started` — the instant this resolution
-            // began, one clock reading shared with the trace event and the
-            // constraint window rather than a fresh read per lookup.
-            if let Some(cached) =
-                self.cache
-                    .get_or_offer(&key, started, buffer, incoming.as_ref(), &mut offer)
-            {
-                // A stored `Replay` is collected by a buffer caller under the run's pool,
-                // admitted here only for such a hit: a buffer hit admits nothing.
-                let cached = cached.budgeted(|| {
-                    run.clone()
-                        .admitted(self.retry.as_ref(), &self.memory, capability)
-                        .memory_budget()
-                        .cloned()
-                });
-                self.trace_record(
-                    &trace,
-                    &request,
-                    capability,
-                    span,
-                    parent,
-                    started,
-                    true,
-                    provenance_notes(&trace, alias, answered, levels, &defaulted, &collected),
-                    &scope,
-                );
-                self.record_resolution(&request, started, true);
-                return Ok(cached);
+            let hit = Hit {
+                trace: &trace,
+                request: &request,
+                capability,
+                span,
+                parent,
+                started,
+                scope: &scope,
+                alias,
+                answered,
+                levels,
+                defaulted: &defaulted,
+                collected: &collected,
+            };
+            let lookup = (key, buffer, incoming.as_ref(), &mut offer, &run);
+            if let Some(served) = self.served_from_cache(lookup, failed.as_deref_mut(), hit) {
+                return served;
             }
         }
 
@@ -4606,11 +4841,25 @@ impl Kernel {
                 // it may carry a path or a host), timed like any invocation that ran,
                 // with whatever the endpoint noted before it failed. `FAILED_NOTE`.
                 Err(error) => {
+                    let depended = self.failed_dependencies(
+                        &invocation,
+                        cacheable_verb.then_some(key),
+                        &error,
+                        taken,
+                        incoming.as_ref(),
+                    );
+                    let cached_until = depended.failure_until;
                     if let Some(failed) = failed {
-                        *failed = invocation.failure_dependencies(&request.target);
+                        *failed = depended;
                     }
                     if trace.is_some() {
                         let mut notes = vec![(FAILED_NOTE.to_string(), error.kind().to_string())];
+                        if let Some(until) = cached_until {
+                            notes.push((
+                                FAILURE_CACHED_NOTE.to_string(),
+                                format!("until {}", until.as_millis()),
+                            ));
+                        }
                         // A sensor, not an enforcer (ledger #1546, decision 6): the error
                         // below is returned as it came. Read only while traced, and only on
                         // a failure, so `describe()` costs nothing on the paths that matter.
@@ -5201,6 +5450,7 @@ impl Kernel {
                         "  {target:<width$}  {state:<7}  {media:<24}  {size:>9}  {deps:<10}  {scope}\n"
                     ));
                 }
+                body.push_str(&self.cached_failures_text());
                 Ok(kernel_text(body))
             }
             // ★ "Is this name cached, UNDER MY SCOPE?" — the probe as a resource
@@ -5273,12 +5523,16 @@ impl Kernel {
                         .chain(canonical.as_ref().map(Iri::as_str))
                         .collect()
                 });
-                Ok(kernel_text(
-                    self.uncached
-                        .lock()
-                        .expect("uncached lock")
-                        .render(names.as_deref()),
-                ))
+                let mut body = self
+                    .uncached
+                    .lock()
+                    .expect("uncached lock")
+                    .render(names.as_deref());
+                // A failure served from the cache is not recomputed, so it is not in the
+                // log above; what it holds cacheable until its expiry is named here
+                // (ledger #2657).
+                body.push_str(&self.cached_failures_text());
+                Ok(kernel_text(body))
             }
             // Inspect the golden threads that have been cut, and how many times.
             ("threads", Verb::Source) => {
@@ -6134,6 +6388,37 @@ fn alias_notes(alias: Option<&AliasHop>) -> Vec<(String, String)> {
 /// strings nobody records (the answerer's note is the one provenance fact a
 /// plain, un-aliased read can carry, so unlike the alias hop it sits on the hot
 /// path of every named space).
+/// What a cache hit on the resolution path is recorded with
+/// ([`Kernel::served_from_cache`]): its trace event's facts and its provenance.
+#[derive(Clone, Copy)]
+struct Hit<'x> {
+    trace: &'x Option<TraceScope>,
+    request: &'x Request,
+    capability: &'x Capability,
+    span: Option<u64>,
+    parent: Option<u64>,
+    started: Option<Time>,
+    scope: &'x Scope,
+    alias: Option<&'x AliasHop>,
+    answered: Option<&'x Iri>,
+    levels: &'x LevelPath,
+    defaulted: &'x [String],
+    collected: &'x [String],
+}
+
+impl Hit<'_> {
+    fn provenance(&self) -> Vec<(String, String)> {
+        provenance_notes(
+            self.trace,
+            self.alias,
+            self.answered,
+            self.levels,
+            self.defaulted,
+            self.collected,
+        )
+    }
+}
+
 fn provenance_notes(
     trace: &Option<TraceScope>,
     alias: Option<&AliasHop>,
