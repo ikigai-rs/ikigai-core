@@ -211,6 +211,7 @@ confined: urn:ctx:c severed 1904a77fcaa47f66
 cache
   entries  7 / 4096 (0 stale)
   size     32 B / 64.0 MB
+  policy   lru (4096 entries, 67108864 bytes)
   evictions  0
   urn:c:doc           live     text/plain                      3 B  1 thread    urn:ctx:c severed
   urn:mod:inner       live     text/plain                      5 B  1 thread    root

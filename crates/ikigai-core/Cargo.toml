@@ -75,3 +75,6 @@ postcard = { version = "1", features = ["use-std"] }
 # feature asks for them (above).
 oxttl = "0.2"
 oxrdf.workspace = true
+# Test-only: the `[cache]` table a host hands `CacheConfig` is read from its `config.toml`
+# (ledger #2687), so the config tests parse real TOML. Core itself reads no file.
+toml = "0.8"

@@ -108,6 +108,7 @@ mod arg;
 mod body;
 pub mod builtins;
 pub mod cache;
+mod cache_config;
 mod cache_graph;
 mod capability;
 mod check;
@@ -154,8 +155,9 @@ pub use body::{Body, ByteStream, Replay};
 pub use bytes::Bytes;
 pub use cache::{
     CacheBound, CacheEntry, CacheKey, CachePolicy, CacheRow, CostAware, CutSnapshot, EntryFacts,
-    EntryState, Fifo, Lru, ReprCache,
+    EntryState, Fifo, Lru, Partitioned, ReprCache, ScanResistant,
 };
+pub use cache_config::{CacheConfig, CacheConfigError, PartitionConfig, CACHE_POLICIES};
 pub use capability::{
     is_deny_scope, principal_scope, Capability, PrincipalError, MAX_PRINCIPAL_LEN,
     PRINCIPAL_SCOPE_PREFIX,

@@ -495,6 +495,45 @@ pub trait CachePolicy: Send + Sync {
     /// so a policy that wants an unbounded cache says so by returning `None` here,
     /// visibly, rather than by omission.
     fn victim(&self, resident: &[EntryFacts<'_>]) -> Option<usize>;
+
+    /// Whether an admitted candidate is worth what it would displace (ledger #2687).
+    /// Asked only when storing it would put the cache over its bound (or, for a
+    /// [`partitioned`](Self::partitioned) policy, on every store of a new key), with
+    /// the entries resident before it; `false` declines the store exactly as
+    /// [`admit`](Self::admit) does, so the residents stay and nothing is evicted.
+    ///
+    /// The default is `true`: a candidate always displaces a victim, which is what every
+    /// policy did before this seam. [`ScanResistant`] answers from how often each name
+    /// has been wanted, which is what keeps a one-pass scan out.
+    fn contest(&self, candidate: &EntryFacts<'_>, resident: &[EntryFacts<'_>]) -> bool {
+        let _ = (candidate, resident);
+        true
+    }
+
+    /// Whether this policy keeps bounds beyond [`capacity`](Self::capacity) — a budget
+    /// per partition of the cache, as [`Partitioned`] does (ledger #2687). Only then is
+    /// [`over_partition`](Self::over_partition) asked, and [`contest`](Self::contest)
+    /// asked on every store: both read every resident entry, which a policy without
+    /// partitions should not pay for.
+    fn partitioned(&self) -> bool {
+        false
+    }
+
+    /// Whether the residents break a bound this policy keeps beyond
+    /// [`capacity`](Self::capacity), when the cache as a whole is within it: the kernel
+    /// keeps asking for a [`victim`](Self::victim) until it says `false`. Asked only of
+    /// a [`partitioned`](Self::partitioned) policy.
+    fn over_partition(&self, resident: &[EntryFacts<'_>]) -> bool {
+        let _ = resident;
+        false
+    }
+
+    /// What `urn:kernel:cache` names this policy as (ledger #2687): one line, the policy
+    /// and the parameters it was built with. `custom` for a host's own policy that does
+    /// not say.
+    fn describe(&self) -> String {
+        "custom".to_string()
+    }
 }
 
 /// Evict the least recently served entry. **The default policy.**
@@ -517,6 +556,10 @@ impl CachePolicy for Lru {
         self.0
     }
 
+    fn describe(&self) -> String {
+        describe_bound("lru", self.0)
+    }
+
     fn victim(&self, resident: &[EntryFacts<'_>]) -> Option<usize> {
         argmin(resident, |facts| facts.last_used_tick)
     }
@@ -536,6 +579,10 @@ impl Fifo {
 impl CachePolicy for Fifo {
     fn capacity(&self) -> CacheBound {
         self.0
+    }
+
+    fn describe(&self) -> String {
+        describe_bound("fifo", self.0)
     }
 
     fn victim(&self, resident: &[EntryFacts<'_>]) -> Option<usize> {
@@ -564,6 +611,10 @@ impl CachePolicy for CostAware {
         self.0
     }
 
+    fn describe(&self) -> String {
+        describe_bound("cost-aware", self.0)
+    }
+
     fn victim(&self, resident: &[EntryFacts<'_>]) -> Option<usize> {
         // No entry carries a measured cost ⇒ nothing to weigh; fall back to recency.
         if resident.iter().all(|facts| facts.cost_millis.is_none()) {
@@ -581,6 +632,436 @@ impl CachePolicy for CostAware {
             (density, facts.last_used_tick)
         })
     }
+}
+
+/// Evict what has not earned its place by being wanted again, so that a one-pass scan
+/// cannot flush the set that is used over and over (ledger #2687).
+///
+/// Plain [`Lru`] loses everything to a scan: a river read walks every feed once, in
+/// order, and each read evicts the entry the next read will want first. The feed scale
+/// round (ikigai-devtools `claude/scale/register.md`, entry 11) measured the default
+/// cache going from about 100% hits to none between 300 and 350 mapped feeds. This
+/// policy is segmented LRU behind a frequency filter, in the spirit of SLRU and
+/// TinyLFU:
+///
+/// - **Two segments, read off the entries.** An entry that has never been served since
+///   it was stored ([`EntryFacts::hits`] `== 0`) is *probationary*; one that has is
+///   *protected*. The victim is the least recently served probationary entry, so a scan
+///   churns probation and leaves the protected set alone. Protected entries may hold at
+///   most `protected_percent` of either half of the bound; past that the protected entry
+///   served least often for the time it has been resident goes (a rate, which fades a
+///   name that was hot once without a count to age), which is how a working set that
+///   has moved on gives way.
+/// - **A frequency filter at the door.** The policy counts, in a small sketch keyed by
+///   the entry's IRI, how often each name has been computed, halving every count from
+///   time to time so the past fades. When a new entry would displace a probationary
+///   one, it is stored only if its name has been wanted more often than the victim's
+///   ([`CachePolicy::contest`]); otherwise it is declined and the residents stay. A name
+///   asked for once does not get in over a full cache; asked for again, it does. Under
+///   a scan wider than the cache that keeps a stable part of the scan resident rather
+///   than none of it, which is the difference between LRU's 0% and a hit rate of about
+///   the share of the scan the cache can hold.
+///
+/// The sketch is approximate (counts can collide upward, never downward) and bounded:
+/// about four bytes per entry of [`CacheBound::max_entries`], capped at 4 MiB. It is
+/// keyed by the IRI alone, so it never learns whose entry it counted.
+#[derive(Debug)]
+pub struct ScanResistant {
+    bound: CacheBound,
+    protected_percent: u8,
+    sketch: Mutex<Sketch>,
+}
+
+impl Default for ScanResistant {
+    fn default() -> Self {
+        ScanResistant::with_bound(CacheBound::default())
+    }
+}
+
+impl ScanResistant {
+    /// The share of the bound protected entries may hold when none is given: 80%.
+    pub const DEFAULT_PROTECTED_PERCENT: u8 = 80;
+
+    /// A scan-resistant policy over `bound`, protecting up to 80% of it.
+    pub fn with_bound(bound: CacheBound) -> Self {
+        ScanResistant {
+            bound,
+            protected_percent: Self::DEFAULT_PROTECTED_PERCENT,
+            sketch: Mutex::new(Sketch::new(bound.max_entries)),
+        }
+    }
+
+    /// The same policy with protected entries allowed `percent` of the bound (builder).
+    /// Clamped to `1..=99`: a protected segment of nothing is LRU with a filter, and one
+    /// of everything never lets a working set move on.
+    pub fn protecting(mut self, percent: u8) -> Self {
+        self.protected_percent = percent.clamp(1, 99);
+        self
+    }
+
+    /// The share of the bound protected entries may hold, in percent.
+    pub fn protected_percent(&self) -> u8 {
+        self.protected_percent
+    }
+
+    /// How often the sketch says `facts`' name has been wanted: the times it was computed,
+    /// plus the times it was served while resident.
+    fn frequency(&self, sketch: &Sketch, facts: &EntryFacts<'_>) -> u64 {
+        u64::from(sketch.estimate(facts.target)).saturating_add(facts.hits)
+    }
+
+    /// Whether the protected entries hold more than their share of the bound.
+    fn protected_over(&self, resident: &[EntryFacts<'_>]) -> bool {
+        let (count, bytes) = resident
+            .iter()
+            .filter(|facts| facts.hits > 0)
+            .fold((0usize, 0usize), |(count, bytes), facts| {
+                (count + 1, bytes.saturating_add(facts.bytes))
+            });
+        let share = |of: usize| {
+            usize::try_from(of as u128 * u128::from(self.protected_percent) / 100)
+                .unwrap_or(usize::MAX)
+        };
+        count > share(self.bound.max_entries) || bytes > share(self.bound.max_bytes)
+    }
+}
+
+impl CachePolicy for ScanResistant {
+    fn capacity(&self) -> CacheBound {
+        self.bound
+    }
+
+    fn admit(&self, candidate: &EntryFacts<'_>) -> bool {
+        // Every candidate is a name wanted once more: count it, admitted or not, so a
+        // name declined today is let in when it is asked for again.
+        self.sketch
+            .lock()
+            .expect("sketch lock")
+            .increment(candidate.target);
+        candidate.bytes <= self.bound.max_bytes
+    }
+
+    fn victim(&self, resident: &[EntryFacts<'_>]) -> Option<usize> {
+        let protected = |facts: &EntryFacts<'_>| facts.hits > 0;
+        let lru_of = |keep: &dyn Fn(&EntryFacts<'_>) -> bool| {
+            resident
+                .iter()
+                .enumerate()
+                .filter(|(_, facts)| keep(facts))
+                .min_by_key(|(_, facts)| facts.last_used_tick)
+                .map(|(index, _)| index)
+        };
+        if let Some(index) = lru_of(&|facts| !protected(facts)) {
+            if !self.protected_over(resident) {
+                return Some(index);
+            }
+        }
+        // A protected entry gives way by how often it has been served for how long it
+        // has been resident — a rate, so a name that was hot once fades as the cache
+        // moves on without any count to age — and the least recently served of equals.
+        let now = resident
+            .iter()
+            .map(|facts| facts.last_used_tick)
+            .max()
+            .unwrap_or(0);
+        let rate = |facts: &EntryFacts<'_>| HitRate {
+            hits: facts.hits,
+            ticks: now.saturating_sub(facts.stored_tick).saturating_add(1),
+        };
+        resident
+            .iter()
+            .enumerate()
+            .filter(|(_, facts)| protected(facts))
+            .min_by(|(_, a), (_, b)| {
+                rate(a)
+                    .cmp(&rate(b))
+                    .then(a.last_used_tick.cmp(&b.last_used_tick))
+            })
+            .map(|(index, _)| index)
+    }
+
+    fn contest(&self, candidate: &EntryFacts<'_>, resident: &[EntryFacts<'_>]) -> bool {
+        let Some(victim) = self.victim(resident).and_then(|index| resident.get(index)) else {
+            return true;
+        };
+        // A protected victim means the protected segment is over its share (or nothing
+        // is probationary): it is giving way to whatever comes next, unconditionally.
+        if victim.hits > 0 {
+            return true;
+        }
+        let sketch = self.sketch.lock().expect("sketch lock");
+        self.frequency(&sketch, candidate) > self.frequency(&sketch, victim)
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "scan-resistant ({} entries, {} bytes, protected {}%)",
+            self.bound.max_entries, self.bound.max_bytes, self.protected_percent
+        )
+    }
+}
+
+/// Hits per tick resident, compared without division.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HitRate {
+    hits: u64,
+    ticks: u64,
+}
+
+impl Ord for HitRate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (u128::from(self.hits) * u128::from(other.ticks))
+            .cmp(&(u128::from(other.hits) * u128::from(self.ticks)))
+    }
+}
+
+impl PartialOrd for HitRate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// A count-min sketch of how often each name has been wanted, with four-bit counters
+/// that halve every `sample` increments, as TinyLFU ages its sketch.
+#[derive(Debug)]
+struct Sketch {
+    /// One counter per byte, saturating at [`Sketch::MAX`].
+    counters: Vec<u8>,
+    /// `counters.len() - 1`; the length is a power of two.
+    mask: usize,
+    /// Increments since the last halving.
+    additions: usize,
+    /// How many increments trigger a halving: ten per entry the cache can hold.
+    sample: usize,
+}
+
+impl Sketch {
+    const MAX: u8 = 15;
+    const ROWS: u64 = 4;
+
+    fn new(max_entries: usize) -> Self {
+        let width = max_entries
+            .saturating_mul(4)
+            .clamp(64, 4 << 20)
+            .next_power_of_two();
+        Sketch {
+            counters: vec![0; width],
+            mask: width - 1,
+            additions: 0,
+            sample: max_entries.saturating_mul(10).max(64),
+        }
+    }
+
+    /// The counter indices for `name`, one per row: a fixed-key hash, so the same name
+    /// lands in the same cells in every process.
+    fn cells(&self, name: &str) -> [usize; Self::ROWS as usize] {
+        let hash = blake3::hash(name.as_bytes());
+        let bytes = hash.as_bytes();
+        let mut cells = [0; Self::ROWS as usize];
+        for (row, cell) in cells.iter_mut().enumerate() {
+            let mut word = [0u8; 8];
+            word.copy_from_slice(&bytes[row * 8..row * 8 + 8]);
+            *cell = (u64::from_le_bytes(word) as usize) & self.mask;
+        }
+        cells
+    }
+
+    fn estimate(&self, name: &str) -> u8 {
+        self.cells(name)
+            .iter()
+            .map(|&cell| self.counters[cell])
+            .min()
+            .unwrap_or(0)
+    }
+
+    fn increment(&mut self, name: &str) {
+        for cell in self.cells(name) {
+            let counter = &mut self.counters[cell];
+            *counter = counter.saturating_add(1).min(Self::MAX);
+        }
+        self.additions += 1;
+        if self.additions >= self.sample {
+            for counter in &mut self.counters {
+                *counter /= 2;
+            }
+            self.additions = 0;
+        }
+    }
+}
+
+/// Separate budgets per name prefix (ledger #2687): a river under `urn:feed:` cannot
+/// evict the REPL's working set or another tenant's views, because each partition is
+/// held to its own bound and evicts only its own entries.
+///
+/// Each partition is a prefix of the entry's IRI ([`EntryFacts::target`]) and a policy
+/// of its own, whose [`capacity`](CachePolicy::capacity) is the partition's budget and
+/// whose victim is chosen among the partition's entries alone; an entry belongs to the
+/// longest prefix it starts with, and to the *rest* when it starts with none. The
+/// cache's bound is the sum of every partition's and the rest's. The budgets are hard:
+/// a partition over its bound evicts even when the cache as a whole has room, so what
+/// one partition holds never depends on how full another is.
+///
+/// ⚠ A partition's own policy is asked for [`admit`](CachePolicy::admit),
+/// [`victim`](CachePolicy::victim) and [`contest`](CachePolicy::contest) over the
+/// partition's entries; a partitioned policy nested inside a partition is not asked
+/// for its own partitions.
+pub struct Partitioned {
+    /// `(prefix, policy)`, in the order given.
+    partitions: Vec<(String, Arc<dyn CachePolicy>)>,
+    /// The policy and budget of every entry no prefix claims.
+    rest: Arc<dyn CachePolicy>,
+}
+
+impl std::fmt::Debug for Partitioned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Partitioned")
+            .field("describe", &self.describe())
+            .finish()
+    }
+}
+
+impl Partitioned {
+    /// A partitioned policy with no partitions yet: every entry is the rest's, under
+    /// `rest` and its bound.
+    pub fn new(rest: Arc<dyn CachePolicy>) -> Self {
+        Partitioned {
+            partitions: Vec::new(),
+            rest,
+        }
+    }
+
+    /// The same policy with entries whose IRI starts with `prefix` held to `policy` and
+    /// its bound (builder). A prefix given twice keeps the first.
+    pub fn partition(mut self, prefix: impl Into<String>, policy: Arc<dyn CachePolicy>) -> Self {
+        let prefix = prefix.into();
+        if !self.partitions.iter().any(|(given, _)| *given == prefix) {
+            self.partitions.push((prefix, policy));
+        }
+        self
+    }
+
+    /// Which partition `target` belongs to: an index into `partitions`, or
+    /// `partitions.len()` for the rest.
+    fn partition_of(&self, target: &str) -> usize {
+        self.partitions
+            .iter()
+            .enumerate()
+            .filter(|(_, (prefix, _))| target.starts_with(prefix.as_str()))
+            .max_by_key(|(_, (prefix, _))| prefix.len())
+            .map_or(self.partitions.len(), |(index, _)| index)
+    }
+
+    fn policy(&self, partition: usize) -> &Arc<dyn CachePolicy> {
+        self.partitions
+            .get(partition)
+            .map_or(&self.rest, |(_, policy)| policy)
+    }
+
+    /// The residents of one partition, with their indices into `resident`.
+    fn members<'a>(
+        &self,
+        partition: usize,
+        resident: &[EntryFacts<'a>],
+    ) -> (Vec<usize>, Vec<EntryFacts<'a>>) {
+        resident
+            .iter()
+            .enumerate()
+            .filter(|(_, facts)| self.partition_of(facts.target) == partition)
+            .map(|(index, facts)| (index, *facts))
+            .unzip()
+    }
+
+    /// How far a partition's residents are over its bound, in bytes and entries, or
+    /// `None` when they are within it.
+    fn overflow(&self, partition: usize, members: &[EntryFacts<'_>]) -> Option<(usize, usize)> {
+        let bound = self.policy(partition).capacity();
+        let bytes = members
+            .iter()
+            .fold(0usize, |total, facts| total.saturating_add(facts.bytes));
+        (members.len() > bound.max_entries || bytes > bound.max_bytes).then(|| {
+            (
+                bytes.saturating_sub(bound.max_bytes),
+                members.len().saturating_sub(bound.max_entries),
+            )
+        })
+    }
+}
+
+impl CachePolicy for Partitioned {
+    fn capacity(&self) -> CacheBound {
+        self.partitions
+            .iter()
+            .map(|(_, policy)| policy.capacity())
+            .fold(self.rest.capacity(), |total, bound| {
+                CacheBound::new(
+                    total.max_entries.saturating_add(bound.max_entries),
+                    total.max_bytes.saturating_add(bound.max_bytes),
+                )
+            })
+    }
+
+    fn admit(&self, candidate: &EntryFacts<'_>) -> bool {
+        self.policy(self.partition_of(candidate.target))
+            .admit(candidate)
+    }
+
+    fn victim(&self, resident: &[EntryFacts<'_>]) -> Option<usize> {
+        // The partition furthest over its own bound gives up an entry, chosen by its own
+        // policy among its own entries. The cache's bound is the sum of the partitions',
+        // so a cache over it always has one.
+        let (indices, members, partition) = (0..=self.partitions.len())
+            .filter_map(|partition| {
+                let (indices, members) = self.members(partition, resident);
+                let overflow = self.overflow(partition, &members)?;
+                Some((indices, members, (overflow, partition)))
+            })
+            .max_by_key(|(_, _, (overflow, partition))| (*overflow, std::cmp::Reverse(*partition)))
+            .map(|(indices, members, (_, partition))| (indices, members, partition))?;
+        let chosen = self.policy(partition).victim(&members)?;
+        indices.get(chosen).copied()
+    }
+
+    fn contest(&self, candidate: &EntryFacts<'_>, resident: &[EntryFacts<'_>]) -> bool {
+        let partition = self.partition_of(candidate.target);
+        let policy = self.policy(partition);
+        let (_, members) = self.members(partition, resident);
+        let bound = policy.capacity();
+        let bytes = members.iter().fold(candidate.bytes, |total, facts| {
+            total.saturating_add(facts.bytes)
+        });
+        if members.len() < bound.max_entries && bytes <= bound.max_bytes {
+            return true;
+        }
+        policy.contest(candidate, &members)
+    }
+
+    fn partitioned(&self) -> bool {
+        true
+    }
+
+    fn over_partition(&self, resident: &[EntryFacts<'_>]) -> bool {
+        (0..=self.partitions.len()).any(|partition| {
+            let (_, members) = self.members(partition, resident);
+            self.overflow(partition, &members).is_some()
+        })
+    }
+
+    fn describe(&self) -> String {
+        let mut out = String::from("partitioned (");
+        for (prefix, policy) in &self.partitions {
+            out.push_str(&format!("{prefix}* {}; ", policy.describe()));
+        }
+        out.push_str(&format!("rest {})", self.rest.describe()));
+        out
+    }
+}
+
+/// `word` and its bound, as [`CachePolicy::describe`] says it: `lru (4096 entries, 67108864 bytes)`.
+fn describe_bound(word: &str, bound: CacheBound) -> String {
+    format!(
+        "{word} ({} entries, {} bytes)",
+        bound.max_entries, bound.max_bytes
+    )
 }
 
 /// The index of the smallest score, or `None` for an empty slice. Ties take the
@@ -965,6 +1446,21 @@ impl ReprCache {
         if !self.policy.admit(&candidate) {
             return Err(Declined::Policy);
         }
+        // The contest (ledger #2687): when this candidate would displace a resident, the
+        // policy may keep the residents instead. A replacement displaces only its own
+        // key's entry, so it is not asked.
+        if !state.entries.contains_key(&key) {
+            let bound = self.policy.capacity();
+            let over = state.entries.len() >= bound.max_entries
+                || state.bytes.saturating_add(candidate.bytes) > bound.max_bytes;
+            if over || self.policy.partitioned() {
+                let resident: Vec<EntryFacts<'_>> =
+                    state.entries.values().map(Slot::facts).collect();
+                if !self.policy.contest(&candidate, &resident) {
+                    return Err(Declined::Policy);
+                }
+            }
+        }
         let entry = Slot {
             incoming: incoming.cloned(),
             target,
@@ -1151,6 +1647,12 @@ impl ReprCache {
         self.policy.capacity()
     }
 
+    /// The policy in force, as it describes itself ([`CachePolicy::describe`]), for the
+    /// operator readout.
+    pub fn policy_description(&self) -> String {
+        self.policy.describe()
+    }
+
     /// One row per entry for `urn:kernel:cache`, with the resolution chain each
     /// was computed in — as the key's scope fingerprint, which is all the cache
     /// holds; the kernel maps it back to a rendered chain for the readout.
@@ -1261,14 +1763,22 @@ impl ReprCache {
             .collect()
     }
 
-    /// Evict until the policy's bound is met, or until the policy declines to name a
-    /// victim.
+    /// Evict until the policy's bound is met (and, for a partitioned policy, every
+    /// partition's), or until the policy declines to name a victim.
     fn enforce_bound(&self, state: &mut CacheState) {
         let bound = self.policy.capacity();
-        while state.entries.len() > bound.max_entries || state.bytes > bound.max_bytes {
+        let partitioned = self.policy.partitioned();
+        loop {
+            let over = state.entries.len() > bound.max_entries || state.bytes > bound.max_bytes;
+            if !over && !partitioned {
+                return;
+            }
             let keys: Vec<CacheKey> = state.entries.keys().copied().collect();
             let facts: Vec<EntryFacts<'_>> =
                 keys.iter().map(|key| state.entries[key].facts()).collect();
+            if !over && !self.policy.over_partition(&facts) {
+                return;
+            }
             let Some(index) = self.policy.victim(&facts) else {
                 return;
             };
@@ -1556,6 +2066,306 @@ mod tests {
         assert!(
             cache.store(key(1), "urn:test:a".into(), repr(8), taken, None),
             "no threads ⇒ no cut can invalidate it"
+        );
+    }
+
+    /// A key and target per name, for workloads wider than `key`'s 256.
+    fn named(name: &str) -> (CacheKey, String) {
+        let request = Request::new(Verb::Source, Iri::parse(name.to_string()).expect("iri"));
+        (CacheKey::new(request.id(), 0), name.to_string())
+    }
+
+    /// Read `name` through `cache` as the kernel does: serve a hit, or compute and
+    /// store. Answers whether it was a hit.
+    fn read_through(cache: &ReprCache, name: &str, bytes: usize) -> bool {
+        let (key, target) = named(name);
+        if cache.get(&key, None).is_some() {
+            return true;
+        }
+        cache.store(key, target, repr(bytes), cache.snapshot(), None);
+        false
+    }
+
+    /// The feed scale round's shape (ikigai-devtools `claude/scale/register.md` entry
+    /// 11, as ledger #2680 reports it): each mapped feed holds about six entries and
+    /// 219 KB, and a river read walks every feed once, in order.
+    const ENTRIES_PER_FEED: usize = 6;
+    const ENTRY_BYTES: usize = 219_000 / ENTRIES_PER_FEED;
+
+    /// One river read over `feeds` feeds; answers (hits, reads).
+    fn river(cache: &ReprCache, feeds: usize) -> (usize, usize) {
+        let mut hits = 0;
+        for feed in 0..feeds {
+            for part in 0..ENTRIES_PER_FEED {
+                hits += usize::from(read_through(
+                    cache,
+                    &format!("urn:feed:{feed}/{part}"),
+                    ENTRY_BYTES,
+                ));
+            }
+        }
+        (hits, feeds * ENTRIES_PER_FEED)
+    }
+
+    /// A REPL's working set: `size` entries, each read `reads` times in a row.
+    fn repl(cache: &ReprCache, size: usize, reads: usize) -> (usize, usize) {
+        let mut hits = 0;
+        for _ in 0..reads {
+            for n in 0..size {
+                hits += usize::from(read_through(cache, &format!("urn:repl:{n}"), ENTRY_BYTES));
+            }
+        }
+        (hits, size * reads)
+    }
+
+    fn percent((hits, reads): (usize, usize)) -> usize {
+        hits * 100 / reads.max(1)
+    }
+
+    /// The river's hit rate, in percent, over rounds 3 to 6 (warm), under `policy`.
+    fn river_rate(policy: Arc<dyn CachePolicy>, feeds: usize) -> usize {
+        let cache = ReprCache::new(policy);
+        let mut total = (0, 0);
+        for round in 0..6 {
+            let (hits, reads) = river(&cache, feeds);
+            if round >= 2 {
+                total = (total.0 + hits, total.1 + reads);
+            }
+        }
+        percent(total)
+    }
+
+    /// The measurement behind ledger #2687, on the default bound (4096 entries, 64 MiB):
+    /// below the cliff both policies serve the river from the cache; past it LRU serves
+    /// nothing and the scan-resistant policy keeps a stable part of the river resident.
+    /// `cargo test -p ikigai-core feed_round -- --nocapture` prints the table.
+    #[test]
+    fn feed_round_river_lru_against_scan_resistant() {
+        println!("feeds  lru  scan-resistant   (warm river hit rate, %)");
+        let mut rates = Vec::new();
+        for feeds in [250, 350, 700] {
+            let lru = river_rate(Arc::new(Lru::default()), feeds);
+            let scan = river_rate(Arc::new(ScanResistant::default()), feeds);
+            println!("{feeds:>5}  {lru:>3}  {scan:>14}");
+            rates.push((feeds, lru, scan));
+        }
+        for (feeds, lru, scan) in rates {
+            if feeds * 219_000 <= 64 << 20 {
+                assert_eq!((lru, scan), (100, 100), "{feeds} feeds fit either way");
+            } else {
+                assert_eq!(
+                    lru, 0,
+                    "{feeds} feeds: LRU loses the whole river to the scan"
+                );
+                assert!(
+                    scan > 0,
+                    "{feeds} feeds: some of the river stays resident ({scan}%)"
+                );
+            }
+        }
+    }
+
+    /// The test the ledger asked for (#2687): a REPL works a hot set, a river read
+    /// scans past it, and the REPL comes back. LRU has evicted the hot set; the
+    /// scan-resistant policy has not.
+    #[test]
+    fn a_scan_evicts_the_hot_set_under_lru_and_not_under_scan_resistant() {
+        let run = |policy: Arc<dyn CachePolicy>| {
+            let cache = ReprCache::new(policy);
+            // The REPL warms up: 200 entries (about 7 MB), each read a few times.
+            repl(&cache, 200, 3);
+            let mut after = (0, 0);
+            for _ in 0..4 {
+                river(&cache, 500); // 3000 entries, about 110 MB: wider than the cache
+                let (hits, reads) = repl(&cache, 200, 1);
+                after = (after.0 + hits, after.1 + reads);
+            }
+            percent(after)
+        };
+        let lru = run(Arc::new(Lru::default()));
+        let scan = run(Arc::new(ScanResistant::default()));
+        println!("hot set after each river read: lru {lru}%, scan-resistant {scan}%");
+        assert_eq!(lru, 0, "under LRU every river read flushes the hot set");
+        assert_eq!(
+            scan, 100,
+            "under the scan-resistant policy the hot set stays"
+        );
+    }
+
+    #[test]
+    fn scan_resistant_admits_a_name_the_second_time_it_is_wanted() {
+        let cache = ReprCache::new(Arc::new(ScanResistant::with_bound(CacheBound::new(
+            2,
+            1 << 20,
+        ))));
+        assert!(!read_through(&cache, "urn:test:a", 8));
+        assert!(!read_through(&cache, "urn:test:b", 8));
+        // Full: a name wanted once does not displace a resident wanted as often.
+        let (c, target) = named("urn:test:c");
+        assert!(!cache.store(c, target.clone(), repr(8), cache.snapshot(), None));
+        assert_eq!(cache.evictions(), 0, "a declined candidate evicts nothing");
+        // Wanted again, it has earned a place: the probationary LRU entry gives way.
+        assert!(cache.store(c, target, repr(8), cache.snapshot(), None));
+        assert!(cache.probe(&c, None));
+        assert!(
+            !cache.probe(&named("urn:test:a").0, None),
+            "a was the LRU newcomer"
+        );
+        assert!(cache.probe(&named("urn:test:b").0, None));
+    }
+
+    #[test]
+    fn scan_resistant_lets_a_working_set_move_on() {
+        // Protected entries may hold 50% of four entries: two.
+        let cache = ReprCache::new(Arc::new(
+            ScanResistant::with_bound(CacheBound::new(4, 1 << 20)).protecting(50),
+        ));
+        for name in ["urn:old:a", "urn:old:b", "urn:old:c", "urn:old:d"] {
+            read_through(&cache, name, 8);
+            assert!(
+                read_through(&cache, name, 8),
+                "{name} is served and protected"
+            );
+        }
+        // A new working set, each name wanted twice and then served, displaces the old.
+        for _ in 0..4 {
+            for name in ["urn:new:a", "urn:new:b", "urn:new:c", "urn:new:d"] {
+                read_through(&cache, name, 8);
+            }
+        }
+        let resident: Vec<String> = cache.rows().into_iter().map(|row| row.0).collect();
+        assert!(
+            resident
+                .iter()
+                .filter(|name| name.starts_with("urn:new:"))
+                .count()
+                >= 3,
+            "the new working set took over: {resident:?}"
+        );
+    }
+
+    #[test]
+    fn a_partition_holds_its_budget_while_another_fills() {
+        let cache = ReprCache::new(Arc::new(
+            Partitioned::new(Arc::new(Lru::with_bound(CacheBound::new(100, 400)))).partition(
+                "urn:feed:",
+                Arc::new(Lru::with_bound(CacheBound::new(100, 1000))),
+            ),
+        ));
+        // The REPL (the rest) holds its working set: 4 × 100 bytes, its whole budget.
+        for n in 0..4 {
+            read_through(&cache, &format!("urn:repl:{n}"), 100);
+        }
+        // The river fills its partition many times over.
+        for n in 0..50 {
+            read_through(&cache, &format!("urn:feed:{n}"), 100);
+        }
+        let rows = cache.rows();
+        let bytes = |prefix: &str| -> usize {
+            rows.iter()
+                .filter(|row| row.0.starts_with(prefix))
+                .map(|row| row.2)
+                .sum()
+        };
+        assert_eq!(
+            bytes("urn:feed:"),
+            1000,
+            "the river is held to its own budget"
+        );
+        assert_eq!(bytes("urn:repl:"), 400, "and evicted none of the REPL's");
+        for n in 0..4 {
+            assert!(read_through(&cache, &format!("urn:repl:{n}"), 100));
+        }
+        // The budget is hard: with the REPL's partition empty, the river still stops at
+        // its own.
+        let cache = ReprCache::new(Arc::new(
+            Partitioned::new(Arc::new(Lru::with_bound(CacheBound::new(100, 400)))).partition(
+                "urn:feed:",
+                Arc::new(Lru::with_bound(CacheBound::new(3, 1000))),
+            ),
+        ));
+        for n in 0..10 {
+            read_through(&cache, &format!("urn:feed:{n}"), 10);
+        }
+        assert_eq!(cache.len(), 3, "the partition's entry count holds too");
+        assert!(
+            read_through(&cache, "urn:feed:9", 10),
+            "LRU within the partition"
+        );
+    }
+
+    #[test]
+    fn a_partition_refuses_what_its_own_budget_cannot_hold() {
+        let policy = Partitioned::new(Arc::new(Lru::with_bound(CacheBound::new(10, 1000))))
+            .partition(
+                "urn:feed:",
+                Arc::new(Lru::with_bound(CacheBound::new(10, 100))),
+            );
+        assert_eq!(policy.capacity(), CacheBound::new(20, 1100));
+        let cache = ReprCache::new(Arc::new(policy));
+        let (key, target) = named("urn:feed:big");
+        assert!(!cache.store(key, target, repr(101), cache.snapshot(), None));
+        let (key, target) = named("urn:repl:big");
+        assert!(cache.store(key, target, repr(101), cache.snapshot(), None));
+    }
+
+    #[test]
+    fn the_longest_prefix_claims_an_entry() {
+        let cache = ReprCache::new(Arc::new(
+            Partitioned::new(Arc::new(Lru::with_bound(CacheBound::new(10, 1000))))
+                .partition(
+                    "urn:feed:",
+                    Arc::new(Lru::with_bound(CacheBound::new(10, 1000))),
+                )
+                .partition(
+                    "urn:feed:hot/",
+                    Arc::new(Lru::with_bound(CacheBound::new(1, 1000))),
+                ),
+        ));
+        read_through(&cache, "urn:feed:hot/a", 8);
+        read_through(&cache, "urn:feed:hot/b", 8);
+        read_through(&cache, "urn:feed:cold", 8);
+        assert_eq!(cache.len(), 2, "the hot partition holds one entry");
+        assert!(cache.probe(&named("urn:feed:cold").0, None));
+        assert!(cache.probe(&named("urn:feed:hot/b").0, None));
+    }
+
+    #[test]
+    fn every_shipped_policy_describes_itself() {
+        let bound = CacheBound::new(8, 64);
+        assert_eq!(
+            Lru::with_bound(bound).describe(),
+            "lru (8 entries, 64 bytes)"
+        );
+        assert_eq!(
+            Fifo::with_bound(bound).describe(),
+            "fifo (8 entries, 64 bytes)"
+        );
+        assert_eq!(
+            CostAware::with_bound(bound).describe(),
+            "cost-aware (8 entries, 64 bytes)"
+        );
+        assert_eq!(
+            ScanResistant::with_bound(bound).protecting(70).describe(),
+            "scan-resistant (8 entries, 64 bytes, protected 70%)"
+        );
+        assert_eq!(
+            Partitioned::new(Arc::new(Lru::with_bound(bound)))
+                .partition("urn:feed:", Arc::new(ScanResistant::with_bound(bound)))
+                .describe(),
+            "partitioned (urn:feed:* scan-resistant (8 entries, 64 bytes, protected 80%); \
+             rest lru (8 entries, 64 bytes))"
+        );
+        struct Mine;
+        impl CachePolicy for Mine {
+            fn victim(&self, _resident: &[EntryFacts<'_>]) -> Option<usize> {
+                None
+            }
+        }
+        assert_eq!(Mine.describe(), "custom");
+        assert_eq!(
+            ReprCache::default().policy_description(),
+            "lru (4096 entries, 67108864 bytes)"
         );
     }
 
