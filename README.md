@@ -60,6 +60,11 @@ sub-request under authority it holds rather than its caller's, capability scopes
 prefix but not infix, and the cache is bounded by policy rather than by an accounting of
 memory. Each is written up in the repository's design notes.
 
+## Accessibility
+What this repository emits that people read (error messages, the kernel's text faces, the
+vocabulary's prose), the rules that output follows and how to report a barrier are in
+[ACCESSIBILITY.md](ACCESSIBILITY.md).
+
 ## License
 Licensed under either of MIT or Apache-2.0 at your option. See `LICENSE-MIT`,
 `LICENSE-APACHE`, and `NOTICE`. See also `ACKNOWLEDGEMENTS.md`.
