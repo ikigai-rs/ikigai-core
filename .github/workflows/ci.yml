@@ -10,6 +10,11 @@ jobs:
     uses: ikigai-rs/.github/.github/workflows/rust.yml@main
     with:
       features: "*"
+      # macOS too (ledger #2688): the resolution path's frame is wider in a debug build on
+      # macOS aarch64 than on Linux x86_64, and a 64-deep nesting overflowed a 2 MiB test
+      # thread there while every Linux job stayed green. These jobs run the debug test suite,
+      # so a frame that widens again fails here first. Free on a public repo.
+      macos: true
       wasm-check: true
       # The `declare` feature on wasm32 (ledger #650): `wasm-check` builds default features only, so
       # nothing in CI compiled oxttl/oxrdf/getrandom for the browser, and the claim that getrandom
