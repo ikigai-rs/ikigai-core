@@ -139,10 +139,19 @@ fn write_thread(out: &mut String, name: &str, cuts: u64) {
 
 /// The Turtle face of `urn:kernel:cache`: every resident entry (stale ones marked,
 /// as the text readout marks them), and every thread any of them hangs from with
-/// how often it has been cut. `cuts` answers a thread's count.
-pub(crate) fn cache_turtle(mut entries: Vec<EntryEdges>, cuts: impl Fn(&str) -> u64) -> String {
+/// how often it has been cut. `cuts` answers a thread's count. The cache resource
+/// states its lifetime representation eviction count, as the text face does.
+pub(crate) fn cache_turtle(
+    mut entries: Vec<EntryEdges>,
+    evictions: u64,
+    cuts: impl Fn(&str) -> u64,
+) -> String {
     entries.sort_by(entry_order);
     let mut out = String::from(PREFIXES);
+    let _ = writeln!(
+        out,
+        "\n<urn:kernel:cache> ik:evictionCount \"{evictions}\"^^xsd:nonNegativeInteger ."
+    );
     let mut threads = BTreeSet::new();
     for entry in &entries {
         write_entry(&mut out, entry);

@@ -52,7 +52,9 @@ assert_eq!(rep.bytes, b"IKIGAI");
   *executor-agnostic* (no runtime dependency), so the same core runs natively, in the
   browser via WebAssembly, or embedded.
 - **Golden threads you can watch** — a write cuts the threads its dependents hang
-  from; `urn:kernel:cache` marks which cached entries a cut has made stale,
+  from; `urn:kernel:cache` marks which cached entries a cut has made stale and
+  reports lifetime representation evictions (bounds or stale removals; excludes
+  replacements, rejected admissions and cached failures) in text and Turtle,
   `urn:kernel:cached` asks whether the asker's own read would hit,
   `urn:kernel:dependents thread=<name>` lists what a cut of one thread would recompute
   (and `as=text/turtle` states the cache, its threads and a thread's dependents as one
