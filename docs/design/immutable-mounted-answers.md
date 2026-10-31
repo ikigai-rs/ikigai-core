@@ -98,7 +98,7 @@ wire field; the peer's serving edge owns the mark it sends.
   already hashes as it writes, ledger #2372) and store only if the digest matched at the
   end; a mismatch found at the end fails the read that was streaming it.
 
-### Engine: the mount honours the pin
+### Engine: the mount honors the pin
 
 - **Digest names are declared, never guessed.** A name that merely *contains* `b3:<hex>` is
   not a digest name: `urn:peer:turtle-of:b3:…` answers something derived from that content,
@@ -115,7 +115,7 @@ wire field; the peer's serving edge owns the mark it sends.
   `Expiry::Never`; the mount answers `pinned(digest, PinSource::Peer)` plus its epoch
   thread when it is present and the expiry is `Never`, and `with_uncached_reason(Mounted)`
   otherwise. An old peer sends no field and an old mount ignores it: both directions
-  degrade to today's behaviour.
+  degrade to today's behavior.
 - **The epoch thread.** Each mount owns one thread, named after the mount (e.g.
   `urn:kernel:mount:<prefix>`, kernel-namespaced so no module can cut it), and cuts it when
   the peer it talks to changes: a reconnect that reports a different peer identity or
@@ -144,7 +144,7 @@ not make.
   makes this detection best-effort, and the design says so; the epoch thread is what bounds
   the damage either way.
 - **Flagged.** A peer with any mismatch in the current epoch is flagged: until the epoch
-  changes (or an operator clears it), the mount stops honouring its `immutable` marks
+  changes (or an operator clears it), the mount stops honoring its `immutable` marks
   (every peer-pinned answer is held `mounted` again), while name pins keep being verified
   and cached, since they never trusted the peer. The flag is visible (next section).
 
@@ -168,7 +168,7 @@ the two digests in its detail.
 ## Tests the build must add
 
 In `crates/ikigai-core/tests/uncached.rs` (or a new `tests/pinned.rs`), with the mount
-modelled the way the existing `a_peer_answer_held_here_uncached_reports_mounted…` test
+modeled the way the existing `a_peer_answer_held_here_uncached_reports_mounted…` test
 models it: an endpoint that counts its invocations and builds the answer the mount would.
 
 1. **A digest-named mounted read is cached after the first read**: five reads, one
