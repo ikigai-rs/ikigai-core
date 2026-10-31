@@ -309,8 +309,9 @@ impl Slot {
         body_size(&self.representation.bytes)
     }
 
-    fn facts(&self) -> EntryFacts<'_> {
+    fn facts(&self, request: RequestId) -> EntryFacts<'_> {
         EntryFacts {
+            request,
             target: &self.target,
             media_type: &self.representation.repr_type.media_type,
             bytes: self.bytes(),
@@ -331,12 +332,14 @@ impl Slot {
 /// than a widening argument list so adding a fact later is not a signature change for
 /// every implementor.
 ///
-/// Deliberately absent: the representation's bytes, the capability fingerprint, and
-/// the request id. A policy decides what is worth keeping; it has no business reading
-/// the payload, and nothing it returns may depend on *whose* entry it is.
+/// Deliberately absent: the representation's bytes and the capability fingerprint.
+/// A policy decides what is worth keeping; it has no business reading the payload,
+/// and nothing it returns may depend on *whose* entry it is.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct EntryFacts<'a> {
+    /// The content-addressed request identity, including verb, target and arguments.
+    pub request: RequestId,
     /// The IRI the entry was resolved from.
     pub target: &'a str,
     /// The representation's media type.
@@ -653,18 +656,19 @@ impl CachePolicy for CostAware {
 ///   name that was hot once without a count to age), which is how a working set that
 ///   has moved on gives way.
 /// - **A frequency filter at the door.** The policy counts, in a small sketch keyed by
-///   the entry's IRI, how often each name has been computed, halving every count from
-///   time to time so the past fades. When a new entry would displace a probationary
-///   one, it is stored only if its name has been wanted more often than the victim's
-///   ([`CachePolicy::contest`]); otherwise it is declined and the residents stay. A name
-///   asked for once does not get in over a full cache; asked for again, it does. Under
+///   the full request identity, how often each request has been computed, halving
+///   every count from time to time so the past fades. When a new entry would displace
+///   a probationary one, it is stored only if its request has been wanted more often
+///   than the victim's ([`CachePolicy::contest`]); otherwise it is declined and the
+///   residents stay. A request asked for once does not get in over a full cache;
+///   asked for again, it does. Under
 ///   a scan wider than the cache that keeps a stable part of the scan resident rather
 ///   than none of it, which is the difference between LRU's 0% and a hit rate of about
 ///   the share of the scan the cache can hold.
 ///
 /// The sketch is approximate (counts can collide upward, never downward) and bounded:
 /// about four bytes per entry of [`CacheBound::max_entries`], capped at 4 MiB. It is
-/// keyed by the IRI alone, so it never learns whose entry it counted.
+/// keyed by request identity without capability or scope fingerprints.
 #[derive(Debug)]
 pub struct ScanResistant {
     bound: CacheBound,
@@ -704,10 +708,10 @@ impl ScanResistant {
         self.protected_percent
     }
 
-    /// How often the sketch says `facts`' name has been wanted: the times it was computed,
+    /// How often the sketch says `facts`' request has been wanted: the times it was computed,
     /// plus the times it was served while resident.
     fn frequency(&self, sketch: &Sketch, facts: &EntryFacts<'_>) -> u64 {
-        u64::from(sketch.estimate(facts.target)).saturating_add(facts.hits)
+        u64::from(sketch.estimate(facts.request)).saturating_add(facts.hits)
     }
 
     /// Whether the protected entries hold more than their share of the bound.
@@ -732,12 +736,12 @@ impl CachePolicy for ScanResistant {
     }
 
     fn admit(&self, candidate: &EntryFacts<'_>) -> bool {
-        // Every candidate is a name wanted once more: count it, admitted or not, so a
-        // name declined today is let in when it is asked for again.
+        // Every candidate is a request wanted once more: count it, admitted or not, so a
+        // request declined today is let in when it is asked for again.
         self.sketch
             .lock()
             .expect("sketch lock")
-            .increment(candidate.target);
+            .increment(candidate.request);
         candidate.bytes <= self.bound.max_bytes
     }
 
@@ -821,7 +825,7 @@ impl PartialOrd for HitRate {
     }
 }
 
-/// A count-min sketch of how often each name has been wanted, with four-bit counters
+/// A count-min sketch of how often each request has been wanted, with four-bit counters
 /// that halve every `sample` increments, as TinyLFU ages its sketch.
 #[derive(Debug)]
 struct Sketch {
@@ -852,11 +856,10 @@ impl Sketch {
         }
     }
 
-    /// The counter indices for `name`, one per row: a fixed-key hash, so the same name
-    /// lands in the same cells in every process.
-    fn cells(&self, name: &str) -> [usize; Self::ROWS as usize] {
-        let hash = blake3::hash(name.as_bytes());
-        let bytes = hash.as_bytes();
+    /// The counter indices for a request, one per row, using its existing content hash.
+    fn cells(&self, request: RequestId) -> [usize; Self::ROWS as usize] {
+        let content = request.content_id();
+        let bytes = content.as_bytes();
         let mut cells = [0; Self::ROWS as usize];
         for (row, cell) in cells.iter_mut().enumerate() {
             let mut word = [0u8; 8];
@@ -866,16 +869,16 @@ impl Sketch {
         cells
     }
 
-    fn estimate(&self, name: &str) -> u8 {
-        self.cells(name)
+    fn estimate(&self, request: RequestId) -> u8 {
+        self.cells(request)
             .iter()
             .map(|&cell| self.counters[cell])
             .min()
             .unwrap_or(0)
     }
 
-    fn increment(&mut self, name: &str) {
-        for cell in self.cells(name) {
+    fn increment(&mut self, request: RequestId) {
+        for cell in self.cells(request) {
             let counter = &mut self.counters[cell];
             *counter = counter.saturating_add(1).min(Self::MAX);
         }
@@ -1434,6 +1437,7 @@ impl ReprCache {
         // the entry below, read off the borrowed answer: nothing is copied until the
         // policy says it will be kept.
         let candidate = EntryFacts {
+            request: key.request,
             target: &target,
             media_type: &representation.repr_type.media_type,
             bytes: body_size(&representation.bytes),
@@ -1454,8 +1458,11 @@ impl ReprCache {
             let over = state.entries.len() >= bound.max_entries
                 || state.bytes.saturating_add(candidate.bytes) > bound.max_bytes;
             if over || self.policy.partitioned() {
-                let resident: Vec<EntryFacts<'_>> =
-                    state.entries.values().map(Slot::facts).collect();
+                let resident: Vec<EntryFacts<'_>> = state
+                    .entries
+                    .iter()
+                    .map(|(key, slot)| slot.facts(key.request))
+                    .collect();
                 if !self.policy.contest(&candidate, &resident) {
                     return Err(Declined::Policy);
                 }
@@ -1774,8 +1781,10 @@ impl ReprCache {
                 return;
             }
             let keys: Vec<CacheKey> = state.entries.keys().copied().collect();
-            let facts: Vec<EntryFacts<'_>> =
-                keys.iter().map(|key| state.entries[key].facts()).collect();
+            let facts: Vec<EntryFacts<'_>> = keys
+                .iter()
+                .map(|key| state.entries[key].facts(key.request))
+                .collect();
             if !over && !self.policy.over_partition(&facts) {
                 return;
             }
@@ -2189,6 +2198,52 @@ mod tests {
         assert_eq!(
             scan, 100,
             "under the scan-resistant policy the hot set stays"
+        );
+    }
+
+    #[test]
+    fn unique_queries_to_a_hot_endpoint_do_not_evict_the_working_set() {
+        let cache = ReprCache::new(Arc::new(ScanResistant::with_bound(CacheBound::new(
+            128,
+            16 * 8,
+        ))));
+        let query = |n: u64| {
+            let request = Request::new(Verb::Source, Iri::parse("urn:query").unwrap())
+                .with_arg("query", crate::ArgRef::Inline(n.to_le_bytes().to_vec()));
+            CacheKey::new(request.id(), 0)
+        };
+        // Fill the byte budget, with a sketch large enough to avoid incidental
+        // collisions. Multiple queries make one endpoint popular, but each request
+        // is distinct. Keep the older entries probationary to exercise admission.
+        let mut working_set = Vec::new();
+        for n in 0..8 {
+            let (key, target) = named(&format!("urn:working:{n}"));
+            assert!(cache.store(key, target, repr(8), cache.snapshot(), None));
+            working_set.push(key);
+        }
+        for n in 0..8 {
+            let key = query(n);
+            assert!(cache.store(key, "urn:query".into(), repr(8), cache.snapshot(), None));
+            working_set.push(key);
+        }
+        // A one-off scan must earn admission per request, not inherit the endpoint's
+        // popularity and displace the other resident computations.
+        for n in 8..40 {
+            cache.store(
+                query(n),
+                "urn:query".into(),
+                repr(8),
+                cache.snapshot(),
+                None,
+            );
+        }
+        assert_eq!(
+            working_set
+                .iter()
+                .filter(|key| cache.probe(key, None))
+                .count(),
+            working_set.len(),
+            "unique queries must leave the working set resident"
         );
     }
 
