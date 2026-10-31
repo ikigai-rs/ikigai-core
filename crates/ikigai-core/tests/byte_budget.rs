@@ -79,12 +79,12 @@ fn over_budget<T: std::fmt::Debug>(result: Result<T>) -> bool {
 fn a_stream_past_the_budget_is_refused_mid_stream_and_never_truncated() {
     let kernel = budgeted(5, 5);
     let err = block_on(kernel.issue(source("urn:mid"), &Capability::root())).unwrap_err();
-    match err {
-        Error::OverBudget { detail } => {
-            assert!(detail.contains("urn:cap:stream:memory"), "{detail}")
+    assert_eq!(
+        err,
+        Error::OverBudget {
+            detail: "the body is larger than the run's byte budget: 1 byte(s) left, at least 6 needed (a `urn:cap:stream:memory:<bytes>` grant raises it, up to the host's ceiling)".into(),
         }
-        other => panic!("expected OverBudget, got {other:?}"),
-    }
+    );
     // Exactly enough is enough.
     let fits = budgeted(6, 6);
     assert_eq!(
