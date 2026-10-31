@@ -1104,6 +1104,10 @@ fn referent_error(error: Error, name: &str, iri: &Iri) -> Error {
 type Settling<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<String>>> + Send + 'a>>;
 
+/// The boxed Meta answer ([`Kernel::meta_answering`]).
+type MetaAnswering<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Representation<Body>>> + Send + 'a>>;
+
 /// One verb's declared defaults, `(input, lexical form)`, shared between the floor
 /// that read them and the [`ProbeMemo`] entry the issue path leaves for the probe, so
 /// recording them is a reference count and comparing them is usually a pointer.
@@ -4171,6 +4175,220 @@ impl Kernel {
         collected(self.issue_answer(request, capability, ctx).await).await
     }
 
+    /// The Meta arm of [`issue_answer`](Self::issue_answer), boxed: the endpoint's description,
+    /// rendered or transrepted to the requested type. Out of line and boxed, like
+    /// [`settling`](Self::settling), so that neither its state nor its temporaries widen the
+    /// frame of the resolution path, which a nesting of [`DEFAULT_MAX_DEPTH`] sub-requests
+    /// stacks 64 deep (ledger #2688).
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)] // the facts of the resolution the description is for
+    fn meta_answering<'a>(
+        &'a self,
+        endpoint: &'a Arc<dyn Endpoint>,
+        request: &'a Request,
+        capability: &'a Capability,
+        span: Option<u64>,
+        trace: &'a Option<TraceScope>,
+        scope: &'a Scope,
+        levels: &'a LevelPath,
+        depth: u32,
+        started: Option<Time>,
+    ) -> MetaAnswering<'a> {
+        Box::pin(async move {
+            // Selection-driven Meta: the renderer emits the endpoint's description in its
+            // *canonical* serializations (Turtle, and JSON/text where the renderer supports
+            // them). Any other requested type is produced by transrepting the canonical
+            // Turtle through a *selected* transreptor chain — so metadata rendering rides
+            // the same transreptor model as everything else, with no per-format logic and no
+            // hardcoded transreptor IRIs here.
+            let renderer = self
+                .meta
+                .as_ref()
+                .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
+            // A forwarder (a view, a named request) is described by its TARGET's contract,
+            // the target resolved in this request's chain (ledger #2513; `forward.rs`).
+            let description = self.meta_description(endpoint, scope, capability);
+            let target = meta_target(request);
+            let policy = meta_policy(request)?;
+            let rendered = match renderer.render(&description, &target) {
+                Ok(repr) => repr.cacheable(),
+                // The renderer doesn't emit this type directly — transrept the canonical
+                // Turtle to it.
+                // The steps run in the RESOLVED scope — where the endpoint described
+                // was found — so a transreptor its own level binds is the one that
+                // converts its description (space-scoped transreptors).
+                Err(_) => {
+                    self.transrept_meta(
+                        &description,
+                        &target,
+                        &policy,
+                        capability,
+                        span,
+                        trace,
+                        &scope.descend(levels.clone()),
+                        depth,
+                    )
+                    .await?
+                }
+            };
+            // A description is a function of the BINDING, not of any state, so the
+            // one thread it hangs from is the binding-change thread — every face,
+            // the canonical rendering and a transrepted one alike (ledger #26).
+            // And no longer than the description says it may be kept: a contract
+            // that can change while it stays bound (a mount's) states a bound, and
+            // nothing would cut the binding thread for it (ledger #1579).
+            let bound = description.contract_caching.expiry_at(started);
+            let expiry = rendered.expiry.most_restrictive(bound);
+            Ok(rendered
+                .depends_on(BINDINGS_THREAD)
+                .with_expiry(expiry)
+                .into_body())
+        })
+    }
+
+    /// A `urn:kernel:*` operation's answer, served or computed: the kernel-operation arm of
+    /// [`issue_answer`](Self::issue_answer). Out of line and synchronous (a kernel operation
+    /// issues no sub-request and refuses an attached body), so its temporaries never widen
+    /// the frame of the resolution path, which a nesting of [`DEFAULT_MAX_DEPTH`]
+    /// sub-requests stacks 64 deep. In a debug build every local of an async body takes its
+    /// own stack slot, so this arm alone cost each level of that nesting several KiB (ledger
+    /// #2688).
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)] // the facts `issue_answer` destructured, moved in whole
+    fn answer_kernel_op(
+        &self,
+        op: &str,
+        mut request: Request,
+        capability: &Capability,
+        run: &crate::run::IssueContext,
+        scope: Scope,
+        trace: Option<TraceScope>,
+        parent: Option<u64>,
+        incoming: Option<Provenance>,
+        buffer: bool,
+        alias: Option<AliasHop>,
+        taken: crate::cache::CutSnapshot,
+    ) -> Result<Answer> {
+        // The operation's declared defaults, injected before its identity is taken,
+        // exactly as for an endpoint below (ledger #19).
+        let verb = request.verb;
+        let defaulted = crate::kernel_ops::description(op)
+            .map(|description| prefill(&mut request, Floor::of(&description).defaults(verb)))
+            .unwrap_or_default();
+        // A kernel operation reads no argument as a body, and its arguments are small
+        // values: an attached body is REFUSED here rather than collected (ledger
+        // #2402), which keeps an await, and the stack it costs on every frame of a deep
+        // resolution, out of this path.
+        refuse_attached_to_kernel_op(&request, run)?;
+        let mut key = CacheKey::new(request.id(), capability_key(capability));
+        // The chain this answer is a function of, for its key and its trace event:
+        // the caller's for the operations whose subject it is, else the empty one
+        // (a kernel operation is resolved ahead of the chain).
+        let chain_dependent = crate::kernel_ops::depends_on_chain(op);
+        if chain_dependent {
+            key = key.in_scope(scope.fingerprint());
+        }
+        let empty_chain = Scope::empty();
+        let event_chain = if chain_dependent {
+            &scope
+        } else {
+            &empty_chain
+        };
+        let cacheable_verb = request.verb.is_cacheable();
+        let started = self.now_stamp();
+        // ★ A KERNEL OPERATION IS A TRACE NODE (ledger #39), served or computed,
+        // like every endpoint: otherwise a tracer sees every cache behavior but the
+        // kernel's own, and a kernel operation an endpoint issues is missing from
+        // that endpoint's tree. Its span is allocated when it is recorded (a kernel
+        // operation issues no sub-requests), so a denial, which `issue_kernel`
+        // records itself, takes exactly one span as before. Still absent from the
+        // constraint window: these are introspection, not throughput.
+        let record = |cache_hit: bool, mut notes: Vec<(String, String)>| {
+            if trace.is_some() {
+                let mut all = alias_notes(alias.as_ref());
+                all.extend(defaulted_note(&defaulted));
+                all.append(&mut notes);
+                let span = trace.as_ref().map(TraceScope::next_span);
+                self.trace_record(
+                    &trace,
+                    &request,
+                    capability,
+                    span,
+                    parent,
+                    started,
+                    cache_hit,
+                    all,
+                    event_chain,
+                );
+            }
+        };
+        if cacheable_verb {
+            if let Some(cached) = self
+                .cache
+                .get_answer(&key, started, buffer, incoming.as_ref())
+            {
+                record(true, Vec::new());
+                return Ok(cached);
+            }
+        }
+        let representation =
+            match self.issue_kernel(op, &request, capability, &trace, parent, &scope) {
+                Ok(representation) => representation.into_body(),
+                // A denial is already on the trace, as the refusal it is.
+                Err(error @ Error::Denied(_)) => return Err(error),
+                Err(error) => {
+                    record(
+                        false,
+                        vec![(FAILED_NOTE.to_string(), error.kind().to_string())],
+                    );
+                    return Err(error);
+                }
+            };
+        let representation = if let Some(incoming) = &incoming {
+            let mut threads = representation.threads().clone();
+            threads.extend(incoming.threads.iter().cloned());
+            let expiry = representation.expiry.most_restrictive(incoming.expiry);
+            representation.with_expiry(expiry).with_threads(threads)
+        } else {
+            representation
+        };
+        let mut why = Uncached::default();
+        if cacheable_verb {
+            match representation.expiry {
+                Expiry::Always => why.reason = representation.uncached_reason(),
+                Expiry::Never => {}
+                Expiry::At(_) if self.clock.is_none() => {
+                    why.declined = Some(Declined::NoClock);
+                }
+                Expiry::At(_) => {}
+            }
+        }
+        if cacheable_verb && why.is_empty() {
+            match self.cache.store_outcome(
+                key,
+                request.target.as_str().to_string(),
+                &representation,
+                taken,
+                self.elapsed_since(started),
+                incoming.as_ref(),
+            ) {
+                // A chain-keyed entry names its chain in the readout, as a scoped
+                // resolution's does; every other kernel operation is keyed with
+                // scope 0 and takes no lock here.
+                Ok(()) if key.scope != 0 => self.remember_scope(key.scope, &scope),
+                Ok(()) => {}
+                Err(declined) => why.declined = Some(declined),
+            }
+        }
+        let notes = if why.is_empty() {
+            Vec::new()
+        } else {
+            vec![(UNCACHED_NOTE.to_string(), why.to_string())]
+        };
+        record(false, notes);
+        Ok(Answer::Body(representation))
+    }
+
     /// The resolution path, answering with the body as the endpoint produced it: a
     /// buffer, a body that can be read again, or a one-shot stream (ledger #2237). Every
     /// entry point runs through here; the bytes ones collect what it returns
@@ -4280,125 +4498,10 @@ impl Kernel {
         // explanation, `validate` by `endpoint=`; `kernel_ops::depends_on_chain`):
         // they are keyed by the chain's fingerprint, as any scoped resolution is.
         if let Some(op) = kernel_op(request.target.as_str()).map(str::to_owned) {
-            // The operation's declared defaults, injected before its identity is taken,
-            // exactly as for an endpoint below (ledger #19).
-            let verb = request.verb;
-            let defaulted = crate::kernel_ops::description(&op)
-                .map(|description| prefill(&mut request, Floor::of(&description).defaults(verb)))
-                .unwrap_or_default();
-            // A kernel operation reads no argument as a body, and its arguments are small
-            // values: an attached body is REFUSED here rather than collected (ledger
-            // #2402), which keeps an await, and the stack it costs on every frame of a deep
-            // resolution, out of this path.
-            refuse_attached_to_kernel_op(&request, &run)?;
-            let op = op.as_str();
-            let mut key = CacheKey::new(request.id(), capability_key(capability));
-            // The chain this answer is a function of, for its key and its trace event:
-            // the caller's for the operations whose subject it is, else the empty one
-            // (a kernel operation is resolved ahead of the chain).
-            let chain_dependent = crate::kernel_ops::depends_on_chain(op);
-            if chain_dependent {
-                key = key.in_scope(scope.fingerprint());
-            }
-            let empty_chain = Scope::empty();
-            let event_chain = if chain_dependent {
-                &scope
-            } else {
-                &empty_chain
-            };
-            let cacheable_verb = request.verb.is_cacheable();
-            let started = self.now_stamp();
-            // ★ A KERNEL OPERATION IS A TRACE NODE (ledger #39), served or computed,
-            // like every endpoint: otherwise a tracer sees every cache behavior but the
-            // kernel's own, and a kernel operation an endpoint issues is missing from
-            // that endpoint's tree. Its span is allocated when it is recorded (a kernel
-            // operation issues no sub-requests), so a denial, which `issue_kernel`
-            // records itself, takes exactly one span as before. Still absent from the
-            // constraint window: these are introspection, not throughput.
-            let record = |cache_hit: bool, mut notes: Vec<(String, String)>| {
-                if trace.is_some() {
-                    let mut all = alias_notes(alias.as_ref());
-                    all.extend(defaulted_note(&defaulted));
-                    all.append(&mut notes);
-                    let span = trace.as_ref().map(TraceScope::next_span);
-                    self.trace_record(
-                        &trace,
-                        &request,
-                        capability,
-                        span,
-                        parent,
-                        started,
-                        cache_hit,
-                        all,
-                        event_chain,
-                    );
-                }
-            };
-            if cacheable_verb {
-                if let Some(cached) =
-                    self.cache
-                        .get_answer(&key, started, buffer, incoming.as_ref())
-                {
-                    record(true, Vec::new());
-                    return Ok(cached);
-                }
-            }
-            let representation =
-                match self.issue_kernel(op, &request, capability, &trace, parent, &scope) {
-                    Ok(representation) => representation.into_body(),
-                    // A denial is already on the trace, as the refusal it is.
-                    Err(error @ Error::Denied(_)) => return Err(error),
-                    Err(error) => {
-                        record(
-                            false,
-                            vec![(FAILED_NOTE.to_string(), error.kind().to_string())],
-                        );
-                        return Err(error);
-                    }
-                };
-            let representation = if let Some(incoming) = &incoming {
-                let mut threads = representation.threads().clone();
-                threads.extend(incoming.threads.iter().cloned());
-                let expiry = representation.expiry.most_restrictive(incoming.expiry);
-                representation.with_expiry(expiry).with_threads(threads)
-            } else {
-                representation
-            };
-            let mut why = Uncached::default();
-            if cacheable_verb {
-                match representation.expiry {
-                    Expiry::Always => why.reason = representation.uncached_reason(),
-                    Expiry::Never => {}
-                    Expiry::At(_) if self.clock.is_none() => {
-                        why.declined = Some(Declined::NoClock);
-                    }
-                    Expiry::At(_) => {}
-                }
-            }
-            if cacheable_verb && why.is_empty() {
-                match self.cache.store_outcome(
-                    key,
-                    request.target.as_str().to_string(),
-                    &representation,
-                    taken,
-                    self.elapsed_since(started),
-                    incoming.as_ref(),
-                ) {
-                    // A chain-keyed entry names its chain in the readout, as a scoped
-                    // resolution's does; every other kernel operation is keyed with
-                    // scope 0 and takes no lock here.
-                    Ok(()) if key.scope != 0 => self.remember_scope(key.scope, &scope),
-                    Ok(()) => {}
-                    Err(declined) => why.declined = Some(declined),
-                }
-            }
-            let notes = if why.is_empty() {
-                Vec::new()
-            } else {
-                vec![(UNCACHED_NOTE.to_string(), why.to_string())]
-            };
-            record(false, notes);
-            return Ok(Answer::Body(representation));
+            return self.answer_kernel_op(
+                &op, request, capability, &run, scope, trace, parent, incoming, buffer, alias,
+                taken,
+            );
         }
 
         let cacheable_verb = request.verb.is_cacheable();
@@ -4740,54 +4843,18 @@ impl Kernel {
         // so a buffer caller collects it under the run's budget (ledger #2238).
         let mut pool: Option<crate::MemoryBudget> = None;
         let representation = if request.verb == Verb::Meta {
-            // Selection-driven Meta: the renderer emits the endpoint's description in its
-            // *canonical* serializations (Turtle, and JSON/text where the renderer supports
-            // them). Any other requested type is produced by transrepting the canonical
-            // Turtle through a *selected* transreptor chain — so metadata rendering rides
-            // the same transreptor model as everything else, with no per-format logic and no
-            // hardcoded transreptor IRIs here.
-            let renderer = self
-                .meta
-                .as_ref()
-                .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
-            // A forwarder (a view, a named request) is described by its TARGET's contract,
-            // the target resolved in this request's chain (ledger #2513; `forward.rs`).
-            let description = self.meta_description(&resolved.endpoint, &scope, capability);
-            let target = meta_target(&request);
-            let policy = meta_policy(&request)?;
-            let rendered = match renderer.render(&description, &target) {
-                Ok(repr) => repr.cacheable(),
-                // The renderer doesn't emit this type directly — transrept the canonical
-                // Turtle to it.
-                // The steps run in the RESOLVED scope — where the endpoint described
-                // was found — so a transreptor its own level binds is the one that
-                // converts its description (space-scoped transreptors).
-                Err(_) => {
-                    self.transrept_meta(
-                        &description,
-                        &target,
-                        &policy,
-                        capability,
-                        span,
-                        &trace,
-                        &scope.descend(levels.clone()),
-                        depth,
-                    )
-                    .await?
-                }
-            };
-            // A description is a function of the BINDING, not of any state, so the
-            // one thread it hangs from is the binding-change thread — every face,
-            // the canonical rendering and a transrepted one alike (ledger #26).
-            // And no longer than the description says it may be kept: a contract
-            // that can change while it stays bound (a mount's) states a bound, and
-            // nothing would cut the binding thread for it (ledger #1579).
-            let bound = description.contract_caching.expiry_at(started);
-            let expiry = rendered.expiry.most_restrictive(bound);
-            rendered
-                .depends_on(BINDINGS_THREAD)
-                .with_expiry(expiry)
-                .into_body()
+            self.meta_answering(
+                &resolved.endpoint,
+                &request,
+                capability,
+                span,
+                &trace,
+                &scope,
+                levels,
+                depth,
+                started,
+            )
+            .await?
         } else {
             // Invocation is asynchronous. On a scheduled kernel, hand it the spawner
             // and an owned self-handle so re-entrant fan-out runs concurrently.
