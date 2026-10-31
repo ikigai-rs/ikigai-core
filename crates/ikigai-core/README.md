@@ -62,6 +62,12 @@ assert_eq!(rep.bytes, b"IKIGAI");
   `Kernel::listen` hands a host a bounded queue of cuts (the thread and what it
   invalidated), so it can recompute before the first reader or push a change to a
   page. The kernel reports; it never issues a request from inside a cut.
+- **Cache policies a host chooses** — `Lru` (the default), `Fifo`, `CostAware`,
+  `ScanResistant` (an entry earns its place by being wanted again, so a one-pass scan
+  such as a river read cannot flush the working set) and `Partitioned` (a hard byte
+  budget per IRI prefix), installed with `Kernel::with_cache_policy`. A host's
+  `config.toml` names one through `CacheConfig` (its `[cache]` table), which fails
+  loud on an unknown policy or a bad value; `urn:kernel:cache` names the policy in force.
 - **Capabilities & self-description** — an unforgeable capability handle, and a `Meta`
   verb routed to a pluggable `MetaRenderer` (one resource, many representations).
 - **Formal companion** — [`docs/formalism/README.md`](https://github.com/ikigai-rs/ikigai-core/blob/main/docs/formalism/README.md) maps the kernel onto Peter Rodgers' *Peter's Hotel* formalism, every theorem pinned to the test that holds its precondition.

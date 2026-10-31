@@ -2837,6 +2837,11 @@ impl Kernel {
     /// Call it before the kernel is used: it replaces the cache, so anything already
     /// stored is dropped.
     ///
+    /// A host that takes the policy from its `config.toml` hands the `[cache]` table to
+    /// [`CacheConfig`](crate::CacheConfig) and installs what
+    /// [`to_policy`](crate::CacheConfig::to_policy) answers (ledger #2687); `urn:kernel:cache`
+    /// names the policy in force.
+    ///
     /// ```
     /// # use std::sync::Arc;
     /// # use ikigai_core::{CacheBound, Kernel, Lru, Space};
@@ -5426,6 +5431,7 @@ impl Kernel {
                     human_size(self.cache.bytes()),
                     human_size(bound.max_bytes),
                 );
+                body.push_str(&format!("  policy   {}\n", self.cache.policy_description()));
                 body.push_str(&format!("  evictions  {}\n", self.cache.evictions()));
                 let width = rows
                     .iter()
