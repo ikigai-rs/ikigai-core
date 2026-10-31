@@ -643,6 +643,8 @@ struct CacheState {
     tick: u64,
     /// Running total of `entries`' payload bytes.
     bytes: usize,
+    /// Lifetime representation removals, excluding replacements and failures.
+    evictions: u64,
 }
 
 impl Default for ReprCache {
@@ -664,6 +666,7 @@ impl ReprCache {
                 seq: 0,
                 tick: 0,
                 bytes: 0,
+                evictions: 0,
             }),
             policy,
             cut_seq: AtomicU64::new(0),
@@ -802,6 +805,7 @@ impl ReprCache {
         {
             if let Some(evicted) = state.entries.remove(key) {
                 state.bytes = state.bytes.saturating_sub(evicted.bytes());
+                state.evictions = state.evictions.saturating_add(1);
             }
         }
     }
@@ -856,6 +860,7 @@ impl ReprCache {
             _ => {
                 if let Some(evicted) = state.entries.remove(key) {
                     state.bytes = state.bytes.saturating_sub(evicted.bytes());
+                    state.evictions = state.evictions.saturating_add(1);
                 }
                 Served::Miss
             }
@@ -1133,6 +1138,14 @@ impl ReprCache {
         self.state.lock().expect("cache lock").bytes
     }
 
+    /// Lifetime count of representation entries removed to enforce a bound or
+    /// discard stale data (including discarded revalidation offers). Saturates at
+    /// `u64::MAX`, so it never decreases. Replacements, declined admissions and
+    /// cached failures are excluded. Probes and readouts do not change it.
+    pub fn evictions(&self) -> u64 {
+        self.state.lock().expect("cache lock").evictions
+    }
+
     /// The bound in force, for the operator readout.
     pub fn bound(&self) -> CacheBound {
         self.policy.capacity()
@@ -1263,7 +1276,10 @@ impl ReprCache {
                 return;
             };
             match state.entries.remove(&key) {
-                Some(evicted) => state.bytes = state.bytes.saturating_sub(evicted.bytes()),
+                Some(evicted) => {
+                    state.bytes = state.bytes.saturating_sub(evicted.bytes());
+                    state.evictions = state.evictions.saturating_add(1);
+                }
                 None => return,
             }
         }
@@ -1556,6 +1572,7 @@ mod tests {
             ));
         }
         assert_eq!(cache.len(), 2, "the bound is enforced on every store");
+        assert_eq!(cache.evictions(), 2, "each victim counts once");
     }
 
     #[test]
@@ -1576,6 +1593,7 @@ mod tests {
             None
         ));
         assert_eq!(cache.len(), 1, "80 bytes does not fit in 64");
+        assert_eq!(cache.evictions(), 1);
         assert!(
             !cache.store(
                 key(3),
@@ -1586,6 +1604,72 @@ mod tests {
             ),
             "an entry larger than the whole budget is refused, not admitted-then-evicted"
         );
+    }
+
+    #[test]
+    fn eviction_count_excludes_replacements_rejections_and_observation() {
+        let cache = ReprCache::new(Arc::new(Lru::with_bound(CacheBound::new(2, 16))));
+        assert_eq!(cache.evictions(), 0);
+        for _ in 0..2 {
+            assert!(cache.store(key(1), "a".into(), repr(8), cache.snapshot(), None));
+        }
+        assert!(!cache.store(key(2), "b".into(), repr(17), cache.snapshot(), None));
+        assert!(cache.get(&key(1), None).is_some());
+        assert!(cache.get(&key(2), None).is_none());
+        assert_eq!(cache.rows().len(), 1);
+        assert_eq!(cache.evictions(), 0);
+        // One large candidate requires two victims in a single store.
+        assert!(cache.store(key(2), "b".into(), repr(8), cache.snapshot(), None));
+        assert!(cache.store(key(3), "c".into(), repr(16), cache.snapshot(), None));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.evictions(), 2);
+    }
+
+    #[test]
+    fn revalidation_counts_a_discard_once_and_preserves_a_replacement() {
+        let cache = ReprCache::default();
+        let validated = || {
+            repr(8)
+                .cacheable_until(Time::from_millis(100))
+                .validated_by(crate::OriginValidator {
+                    etag: Some("v1".into()),
+                    last_modified: None,
+                })
+        };
+        let later = Some(Time::from_millis(100));
+        assert!(cache.store(key(1), "a".into(), validated(), cache.snapshot(), None));
+        let mut offer = None;
+        assert!(cache
+            .get_or_offer(&key(1), later, true, None, &mut offer)
+            .is_none());
+        assert!(offer.is_some());
+        assert_eq!(cache.evictions(), 0, "offering retains the entry");
+        cache.discard(&key(1), &offer);
+        cache.discard(&key(1), &offer);
+        assert_eq!(cache.evictions(), 1);
+        assert!(cache.store(key(1), "a".into(), validated(), cache.snapshot(), None));
+        assert!(cache
+            .get_or_offer(&key(1), later, true, None, &mut offer)
+            .is_none());
+        assert!(cache.store(key(1), "a".into(), repr(8), cache.snapshot(), None));
+        cache.discard(&key(1), &offer);
+        assert!(cache.probe(&key(1), later), "a newer entry survives");
+        assert_eq!(cache.evictions(), 1, "replacement is not an eviction");
+    }
+
+    #[test]
+    fn expiry_counts_only_when_the_entry_is_removed() {
+        let cache = ReprCache::default();
+        let repr = repr(8).cacheable_until(Time::from_millis(100));
+        assert!(cache.store(key(1), "a".into(), repr, cache.snapshot(), None));
+        let now = Some(Time::from_millis(100));
+        assert!(!cache.probe(&key(1), now));
+        assert_eq!(cache.rows_at(now)[0].state, EntryState::Expired);
+        assert_eq!(cache.evictions(), 0);
+        assert!(cache.get_body(&key(1), now).is_none());
+        assert_eq!(cache.evictions(), 1);
+        assert!(cache.get(&key(1), now).is_none());
+        assert_eq!(cache.evictions(), 1);
     }
 
     #[test]
@@ -1658,12 +1742,14 @@ mod tests {
         cache.cut(Thread::new("urn:data:state"));
         assert!(!cache.probe(&key(1), None), "a cut entry is not served");
         assert_eq!(cache.len(), 1, "the probe does not evict");
+        assert_eq!(cache.evictions(), 0);
         assert!(cache.get(&key(1), None).is_none());
         assert_eq!(
             cache.len(),
             0,
             "the serving path evicts what it found stale"
         );
+        assert_eq!(cache.evictions(), 1);
     }
 
     #[test]

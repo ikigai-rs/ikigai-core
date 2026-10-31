@@ -5381,9 +5381,11 @@ impl Kernel {
                 // or draws it (`crate::cache_graph`).
                 if kernel_face(request)? {
                     let entries = self.cache.edges_at(self.now_stamp());
-                    let turtle = crate::cache_graph::cache_turtle(entries, |thread| {
-                        self.cache.generation(&Thread::from(thread))
-                    });
+                    let turtle = crate::cache_graph::cache_turtle(
+                        entries,
+                        self.cache.evictions(),
+                        |thread| self.cache.generation(&Thread::from(thread)),
+                    );
                     return Ok(kernel_turtle(turtle));
                 }
                 let mut rows = self.cache.rows_at(self.now_stamp());
@@ -5424,6 +5426,7 @@ impl Kernel {
                     human_size(self.cache.bytes()),
                     human_size(bound.max_bytes),
                 );
+                body.push_str(&format!("  evictions  {}\n", self.cache.evictions()));
                 let width = rows
                     .iter()
                     .map(|r| r.target.chars().count())
@@ -8874,6 +8877,20 @@ mod tests {
             "FIFO evicted the oldest"
         );
         assert!(kernel.is_cached(&read("d"), &cap), "the newest survives");
+        for face in ["text/plain", "text/turtle"] {
+            let request = Request::new(Verb::Source, iri("urn:kernel:cache"))
+                .with_arg("as", ArgRef::Inline(face.as_bytes().to_vec()));
+            for _ in 0..2 {
+                let out = block_on(kernel.issue(request.clone(), &cap)).unwrap();
+                let text = String::from_utf8(out.bytes).unwrap();
+                let expected = if face == "text/plain" {
+                    "evictions  2"
+                } else {
+                    "<urn:kernel:cache> ik:evictionCount \"2\"^^xsd:nonNegativeInteger"
+                };
+                assert!(text.contains(expected), "{face}: {text}");
+            }
+        }
     }
 
     /// A policy decides admission and eviction, never validity: an entry whose
@@ -9510,6 +9527,7 @@ mod tests {
             .unwrap();
         let text = String::from_utf8_lossy(&out.bytes);
         assert!(text.contains("entries  1"), "count: {text}");
+        assert!(text.contains("evictions  0"), "eviction count: {text}");
         assert!(text.contains("urn:data:x"), "names the IRI: {text}");
         assert!(text.contains("text/plain"), "names the type: {text}");
         assert!(text.contains("5 B"), "names the size: {text}");
