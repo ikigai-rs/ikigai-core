@@ -683,6 +683,11 @@ ik:cutCount a rdf:Property ;
     rdfs:label "cutCount" ;
     rdfs:comment "How many times an ik:GoldenThread has been cut, as the kernel tracks it — its current generation. A thread no resident entry hangs from may be forgotten and start again from zero, so this is the tracked count, not the lifetime one." .
 
+ik:evictionCount a rdf:Property ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "evictionCount" ;
+    rdfs:comment "On urn:kernel:cache: how many representation entries the cache has removed over the kernel's lifetime to enforce its bound or to discard stale data (a discarded revalidation offer included). Replacements, declined admissions and cached failures are not counted. It never decreases, so the rate between two readings shows the cache cliff a scan larger than the bound produces (ledger #2682)." .
+
 # ---- the scheduler and the constraint as graphs (urn:kernel:scheduler, urn:kernel:constraint)
 # The Turtle faces of the two remaining text-only introspection readouts, so an
 # inspector can draw them as graph views beside the cache's. Both are computed from

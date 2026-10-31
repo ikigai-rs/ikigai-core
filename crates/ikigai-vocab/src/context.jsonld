@@ -258,6 +258,10 @@
       "@id": "ik:envelope",
       "@type": "@id"
     },
+    "evictionCount": {
+      "@id": "ik:evictionCount",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "evidence": {
       "@id": "ik:evidence",
       "@type": "@id"
