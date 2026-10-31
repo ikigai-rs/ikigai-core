@@ -38,6 +38,7 @@ say what changed, and R7.11 (the resolved scope) and R7.12 (sealed names) are ne
 `docs/design/sub-request-authority.md` (attenuation, and why delegation is not built),
 `docs/design/cache-ejection.md` (what the cache key does not identify),
 `docs/design/path-cache.md` (the resolution memo: parked, shape and triggers),
+`docs/design/immutable-mounted-answers.md` (caching a mounted answer that cannot change: design only),
 `docs/design/spaces-as-named-graphs.md` (where corridor identity goes next).
 **The gate:** `crates/ikigai-core/tests/formalism_pins.rs`. Every pin in this document is
 resolved against the source tree on every `cargo test`. A renamed or deleted test turns this
