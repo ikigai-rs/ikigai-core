@@ -269,13 +269,13 @@ impl Body {
     /// assert_eq!(pool.remaining(), 2);
     /// ```
     pub async fn collect_within(self, budget: &MemoryBudget) -> Result<Bytes> {
-        let over = |seen: u64| {
-            Error::OverBudget {
+        let over = |seen: u64| Error::OverBudget {
             detail: format!(
-                "the body is larger than the run's byte budget: {} byte(s) left, at least {seen}                  needed (a `urn:cap:stream:memory:<bytes>` grant raises it, up to the host's                  ceiling)",
+                "the body is larger than the run's byte budget: {} byte(s) left, at least {seen} \
+                 needed (a `urn:cap:stream:memory:<bytes>` grant raises it, up to the host's \
+                 ceiling)",
                 budget.remaining()
             ),
-        }
         };
         let stream = match self {
             Body::Bytes(bytes) => return Ok(bytes),
