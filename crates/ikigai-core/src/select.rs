@@ -30,6 +30,7 @@ use std::sync::Arc;
 use crate::describe::{Description, InputSource};
 use crate::grammar::{Bindings, UriTemplate};
 use crate::iri::Iri;
+use crate::media::media_types_agree;
 use crate::request::Request;
 use crate::space::{Resolution, Resolved, Scope, Space, SpaceEntry};
 use crate::verb::Verb;
@@ -826,49 +827,6 @@ pub(crate) fn cap_satisfies(capability: &crate::Capability, scope: &str) -> bool
 /// `charset` case-insensitively (RFC 9110 §8.3.2), every other parameter exactly.
 fn output_fits_want(declared: &str, want: &str) -> bool {
     media_types_agree(declared, want)
-}
-
-/// Whether two media types are one type for selection — the comparison behind both
-/// [`output_fits_want`] and transreptor selection ([`select_transreptor_with`]): the same
-/// essence (`type/subtype`, case-insensitive, whitespace ignored), and no parameter that
-/// BOTH state with different values (values unquoted, `charset` case-insensitive per RFC
-/// 9110 §8.3.2). Symmetric: a parameter only one side states does not contradict the other.
-fn media_types_agree(a: &str, b: &str) -> bool {
-    let (a_essence, a_params) = media_type_parts(a);
-    let (b_essence, b_params) = media_type_parts(b);
-    a_essence == b_essence
-        && b_params.iter().all(|(name, value)| {
-            a_params
-                .iter()
-                .find(|(n, _)| n == name)
-                .is_none_or(|(_, v)| v == value)
-        })
-}
-
-/// A media type's lowercased essence and its parameters (names lowercased, values
-/// unquoted, `charset` values lowercased), for [`media_types_agree`] only: no
-/// validation, so a malformed string compares as whatever it splits into.
-fn media_type_parts(media_type: &str) -> (String, Vec<(String, String)>) {
-    let mut parts = media_type.split(';');
-    let essence = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
-    let params = parts
-        .filter_map(|param| {
-            let (name, value) = param.split_once('=')?;
-            let name = name.trim().to_ascii_lowercase();
-            let value = value.trim();
-            let value = value
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .unwrap_or(value);
-            let value = if name == "charset" {
-                value.to_ascii_lowercase()
-            } else {
-                value.to_string()
-            };
-            Some((name, value))
-        })
-        .collect();
-    (essence, params)
 }
 
 /// Whether every required input of `action` declares a class present in `present`, with
