@@ -133,8 +133,12 @@ struct Candidate {
 }
 
 impl Candidate {
+    /// Whether this transreptor reads `from` and produces `to`, compared as MEDIA TYPES
+    /// ([`media_types_agree`], ledger #2163): `text/csv; charset=utf-8` is the `text/csv`
+    /// a transreptor declares.
     fn handles(&self, from: &str, to: &str) -> bool {
-        self.from.iter().any(|f| f == from) && self.to.iter().any(|t| t == to)
+        self.from.iter().any(|f| media_types_agree(f, from))
+            && self.to.iter().any(|t| media_types_agree(t, to))
     }
 
     fn step(&self, to: &str) -> TransreptionStep {
@@ -177,7 +181,7 @@ pub fn is_auto_invocable(description: &Description) -> bool {
 /// Find a chain of auto-invocable transreptors in `root` converting `from` → `to`
 /// through **lossless edges only** (the default [`TransreptionPolicy`]): a direct single
 /// hop if one exists, else a two-hop pivot via [`CANONICAL`]. `None` if no such chain is
-/// available (or if `from == to`, which needs no transreption). A transreptor declared
+/// available (or if `from` and `to` are one type, which needs no transreption). A transreptor declared
 /// lossy ([`Description::lossy`](crate::Description::lossy)) is invisible here; to
 /// consent to one, plan with [`select_transreptor_with`].
 pub fn select_transreptor(root: &dyn Space, from: &str, to: &str) -> Option<Vec<TransreptionStep>> {
@@ -194,13 +198,39 @@ pub fn select_transreptor(root: &dyn Space, from: &str, to: &str) -> Option<Vec<
 /// The two-hop rule is per edge: the pivot is lossless iff BOTH edges are. A lossy first
 /// hop under a lossless second is a lossy plan (refused by default, reported when
 /// allowed), and so is the converse.
+///
+/// `from`, `to` and every declaration compare as MEDIA TYPES, not strings (RFC 9110
+/// §8.3.1; ledger #2163): the `type/subtype` essence case-insensitively, a parameter
+/// ignored unless both sides state it and disagree. So `text/csv; charset=utf-8` finds a
+/// transreptor declaring `text/csv`. Each step asks for `to` as written, parameters
+/// included, so they reach the transreptor's `as`.
+///
+/// ```
+/// use ikigai_core::{select_transreptor, Description, EndpointSpace, Exact, FnEndpoint};
+/// use ikigai_core::{ArgSpec, ReprType, Representation, Verb};
+///
+/// let csv_json = FnEndpoint::new("csv-json", |_| {
+///     Ok(Representation::new(ReprType::new("application/json"), Vec::new()))
+/// })
+/// .with_description(
+///     Description::new("csv-json")
+///         .verb(Verb::Source)
+///         .input(ArgSpec::new("content"))
+///         .input(ArgSpec::new("as"))
+///         .transreptor(["text/csv"], ["application/json"]),
+/// );
+/// let space = EndpointSpace::new().bind(Exact::new("urn:demo:csv-json"), csv_json);
+/// let plan = select_transreptor(&space, "text/csv; charset=utf-8", "application/json")
+///     .expect("a charset does not make it another type");
+/// assert_eq!(plan[0].endpoint, "urn:demo:csv-json");
+/// ```
 pub fn select_transreptor_with(
     root: &dyn Space,
     from: &str,
     to: &str,
     policy: &TransreptionPolicy,
 ) -> Option<Vec<TransreptionStep>> {
-    if from == to {
+    if media_types_agree(from, to) {
         return None;
     }
     let candidates = collect(root);
@@ -234,7 +264,7 @@ fn plan_over(
     }
 
     // Pivot: `from → text/turtle` then `text/turtle → to` (two distinct hops).
-    if from != CANONICAL && to != CANONICAL {
+    if !media_types_agree(from, CANONICAL) && !media_types_agree(to, CANONICAL) {
         let first = candidates
             .iter()
             .filter(eligible)
@@ -795,11 +825,20 @@ pub(crate) fn cap_satisfies(capability: &crate::Capability, scope: &str) -> bool
 /// the essence is what an output declaration is about). Values compare after unquoting,
 /// `charset` case-insensitively (RFC 9110 §8.3.2), every other parameter exactly.
 fn output_fits_want(declared: &str, want: &str) -> bool {
-    let (declared_essence, declared_params) = media_type_parts(declared);
-    let (want_essence, want_params) = media_type_parts(want);
-    declared_essence == want_essence
-        && want_params.iter().all(|(name, value)| {
-            declared_params
+    media_types_agree(declared, want)
+}
+
+/// Whether two media types are one type for selection — the comparison behind both
+/// [`output_fits_want`] and transreptor selection ([`select_transreptor_with`]): the same
+/// essence (`type/subtype`, case-insensitive, whitespace ignored), and no parameter that
+/// BOTH state with different values (values unquoted, `charset` case-insensitive per RFC
+/// 9110 §8.3.2). Symmetric: a parameter only one side states does not contradict the other.
+fn media_types_agree(a: &str, b: &str) -> bool {
+    let (a_essence, a_params) = media_type_parts(a);
+    let (b_essence, b_params) = media_type_parts(b);
+    a_essence == b_essence
+        && b_params.iter().all(|(name, value)| {
+            a_params
                 .iter()
                 .find(|(n, _)| n == name)
                 .is_none_or(|(_, v)| v == value)
@@ -807,7 +846,7 @@ fn output_fits_want(declared: &str, want: &str) -> bool {
 }
 
 /// A media type's lowercased essence and its parameters (names lowercased, values
-/// unquoted, `charset` values lowercased), for [`output_fits_want`] only: no
+/// unquoted, `charset` values lowercased), for [`media_types_agree`] only: no
 /// validation, so a malformed string compares as whatever it splits into.
 fn media_type_parts(media_type: &str) -> (String, Vec<(String, String)>) {
     let mut parts = media_type.split(';');
@@ -1067,6 +1106,86 @@ mod tests {
     fn none_when_unreachable_or_identity() {
         assert!(select_transreptor(&space(), "text/turtle", "text/turtle").is_none());
         assert!(select_transreptor(&space(), "application/pdf", "image/png").is_none());
+    }
+
+    /// Ledger #2163: selection compares MEDIA TYPES (RFC 9110 §8.3.1), not strings. A
+    /// CSV atom served as `text/csv; charset=utf-8` found no transreptor declaring bare
+    /// `text/csv`, so a read of it as JSON was refused.
+    #[test]
+    fn selection_matches_the_essence_not_the_string() {
+        let csv = EndpointSpace::new().bind(
+            Exact::new("urn:demo:csv-json"),
+            transreptor("csv-json", &["text/csv"], &["application/json"]),
+        );
+        // A parameter on the request: the bare declaration still reads it.
+        let plan = select_transreptor(&csv, "text/csv; charset=utf-8", "application/json")
+            .expect("text/csv with a charset is text/csv");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].endpoint, "urn:demo:csv-json");
+        // The essence is case-insensitive, whitespace around it ignored.
+        assert!(select_transreptor(&csv, " Text/CSV;charset=UTF-8", "application/json").is_some());
+        // The target too, and the step asks for the target AS WRITTEN: its parameters pass
+        // through to the transreptor's `as`.
+        let plan = select_transreptor(&csv, "text/csv", "Application/JSON; charset=utf-8")
+            .expect("the target is application/json");
+        assert_eq!(plan[0].to, "Application/JSON; charset=utf-8");
+        // A different essence is still a different type.
+        assert!(
+            select_transreptor(&csv, "text/tab-separated-values", "application/json").is_none()
+        );
+
+        // The pivot hops match the same way.
+        let pivot = space().bind(
+            Exact::new("urn:demo:csv"),
+            transreptor("csv", &["text/turtle"], &["text/csv"]),
+        );
+        let plan = select_transreptor(&pivot, "application/rdf+xml; charset=utf-8", "text/csv")
+            .expect("pivot via turtle");
+        assert_eq!(plan.len(), 2, "{plan:?}");
+        // A source that IS Turtle, with a parameter, takes the direct hop.
+        let plan =
+            select_transreptor(&pivot, "text/turtle; charset=utf-8", "text/csv").expect("direct");
+        assert_eq!(plan.len(), 1, "{plan:?}");
+
+        // Identity: the same type with a parameter on one side needs no transreption.
+        assert!(select_transreptor(&csv, "text/csv; charset=utf-8", "text/csv").is_none());
+    }
+
+    /// Ledger #2163: a parameter is ignored for matching unless BOTH sides state it and
+    /// they disagree — then the types are different. No published transreptor declares a
+    /// parameter today; this pins what one that did would get.
+    #[test]
+    fn a_parameter_both_sides_state_must_agree() {
+        let space = EndpointSpace::new().bind(
+            Exact::new("urn:demo:latin1"),
+            transreptor(
+                "latin1",
+                &["text/plain; charset=iso-8859-1"],
+                &["text/plain; charset=utf-8"],
+            ),
+        );
+        // The charset it declares, in another case and quoted: matched.
+        let plan = select_transreptor(
+            &space,
+            "text/plain; charset=\"ISO-8859-1\"",
+            "text/plain;charset=utf-8",
+        )
+        .expect("the declared charsets");
+        assert_eq!(plan[0].endpoint, "urn:demo:latin1");
+        // A contradicting charset on the input: not this transreptor's input.
+        assert!(select_transreptor(
+            &space,
+            "text/plain; charset=koi8-r",
+            "text/plain; charset=utf-8"
+        )
+        .is_none());
+        // Two charsets of one essence are two types, not an identity.
+        assert!(select_transreptor(
+            &space,
+            "text/plain; charset=iso-8859-1",
+            "text/plain; charset=koi8-r"
+        )
+        .is_none());
     }
 
     // --- lossless by default; a lossy edge only with consent ---
