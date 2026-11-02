@@ -50,7 +50,9 @@ const ABOUT: &str = "Capability vectors computed by ikigai-core from \
      tests/vectors/capability_cases.json (crates/ikigai-vocab/tests/capability_vectors.rs, \
      which fails if this file differs from what it computes). A capability is \"root\" or \
      the list of scopes it holds; verbs are spelled as ikigai_core::Verb serializes them; \
-     a denial is the text of the kernel's Denied, null when the floor admits the request.";
+     a denial is the text of the kernel's Denied, null when the floor admits the request \
+     or conceals it; `unresolved`, only on a row the kernel conceals (an existence-sensitive \
+     refusal), is the IRI its Unresolved names, the answer a name bound nowhere gets.";
 
 fn verb_name(verb: Verb) -> String {
     format!("{verb:?}")
@@ -118,18 +120,31 @@ fn kernel(target: &str, description: Description) -> Kernel {
     ))
 }
 
-/// What the kernel answers `verb` on `target` under `capability`: the text of its
-/// `Denied`, or `None` when the floor admitted the request (whatever happened next: the
-/// endpoint answers every verb, and this kernel has no Meta renderer).
-fn denial(kernel: &Kernel, target: &str, verb: Verb, capability: &Capability) -> Option<String> {
+/// What the kernel answers a request, as far as the floor is concerned.
+#[derive(Debug, PartialEq)]
+enum Answer {
+    /// The floor admitted the request (whatever happened next: the endpoint answers every
+    /// verb, and this kernel has no Meta renderer).
+    Admitted,
+    /// The kernel's `Denied`, its text.
+    Denied(String),
+    /// The kernel's `Unresolved`, the IRI it names: an existence-sensitive refusal
+    /// (ledger #2176, #2434), answered as a name bound nowhere. Every target in these
+    /// vectors is bound, so this arm is reached by the concealment alone.
+    Unresolved(String),
+}
+
+/// What the kernel answers `verb` on `target` under `capability`.
+fn answer(kernel: &Kernel, target: &str, verb: Verb, capability: &Capability) -> Answer {
     let target = Iri::parse(target).unwrap_or_else(|e| panic!("target {target}: {e}"));
     let mut request = Request::new(verb, target);
     if verb.is_mutating() {
         request = request.with_arg("content", ArgRef::Inline(b"x".to_vec()));
     }
     match block_on(kernel.issue(request, capability)) {
-        Err(Error::Denied(message)) => Some(message),
-        _ => None,
+        Err(Error::Denied(message)) => Answer::Denied(message),
+        Err(Error::Unresolved(iri)) => Answer::Unresolved(iri.as_str().to_string()),
+        _ => Answer::Admitted,
     }
 }
 
@@ -194,12 +209,21 @@ fn compute() -> String {
             let target = case["target"].as_str().expect("a denial names a target");
             let k = kernel(target, description(&case["description"]));
             let mut row = case.clone();
-            row["denied"] = json!(denial(
+            // `unresolved` is written only on a row the kernel conceals, so every row it
+            // does not stays byte-identical to the file before concealment was pinned.
+            match answer(
                 &k,
                 target,
                 verb(&case["verb"]),
-                &capability(&case["capability"])
-            ));
+                &capability(&case["capability"]),
+            ) {
+                Answer::Admitted => row["denied"] = Value::Null,
+                Answer::Denied(message) => row["denied"] = json!(message),
+                Answer::Unresolved(iri) => {
+                    row["denied"] = Value::Null;
+                    row["unresolved"] = json!(iri);
+                }
+            }
             row
         })
         .collect();
@@ -246,20 +270,24 @@ fn every_floor_row_is_what_the_kernel_enforces() {
             let v = verb(&row["verb"]);
             let required: Vec<String> = serde_json::from_value(row["required_scopes"].clone())
                 .expect("required_scopes is a list of strings");
-            let refused = denial(&k, target, v, &nobody);
+            // No floor row is existence-sensitive (the concealment is pinned in `denials`),
+            // so a refusal here is a `Denied`, never an `Unresolved`.
+            let refused = answer(&k, target, v, &nobody);
             match required.first() {
-                None => assert_eq!(refused, None, "{name} {v:?}: nothing is required"),
+                None => assert_eq!(
+                    refused,
+                    Answer::Admitted,
+                    "{name} {v:?}: nothing is required"
+                ),
                 Some(first) => assert!(
-                    refused
-                        .as_deref()
-                        .is_some_and(|m| m.contains(&format!("grant `{first}`"))),
+                    matches!(&refused, Answer::Denied(m) if m.contains(&format!("grant `{first}`"))),
                     "{name} {v:?}: expected a refusal naming {first}, got {refused:?}"
                 ),
             }
             let holder = Capability::scoped(required.clone());
             assert_eq!(
-                denial(&k, target, v, &holder),
-                None,
+                answer(&k, target, v, &holder),
+                Answer::Admitted,
                 "{name} {v:?}: holding {required:?} is refused"
             );
         }
@@ -296,6 +324,100 @@ fn the_shared_vectors_pin_every_denial_shape() {
         json!("capability does not grant `*` (declared by `urn:x`; any grant at all satisfies it)")
     );
     assert_eq!(denied("exact-held"), Value::Null);
+}
+
+/// The existence-sensitive refusals (ledger #2176, #2434): the floor refuses, and the
+/// kernel answers as a name bound nowhere instead of `Denied`. Pins one row of each kind,
+/// and that every concealed row's answer is a MISS's, byte for byte: the same verb on the
+/// same name in a space that binds nothing.
+#[test]
+fn the_shared_vectors_pin_every_concealment() {
+    let doc: Value = serde_json::from_str(&compute()).unwrap();
+    let rows = doc["denials"].as_array().unwrap();
+    let row = |name: &str| {
+        rows.iter()
+            .find(|d| d["name"] == name)
+            .unwrap_or_else(|| panic!("no denial named {name}"))
+    };
+    let concealed = |name: &str| {
+        let r = row(name);
+        assert_eq!(
+            r["denied"],
+            Value::Null,
+            "{name}: a concealment is not a Denied"
+        );
+        assert_eq!(
+            r["unresolved"], r["target"],
+            "{name}: expected the target's miss"
+        );
+    };
+    let denied = |name: &str, text: &str| {
+        let r = row(name);
+        assert_eq!(r["denied"], json!(text), "{name}");
+        assert!(
+            r.get("unresolved").is_none(),
+            "{name}: a Denied is not concealed"
+        );
+    };
+    let admitted = |name: &str| {
+        let r = row(name);
+        assert_eq!(r["denied"], Value::Null, "{name}");
+        assert!(
+            r.get("unresolved").is_none(),
+            "{name}: an admitted request is not concealed"
+        );
+    };
+
+    // Flat: every verb is marked, so a refused one is a miss, and so is Meta for a caller
+    // the floor refuses on every declared verb; a caller who passes it is answered.
+    concealed("sensitive-flat-nothing");
+    concealed("sensitive-flat-unrelated");
+    concealed("sensitive-flat-undeclared-exists");
+    concealed("sensitive-flat-meta-nothing");
+    admitted("sensitive-flat-held");
+    admitted("sensitive-flat-root");
+    admitted("sensitive-flat-undeclared-exists-held");
+    admitted("sensitive-flat-meta-held");
+    // Per verb: only the marked verb conceals; the unmarked one still says Denied; an
+    // undeclared verb conceals because the description is sensitive somewhere; Meta is
+    // answered for a caller who passes ANY declared verb's floor.
+    concealed("sensitive-per-verb-sink-nothing");
+    concealed("sensitive-per-verb-sink-with-read");
+    admitted("sensitive-per-verb-sink-with-write");
+    denied(
+        "sensitive-per-verb-source-nothing",
+        "capability does not grant `urn:cap:vault:read` (declared by `urn:vault:secret`)",
+    );
+    concealed("sensitive-per-verb-undeclared-exists");
+    concealed("sensitive-per-verb-undeclared-delete-with-read");
+    admitted("sensitive-per-verb-undeclared-delete-with-both");
+    concealed("sensitive-per-verb-meta-nothing");
+    admitted("sensitive-per-verb-meta-with-read");
+    // An explicit action's flag REPLACES the flat one, like its `requires`.
+    concealed("sensitive-replaced-source-nothing");
+    denied(
+        "sensitive-replaced-sink-nothing",
+        "capability does not grant `urn:cap:vault:write` (declared by `urn:vault:secret`)",
+    );
+    // Nothing required: nothing refused, so nothing to conceal.
+    admitted("sensitive-public");
+    // No declared verb: every verb needs everything, Meta included.
+    concealed("sensitive-no-verb-sink");
+    concealed("sensitive-no-verb-meta");
+    admitted("sensitive-no-verb-meta-held");
+
+    let empty = Kernel::new(Arc::new(EndpointSpace::new()));
+    for r in rows.iter().filter(|r| r.get("unresolved").is_some()) {
+        let name = r["name"].as_str().unwrap();
+        let target = r["target"].as_str().unwrap();
+        let v = verb(&r["verb"]);
+        let k = kernel(target, description(&r["description"]));
+        assert_eq!(
+            answer(&k, target, v, &capability(&r["capability"])),
+            answer(&empty, target, v, &capability(&r["capability"])),
+            "{name}: the concealment is not the answer a miss gets"
+        );
+    }
 }
 
 /// Regenerate `capability_vectors.json`. Ignored so a normal run only CHECKS; run it with

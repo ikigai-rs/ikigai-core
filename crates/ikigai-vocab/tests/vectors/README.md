@@ -165,7 +165,7 @@ refused naming the first required scope, a caller holding exactly the list is ad
 | `coverage[]` | `capability`, `scope` | `allows` = `Capability::allows(scope)` (exact), `satisfies` = `Capability::satisfies(scope)` (a trailing `*` is "holds any scope under the prefix"; root satisfies everything) |
 | `principals[]` | `capability` | `principal` = `Capability::principal()`: the ONE principal it carries, `null` for root, none, several, or a scope under `urn:cap:principal:` that names no carriable principal |
 | `floors[]` | `description` (the serde shape of `ikigai_core::Description`) | per `verbs[]`: `required_scopes` = `Description::required_scopes(verb)`, for all five verbs |
-| `denials[]` | `target`, `description`, `verb`, `capability` | `denied` = the text of the kernel's `Denied` for that request (core's `denial_message` for the first required scope the capability does not satisfy, in declaration order), `null` when the floor admits it |
+| `denials[]` | `target`, `description`, `verb`, `capability` | `denied` = the text of the kernel's `Denied` for that request (core's `denial_message` for the first required scope the capability does not satisfy, in declaration order), `null` when the floor admits it or conceals it; `unresolved`, present ONLY on a row the kernel conceals, = the IRI its `Unresolved` names (see existence sensitivity below). A row with `denied` null and no `unresolved` is admitted |
 
 A `capability` is `"root"` or the list of scopes a scoped capability holds (not the wire's
 `{"kind": …}` form). Verbs are spelled as `ikigai_core::Verb` serializes them. The `denied`
@@ -177,6 +177,31 @@ UNION (an undeclared verb's floor); a declared verb's own `requires` is returned
 duplicates included (`floors` `duplicate-verbs`). And an `actions[]` entry for a verb not listed
 in `verbs` is ignored, as is a `Meta` action's `requires` (`action-for-undeclared-verb`,
 `meta-action-is-not-gated`).
+
+**Existence sensitivity** (ledger #2176, ikigai-core 0.2.2; vectors ledger #2434). A description
+that marks a verb `existence_sensitive` (flat, or on an explicit action, whose flag REPLACES the
+flat one like its `requires`) changes what a floor refusal looks like: the kernel answers the
+request exactly as it answers a name bound nowhere, `Unresolved` naming the target, never
+`Denied`, so a refused caller cannot learn that the name exists. A face that enforces floors
+itself must do the same, or it answers `Denied` where core answers a miss, which is the leak this
+closes. The `sensitive-*` rows pin the rule:
+
+- a refused verb conceals when its own action is marked (`sensitive-per-verb-source-nothing`, an
+  UNMARKED verb beside a marked one, is still `Denied`; `sensitive-replaced-sink-nothing` is an
+  explicit unmarked action replacing a marked flat flag);
+- a refused UNDECLARED verb (it needs what the floor table says) conceals when any part of the
+  description is marked (`sensitive-per-verb-undeclared-exists`, `…-delete-with-read`);
+- `Meta`, which the floor never gates, conceals when the description is marked anywhere and the
+  capability passes the floor of NO declared verb (with no declared verb, of the union): it is
+  answered for a caller who passes any one (`sensitive-per-verb-meta-with-read`);
+- nothing required means nothing refused and nothing concealed (`sensitive-public`); a caller the
+  floor admits is answered as usual.
+
+A face answers a concealed request with the SAME error, status and body its own miss arm
+produces for that name (on the HTTP edge a 404, per the failure-class vectors), and records
+nothing a miss would not. `tests/capability_vectors.rs` checks that every concealed row's answer
+is the one a kernel that binds nothing gives. Every row that predates these is byte-identical:
+`unresolved` is written only where the kernel conceals.
 
 ## Adding a case
 
