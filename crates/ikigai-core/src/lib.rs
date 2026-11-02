@@ -131,6 +131,7 @@ mod iri;
 mod kernel;
 mod kernel_ops;
 pub mod listen;
+mod media;
 mod meta;
 mod repr;
 mod request;
@@ -204,6 +205,7 @@ pub use kernel::{
 pub use listen::{
     CutBatch, CutEvent, CutListener, ListenSpec, CAP_LISTEN, INVALIDATED_NAMED, LISTEN_CAPACITY,
 };
+pub use media::{media_type_essence, media_types_agree};
 pub use meta::MetaRenderer;
 pub use repr::{
     Expiry, OriginValidator, Provenance, ReprType, Representation, Stale, Thread, Time,
