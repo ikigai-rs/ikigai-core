@@ -210,6 +210,12 @@ impl Provenance {
     pub fn new(expiry: Expiry, threads: BTreeSet<Thread>) -> Self {
         Provenance { expiry, threads }
     }
+
+    /// Whether this upstream limits the answer it feeds at all. One that never expires
+    /// and hangs from nothing folds to nothing, so it is the same as no upstream.
+    pub(crate) fn contributes(&self) -> bool {
+        self.expiry != Expiry::Never || !self.threads.is_empty()
+    }
 }
 
 /// What an ORIGIN says identifies the version of an answer it gave: an entity tag, a
