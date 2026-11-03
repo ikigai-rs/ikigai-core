@@ -718,3 +718,174 @@ fn a_later_rules_reference_template_has_its_own_captures_settled() {
         .unwrap();
     assert_eq!(query.fixed.as_deref(), Some("<urn:example:files/since.rq>"));
 }
+
+// A declared input's contract ───────────────────────────────────────────────────
+
+/// `urn:example:quakes:page`, bound as ledger #2958 found it: a `theme` input with a default
+/// and an enumeration, declared in Turtle (the form a names file compiles to).
+const THEMED: &str = r#"
+@prefix ik: <https://ikigai-rs.dev/ns#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+<urn:example:space:themed> a ik:Alias ;
+    ik:maxHops 8 ;
+    ik:rewrites <urn:example:space:themed:rule:1> ;
+    ik:space <urn:example:space:themed:empty> .
+<urn:example:space:themed:empty> a ik:EndpointSpace ; ik:doors rdf:nil .
+
+<urn:example:space:themed:rule:1> a ik:RewriteRule ;
+    ik:ruleKind "exact" ;
+    ik:logical "urn:example:quakes:page" ;
+    ik:canonical "urn:example:compose" ;
+    ik:resolveAt "root" ;
+    ik:verb "Source" ;
+    ik:input <urn:example:space:themed:rule:1:input:theme> .
+<urn:example:space:themed:rule:1:input:theme>
+    ik:inputName "theme" ; ik:required false ; ik:default "auto" ;
+    ik:oneOf "auto", "light", "dark", "high-contrast" .
+"#;
+
+fn themed_page() -> Request {
+    source("urn:example:quakes:page")
+}
+
+/// The door maps `?theme=sepia` to exactly this request.
+#[test]
+fn a_value_outside_a_declared_one_of_is_refused_before_the_target_runs() {
+    let host = host(&Topology::from_turtle(THEMED).unwrap());
+    let err = host
+        .issue(themed_page().with_arg("theme", ArgRef::Inline(b"sepia".to_vec())))
+        .unwrap_err();
+    assert!(
+        matches!(&err, Error::InvalidArgument { name, .. } if name == "theme"),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "invalid argument `theme`: `sepia` is not an accepted value of `theme` \
+         (one of: auto, light, dark, high-contrast)"
+    );
+    assert_eq!(
+        host.runs.load(Ordering::SeqCst),
+        0,
+        "a refusal never reaches the target"
+    );
+}
+
+#[test]
+fn a_value_inside_a_declared_one_of_reaches_the_target() {
+    let host = host(&Topology::from_turtle(THEMED).unwrap());
+    let given = host
+        .issue(themed_page().with_arg("theme", ArgRef::Inline(b"dark".to_vec())))
+        .unwrap();
+    assert_eq!(given, "theme=dark\n");
+    assert_eq!(
+        host.issue(themed_page()).unwrap(),
+        "theme=auto\n",
+        "left out, the declared default is sent"
+    );
+    assert_eq!(host.runs.load(Ordering::SeqCst), 2);
+}
+
+/// One named request over the echoing target, in the kernel's own table.
+fn bound(rules: Vec<TopologyRule>) -> (Kernel, Arc<AtomicU32>) {
+    let runs = Arc::new(AtomicU32::new(0));
+    let doors = EndpointSpace::new().bind(Exact::new(COMPOSE), echoing("compose", runs.clone()));
+    let table = rules.into_iter().fold(AliasTable::new(), |table, rule| {
+        table.with_rule(rule).unwrap()
+    });
+    (
+        Kernel::new(Arc::new(doors)).with_aliases(Arc::new(table)),
+        runs,
+    )
+}
+
+fn themed_rule() -> TopologyRule {
+    TopologyRule::named_request("urn:example:quakes:page", COMPOSE)
+        .input(ArgSpec::new("theme").optional().one_of(["light", "dark"]))
+}
+
+#[test]
+fn a_declared_one_of_is_held_in_the_kernels_own_table_and_for_exists() {
+    let (kernel, runs) = bound(vec![themed_rule()]);
+    let sepia = ArgRef::Inline(b"sepia".to_vec());
+    for verb in [Verb::Source, Verb::Exists] {
+        let request =
+            Request::new(verb, iri("urn:example:quakes:page")).with_arg("theme", sepia.clone());
+        let err = block_on(kernel.issue(request, &Capability::root())).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid argument `theme`: `sepia` is not an accepted value of `theme` \
+             (one of: light, dark)",
+            "{verb:?}"
+        );
+    }
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn an_enumerated_input_refuses_a_value_it_cannot_see() {
+    let (kernel, runs) = bound(vec![themed_rule()]);
+    // Forwarded, this reference could become a value only the target's contract would see:
+    // on an open argument set the kernel reads the referent for it, a theme nobody checked.
+    let by_reference =
+        themed_page().with_arg("theme", ArgRef::Reference(iri("urn:example:holds:sepia")));
+    let err = block_on(kernel.issue(by_reference, &Capability::root())).unwrap_err();
+    assert!(
+        matches!(&err, Error::InvalidArgument { name, .. } if name == "theme"),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "invalid argument `theme`: `theme` takes an enumerated value, which cannot be checked \
+         when given by reference or as stored content: give the value itself"
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_declared_class_is_held_and_an_open_input_takes_a_reference() {
+    const INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+    let (kernel, runs) = bound(vec![TopologyRule::named_request(
+        "urn:example:quakes:page",
+        COMPOSE,
+    )
+    .input(ArgSpec::new("limit").optional().class(INTEGER))
+    .input(ArgSpec::new("query").optional())]);
+    let issue = |request| block_on(kernel.issue(request, &Capability::root()));
+
+    let many = themed_page().with_arg("limit", ArgRef::Inline(b"many".to_vec()));
+    let err = issue(many).unwrap_err();
+    assert!(
+        matches!(&err, Error::InvalidArgument { name, .. } if name == "limit"),
+        "{err:?}"
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+    let ten = themed_page().with_arg("limit", ArgRef::Inline(b"10".to_vec()));
+    assert_eq!(issue(ten).unwrap().bytes, b"limit=10\n");
+    let saved = themed_page().with_arg("query", ArgRef::Reference(iri("urn:example:saved")));
+    assert_eq!(
+        issue(saved).unwrap().bytes,
+        b"query=<urn:example:saved>\n",
+        "a reference passes through: nothing declared needs its value here"
+    );
+}
+
+#[test]
+fn every_named_request_of_a_chain_holds_its_own_one_of() {
+    let (kernel, runs) = bound(vec![
+        TopologyRule::named_request("urn:example:outer", "urn:example:quakes:page")
+            .input(ArgSpec::new("theme").optional().one_of(["dark", "sepia"])),
+        themed_rule(),
+    ]);
+    let outer = |theme: &str| {
+        source("urn:example:outer").with_arg("theme", ArgRef::Inline(theme.as_bytes().to_vec()))
+    };
+    // The outer name accepts it, the inner one does not.
+    let err = block_on(kernel.issue(outer("sepia"), &Capability::root())).unwrap_err();
+    assert!(err.to_string().contains("(one of: light, dark)"), "{err}");
+    let answer = block_on(kernel.issue(outer("dark"), &Capability::root())).unwrap();
+    assert_eq!(answer.bytes, b"theme=dark\n");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
