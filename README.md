@@ -53,7 +53,11 @@ Breaking here is not only about types. The version also moves when what an uncha
 *does* changes: 0.1.49 made the kernel enforce the capabilities an endpoint declares, before
 dispatch and before the cache, so a caller that had been relying on a declared-but-unchecked
 scope compiled exactly as before and started being refused at runtime. A change like that
-cannot be caught by `cargo build`, which is the other reason to read the release notes.
+cannot be caught by `cargo build`, which is the other reason to read the release notes. 0.3.0
+did the same to the content store: an invocation now reads held content only as the principal
+who delivered it, or as root, so a door that holds a caller's content has to move to `put_for`
+or `put_replay_for` under a capability that names the caller
+([what to change](crates/ikigai-core/README.md#held-content)).
 
 Where the edges still are, so nobody discovers them by surprise: a module cannot issue a
 sub-request under authority it holds rather than its caller's, capability scopes match by
