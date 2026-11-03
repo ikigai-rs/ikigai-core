@@ -2793,8 +2793,10 @@ impl Kernel {
     ///
     /// A request that carries a content id is keyed by the digest, so it caches like any
     /// other value; the store holds only bodies that can be read again, so a retried
-    /// request reads its content again. Hosts can read held content through
-    /// [`Issuer::content`] (import [`Issuer`] to call it on a kernel).
+    /// request reads its content again. An invocation reads only what its capability may
+    /// (ledger #2965, [`MemoryContentStore::put_for`](crate::MemoryContentStore::put_for)).
+    /// Hosts can read held content through [`Issuer::content`] (import [`Issuer`] to call it
+    /// on a kernel).
     pub fn with_content_store(mut self, store: Arc<dyn crate::ContentStore>) -> Self {
         self.content = Some(store);
         self
@@ -6572,6 +6574,25 @@ fn defaulted_note(defaulted: &[String]) -> Option<(String, String)> {
     (!defaulted.is_empty()).then(|| (DEFAULTED_NOTE.to_string(), defaulted.join(",")))
 }
 
+impl Kernel {
+    /// The installed content store, or the refusal for a kernel that has none.
+    fn content_store(&self, id: &crate::ContentId) -> Result<&Arc<dyn crate::ContentStore>> {
+        self.content.as_ref().ok_or_else(|| Error::Unsupported {
+            verb: None,
+            detail: format!(
+                "content {id} names a value, and this kernel has no content store \
+                 (`Kernel::with_content_store`)"
+            ),
+        })
+    }
+}
+
+/// The one answer for content a caller may not read, held or not: a foreign id and an absent
+/// one must not differ (ledger #2965).
+fn content_not_held(id: &crate::ContentId) -> Error {
+    Error::NotFound(format!("no content is held under {id}"))
+}
+
 /// Refuse a kernel operation whose request names the body attached to `run` (ledger
 /// #2402). Out of line, so its temporaries are not part of the resolution path's frame.
 #[cold]
@@ -7199,18 +7220,15 @@ impl Issuer for Kernel {
     }
 
     fn content(&self, id: &crate::ContentId) -> Result<Body> {
-        let Some(store) = self.content.as_ref() else {
-            return Err(Error::Unsupported {
-                verb: None,
-                detail: format!(
-                    "content {id} names a value, and this kernel has no content store \
-                     (`Kernel::with_content_store`)"
-                ),
-            });
-        };
-        store
+        self.content_store(id)?
             .get(id)
-            .ok_or_else(|| Error::NotFound(format!("no content is held under {id}")))
+            .ok_or_else(|| content_not_held(id))
+    }
+
+    fn content_for(&self, id: &crate::ContentId, capability: &Capability) -> Result<Body> {
+        self.content_store(id)?
+            .get_for(id, capability)
+            .ok_or_else(|| content_not_held(id))
     }
 
     fn spill(&self, capability: &Capability) -> Result<(Arc<dyn crate::Spill>, u64)> {

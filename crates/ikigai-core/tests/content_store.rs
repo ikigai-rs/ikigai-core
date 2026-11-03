@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use futures::executor::block_on;
 use ikigai_core::{
-    ArgRef, AsyncFnEndpoint, Capability, ContentId, EndpointSpace, Error, Exact, FnEndpoint, Iri,
-    Kernel, MemoryContentStore, ReprType, Representation, Request, Verb,
+    ArgRef, AsyncFnEndpoint, Body, Capability, ContentId, ContentStore, EndpointSpace, Error,
+    Exact, FnEndpoint, Iri, Kernel, MemoryContentStore, ReprType, Representation, Request, Verb,
 };
 
 fn iri(s: &str) -> Iri {
@@ -151,5 +151,214 @@ fn content_dropped_from_the_store_no_longer_resolves() {
     assert!(matches!(
         block_on(kernel.issue(sink, &Capability::root())),
         Err(Error::NotFound(_))
+    ));
+}
+
+// ---------------------------------------------------------- whose content it is (ledger #2965)
+
+fn session() -> Capability {
+    Capability::scoped(["urn:cap:read"])
+}
+
+fn alice() -> Capability {
+    session()
+        .with_principal("urn:example:person:alice")
+        .unwrap()
+}
+
+fn bob() -> Capability {
+    session().with_principal("urn:example:person:bob").unwrap()
+}
+
+/// `urn:stream:collect` answers the content's own bytes, with nothing to bind or grant: what a
+/// wire peer can name on any kernel with a store.
+fn collect(id: ContentId) -> Request {
+    Request::new(Verb::Source, iri("urn:stream:collect")).with_arg("content", ArgRef::Content(id))
+}
+
+/// The bytes `capability` reads under `id`, or the refusal's text.
+fn read(kernel: &Kernel, id: ContentId, capability: &Capability) -> Result<Vec<u8>, String> {
+    block_on(kernel.issue(collect(id), capability))
+        .map(|answer| answer.bytes)
+        .map_err(|e| e.to_string())
+}
+
+fn absent(id: ContentId) -> Result<Vec<u8>, String> {
+    Err(format!("not found: no content is held under {id}"))
+}
+
+#[test]
+fn a_foreign_content_id_answers_exactly_as_an_absent_one() {
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let (kernel, _) = kernel(Some(Arc::clone(&store)));
+    let held = store.put_for(&alice(), b"alice's".to_vec()).unwrap();
+
+    assert_eq!(read(&kernel, held.id(), &alice()), Ok(b"alice's".to_vec()));
+    // Bob cannot read it, and cannot learn it is here: the words are those for no content.
+    assert_eq!(read(&kernel, held.id(), &bob()), absent(held.id()));
+    let nothing = ContentId::of(b"nothing");
+    assert_eq!(read(&kernel, nothing, &bob()), absent(nothing));
+    // Through an endpoint, by the seam every reader uses, the same.
+    assert!(matches!(
+        block_on(kernel.issue(length_of(held.id()), &bob())),
+        Err(Error::NotFound(_))
+    ));
+    // Root is the owner of the kernel, and reads it.
+    assert_eq!(
+        read(&kernel, held.id(), &Capability::root()),
+        Ok(b"alice's".to_vec())
+    );
+}
+
+#[test]
+fn a_principal_reads_its_own_content_whatever_else_it_holds() {
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let (kernel, _) = kernel(Some(Arc::clone(&store)));
+    let held = store.put_for(&alice(), b"alice's".to_vec()).unwrap();
+    let wider = Capability::scoped(["urn:cap:read", "urn:cap:write"])
+        .with_principal("urn:example:person:alice")
+        .unwrap();
+    assert_eq!(read(&kernel, held.id(), &wider), Ok(b"alice's".to_vec()));
+}
+
+#[test]
+fn a_cached_answer_on_foreign_content_does_not_reach_another_principal() {
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let (kernel, runs) = kernel(Some(Arc::clone(&store)));
+    let held = store.put_for(&alice(), vec![1u8; 64]).unwrap();
+    assert_eq!(
+        block_on(kernel.issue(length_of(held.id()), &alice()))
+            .unwrap()
+            .bytes,
+        b"64"
+    );
+    assert!(kernel.is_cached(&length_of(held.id()), &alice()));
+    assert!(!kernel.is_cached(&length_of(held.id()), &bob()));
+    assert!(matches!(
+        block_on(kernel.issue(length_of(held.id()), &bob())),
+        Err(Error::NotFound(_))
+    ));
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        2,
+        "bob's was no hit on alice's"
+    );
+}
+
+#[test]
+fn content_put_for_nobody_is_read_by_root_alone() {
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let (kernel, _) = kernel(Some(Arc::clone(&store)));
+    let held = store.put(b"the host's".to_vec()).unwrap();
+    assert_eq!(
+        read(&kernel, held.id(), &Capability::root()),
+        Ok(b"the host's".to_vec())
+    );
+    for capability in [alice(), session(), Capability::scoped(Vec::<String>::new())] {
+        assert_eq!(read(&kernel, held.id(), &capability), absent(held.id()));
+    }
+}
+
+#[test]
+fn a_capability_naming_nobody_reads_only_what_an_equal_one_delivered() {
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let (kernel, _) = kernel(Some(Arc::clone(&store)));
+    let held = store.put_for(&session(), b"a session's".to_vec()).unwrap();
+    assert_eq!(
+        read(&kernel, held.id(), &session()),
+        Ok(b"a session's".to_vec()),
+        "an equal capability is the same party, as it is to the cache"
+    );
+    let wider = Capability::scoped(["urn:cap:read", "urn:cap:write"]);
+    let narrower = wider.attenuate(["urn:cap:write"]);
+    for capability in [alice(), wider, narrower] {
+        assert_eq!(read(&kernel, held.id(), &capability), absent(held.id()));
+    }
+    // And the other way: a principal's content is not read by its grant without the name.
+    let named = store.put_for(&alice(), b"alice's".to_vec()).unwrap();
+    assert_eq!(read(&kernel, named.id(), &session()), absent(named.id()));
+}
+
+#[test]
+fn two_deliverers_of_the_same_bytes_each_read_while_their_own_handle_lives() {
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let (kernel, _) = kernel(Some(Arc::clone(&store)));
+    let hers = store.put_for(&alice(), b"same".to_vec()).unwrap();
+    let his = store.put_for(&bob(), b"same".to_vec()).unwrap();
+    let id = hers.id();
+    assert_eq!((store.len(), store.held_bytes()), (1, 4), "one entry");
+
+    assert_eq!(read(&kernel, id, &alice()), Ok(b"same".to_vec()));
+    assert_eq!(read(&kernel, id, &bob()), Ok(b"same".to_vec()));
+
+    // A clone is one more hold for the same party.
+    let hers_again = hers.clone();
+    drop(hers);
+    assert_eq!(read(&kernel, id, &alice()), Ok(b"same".to_vec()));
+    drop(hers_again);
+    // Asked of the store: her earlier answer stays cached in her own partition, as any
+    // answer does, and it is the store's hold this is about.
+    assert!(store.get_for(&id, &alice()).is_none(), "her hold is gone");
+    assert!(store.get_for(&id, &bob()).is_some());
+
+    drop(his);
+    assert!(store.is_empty());
+    assert!(store.get_for(&id, &bob()).is_none());
+}
+
+#[test]
+fn put_replay_for_holds_a_spill_for_its_deliverer() {
+    use ikigai_core::{ByteStream, Bytes, Replay};
+    struct Spilled;
+    impl Replay for Spilled {
+        fn open(&self) -> ByteStream {
+            Box::pin(futures::stream::iter([Ok(Bytes::from_static(b"spilled"))]))
+        }
+        fn len_hint(&self) -> Option<u64> {
+            Some(7)
+        }
+        fn validator(&self) -> Option<ContentId> {
+            Some(ContentId::of(b"spilled"))
+        }
+    }
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let (kernel, _) = kernel(Some(Arc::clone(&store)));
+    let held = store.put_replay_for(&alice(), Spilled).unwrap();
+    assert_eq!(read(&kernel, held.id(), &alice()), Ok(b"spilled".to_vec()));
+    assert_eq!(read(&kernel, held.id(), &bob()), absent(held.id()));
+    let host = store.put_replay(Spilled).unwrap();
+    drop(held);
+    assert!(
+        store.get_for(&host.id(), &alice()).is_none(),
+        "the host's hold is not hers"
+    );
+    assert!(store.get_for(&host.id(), &Capability::root()).is_some());
+}
+
+#[test]
+fn a_store_that_keeps_no_record_of_holders_is_read_by_root_alone() {
+    struct Plain(MemoryContentStore);
+    impl ContentStore for Plain {
+        fn get(&self, id: &ContentId) -> Option<Body> {
+            self.0.get(id)
+        }
+    }
+    let inner = MemoryContentStore::new(1 << 20);
+    let held = inner.put(b"a host library's".to_vec()).unwrap();
+    let kernel =
+        Kernel::new(Arc::new(EndpointSpace::new())).with_content_store(Arc::new(Plain(inner)));
+    assert_eq!(
+        read(&kernel, held.id(), &Capability::root()),
+        Ok(b"a host library's".to_vec())
+    );
+    assert_eq!(read(&kernel, held.id(), &alice()), absent(held.id()));
+}
+
+#[test]
+fn no_store_stays_unsupported_for_every_capability() {
+    let (bare, _) = kernel(None);
+    assert!(matches!(
+        block_on(bare.issue(collect(ContentId::of(b"x")), &alice())),
+        Err(Error::Unsupported { .. })
     ));
 }

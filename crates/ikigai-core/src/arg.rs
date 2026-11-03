@@ -29,5 +29,8 @@ pub enum ArgRef {
     /// plan attached or the kernel's content store (ledger #2240,
     /// [`Kernel::with_content_store`](crate::Kernel::with_content_store)), as a body
     /// ([`Invocation::content_body`](crate::Invocation::content_body)), never as inline bytes.
+    /// A store answers only what the invocation's capability may read (ledger #2965,
+    /// [`MemoryContentStore::put_for`](crate::MemoryContentStore::put_for)): naming an id is
+    /// not holding it.
     Content(ContentId),
 }

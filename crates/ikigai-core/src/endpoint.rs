@@ -252,11 +252,27 @@ pub trait Issuer: Send + Sync {
     /// from the store a host installed
     /// ([`Kernel::with_content_store`](crate::Kernel::with_content_store)), and with
     /// [`Error::NotFound`] when nothing is held under `id`.
+    ///
+    /// This is the host's view and asks nothing of the caller: an invocation reads through
+    /// [`content_for`](Self::content_for).
     fn content(&self, id: &crate::ContentId) -> Result<crate::Body> {
         Err(Error::Unsupported {
             verb: None,
             detail: format!("content {id} names a value, and this issuer has no content store"),
         })
+    }
+
+    /// [`content`](Self::content) as `capability` may read it (ledger #2965): what
+    /// [`Invocation::content_body`] resolves through. Content held for someone else answers
+    /// exactly as content that is not there, [`Error::NotFound`]. The default fails closed
+    /// for an issuer that has not said otherwise: only root reads.
+    fn content_for(&self, id: &crate::ContentId, capability: &Capability) -> Result<crate::Body> {
+        let body = self.content(id)?;
+        if capability.is_root() {
+            Ok(body)
+        } else {
+            Err(Error::NotFound(format!("no content is held under {id}")))
+        }
     }
 
     /// The issuer's spill facility and how many bytes `capability` may write to it in one
@@ -1665,7 +1681,9 @@ impl<'a> Invocation<'a> {
     ///
     /// A content id resolves only here, inside the invocation whose request carries it:
     /// there is no name to read one by. With no store installed it is
-    /// [`Error::Unsupported`]; with one that holds nothing under the id,
+    /// [`Error::Unsupported`]; with one that holds nothing under the id, or holds it for
+    /// someone this invocation's capability does not act for (ledger #2965,
+    /// [`MemoryContentStore::put_for`](crate::MemoryContentStore::put_for)),
     /// [`Error::NotFound`]. [`inline_arg`](Self::inline_arg) keeps refusing it, since it
     /// cannot hand out a stored body as inline bytes.
     ///
@@ -1706,9 +1724,10 @@ impl<'a> Invocation<'a> {
                     }
                 }
                 // Otherwise the kernel's content store (ledger #2240), still only for the
-                // id this invocation's own request carries.
+                // id this invocation's own request carries, and only as far as its
+                // capability may read (ledger #2965).
                 match self.issuer {
-                    Some(issuer) => issuer.content(id),
+                    Some(issuer) => issuer.content_for(id, self.capability),
                     None => Err(Error::Unsupported {
                         verb: None,
                         detail: format!(
