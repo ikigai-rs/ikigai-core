@@ -1248,6 +1248,10 @@ pub(crate) fn previewing<R>(resolve: impl FnOnce() -> R) -> R {
 /// - **a declared input** is the caller's to give, and its default is filled when the
 ///   caller leaves it out; `as` is never fixed, and a binding's default face is a
 ///   declared `as` with a default, so a caller's `as=` still negotiates;
+/// - **a declared input's contract is held at the name**: a value outside its `one_of`, or
+///   implausible for its XSD `class`, is refused with [`Error::InvalidArgument`] before the
+///   target runs, and so is a reference or stored content given to an enumerated input,
+///   whose value the view cannot see;
 /// - **a bound verb** is the one verb forwarded, beside `Exists`; any other is refused
 ///   with [`Error::Unsupported`];
 /// - **a template rule's captures** may fill its canonical name and whole argument
@@ -1545,7 +1549,8 @@ impl ViewEndpoint {
     ///
     /// **Fixed wins, and says so** (ledger #2512): a caller who gives a fixed argument is
     /// REFUSED, naming the binding, never silently overridden (that would make the name
-    /// mean any request) and never silently ignored. Every other argument passes through.
+    /// mean any request) and never silently ignored. Every other argument passes through,
+    /// and a declared input's value is held to that input's contract (ledger #2958).
     fn forwarded(&self, inv: &Invocation<'_>) -> crate::error::Result<Request> {
         let mut forwarded = inv.request.clone();
         forwarded.target = self.target.clone();
@@ -1583,6 +1588,9 @@ impl ViewEndpoint {
                         .entry(input.name.clone())
                         .or_insert_with(|| ArgRef::Inline(default.clone().into_bytes()));
                 }
+                if let Some(value) = forwarded.args.get(&input.name) {
+                    held_to_contract(input, value)?;
+                }
             }
         }
         Ok(forwarded)
@@ -1591,6 +1599,33 @@ impl ViewEndpoint {
     /// The one verb the chain binds, if any.
     fn bound_verb(&self) -> Option<Verb> {
         self.parts.iter().find_map(|part| part.verb)
+    }
+}
+
+/// A value of a named request's declared input against that input's `one_of` and class: the
+/// rule [`ActionSpec::check`](crate::ActionSpec::check) reports, as the refusal of the request
+/// itself. The target may declare nothing about the input (an open argument set), so nothing
+/// after the view would hold it. A reference or stored content is the target's to read, so its
+/// value is out of the view's sight: an enumerated input refuses it rather than let any value
+/// through that way.
+fn held_to_contract(input: &ArgSpec, value: &ArgRef) -> crate::error::Result<()> {
+    let refuse = |detail: String| Error::InvalidArgument {
+        name: input.name.clone(),
+        detail,
+    };
+    match value {
+        ArgRef::Inline(bytes) => {
+            match crate::check::check_value(input, &String::from_utf8_lossy(bytes)) {
+                Some(violation) => Err(refuse(violation.message)),
+                None => Ok(()),
+            }
+        }
+        _ if input.is_enumerated() => Err(refuse(format!(
+            "`{}` takes an enumerated value, which cannot be checked when given by reference or \
+             as stored content: give the value itself",
+            input.name
+        ))),
+        _ => Ok(()),
     }
 }
 

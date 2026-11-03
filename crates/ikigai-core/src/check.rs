@@ -599,8 +599,8 @@ impl ActionSpec {
 }
 
 /// One value (a whole value, or one item of a list) against its input's `one_of` and
-/// declared class.
-fn check_value(input: &ArgSpec, value: &str) -> Option<Violation> {
+/// declared class. Also what a named request holds a caller's value to ([`crate::alias`]).
+pub(crate) fn check_value(input: &ArgSpec, value: &str) -> Option<Violation> {
     if input.is_enumerated() && !input.one_of.iter().any(|v| v == value) {
         let accepted = if input.one_of.is_empty() {
             "it accepts none: its enumeration is empty".to_string()
