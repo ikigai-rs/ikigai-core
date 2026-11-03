@@ -17,7 +17,7 @@ serde_json = "1"
 # The version is the TRUE minimum, not a family: the path dep satisfies every call
 # locally, so fmt/clippy/test/CI stay green against a pin that cannot resolve on
 # crates.io, and only `cargo publish --dry-run` ever sees it.
-ikigai-core = { path = "../ikigai-core", version = "0.2.5" } # 0.2.5: `ArgSpec.fixed`, rendered as `ik:fixed` (ledger #2512). Beneath it, 0.2.3: `ArgSpec::reads_body` and `ik:readsBody` (ledger #2402).
+ikigai-core = { path = "../ikigai-core", version = "0.3.0" } # 0.3.0: held content scoped to who delivered it (ledger #2965). This crate calls nothing new, but "0.2.5" means <0.3.0 under 0.x rules, and so would put a second core in every consumer's graph. Beneath it, 0.2.5: `ArgSpec.fixed`, rendered as `ik:fixed` (ledger #2512), and 0.2.3: `ArgSpec::reads_body` and `ik:readsBody` (ledger #2402).
 # Under 0.x rules "0.1.108" means <0.2.0, so a vocab 0.2.0 pinned to the 0.1 line would put a second
 # core in every consumer's graph. Earlier floors, kept for the record: 0.1.108 =
 # the failure classes (ledger #1546): `to_turtle` reads `Description::failures` and
@@ -44,11 +44,8 @@ futures = "0.3" # block_on for the kernel faces in tests/manifold_identity.rs
 # dependency graph (the crate stays dependency-free).
 oxttl = "0.2"
 oxrdf.workspace = true
-# What "done" means for a module, run against `space()` (tests/conformance.rs). It depends on
-# `ikigai-core` and `ikigai-vocab` from crates.io, which would link a SECOND copy of each beside
-# this workspace's: the workspace root's `[patch.crates-io]` points both at the members here, so
-# the suite and this crate share one kernel. The `ikigai-vocab` edge is a dev-dependency cycle,
-# which cargo permits (an integration test links the plain library).
-# 0.12.0 adds BODIES and BODY-INPUTS; the suite supplies the kernel's space so body
-# checks are probed (ledger #2566).
-ikigai-conformance = "0.12.0"
+# The conformance test (tests/conformance.rs, with `ikigai-conformance` as a dev-dependency) is
+# OUT for the 0.3.0 bump, as it was for 0.2.0: the published suite pins ikigai-core ^0.2, which
+# cannot admit 0.3.0, so it would link a second core, and the workspace [patch] cannot bridge a
+# requirement that excludes the patched version. Restore it from git history, pinned to the first
+# conformance release on core 0.3.0; the workspace [patch.crates-io] stays for that.

@@ -253,8 +253,11 @@ pub trait Issuer: Send + Sync {
     /// ([`Kernel::with_content_store`](crate::Kernel::with_content_store)), and with
     /// [`Error::NotFound`] when nothing is held under `id`.
     ///
-    /// This is the host's view and asks nothing of the caller: an invocation reads through
-    /// [`content_for`](Self::content_for).
+    /// An invocation reads through [`content_for`](Self::content_for).
+    ///
+    /// ⚠ This bypasses the scope (ledger #2965): it answers whoever holds the content, and
+    /// asks nothing of the caller. It is for host code only. Never call it on behalf of a
+    /// caller or a peer, who could then read content another party delivered.
     fn content(&self, id: &crate::ContentId) -> Result<crate::Body> {
         Err(Error::Unsupported {
             verb: None,
@@ -1520,6 +1523,14 @@ impl<'a> Invocation<'a> {
     /// [`issue`](Self::issue), so this defends the module's *downstream*, not the
     /// module itself. That is the only thing an in-process, self-applied restriction
     /// can honestly claim.
+    ///
+    /// ## Content the caller delivered
+    ///
+    /// A sub-request reads content held for its caller (ledger #2965,
+    /// [`MemoryContentStore::put_for`](crate::MemoryContentStore::put_for)) only when `scopes`
+    /// name the caller's principal ([`principal_scope`](crate::principal_scope)): the narrowed
+    /// capability then acts as the same party. Scopes that leave the principal out drop it, so
+    /// the sub-request fails closed and the id answers [`Error::NotFound`].
     ///
     /// ```
     /// # use std::sync::Arc;

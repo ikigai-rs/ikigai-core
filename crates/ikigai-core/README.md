@@ -72,6 +72,35 @@ assert_eq!(rep.bytes, b"IKIGAI");
   verb routed to a pluggable `MetaRenderer` (one resource, many representations).
 - **Formal companion** — [`docs/formalism/README.md`](https://github.com/ikigai-rs/ikigai-core/blob/main/docs/formalism/README.md) maps the kernel onto Peter Rodgers' *Peter's Hotel* formalism, every theorem pinned to the test that holds its precondition.
 
+<a id="held-content"></a>
+
+## Held content belongs to who delivered it (0.3.0)
+
+Before 0.3.0, any caller that named a content id read what the content store held under it, so a
+wire peer could read content another party had delivered. Now an invocation reads a content id
+under its own capability, and a foreign id answers exactly as an absent one does (`NotFound`).
+Your code still compiles, and these calls now answer differently:
+
+| Held with | Who reads it |
+|---|---|
+| `MemoryContentStore::put`, `put_replay` | Root only |
+| `put_for`, `put_replay_for`, under a capability naming one principal | That principal, under any capability that acts as it, and root |
+| `put_for`, `put_replay_for`, under a capability naming no principal, or several | Root only, so the deliverer cannot read it back |
+
+To upgrade a door that holds a caller's content and dispatches under that caller's capability:
+
+1. Name the caller in the capability (`Capability::with_principal`). Anonymous callers can't
+   read back what they deliver, because equal scopes don't make two callers one party.
+2. Hold the content with `put_for` or `put_replay_for`, under that capability.
+3. Check any custom `ContentStore` or `Issuer`. Unless it overrides `get_for` or `content_for`,
+   only root reads through it.
+
+A sub-request made with `Invocation::issue_attenuated` reads its caller's content only when its
+scopes name the caller's principal (`principal_scope`). Otherwise it gets `NotFound`.
+
+`ContentStore::get` and `Issuer::content` stay public and don't check who is asking. Use them only
+in host code, never on behalf of a caller or a peer.
+
 ## Lineage
 
 ikigai is inspired by Resource-Oriented Computing and NetKernel, and builds on the

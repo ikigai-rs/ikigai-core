@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use futures::executor::block_on;
 use ikigai_core::{
-    ArgRef, AsyncFnEndpoint, Body, Capability, ContentId, ContentStore, EndpointSpace, Error,
-    Exact, FnEndpoint, Iri, Kernel, MemoryContentStore, ReprType, Representation, Request, Verb,
+    principal_scope, ArgRef, AsyncFnEndpoint, Body, Capability, ContentId, ContentStore,
+    EndpointSpace, Error, Exact, FnEndpoint, Iri, Kernel, MemoryContentStore, ReprType,
+    Representation, Request, Verb,
 };
 
 fn iri(s: &str) -> Iri {
@@ -260,23 +261,178 @@ fn content_put_for_nobody_is_read_by_root_alone() {
 }
 
 #[test]
-fn a_capability_naming_nobody_reads_only_what_an_equal_one_delivered() {
+fn a_hold_under_a_capability_naming_nobody_is_read_by_root_alone() {
     let store = Arc::new(MemoryContentStore::new(1 << 20));
-    let (kernel, _) = kernel(Some(Arc::clone(&store)));
-    let held = store.put_for(&session(), b"a session's".to_vec()).unwrap();
-    assert_eq!(
-        read(&kernel, held.id(), &session()),
-        Ok(b"a session's".to_vec()),
-        "an equal capability is the same party, as it is to the cache"
-    );
+    let (kernel, runs) = kernel(Some(Arc::clone(&store)));
+    let held = store.put_for(&session(), vec![1u8; 64]).unwrap();
     let wider = Capability::scoped(["urn:cap:read", "urn:cap:write"]);
     let narrower = wider.attenuate(["urn:cap:write"]);
-    for capability in [alice(), wider, narrower] {
+    // The deliverer included: nothing tells it from any other holder of the same scopes.
+    for capability in [session(), wider, narrower, alice()] {
         assert_eq!(read(&kernel, held.id(), &capability), absent(held.id()));
     }
-    // And the other way: a principal's content is not read by its grant without the name.
+    // Root's cached answer stays in root's partition.
+    let root = Capability::root();
+    assert_eq!(
+        block_on(kernel.issue(length_of(held.id()), &root))
+            .unwrap()
+            .bytes,
+        b"64"
+    );
+    assert!(kernel.is_cached(&length_of(held.id()), &root));
+    assert!(!kernel.is_cached(&length_of(held.id()), &session()));
+    assert!(matches!(
+        block_on(kernel.issue(length_of(held.id()), &session())),
+        Err(Error::NotFound(_))
+    ));
+    assert_eq!(runs.load(Ordering::SeqCst), 2, "the session's was no hit");
+
+    // And a principal's content is not read by its grant without the name.
     let named = store.put_for(&alice(), b"alice's".to_vec()).unwrap();
     assert_eq!(read(&kernel, named.id(), &session()), absent(named.id()));
+}
+
+#[test]
+fn a_peer_cannot_clamp_its_way_into_a_hold_that_names_nobody() {
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let (kernel, _) = kernel(Some(Arc::clone(&store)));
+    // A door admitting principal-less callers: each peer resolves under a clamp of its ceiling.
+    let door = Capability::scoped(["urn:cap:read", "urn:cap:write"]);
+    let deliverer = door.clamp(&session());
+    let peer = door.clamp(&session());
+    assert_eq!(deliverer, peer, "narrowed to the same scopes");
+
+    let held = store.put_for(&deliverer, b"a peer's".to_vec()).unwrap();
+    assert_eq!(read(&kernel, held.id(), &peer), absent(held.id()));
+    assert_eq!(read(&kernel, held.id(), &door), absent(held.id()));
+    assert_eq!(
+        read(&kernel, held.id(), &Capability::root()),
+        Ok(b"a peer's".to_vec())
+    );
+}
+
+#[test]
+fn anonymous_callers_share_no_holds() {
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let (kernel, _) = kernel(Some(Arc::clone(&store)));
+    // What a web door with no principal mints: every anonymous caller the same capability.
+    let anonymous = || Capability::scoped(["urn:cap:upload"]);
+    let first = store.put_for(&anonymous(), b"first".to_vec()).unwrap();
+    let second = store.put_for(&anonymous(), b"second".to_vec()).unwrap();
+    assert_eq!(read(&kernel, first.id(), &anonymous()), absent(first.id()));
+    assert_eq!(
+        read(&kernel, second.id(), &anonymous()),
+        absent(second.id())
+    );
+    // The same bytes delivered by both widen nothing.
+    let again = store.put_for(&anonymous(), b"first".to_vec()).unwrap();
+    assert_eq!(read(&kernel, again.id(), &anonymous()), absent(again.id()));
+}
+
+#[test]
+fn a_capability_naming_several_principals_names_nobody() {
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let (kernel, _) = kernel(Some(Arc::clone(&store)));
+    let several = Capability::scoped([
+        principal_scope("urn:example:person:alice").unwrap(),
+        principal_scope("urn:example:person:bob").unwrap(),
+    ]);
+    assert_eq!(several.principal(), None);
+    let held = store.put_for(&several, b"whose?".to_vec()).unwrap();
+    let hers = store.put_for(&alice(), b"alice's".to_vec()).unwrap();
+    assert_eq!(read(&kernel, hers.id(), &several), absent(hers.id()));
+    for capability in [several, alice(), bob()] {
+        assert_eq!(read(&kernel, held.id(), &capability), absent(held.id()));
+    }
+}
+
+#[test]
+fn the_same_principal_reads_under_a_narrower_capability() {
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let (kernel, _) = kernel(Some(Arc::clone(&store)));
+    let alice_scope = principal_scope("urn:example:person:alice").unwrap();
+    let full = Capability::scoped(["urn:cap:read", "urn:cap:write"])
+        .with_principal("urn:example:person:alice")
+        .unwrap();
+    let held = store.put_for(&full, b"alice's".to_vec()).unwrap();
+
+    // Attenuated, asking to keep the principal.
+    let narrower = full.attenuate(["urn:cap:read".to_string(), alice_scope.clone()]);
+    assert_ne!(narrower, full);
+    assert_eq!(read(&kernel, held.id(), &narrower), Ok(b"alice's".to_vec()));
+    // Down to the name alone: the hold asks who, not what.
+    let name_only = full.attenuate([alice_scope]);
+    assert_eq!(
+        read(&kernel, held.id(), &name_only),
+        Ok(b"alice's".to_vec())
+    );
+    // Clamped by a door: the ceiling's principal survives what the peer carried.
+    let clamped = full.clamp(&session());
+    assert_eq!(clamped.principal(), Some("urn:example:person:alice"));
+    assert_eq!(read(&kernel, held.id(), &clamped), Ok(b"alice's".to_vec()));
+    // Delivered under the narrower, read under the wider: one party either way.
+    let delivered = store.put_for(&narrower, b"narrow".to_vec()).unwrap();
+    assert_eq!(read(&kernel, delivered.id(), &full), Ok(b"narrow".to_vec()));
+
+    // A narrowing that does not ask for the principal drops it, and fails closed.
+    let nameless = full.attenuate(["urn:cap:read"]);
+    assert_eq!(nameless.principal(), None);
+    assert_eq!(read(&kernel, held.id(), &nameless), absent(held.id()));
+}
+
+/// An endpoint that reads `id` in a sub-request: under `scopes` when given, else under its
+/// caller's own capability.
+fn relay(id: ContentId, scopes: Option<Vec<String>>) -> AsyncFnEndpoint {
+    AsyncFnEndpoint::new("relay", move |inv| {
+        let scopes = scopes.clone();
+        Box::pin(async move {
+            let answer = match scopes {
+                Some(scopes) => inv.issue_attenuated(collect(id), scopes).await?,
+                None => inv.issue(collect(id)).await?,
+            };
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                answer.bytes,
+            ))
+        })
+    })
+}
+
+#[test]
+fn a_sub_request_reads_its_callers_content_only_when_it_keeps_the_principal() {
+    let store = Arc::new(MemoryContentStore::new(1 << 20));
+    let held = store.put_for(&alice(), b"alice's".to_vec()).unwrap();
+    let id = held.id();
+    let alice_scope = principal_scope("urn:example:person:alice").unwrap();
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:relay:as-caller"), relay(id, None))
+        .bind(
+            Exact::new("urn:relay:keeps-principal"),
+            relay(id, Some(vec!["urn:cap:read".to_string(), alice_scope])),
+        )
+        .bind(
+            Exact::new("urn:relay:drops-principal"),
+            relay(id, Some(vec!["urn:cap:read".to_string()])),
+        );
+    let kernel = Kernel::new(Arc::new(space)).with_content_store(store.clone());
+    let call = |name: &str, capability: &Capability| {
+        block_on(kernel.issue(Request::new(Verb::Source, iri(name)), capability))
+            .map(|answer| answer.bytes)
+    };
+
+    assert_eq!(call("urn:relay:as-caller", &alice()).unwrap(), b"alice's");
+    assert_eq!(
+        call("urn:relay:keeps-principal", &alice()).unwrap(),
+        b"alice's"
+    );
+    assert!(matches!(
+        call("urn:relay:drops-principal", &alice()),
+        Err(Error::NotFound(_))
+    ));
+    // The scopes name alice, and bob still cannot read through them: a narrowing adds no name.
+    for name in ["urn:relay:as-caller", "urn:relay:keeps-principal"] {
+        assert!(matches!(call(name, &bob()), Err(Error::NotFound(_))));
+    }
 }
 
 #[test]

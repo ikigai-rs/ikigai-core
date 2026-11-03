@@ -13,10 +13,11 @@
 //! **Held content belongs to whoever delivered it** (ledger #2965). A digest is a name, not a
 //! secret, and a wire peer can put any id in an argument, so an invocation reads a content id
 //! under its own capability ([`ContentStore::get_for`]): root reads everything, and any other
-//! capability reads only what was held for it
+//! capability reads only what was held for the principal it names
 //! ([`put_for`](MemoryContentStore::put_for)). A foreign id answers exactly as an absent one
 //! does, [`Error::NotFound`], so naming one does not tell the caller the content is here.
-//! [`put`](MemoryContentStore::put) names nobody, and only root reads what it holds.
+//! A hold that names nobody ([`put`](MemoryContentStore::put), or `put_for` a capability with
+//! no principal) is read by root alone: scopes say what a caller may do, not who it is.
 //!
 //! [`MemoryContentStore`] is core's in-memory implementation; a spill-backed store (files,
 //! hashed while written) is a host library's, through the same trait.
@@ -51,7 +52,7 @@
 //! assert!(block_on(kernel.issue(sink, &Capability::root())).is_err());
 //! ```
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -70,8 +71,11 @@ use crate::error::{Error, Result};
 /// a retried request reads its content again, which a one-shot stream could not give it.
 pub trait ContentStore: Send + Sync {
     /// The body stored under `id`, a fresh handle on every call, or `None` when nothing
-    /// is held under it. This is the host's view and asks nothing of the caller: what an
-    /// invocation reads goes through [`get_for`](Self::get_for).
+    /// is held under it. What an invocation reads goes through [`get_for`](Self::get_for).
+    ///
+    /// ⚠ This bypasses the scope (ledger #2965): it answers whoever holds the content, and
+    /// asks nothing of the caller. It is for host code only. Never call it on behalf of a
+    /// caller or a peer, who could then read content another party delivered.
     fn get(&self, id: &ContentId) -> Option<Body>;
 
     /// The body stored under `id`, when `capability` may read it, or `None`: a store must
@@ -91,32 +95,27 @@ pub trait ContentStore: Send + Sync {
 /// Who a hold on content was taken for, and so who may read the content through it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Holder {
-    /// The host, naming nobody ([`MemoryContentStore::put`]): root alone reads.
-    Host,
+    /// Nobody a capability can name ([`MemoryContentStore::put`], or a capability with no
+    /// principal): root alone reads. Equal scopes do not make two callers one party, and a
+    /// peer can narrow to the scopes of another.
+    Root,
     /// One principal: any capability acting as it reads, whatever else it holds.
     Principal(String),
-    /// A capability naming no principal: an equal one reads, since nothing tells the two
-    /// apart. They already share a cache partition.
-    Grant(BTreeSet<String>),
 }
 
 impl Holder {
     fn of(capability: &Capability) -> Holder {
-        match (capability.scopes(), capability.principal()) {
-            (None, _) => Holder::Host,
-            (Some(_), Some(principal)) => Holder::Principal(principal.to_string()),
-            (Some(scopes), None) => Holder::Grant(scopes.clone()),
+        match capability.principal() {
+            Some(principal) => Holder::Principal(principal.to_string()),
+            None => Holder::Root,
         }
     }
 
     /// Whether `capability`, which is not root, may read what this hold keeps.
     fn admits(&self, capability: &Capability) -> bool {
         match self {
-            Holder::Host => false,
-            Holder::Principal(principal) => capability.principal() == Some(principal.as_str()),
-            Holder::Grant(scopes) => {
-                capability.principal().is_none() && capability.scopes() == Some(scopes)
-            }
+            Holder::Root => false,
+            Holder::Principal(principal) => capability.acts_as(principal),
         }
     }
 }
@@ -162,22 +161,30 @@ impl MemoryContentStore {
     }
 
     /// Put `bytes` in, under their digest ([`ContentId::of`]), and hold them while the
-    /// returned handle lives, for the host: through this handle only root reads them. Content
+    /// returned handle lives, for the host: through this hold only root reads them. Content
     /// delivered on behalf of a caller goes in with [`put_for`](Self::put_for).
     pub fn put(&self, bytes: impl Into<Bytes>) -> Result<ContentHandle> {
-        self.put_held(Holder::Host, bytes.into())
+        self.put_held(Holder::Root, bytes.into())
     }
 
     /// [`put`](Self::put) on behalf of the caller holding `capability`, who reads the content
     /// while the handle lives (ledger #2965): any capability acting as the same principal,
-    /// or, when `capability` names no principal, a capability equal to it. Root reads it too.
-    /// Anyone else naming its id is answered as if nothing were held.
+    /// wider or narrower, since the hold asks who the reader is and not what it may do. Root
+    /// reads it too. Anyone else naming its id is answered as if nothing were held.
     ///
-    /// ⚠ A capability naming no principal cannot be told from an equal one, so callers a door
-    /// admits under one shared grant can read each other's content. A door serving parties
-    /// that must not should name each in its capability
-    /// ([`Capability::with_principal`](crate::Capability::with_principal)). A narrowed
-    /// capability that kept no principal is not equal to the one that delivered.
+    /// ⚠ When `capability` names no principal (none, or several), the hold is read by root
+    /// alone, and the deliverer cannot read it back. Equal scopes do not make two callers one
+    /// party: anonymous callers of a door share them, and
+    /// [`Capability::clamp`](crate::Capability::clamp) lets a peer narrow to them. A door
+    /// whose callers read what they deliver names each in its capability
+    /// ([`Capability::with_principal`](crate::Capability::with_principal)).
+    ///
+    /// A narrowing keeps the principal only when it asks for it
+    /// ([`Capability::attenuate`](crate::Capability::attenuate)), so a sub-request reads its
+    /// caller's content only when its
+    /// [`issue_attenuated`](crate::Invocation::issue_attenuated) scopes name the principal
+    /// ([`principal_scope`](crate::principal_scope)). Scopes that leave it out fail closed,
+    /// as [`Error::NotFound`].
     ///
     /// ```
     /// use std::sync::Arc;
@@ -218,9 +225,9 @@ impl MemoryContentStore {
     /// as [`Error::InvalidArgument`] when the replay states no validator (there is no id
     /// to hold it under without reading it), and counted by its length hint against the
     /// bound (`OverBudget` when it states none). Held for the host, as [`put`](Self::put)
-    /// is: only root reads it through this handle.
+    /// is: only root reads it through this hold.
     pub fn put_replay<R: Replay + 'static>(&self, replay: R) -> Result<ContentHandle> {
-        self.put_replay_held(Holder::Host, replay)
+        self.put_replay_held(Holder::Root, replay)
     }
 
     /// [`put_replay`](Self::put_replay) on behalf of the caller holding `capability`, who

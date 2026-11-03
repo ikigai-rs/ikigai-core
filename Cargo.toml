@@ -3,7 +3,11 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.12"
+# 0.3.0: held content is scoped to the principal who delivered it (ledger #2965). What still
+# compiles changes: `MemoryContentStore::put` and `put_replay` are read by root alone, and so is a
+# hold under a capability naming no principal. A door holding a caller's content moves to
+# `put_for` or `put_replay_for`, under a capability that names the caller.
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
@@ -16,10 +20,10 @@ categories = ["caching", "data-structures"]
 # core RDF foundations come from the Oxigraph crate family
 oxrdf = "0.3"
 
-# The workspace's own members, for crates.io dependents that reach back into it. Today that is
-# only `ikigai-conformance` (a dev-dependency of ikigai-vocab), which names `ikigai-core` and
-# `ikigai-vocab` by version: without this the test would link two kernels whose types do not
-# unify. In-repo paths only, never a path outside the repo. A workspace-root `[patch]` is not
+# The workspace's own members, for crates.io dependents that reach back into it. That is
+# `ikigai-conformance` (a dev-dependency of ikigai-vocab, OUT for the 0.3.0 bump: see its
+# manifest), which names `ikigai-core` and `ikigai-vocab` by version: without this the test would
+# link two kernels whose types do not unify. In-repo paths only, never a path outside the repo. A workspace-root `[patch]` is not
 # published (no member's manifest carries it), so no consumer's build is redirected.
 [patch.crates-io]
 ikigai-core = { path = "crates/ikigai-core" }
