@@ -4112,7 +4112,9 @@ impl Kernel {
     /// [`issue`](Self::issue) is the no-upstream case. Cache reuse also requires
     /// matching incoming expiry and threads: identical request bytes alone do not
     /// make an answer computed under another upstream valid here. The cache keeps
-    /// one upstream variant per request/authority/scope key.
+    /// one upstream variant per request/authority/scope key. An upstream of
+    /// [`Expiry::Never`] with no threads contributes nothing, so it is no upstream: it
+    /// shares its entry with plain [`issue`](Self::issue) (ledger #2926).
     pub async fn issue_with_incoming(
         &self,
         request: Request,
@@ -4410,6 +4412,13 @@ impl Kernel {
             mut failed,
             buffer,
         } = ctx;
+        // ★ AN UPSTREAM THAT CONTRIBUTES NOTHING IS NO UPSTREAM (ledger #2926). An entry is
+        // served only under the upstream it was stored under, because its expiry and threads
+        // include that upstream's; this one adds neither, so the two forms are one answer. A
+        // host's first pipe stage passes it (`ikigai-engine`'s `source` does, its `trace`
+        // does not), and as two variants they evicted each other from the key's one slot,
+        // while the cache-status probe, which sees no upstream, called both cached.
+        let incoming = incoming.filter(Provenance::contributes);
         // ★ THE CUT SNAPSHOT, BEFORE ANYTHING ELSE. Everything this request is
         // about to observe is state as of *now*; a cut that lands after this point
         // invalidates whatever comes back, and `ReprCache::store` declines the entry
@@ -6153,6 +6162,11 @@ impl Kernel {
     /// bindings last changed it knows them without resolving anything (ledger #1884).
     /// Only for any other name does it resolve a `Meta` to read the contract, which a
     /// mount answers by asking its peer.
+    ///
+    /// It takes no upstream, so it answers for the entry whichever upstream that was
+    /// stored under: a request issued under an upstream that contributes
+    /// ([`issue_with_incoming`](Self::issue_with_incoming)) may be recomputed after a
+    /// `true` here, when the entry was stored under a different one.
     pub fn is_cached(&self, request: &Request, capability: &Capability) -> bool {
         self.is_cached_in(request, capability, &Scope::empty())
     }
