@@ -380,6 +380,8 @@ fn every_pin_in_the_formalism_resolves_and_the_document_is_not_empty() {
     let mut docs = Vec::new();
     files_with(&docs_dir, "md", &mut docs);
     assert!(!docs.is_empty(), "docs/formalism holds no Markdown");
+    // The audits the certificate work cites are held to their pins the same way.
+    files_with(&root.join("docs/formal"), "md", &mut docs);
 
     let mut errors = Vec::new();
     let mut pins = Vec::new();
