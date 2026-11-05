@@ -18,8 +18,8 @@ template](https://github.com/mgifford/ACCESSIBILITY.md) (MIT).
 
 - **Error messages**: the `Display` of `Error` (`crates/ikigai-core/src/error.rs`), which every
   host prints or serves, for example `missing required argument `name``, `invalid argument
-  `as`: …`, `no endpoint resolved for urn:…`, `denied: …`, `not found: …`; and the `Display` of
-  the smaller error types (`AliasRefusal` and `AliasParseError` in `alias.rs`,
+  `as`: …`, `no endpoint resolved for urn:…`, `denied: …`, `not found: …`, `gone: …`; and the
+  `Display` of the smaller error types (`AliasRefusal` and `AliasParseError` in `alias.rs`,
   `DeclarationError` in `declare.rs`, `TemplateError` in `grammar.rs`, `CacheConfigError`,
   `ContentIdError`, `PrincipalError`, `DynamicRefusal`).
 - **Validation messages**: each `Violation` of `urn:kernel:validate` (`src/check.rs`) carries a
@@ -29,6 +29,8 @@ template](https://github.com/mgifford/ACCESSIBILITY.md) (MIT).
   `uncached`, `cut`, `threads`, `explain` and the dynamic space's status (`src/kernel_ops.rs`,
   `src/explain.rs`, `src/uncached.rs`, `src/dynamic.rs`): plain lines, some laid out as a
   label column and a value column.
+- **Redirect answers**: the JSON body of `Representation::redirect` (`src/redirect.rs`),
+  `{"status":303,"location":"…"}`, which a REPL shows as it is.
 - **Vocabulary prose**: the `rdfs:label` and `rdfs:comment` text in
   `crates/ikigai-vocab/src/vocabulary.ttl` and `shapes.ttl`, published at
   <https://ikigai-rs.dev/ns> and read by people browsing the vocabulary.
@@ -45,7 +47,7 @@ Verified by reading the source on 2026-10-31:
 
 - An error names what it is about: a missing or invalid argument by its name, an unresolved
   target and a depth refusal by the IRI. The first words say the kind of failure in words
-  (`denied:`, `not found:`, `conflict:`, `timeout:`), never a code alone.
+  (`denied:`, `not found:`, `gone:`, `conflict:`, `timeout:`), never a code alone.
 - A kernel operation asked for a face it does not serve refuses with a sentence that names the
   face it was asked for, the operation, and the faces it does serve.
 - No color, no terminal escape and no markup is written: every message and face is plain text.
@@ -59,8 +61,8 @@ Verified by reading the source on 2026-10-31:
   (`single_face_operations_refuse_unsupported_as`, `two_face_operations_refuse_unsupported_as`)
   pins that a refused face names the argument, the face asked for, the operation and the faces
   served.
-- The doctests on `Error::Conflict`, `RetryAfter`, `OverBudget` and `Refused` in `error.rs` pin
-  their displayed text, and `crates/ikigai-vocab/tests/failure_class_vectors.rs` pins the
+- The doctests on `Error::Gone`, `Conflict`, `RetryAfter`, `OverBudget` and `Refused` in
+  `error.rs` pin their displayed text, and `crates/ikigai-vocab/tests/failure_class_vectors.rs` pins the
   `display` form of every case in `tests/vectors/failure_class_vectors.json`.
 - `crates/ikigai-core/tests/american_spelling.rs` scans the docs, the Rust sources and the
   vocabulary's prose for British spellings.
@@ -77,6 +79,7 @@ Found by reading the source on 2026-10-31, not by testing:
   to do next.
 - Messages wrap argument names in backticks (`` `name` ``), Markdown punctuation that a screen
   reader may read aloud in a plain-text face.
+- A redirect answer's body states its status as a number alone, with no words for what 303 means.
 - The design figures use fixed light colors on a transparent background with no dark-scheme
   variant, so on a dark page the text drawn outside a box may lose contrast; their contrast has
   not been measured. Their root `<svg>` does not reference the `<title>` and `<desc>` with

@@ -1096,6 +1096,7 @@ fn referent_error(error: Error, name: &str, iri: &Iri) -> Error {
             ),
         },
         Error::NotFound(detail) => Error::NotFound(format!("{refers}: {detail}")),
+        Error::Gone(detail) => Error::Gone(format!("{refers}: {detail}")),
         other => other,
     }
 }

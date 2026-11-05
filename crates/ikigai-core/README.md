@@ -101,6 +101,25 @@ scopes name the caller's principal (`principal_scope`). Otherwise it gets `NotFo
 `ContentStore::get` and `Issuer::content` stay public and don't check who is asking. Use them only
 in host code, never on behalf of a caller or a peer.
 
+<a id="elsewhere-or-no-longer"></a>
+
+## A name that resolves to "elsewhere" or "no longer" (0.3.1)
+
+Both are resolution outcomes, not transport details, so an endpoint says them in core's terms and
+every face maps them:
+
+| Outcome | The endpoint returns | An HTTP face answers | A REPL shows |
+|---|---|---|---|
+| It was here and was retired | `Err(Error::Gone(message))` | 410 | `gone: {message}` |
+| It is elsewhere | `Ok(Representation::redirect(Redirect::new(status, location)?))` | The status (301, 302, 303, 307 or 308), with `location` as `Location` | The JSON body, `{"status":303,"location":"…"}` |
+
+A face recognizes a redirect with `Representation::as_redirect`. The location is an absolute IRI,
+and core never follows it: a composite that wants to follow a redirect reads it and issues the
+location itself. A redirect is cached and golden-threaded like any answer, so an edit to the
+registry behind it cuts it. Over the wire it crosses as bytes plus its media type,
+`application/vnd.ikigai.redirect+json`, and `Gone` crosses as `Endpoint` with the displayed message
+until the wire gains a tag for it.
+
 ## Lineage
 
 ikigai is inspired by Resource-Oriented Computing and NetKernel, and builds on the

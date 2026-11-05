@@ -38,6 +38,10 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 futures-channel = { version = "0.3", default-features = false, features = ["alloc", "std"] }
 oxiri = "0.2"
 serde = { version = "1", features = ["derive"] }
+# The JSON body of a redirect answer (ledger #3150): `Representation::as_redirect` reads what a
+# Python or Deno face wrote, in any spelling JSON allows, so it is a real parser and not a
+# format string. Runtime-free and wasm-clean.
+serde_json = "1"
 # Only under the `declare` feature: parse a declaration's Turtle
 # (`Topology::from_turtle`). The floor is the version this workspace's tests have
 # always parsed topology with. Runtime-free, and clean under WASI as they stand; in
@@ -64,7 +68,6 @@ getrandom = { version = "0.3.4", features = ["wasm_js"], optional = true }
 
 [dev-dependencies]
 futures = "0.3" # block_on for async tests
-serde_json = "1"
 # Test-only: the IPC wire's codec, so the duplicate-argument refusal (ledger #1731) is
 # pinned on the bytes a peer actually sends, not only on JSON.
 postcard = { version = "1", features = ["use-std"] }
