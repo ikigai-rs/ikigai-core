@@ -233,3 +233,76 @@ pub use topology::{
     SKOLEM_PREFIX,
 };
 pub use verb::Verb;
+
+/// The visibility pins of `docs/formal/scope-hypothesis-audit.md`, here because they hold a
+/// fact about the absence of an API and so have no item of their own to live on. Compiled only
+/// for doctests. Each block fails for the one reason its comment gives; stable rustdoc checks
+/// only that it fails, so that is held by a standalone compile of each snippet, which reports
+/// exactly that one error (rustc 1.99.0, 2026-11-05). Recheck that way after editing one.
+///
+/// An invocation hands out neither its issuer nor a way to set its chain (E0616):
+///
+/// ```compile_fail,E0616
+/// use ikigai_core::{Bindings, Capability, Invocation, Iri, Request, Verb};
+///
+/// let request = Request::new(Verb::Source, Iri::parse("urn:x").unwrap());
+/// let (bindings, cap) = (Bindings::new(), Capability::root());
+/// let inv = Invocation::detached(&request, &bindings, &cap);
+/// let _ = inv.issuer;
+/// ```
+///
+/// ```compile_fail,E0616
+/// use ikigai_core::{Bindings, Capability, Invocation, Iri, Request, Verb};
+///
+/// let request = Request::new(Verb::Source, Iri::parse("urn:x").unwrap());
+/// let (bindings, cap) = (Bindings::new(), Capability::root());
+/// let inv = Invocation::detached(&request, &bindings, &cap);
+/// let _ = &inv.scope;
+/// ```
+///
+/// No sub-request form takes a chain, on the invocation (E0599):
+///
+/// ```compile_fail,E0599
+/// use ikigai_core::{Bindings, Capability, Invocation, Iri, Request, Scope, Verb};
+///
+/// let request = Request::new(Verb::Source, Iri::parse("urn:x").unwrap());
+/// let (bindings, cap) = (Bindings::new(), Capability::root());
+/// let inv = Invocation::detached(&request, &bindings, &cap);
+/// let _ = inv.issue_in(Request::new(Verb::Source, Iri::parse("urn:y").unwrap()), Scope::empty());
+/// ```
+///
+/// Or on the blocking handle it mints (E0599):
+///
+/// ```compile_fail,E0599
+/// use ikigai_core::{Iri, Request, Scope, SyncIssuer, Verb};
+///
+/// fn escape(issuer: SyncIssuer) {
+///     let _ = issuer.issue_in(Request::new(Verb::Source, Iri::parse("urn:y").unwrap()), Scope::empty());
+/// }
+/// ```
+///
+/// An endpoint cannot push a level onto its own chain (E0624):
+///
+/// ```compile_fail,E0624
+/// use ikigai_core::Scope;
+///
+/// let _ = Scope::empty().descend(Scope::empty().levels().clone());
+/// ```
+///
+/// And a level path gives names, never the spaces behind them (E0616):
+///
+/// ```compile_fail,E0616
+/// use ikigai_core::Scope;
+///
+/// let _ = &Scope::empty().levels().0;
+/// ```
+///
+/// ```compile_fail,E0616
+/// use std::sync::Arc;
+/// use ikigai_core::{EndpointSpace, Iri, Level};
+///
+/// let level = Level::new(Iri::parse("urn:l").unwrap(), Arc::new(EndpointSpace::new()));
+/// let _ = &level.core;
+/// ```
+#[cfg(doctest)]
+pub struct ScopeHypothesisPins;
