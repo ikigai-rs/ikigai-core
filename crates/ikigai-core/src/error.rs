@@ -38,6 +38,27 @@ pub enum Error {
     /// *kernel* finding no binding for the target; `NotFound` is a bound endpoint
     /// reporting that the thing it fronts does not exist.
     NotFound(String),
+    /// The named thing existed and was deliberately retired: the tombstone's sibling of
+    /// [`NotFound`](Error::NotFound), and the HTTP analog is **410 Gone**. **Permanent**
+    /// (see [`is_transient`](Error::is_transient)). Carries a message only. Never cached,
+    /// like every error, unless its endpoint states a failure expiry
+    /// (`Invocation::failure_expires_at`).
+    ///
+    /// **Across the wire, for now.** Until the wire taxonomy gains a tag for it (a
+    /// wire-version event, not this crate's), a remote caller receives this as
+    /// [`Endpoint`](Error::Endpoint) carrying the displayed message, exactly as
+    /// [`Conflict`](Error::Conflict) documents for itself.
+    ///
+    /// ```
+    /// use ikigai_core::{Error, FailureClass};
+    ///
+    /// let err = Error::Gone("urn:name:old was retired in 2024".into());
+    /// assert_eq!(err.to_string(), "gone: urn:name:old was retired in 2024");
+    /// assert_eq!(err.kind(), "gone");
+    /// assert_eq!(err.class(), FailureClass::Permanent);
+    /// assert!(!err.is_transient());
+    /// ```
+    Gone(String),
     /// The request is well-formed, authorized and names something that exists — and
     /// the **current state** of the resource refuses it: a move to a square already
     /// taken, a move after the game is over, a transition the resource is not in a
@@ -53,13 +74,14 @@ pub enum Error {
     /// a cacheable fallback is forced uncacheable (see `Invocation::issue` on failed
     /// sub-requests).
     ///
-    /// **Which refusal is which.** Four variants refuse a request an author might
+    /// **Which refusal is which.** Five variants refuse a request an author might
     /// confuse, and each answers a different question:
     ///
     /// - [`InvalidArgument`](Error::InvalidArgument) — *is the argument itself usable?*
     ///   Wrong spelling, wrong type, out of range, not one of the allowed values. The
     ///   fault is in the request, and naming the argument is the whole message.
-    /// - [`NotFound`](Error::NotFound) — *does the fronted thing exist?* It does not.
+    /// - [`NotFound`](Error::NotFound) — *does the fronted thing exist?* It is not here.
+    /// - [`Gone`](Error::Gone) — *did it ever?* It was here and was retired.
     /// - [`Denied`](Error::Denied) — *may this capability do it?* It may not; a
     ///   different grant would succeed against the same state.
     /// - `Conflict` — *does the state permit it?* The argument is fine, the thing
@@ -324,7 +346,7 @@ impl Error {
     /// denied, or a domain endpoint error). The retry / circuit-breaker / failover
     /// overlays gate on this. Note the request *verb* separately governs whether a
     /// re-issue is *safe* ([`Verb::is_idempotent`]): a non-idempotent `Sink` needs an
-    /// idempotency key even when the error is transient. `NotFound` and `Denied` are permanent — re-issuing
+    /// idempotency key even when the error is transient. `NotFound`, `Gone` and `Denied` are permanent — re-issuing
     /// won't conjure the resource or the grant — and so is `Conflict`: re-issuing
     /// against the same state gets the same refusal, so a retry overlay that re-sent it
     /// would only spend its budget. What clears a conflict is a change of state.
@@ -349,7 +371,8 @@ impl Error {
     ///     (Error::InvalidArgument { name: "in".into(), detail: "bad".into() }, FailureClass::Permanent),
     ///     (Error::Endpoint("boom".into()), FailureClass::Unknown),
     ///     (Error::Denied("no grant".into()), FailureClass::Denied),
-    ///     (Error::NotFound("gone".into()), FailureClass::Permanent),
+    ///     (Error::NotFound("absent".into()), FailureClass::Permanent),
+    ///     (Error::Gone("retired".into()), FailureClass::Permanent),
     ///     (Error::Conflict("taken".into()), FailureClass::Permanent),
     ///     (Error::Timeout("slow".into()), FailureClass::Transient),
     ///     (Error::Unavailable("down".into()), FailureClass::Transient),
@@ -376,6 +399,7 @@ impl Error {
             | Error::MissingArgument(_)
             | Error::InvalidArgument { .. }
             | Error::NotFound(_)
+            | Error::Gone(_)
             | Error::Conflict(_)
             | Error::DepthExceeded { .. }
             | Error::Unsupported { .. } => FailureClass::Permanent,
@@ -427,7 +451,8 @@ impl Error {
     ///     (Error::InvalidArgument { name: "in".into(), detail: "bad".into() }, "invalid-argument"),
     ///     (Error::Endpoint("boom".into()), "endpoint"),
     ///     (Error::Denied("/etc/secret".into()), "denied"),
-    ///     (Error::NotFound("gone".into()), "not-found"),
+    ///     (Error::NotFound("absent".into()), "not-found"),
+    ///     (Error::Gone("retired".into()), "gone"),
     ///     (Error::Conflict("taken".into()), "conflict"),
     ///     (Error::Timeout("slow".into()), "timeout"),
     ///     (Error::Unavailable("down".into()), "unavailable"),
@@ -443,7 +468,7 @@ impl Error {
     /// ```
     ///
     /// A kind is not a [`class`](Self::class): several kinds share one (`not-found`,
-    /// `conflict` and `unsupported` are all permanent), and a word here names the
+    /// `gone`, `conflict` and `unsupported` are all permanent), and a word here names the
     /// variant, while a class names a retry rule.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -453,6 +478,7 @@ impl Error {
             Error::Endpoint(_) => "endpoint",
             Error::Denied(_) => "denied",
             Error::NotFound(_) => "not-found",
+            Error::Gone(_) => "gone",
             Error::Conflict(_) => "conflict",
             Error::Timeout(_) => "timeout",
             Error::Unavailable(_) => "unavailable",
@@ -476,6 +502,7 @@ impl fmt::Display for Error {
             Error::Endpoint(msg) => write!(f, "endpoint error: {msg}"),
             Error::Denied(msg) => write!(f, "denied: {msg}"),
             Error::NotFound(msg) => write!(f, "not found: {msg}"),
+            Error::Gone(msg) => write!(f, "gone: {msg}"),
             Error::Conflict(msg) => write!(f, "conflict: {msg}"),
             Error::Timeout(msg) => write!(f, "timeout: {msg}"),
             Error::Unavailable(msg) => write!(f, "unavailable: {msg}"),

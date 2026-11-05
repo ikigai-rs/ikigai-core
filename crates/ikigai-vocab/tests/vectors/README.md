@@ -289,6 +289,10 @@ millisecond (`retry-after/a-fraction-of-a-millisecond-rounds-up` displays `2 ms`
 still sends `Retry-After: 1`; a `retry-after` with no delay is a 429 with no header and displays
 `retry later: …`; `unsupported` is one class and two statuses, decided by whether it names a verb.
 
+One variant has no row yet: `gone` (HTTP 410, class `permanent`, displayed `gone: …`, ikigai-core
+0.3.1). No wire version has decided a tag for it, so it crosses as `Endpoint(display)`, and it gets
+its row when one does.
+
 ## Adding a case
 
 Edit `failure_class_cases.json`, then regenerate and commit both files.

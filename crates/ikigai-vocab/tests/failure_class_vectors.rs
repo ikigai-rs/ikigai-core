@@ -135,6 +135,7 @@ fn http_status(error: &Error) -> u16 {
         Error::MissingArgument(_) | Error::InvalidArgument { .. } => 400,
         Error::Denied(_) => 403,
         Error::Conflict(_) => 409,
+        Error::Gone(_) => 410,
         Error::Timeout(_) => 504,
         Error::Unavailable(_) => 503,
         Error::RetryAfter { .. } => 429,
@@ -289,6 +290,17 @@ fn the_vectors_pin_the_rules_that_are_easiest_to_get_wrong() {
         json!(501)
     );
     assert_eq!(row("unsupported/a-verb")["class"], json!("permanent"));
+}
+
+/// `gone` (core 0.3.1, ledger #3150) has a status but no row: a row needs a decided wire tag, and
+/// the wire has decided none, so `gone` crosses as `Endpoint(display)` today. When a wire version
+/// tags it, name the tag in `wire_tag`, add the case and the kind, and drop this test.
+#[test]
+fn gone_has_a_status_and_waits_for_a_wire_tag_before_it_has_a_row() {
+    assert_eq!(http_status(&Error::Gone("retired".into())), 410);
+    let doc: Value = serde_json::from_str(&compute()).unwrap();
+    let kinds = doc["cases"].as_array().unwrap().iter();
+    assert!(!kinds.map(|r| &r["kind"]).any(|k| k == "gone"));
 }
 
 /// Regenerate `failure_class_vectors.json`. Ignored so a normal run only CHECKS.
