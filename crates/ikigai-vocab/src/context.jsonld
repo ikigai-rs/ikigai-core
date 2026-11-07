@@ -290,6 +290,11 @@
       "@id": "ik:forkOf",
       "@type": "@id"
     },
+    "forwardTarget": {
+      "@id": "ik:forwardTarget",
+      "@type": "@id"
+    },
+    "forwardVerb": "ik:forwardVerb",
     "from": "ik:from",
     "grantee": {
       "@id": "ik:grantee",
