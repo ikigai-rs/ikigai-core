@@ -72,6 +72,19 @@ assert_eq!(rep.bytes, b"IKIGAI");
   verb routed to a pluggable `MetaRenderer` (one resource, many representations).
 - **Formal companion** — [`docs/formalism/README.md`](https://github.com/ikigai-rs/ikigai-core/blob/main/docs/formalism/README.md) maps the kernel onto Peter Rodgers' *Peter's Hotel* formalism, every theorem pinned to the test that holds its precondition.
 
+## Structured forwarding metadata (0.3.2)
+
+A forwarding endpoint's `Description` carries `forward_target` (its immediate target IRI)
+and `forward_verb` (the bound verb, if any). Read these fields to recognize named requests
+instead of parsing the summary. An unbound view omits `forward_verb`; a plain endpoint omits
+both fields. An unresolved target is still named, and a chain describes its next hop.
+
+Meta JSON serializes these fields directly. Meta Turtle and the catalog use
+`ik:forwardTarget` (an IRI) and `ik:forwardVerb` (a verb string). Older JSON descriptions
+without these fields still deserialize. The new vocabulary terms require a vocabulary
+release and a deploy of `https://ikigai-rs.dev/ns` before consumers rely on the published
+namespace.
+
 <a id="held-content"></a>
 
 ## Held content belongs to who delivered it (0.3.0)

@@ -1680,6 +1680,8 @@ impl Endpoint for ViewEndpoint {
             // Every argument a caller gives passes through to the target, so the set is
             // open: an engine names each `key=value` rather than routing it as a value.
             .open_arguments("an argument of the target, passed through unchanged");
+        description.forward_target = Some(self.forward.target.clone());
+        description.forward_verb = self.forward.verb;
         description = match self.bound_verb() {
             Some(verb) => description.verb(verb).verb(Verb::Exists).verb(Verb::Meta),
             None => description
