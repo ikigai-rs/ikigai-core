@@ -19,8 +19,9 @@ use common::{axiom, block, declared, fixture, ik, named, parse, Schema, PROV, RD
 use ikigai_vocab::{CONTEXT, VOCABULARY};
 use oxrdf::{NamedOrBlankNode, Term, Triple};
 
-/// The classes arc 1 of the layers design names.
-const CLASSES: [&str; 9] = [
+/// The classes arc 1 of the layers design names, and those the layers emit since: a feed
+/// layer and its announcements (ledger #3284, #3287) and the talk layers' briefs (#3300).
+const CLASSES: [&str; 12] = [
     "Layer",
     "Collaboration",
     "Machine",
@@ -30,6 +31,9 @@ const CLASSES: [&str; 9] = [
     "Progress",
     "Release",
     "Handback",
+    "Feed",
+    "Announcement",
+    "Brief",
 ];
 
 /// The properties arc 1 names. Only `layerModel` declares a domain.
@@ -94,15 +98,23 @@ fn the_layer_family_is_defined() {
         ("Progress", format!("{PROV}Entity")),
         ("Release", format!("{PROV}Entity")),
         ("Handback", format!("{PROV}Entity")),
+        ("Feed", ik("Layer")),
+        ("Announcement", format!("{PROV}Entity")),
+        ("Brief", format!("{PROV}Entity")),
     ] {
         assert!(schema.is_a(&ik(class), &of), "ik:{class} ⊑ {of}");
     }
-    // Neither a layer nor a manifest is an entry, and a machine is not a message.
+    // Neither a layer nor a manifest is an entry, and a machine is not a message. A feed
+    // is a layer, never an entry of one; an announcement and a brief sit beside messages
+    // under shapes of their own, so reading a layer's messages does not include them.
     for (class, not) in [
         ("Layer", format!("{PROV}Entity")),
         ("Collaboration", format!("{PROV}Entity")),
         ("Machine", format!("{PROV}Entity")),
         ("Message", ik("Question")),
+        ("Feed", format!("{PROV}Entity")),
+        ("Announcement", ik("Message")),
+        ("Brief", ik("Message")),
     ] {
         assert!(
             !schema.is_a(&ik(class), &not),

@@ -30,6 +30,7 @@
 
 <urn:layer:talk>        a ik:Layer ; ik:layerModel "channel" .
 <urn:layer:tasks-bobby> a ik:Layer ; ik:layerModel "tuplespace" .
+<urn:layer:releases>    a ik:Layer , ik:Feed ; ik:layerModel "channel" .
 <urn:collab:bobby>      a ik:Collaboration ; rdfs:label "bobby" .
 
 # ---- the message layer: a question, its answer, and a correction ---------------
@@ -54,6 +55,24 @@
     prov:wasAttributedTo <urn:collab:participant:hub> ;
     dcterms:created "2026-10-10T12:02:00Z"^^xsd:dateTime ;
     ik:seq 3 .
+
+# ---- a brief in the message layer, and an announcement in the feed layer --------
+
+<urn:layer:talk:entry:01k0000000000000000000000j> a ik:Brief ;
+    dcterms:title "Add a door check" ;
+    ik:body "Check the door before it opens." ;
+    ik:repository <https://github.com/ikigai-rs/ikigai-core> ;
+    prov:wasAttributedTo <urn:collab:participant:bobby> ;
+    dcterms:created "2026-10-10T12:03:00Z"^^xsd:dateTime ;
+    ik:seq 4 .
+
+<urn:layer:releases:entry:01k0000000000000000000000k> a ik:Announcement ;
+    dcterms:title "Release 0.3.2" ;
+    ik:body "The vocabulary now defines feeds." ;
+    dcterms:subject <urn:scheme:releases:vocabulary> ;
+    prov:wasAttributedTo <urn:collab:participant:brian> ;
+    dcterms:created "2026-10-10T12:04:00Z"^^xsd:dateTime ;
+    ik:seq 1 .
 
 # ---- the task layer: an offer and each kind of report on it ---------------------
 
