@@ -47,7 +47,7 @@
 <https://ikigai-rs.dev/ns#> a owl:Ontology ;
     rdfs:label "ikigai endpoint vocabulary" ;
     rdfs:comment "Self-description vocabulary for ikigai resource-oriented endpoints, and the process vocabulary that makes a plan (a DAG of requests) a resource in the same graph." ;
-    owl:versionInfo "0.3.1" .
+    owl:versionInfo "0.3.2" .
 
 #
 # Classes
@@ -1355,8 +1355,10 @@ ik:draftWarning a rdf:Property ;
 # corrected by a new entry that ik:supersedes the old; in a task layer (the
 # tuplespace model) an ik:Offer of work and the reports on it, ik:Progress,
 # ik:Release and ik:Handback, each ik:addressedTo the offerer and naming its
-# ik:offer. The host stamps prov:wasAttributedTo, dcterms:created and (in a channel)
-# ik:seq, and refuses an entry that sends any of them. Participants are PROV agents
+# ik:offer. A message layer's shapes may also admit an ik:Brief, and a channel may be
+# an ik:Feed, written only by its publishers, whose entries are ik:Announcement nodes
+# (ledger #3284, #3287, #3300). The host stamps prov:wasAttributedTo, dcterms:created
+# and (in a channel) ik:seq, and refuses an entry that sends any of them. Participants are PROV agents
 # (a person, an LLM agent as a prov:SoftwareAgent, a host as an ik:Machine), linked
 # to whom they act for by prov:actedOnBehalfOf. Design: ikigai-devtools
 # claude/research/collab-layer-v1-2026-10-10.md, sections 2, 4, 5 and 9 (ledger
@@ -1378,6 +1380,11 @@ ik:Layer a rdfs:Class ;
     rdfs:label "Layer" ;
     rdfs:comment "One independent shared space between participants, named urn:layer:{layer} ({layer} lowercase [a-z0-9-], at most 24 characters). Its definition chooses an access model (ik:layerModel) and names its closed admission shapes and its egress context; its grants are capabilities named for it (urn:cap:layer:{verb}:{layer}), and it has its own feed. Adding a layer whose model exists is configuration, never code. Not ik:layer (lowercase), which is a dry run's chain cell." .
 
+ik:Feed a rdfs:Class ;
+    rdfs:subClassOf ik:Layer ;
+    rdfs:label "Feed" ;
+    rdfs:comment "A channel layer for announcements, read by everyone holding its read grant and written only by its named publishers: anyone else is refused, even under a grant to say. Its membership is hidden: its definition lists no members and a manifest names only its publishers, so no answer counts or names its readers. Its entries, typically ik:Announcement nodes, take their subjects from the feed's SKOS concept scheme. A subclass of ik:Layer, and a host types a feed's definition as both. Not the event feed every layer has at urn:layer:{layer}:feed, which tells a follower that something new was written." .
+
 ik:Collaboration a rdfs:Class ;
     rdfs:label "Collaboration" ;
     rdfs:comment "A manifest, urn:collab:{name}: the layers a collaboration mounts and which participant holds which verbs on each. The authoring form of a door's enrollment, which a generator derives from it. A convenience over grants, never a filter inside a layer: the ik:Layer is the access boundary, so two collaborations that must not see each other's messages use two layers." .
@@ -1396,6 +1403,16 @@ ik:Question a rdfs:Class ;
     rdfs:subClassOf ik:Message ;
     rdfs:label "Question" ;
     rdfs:comment "A message that asks: an ik:Message whose author expects an answer, which arrives as an entry ik:inReplyTo it. A subclass of ik:Message, so reading a layer's messages includes its questions." .
+
+ik:Announcement a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Announcement" ;
+    rdfs:comment "One entry of an ik:Feed: what a publisher announces, with a title (dcterms:title), its text (ik:body) and the topics it is about (dcterms:subject), each a concept of the feed's SKOS concept scheme; the host refuses any other concept and names it. The host names the entry urn:layer:{layer}:entry:{ulid} and stamps its author (prov:wasAttributedTo), its time (dcterms:created) and its ik:seq. Beside ik:Message rather than a subclass of it: an announcement has a title and a shape of its own, so reading a layer's messages does not include it. A subclass of prov:Entity, as every attributed entry is." .
+
+ik:Brief a rdfs:Class ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Brief" ;
+    rdfs:comment "One entry in a message layer that describes work, written to be done: a title (dcterms:title), the brief itself as Markdown (ik:body) and optionally the repository it is for (ik:repository), bounded by the layer's closed admission shape. It may be ik:inReplyTo or ik:supersedes another entry of the layer. The host stamps its author (prov:wasAttributedTo), its time (dcterms:created) and its ik:seq. Beside ik:Message rather than a subclass of it, so reading a layer's messages does not include it. Not ik:brief (lowercase), a property: the text an ik:Offer gives whoever takes it. A subclass of prov:Entity, as every attributed entry is." .
 
 ik:Offer a rdfs:Class ;
     rdfs:subClassOf prov:Entity ;
