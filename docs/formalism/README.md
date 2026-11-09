@@ -247,6 +247,7 @@ Pinned by the chain the decorator reports and by nested confinement:
 
     pin: `scope::confine_describes_and_names_as_its_inner_endpoint` (crates/ikigai-core/tests/scope.rs)
     pin: `scope::an_endpoint_can_only_narrow_its_chain` (crates/ikigai-core/tests/scope.rs)
+    pin: `scope_hypothesis::finding_an_endpoint_holding_the_kernel_leaves_the_confinement_its_door_reports` (crates/ikigai-core/tests/scope_hypothesis.rs)
 
 **With levels, confinement leaves the level stack behind.** An endpoint found inside a `Level`
 runs from its level outward; its levels are part of the arrangement — the side the root stands
@@ -1232,23 +1233,39 @@ chain's own list, so the same queries find it.
     pin: `topology::a_door_behind_a_modules_guard_is_reachable_through_the_modules_own_endpoint` (crates/ikigai-core/tests/topology.rs)
     pin: `topology::a_modules_own_frame_reaches_its_sealed_name_behind_a_wall_over_it` (crates/ikigai-core/tests/topology.rs)
 
-**R7.4 (the floor runs against whichever corridor answered).** A corridor shadowing an open
-root door with a gated one is gated on its own declaration, and its cached entry is fenced from
-a caller the declaration refuses.
+**R7.4 (kernel dispatch checks the answering corridor's floor).** For requests dispatched
+through the kernel, a corridor shadowing an open root door with a gated one is gated on its own
+declaration, and its cached entry is fenced from a caller the declaration refuses. This holds
+only when dispatch goes through the kernel: `Scope::spaces` exposes live corridor spaces, so an
+endpoint can call `Space::resolve` and `Endpoint::invoke` directly and skip the floor. The
+[scope-hypothesis audit, B3](../formal/scope-hypothesis-audit.md#b3-scopespaces-hands-an-endpoint-live-corridors-and-dispatching-through-one-skips-the-floor)
+pins that exception; core does not enforce the kernel-dispatch condition.
 
     pin: `scope::the_capability_floor_is_evaluated_on_the_corridor_endpoint_that_answered` (crates/ikigai-core/tests/scope.rs)
+    pin: `scope_hypothesis::finding_scope_spaces_lets_an_endpoint_dispatch_past_a_corridors_capability_floor` (crates/ikigai-core/tests/scope_hypothesis.rs)
 
 **R7.5 (injection is authority; severing is not).** Whoever pushes a corridor innermost can
 stand in for any door for every sub-request of that resolution, so injection with the root
-present is reachable only by whoever holds the `Kernel` (`Kernel::issue_in`) — the trust line
-of `Capability::root()`. From inside an endpoint the only chain-changing operation is
-`Invocation::confine`, whose placement (§1.3) makes it strictly narrowing; `Invocation::with_scope`
-is crate-private for the reason `issue_under` is (R2.2), and pinned the same way — a
-`compile_fail` doctest on it, refused with E0624 from outside the crate. Nested confinement
-adds doors in the root's old position and shadows nothing. A `Level` changes none of this: the
-level stack is the kernel's to set (`Scope::descend`, crate-private, from the path resolution
-found), an endpoint cannot push a level onto its own chain, and confinement leaves the stack
-behind with the root (§1.3).
+present requires a kernel or an issuer accepting an explicit chain. This is a trust condition
+on who holds those handles, not a type-enforced separation between host and endpoint code. An
+endpoint holding only its `Invocation`, without a separate kernel or issuer handle, can change
+its sub-request chain only through `Invocation::confine`, whose placement (§1.3) makes it strictly
+narrowing in reach, including doors of a space value the endpoint already holds.
+`Invocation::with_scope` is crate-private for the reason `issue_under` is (R2.2), and pinned the
+same way — a `compile_fail` doctest on it, refused with E0624 from outside the crate. Nested
+confinement adds doors in the root's old position and shadows nothing. A `Level` changes none of
+this: the level stack is the kernel's to set (`Scope::descend`, crate-private, from the path
+resolution found), an endpoint cannot push a level onto its invocation's chain, and confinement
+leaves the stack behind with the root (§1.3).
+
+An endpoint holding a `Kernel` can instead choose any chain with `issue_in`, or drop the caller's
+chain with `issue`. Its door can therefore report `ik:confinedTo` while its body reads the root.
+The [scope-hypothesis audit, B4](../formal/scope-hypothesis-audit.md#b4-an-endpoint-holding-a-kernel-chooses-any-chain-and-its-door-can-report-the-opposite)
+pins this behavior and records host bridges that use it. Treating a declared confinement as a
+bound on sub-request reach requires that the endpoint hold no separate kernel or issuer that
+can issue outside that confinement; core does not check that condition. The audit's
+[certificate conditions](../formal/scope-hypothesis-audit.md#the-answer) also account for held
+space values and opaque graph edges.
 
 Two consequences of that placement are stated where the decision is
 (`docs/design/resolution-scope.md`, decision 3), and cited here rather than copied:
@@ -1259,6 +1276,7 @@ Two consequences of that placement are stated where the decision is
   trapdoor already wrapped in §9.3's mapper that exposes one identifier.
 
     pin: `scope::an_endpoint_can_only_narrow_its_chain` (crates/ikigai-core/tests/scope.rs)
+    pin: `scope_hypothesis::finding_an_endpoint_holding_the_kernel_leaves_the_confinement_its_door_reports` (crates/ikigai-core/tests/scope_hypothesis.rs)
     pin: `scope::a_host_corridor_shadows_the_confined_spaces_own_door` (crates/ikigai-core/tests/scope.rs)
     doctest: `Invocation::with_scope`
     doctest: `Invocation::confine`
