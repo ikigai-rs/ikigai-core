@@ -139,7 +139,17 @@ fn kernel() -> Kernel {
         .bind(Exact::new("urn:example:sparql"), sparql())
         .bind(Exact::new("urn:example:compose"), compose());
     let views = Alias::new(Arc::new(names()), Arc::new(EndpointSpace::new()));
-    let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![Arc::new(doors), Arc::new(views)]));
+    // A separate table keeps this as two forwarding endpoints, rather than alias
+    // rules composed into one forward by AliasTable.
+    let outer = Alias::new(
+        Arc::new(AliasTable::new().exact_at_root("urn:example:count-view", "urn:example:count")),
+        Arc::new(EndpointSpace::new()),
+    );
+    let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(doors),
+        Arc::new(views),
+        Arc::new(outer),
+    ]));
     Kernel::with_meta_renderer(root, Arc::new(Renderer))
 }
 
@@ -149,6 +159,62 @@ fn meta(kernel: &Kernel, name: &str) -> Description {
         .with_arg("as", ArgRef::Inline(b"application/json".to_vec()));
     let answer = block_on(kernel.issue(request, &Capability::root())).unwrap();
     serde_json::from_slice(&answer.bytes).unwrap()
+}
+
+#[test]
+fn meta_json_exposes_forward_target_and_bound_verb_without_parsing_the_summary() {
+    let kernel = kernel();
+    let request = Request::new(Verb::Meta, iri("urn:example:count"))
+        .with_arg("as", ArgRef::Inline(b"application/json".to_vec()));
+    let answer = block_on(kernel.issue(request, &Capability::root())).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&answer.bytes).unwrap();
+    assert_eq!(json["forward_target"], "urn:example:sparql");
+    assert_eq!(json["forward_verb"], "Source");
+}
+
+#[test]
+fn plain_endpoint_meta_json_omits_forward_fields() {
+    let kernel = kernel();
+    let request = Request::new(Verb::Meta, iri("urn:example:upper"))
+        .with_arg("as", ArgRef::Inline(b"application/json".to_vec()));
+    let answer = block_on(kernel.issue(request, &Capability::root())).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&answer.bytes).unwrap();
+    assert!(json.get("forward_target").is_none());
+    assert!(json.get("forward_verb").is_none());
+}
+
+#[test]
+fn a_forward_chain_describes_its_immediate_hop_and_own_verb_binding() {
+    let kernel = kernel();
+    let view = meta(&kernel, "urn:example:count-view");
+    assert_eq!(view.forward_target, Some(iri("urn:example:count")));
+    assert_eq!(view.forward_verb, None, "the outer view binds no verb");
+    assert_eq!(
+        kernel.describe(&iri("urn:example:count-view")).unwrap(),
+        view
+    );
+}
+
+#[test]
+fn forward_fields_round_trip_and_older_json_defaults_to_no_forward() {
+    let description = meta(&kernel(), "urn:example:count");
+    let mut json = serde_json::to_value(&description).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Description>(json.clone()).unwrap(),
+        description
+    );
+    json.as_object_mut().unwrap().remove("forward_target");
+    json.as_object_mut().unwrap().remove("forward_verb");
+    let old: Description = serde_json::from_value(json).unwrap();
+    assert_eq!(old.forward_target, None);
+    assert_eq!(old.forward_verb, None);
+    assert_ne!(
+        description, old,
+        "forward metadata participates in equality"
+    );
+    let mut other_verb = description.clone();
+    other_verb.forward_verb = Some(Verb::Sink);
+    assert_ne!(description, other_verb);
 }
 
 fn input<'a>(description: &'a Description, verb: Verb, name: &str) -> Option<&'a ArgSpec> {
@@ -166,6 +232,8 @@ fn meta_of_a_bound_name_is_its_targets_contract_with_the_fixed_inputs_marked() {
     let kernel = kernel();
     let count = meta(&kernel, "urn:example:count");
     assert_eq!(count.id, "urn:example:count");
+    assert_eq!(count.forward_target, Some(iri("urn:example:sparql")));
+    assert_eq!(count.forward_verb, Some(Verb::Source));
     assert_eq!(count.verbs, [Verb::Source, Verb::Exists, Verb::Meta]);
     let graph = input(&count, Verb::Source, "graph").expect("a fixed input is LISTED");
     assert_eq!(graph.fixed.as_deref(), Some("urn:example:graph"));
@@ -203,6 +271,8 @@ fn a_plain_views_meta_carries_its_targets_inputs_and_outputs() {
     let kernel = kernel();
     let shout = meta(&kernel, "urn:example:shout");
     assert_eq!(shout.id, "urn:example:shout");
+    assert_eq!(shout.forward_target, Some(iri("urn:example:upper")));
+    assert_eq!(shout.forward_verb, None);
     assert_eq!(shout.title, "Upper case");
     assert_eq!(shout.outputs, ["text/plain"]);
     let input = input(&shout, Verb::Source, "in").expect("the target's `in`");
@@ -287,6 +357,8 @@ fn a_view_onto_nothing_is_described_as_the_forwarder_saying_so() {
     let kernel = kernel();
     let nowhere = meta(&kernel, "urn:example:nowhere");
     assert_eq!(nowhere.id, "alias-view");
+    assert_eq!(nowhere.forward_target, Some(iri("urn:example:missing")));
+    assert_eq!(nowhere.forward_verb, None);
     assert!(
         nowhere
             .summary

@@ -47,7 +47,7 @@
 <https://ikigai-rs.dev/ns#> a owl:Ontology ;
     rdfs:label "ikigai endpoint vocabulary" ;
     rdfs:comment "Self-description vocabulary for ikigai resource-oriented endpoints, and the process vocabulary that makes a plan (a DAG of requests) a resource in the same graph." ;
-    owl:versionInfo "0.3.2" .
+    owl:versionInfo "0.3.3" .
 
 #
 # Classes
@@ -92,6 +92,18 @@ ik:summary a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "summary" ;
     rdfs:comment "A longer human description of the subject — an endpoint, one of its ik:Action nodes, or an input. No domain: it is emitted on all three." .
+
+ik:forwardTarget a rdf:Property ;
+    rdfs:label "forward target" ;
+    rdfs:domain ik:Endpoint ;
+    rdfs:range rdfs:Resource ;
+    rdfs:comment "The immediate target IRI of a forwarding endpoint, independent of its human summary. A chain names its next hop, not its final destination. Present even when the target cannot be resolved; absent on plain endpoints. Paired with ik:forwardVerb when the forward binds one verb." .
+
+ik:forwardVerb a rdf:Property ;
+    rdfs:label "forward verb" ;
+    rdfs:domain ik:Endpoint ;
+    rdfs:range xsd:string ;
+    rdfs:comment "The verb bound by a forwarding endpoint, beside Exists: Source, Sink, Exists or Delete. When ik:forwardTarget is present and this property is absent, the forward is not restricted to one verb. This is not the list of verbs the target supports (ik:verb)." .
 
 ik:verb a rdf:Property ;
     rdfs:range xsd:string ;

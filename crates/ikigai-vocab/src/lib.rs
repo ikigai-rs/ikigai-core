@@ -531,6 +531,12 @@ pub fn to_turtle(description: &Description) -> String {
     if !description.summary.is_empty() {
         predicates.push(format!("ik:summary {}", lit(&description.summary)));
     }
+    if let Some(target) = &description.forward_target {
+        predicates.push(format!("ik:forwardTarget {}", iri_term(target.as_str())));
+    }
+    if let Some(verb) = description.forward_verb {
+        predicates.push(format!("ik:forwardVerb {}", lit(verb_name(verb))));
+    }
     if !description.verbs.is_empty() {
         let verbs = description
             .verbs

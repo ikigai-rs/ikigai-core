@@ -1274,6 +1274,17 @@ pub struct Description {
     pub title: String,
     /// A longer human summary.
     pub summary: String,
+    /// The immediate target of a forwarding endpoint, independent of its human summary.
+    /// Set by the kernel from [`Endpoint::forwards`](crate::Endpoint::forwards), even
+    /// when that target cannot be resolved. A chain names its next hop, not its final
+    /// destination. Omitted for plain endpoints; absent in older serialized descriptions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward_target: Option<crate::Iri>,
+    /// The verb bound by the forward, beside `Exists`. With a `forward_target`, `None`
+    /// means the forward is not restricted to one verb. Omitted when unbound or when
+    /// this is a plain endpoint. This is not the list of verbs the target supports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward_verb: Option<Verb>,
     /// The verbs this endpoint answers.
     pub verbs: Vec<Verb>,
     /// The named inputs it accepts.
@@ -1369,6 +1380,8 @@ impl PartialEq for Description {
             id,
             title,
             summary,
+            forward_target,
+            forward_verb,
             verbs,
             inputs,
             outputs,
@@ -1385,6 +1398,8 @@ impl PartialEq for Description {
         *id == other.id
             && *title == other.title
             && *summary == other.summary
+            && *forward_target == other.forward_target
+            && *forward_verb == other.forward_verb
             && *verbs == other.verbs
             && *inputs == other.inputs
             && *outputs == other.outputs

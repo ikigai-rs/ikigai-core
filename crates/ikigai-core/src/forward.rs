@@ -133,6 +133,8 @@ pub(crate) fn project(
 ) -> Description {
     let Some(target) = target else {
         let mut own = own;
+        own.forward_target = Some(forward.target.clone());
+        own.forward_verb = forward.verb;
         own.summary.push_str(&format!(
             " Its target <{}> resolves to nothing here, so this is the forwarder's own \
              contract.",
@@ -165,6 +167,8 @@ pub(crate) fn project(
     let mut description = Description::new(forward.name.clone())
         .title(title)
         .summary(summary);
+    description.forward_target = Some(forward.target.clone());
+    description.forward_verb = forward.verb;
     let specs = target.action_specs();
     let verbs: Vec<Verb> = match forward.verb {
         Some(bound) => vec![bound, Verb::Exists],
