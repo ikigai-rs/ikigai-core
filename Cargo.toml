@@ -3,13 +3,13 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-# 0.3.2: structured forwarding target and bound verb in Description and Meta (ledger #2662).
+# 0.3.3: structured forwarding target and bound verb in Description and Meta (ledger #2662).
 # 0.3.1: `Error::Gone` and the typed redirect answer (ledger #3150). Additive.
 # 0.3.0: held content is scoped to the principal who delivered it (ledger #2965). What still
 # compiles changes: `MemoryContentStore::put` and `put_replay` are read by root alone, and so is a
 # hold under a capability naming no principal. A door holding a caller's content moves to
 # `put_for` or `put_replay_for`, under a capability that names the caller.
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]

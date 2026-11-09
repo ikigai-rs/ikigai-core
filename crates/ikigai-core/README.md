@@ -72,7 +72,7 @@ assert_eq!(rep.bytes, b"IKIGAI");
   verb routed to a pluggable `MetaRenderer` (one resource, many representations).
 - **Formal companion** — [`docs/formalism/README.md`](https://github.com/ikigai-rs/ikigai-core/blob/main/docs/formalism/README.md) maps the kernel onto Peter Rodgers' *Peter's Hotel* formalism, every theorem pinned to the test that holds its precondition.
 
-## Structured forwarding metadata (0.3.2)
+## Structured forwarding metadata (0.3.3)
 
 A forwarding endpoint's `Description` carries `forward_target` (its immediate target IRI)
 and `forward_verb` (the bound verb, if any). Read these fields to recognize named requests
