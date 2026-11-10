@@ -27,6 +27,7 @@
     "Endpoint": "ik:Endpoint",
     "EndpointSpace": "ik:EndpointSpace",
     "Explanation": "ik:Explanation",
+    "Failure": "ik:Failure",
     "FailureClass": "ik:FailureClass",
     "Fallback": "ik:Fallback",
     "Feed": "ik:Feed",
@@ -108,6 +109,10 @@
     "asked": {
       "@id": "ik:asked",
       "@type": "@id"
+    },
+    "attempts": {
+      "@id": "ik:attempts",
+      "@type": "xsd:nonNegativeInteger"
     },
     "authMethod": {
       "@id": "ik:authMethod",
@@ -243,6 +248,10 @@
       "@id": "ik:droppedItems",
       "@type": "xsd:nonNegativeInteger"
     },
+    "elapsedMillis": {
+      "@id": "ik:elapsedMillis",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "endpoint": {
       "@id": "ik:endpoint",
       "@type": "@id"
@@ -275,6 +284,12 @@
       "@type": "xsd:boolean"
     },
     "explanation": "ik:explanation",
+    "failureClass": {
+      "@id": "ik:failureClass",
+      "@type": "@id"
+    },
+    "failureKind": "ik:failureKind",
+    "failureMessage": "ik:failureMessage",
     "family": "ik:family",
     "fileName": "ik:fileName",
     "findingCount": {
@@ -495,6 +510,10 @@
     "result": {
       "@id": "ik:result",
       "@type": "@id"
+    },
+    "retryAfterMillis": {
+      "@id": "ik:retryAfterMillis",
+      "@type": "xsd:nonNegativeInteger"
     },
     "reviewedBytes": {
       "@id": "ik:reviewedBytes",

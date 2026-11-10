@@ -38,8 +38,10 @@ const ABOUT: &str = "Failure-class vectors (ledger #1546) computed from \
      `kind` (Error::kind), `class` (Error::class, a FailureClass word), `transient` \
      (Error::is_transient), `display` (the Display form a v8 peer receives inside Endpoint) and \
      `retry_after_ms` (Error::retry_after_millis: the delay in whole milliseconds rounded UP, \
-     the wire form). The rest is the DECIDED table this file pins for the faces (decision 4 of \
-     ledger #1546): `wire_tag` is the wire v9 discriminant (0-8 as today, 9-13 appended; \
+     the wire form), `attempts` and `elapsed_ms` (Error::attempts and Error::elapsed_millis: a \
+     gave-up's attempt count and its time spent in whole milliseconds rounded DOWN, null for \
+     every other kind) and `json` (Error::to_json, the JSON face Error::from_json reads back). The rest is the DECIDED table this file pins for the faces (decision 4 of \
+     ledger #1546): `wire_tag` is the wire v9 discriminant (0-8 as today, 9-14 appended; \
      ikigai-wire owns the encoding), and `http` is the edge's answer: `status`, and \
      `retry_after`, the Retry-After header in delay-seconds rounded up and never 0, null when \
      no header is sent. `classes` lists every class with its vocabulary individual.";
@@ -101,6 +103,11 @@ fn error_of(name: &Value, spec: &Value) -> Error {
                 .map(|v| serde_json::from_value::<Verb>(v.clone()).expect("a verb")),
             detail: s("detail"),
         },
+        "gave-up" => Error::GaveUp {
+            attempts: spec["attempts"].as_u64().expect("an attempt count") as u32,
+            elapsed: Duration::from_micros(spec["elapsed_us"].as_u64().expect("an elapsed time")),
+            detail: s("detail"),
+        },
         other => panic!("case {name}: no variant has the kind `{other}`"),
     }
 }
@@ -123,12 +130,15 @@ fn wire_tag(error: &Error) -> u8 {
         Error::OverBudget { .. } => 11,
         Error::Refused(_) => 12,
         Error::Unsupported { .. } => 13,
+        Error::GaveUp { .. } => 14,
         other => panic!("no decided wire tag for `{}`", other.kind()),
     }
 }
 
 /// The edge's status (decision 4): Timeout 504, OverBudget 422, Refused 502, DepthExceeded
 /// and Endpoint 500, RetryAfter 429; Unsupported 405 for a verb and 501 for a facility.
+/// GaveUp 503 (ledger #3386): the dependency stayed away through every attempt, which is
+/// what Unavailable says of one.
 fn http_status(error: &Error) -> u16 {
     match error {
         Error::Unresolved(_) | Error::NotFound(_) => 404,
@@ -137,7 +147,7 @@ fn http_status(error: &Error) -> u16 {
         Error::Conflict(_) => 409,
         Error::Gone(_) => 410,
         Error::Timeout(_) => 504,
-        Error::Unavailable(_) => 503,
+        Error::Unavailable(_) | Error::GaveUp { .. } => 503,
         Error::RetryAfter { .. } => 429,
         Error::OverBudget { .. } => 422,
         Error::Refused(_) => 502,
@@ -175,6 +185,9 @@ fn compute() -> String {
                 "transient": error.is_transient(),
                 "display": error.to_string(),
                 "retry_after_ms": error.retry_after_millis(),
+                "attempts": error.attempts(),
+                "elapsed_ms": error.elapsed_millis(),
+                "json": error.to_json(),
                 "wire_tag": wire_tag(&error),
                 "http": {
                     "status": http_status(&error),
@@ -230,6 +243,7 @@ fn the_vectors_cover_every_kind_and_every_class() {
         "over-budget",
         "refused",
         "unsupported",
+        "gave-up",
     ]
     .into();
     assert_eq!(kinds, expected);
@@ -290,6 +304,70 @@ fn the_vectors_pin_the_rules_that_are_easiest_to_get_wrong() {
         json!(501)
     );
     assert_eq!(row("unsupported/a-verb")["class"], json!("permanent"));
+    // A gave-up carries both numbers as fields, names both in its sentence, and is
+    // transient like the last error it stands for (ledger #3386).
+    let gave_up = row("gave-up/minutes");
+    assert_eq!(gave_up["attempts"], json!(9));
+    assert_eq!(gave_up["elapsed_ms"], json!(120_000));
+    assert_eq!(
+        gave_up["display"],
+        json!(
+            "gave up after 9 attempts over 120000 ms: unavailable: the hub refused the connection"
+        )
+    );
+    assert_eq!(gave_up["class"], json!("transient"));
+    assert_eq!(gave_up["transient"], json!(true));
+    assert_eq!(gave_up["http"], json!({"status": 503, "retry_after": null}));
+    assert_eq!(gave_up["wire_tag"], json!(14));
+    assert_eq!(
+        gave_up["json"],
+        json!({
+            "kind": "gave-up",
+            "attempts": 9,
+            "elapsed_ms": 120_000,
+            "detail": "unavailable: the hub refused the connection",
+        })
+    );
+    // Elapsed time rounds DOWN (time spent), unlike a retry delay (time to wait).
+    let sub_ms = row("gave-up/a-fraction-of-a-millisecond-rounds-down");
+    assert_eq!(sub_ms["elapsed_ms"], json!(1));
+    let once = row("gave-up/one-attempt")["display"].clone();
+    assert_eq!(
+        once,
+        json!("gave up after 1 attempt over 250 ms: unavailable: connection refused")
+    );
+    // Every other kind carries no numbers of a give-up.
+    assert_eq!(row("unavailable")["attempts"], json!(null));
+    assert_eq!(row("timeout")["elapsed_ms"], json!(null));
+}
+
+/// Every row's JSON face reads back, through `Error::from_json`, to an error with the same
+/// kind, class, display and numbers: what a face that copies `json` and hands it to core
+/// gets back.
+#[test]
+fn every_rows_json_face_reads_back_with_its_numbers() {
+    let doc: Value = serde_json::from_str(&compute()).unwrap();
+    for row in doc["cases"].as_array().unwrap() {
+        let error =
+            Error::from_json(&row["json"]).unwrap_or_else(|e| panic!("{}: {e}", row["name"]));
+        assert_eq!(error.kind(), row["kind"], "{}", row["name"]);
+        assert_eq!(error.class().word(), row["class"], "{}", row["name"]);
+        assert_eq!(json!(error.to_string()), row["display"], "{}", row["name"]);
+        assert_eq!(json!(error.attempts()), row["attempts"], "{}", row["name"]);
+        assert_eq!(
+            json!(error.elapsed_millis()),
+            row["elapsed_ms"],
+            "{}",
+            row["name"]
+        );
+        assert_eq!(
+            json!(error.retry_after_millis()),
+            row["retry_after_ms"],
+            "{}",
+            row["name"]
+        );
+        assert_eq!(error.to_json(), row["json"], "{}", row["name"]);
+    }
 }
 
 /// `gone` (core 0.3.1, ledger #3150) has a status but no row: a row needs a decided wire tag, and

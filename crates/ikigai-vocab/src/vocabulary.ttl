@@ -339,6 +339,50 @@ ik:UnknownFailure a ik:FailureClass , owl:NamedIndividual ;
     rdfs:label "unknown" ;
     rdfs:comment "The endpoint could not say (an opaque endpoint error). Repeated by nobody automatically; the class exists so a declaration can say honestly that an action can fail opaquely." .
 
+# ---- a failure's Turtle face (ikigai_core::Error::to_turtle, ledger #3386) ----
+# One node per error, stating its kind, its class, its sentence and its numbers,
+# so a graph reader gets how many attempts and how long without parsing text.
+
+ik:Failure a rdfs:Class ;
+    rdfs:label "Failure" ;
+    rdfs:comment "One error a request failed with, as its Turtle face writes it (ikigai_core::Error::to_turtle): its kind, its failure class, its displayed sentence, and its numbers as typed counts. A description, not an encoding: the error's JSON face is the one a client reads it back from (ledger #3386)." .
+
+ik:failureKind a rdf:Property ;
+    rdfs:domain ik:Failure ;
+    rdfs:range xsd:string ;
+    rdfs:label "failureKind" ;
+    rdfs:comment "The error's kind as one stable lowercase word (ikigai_core::Error::kind), for example gave-up, unavailable or denied. It carries nothing from the error's payload." .
+
+ik:failureClass a rdf:Property ;
+    rdfs:domain ik:Failure ;
+    rdfs:range ik:FailureClass ;
+    rdfs:label "failureClass" ;
+    rdfs:comment "Who may repeat this failure, and when: the class of the error the request RECEIVED, a pure function of its kind (ikigai_core::Error::class). Not ik:mayFail, which is what an action declares it can produce." .
+
+ik:failureMessage a rdf:Property ;
+    rdfs:domain ik:Failure ;
+    rdfs:range xsd:string ;
+    rdfs:label "failureMessage" ;
+    rdfs:comment "The error's displayed sentence, as every host prints it: its first words say the kind of failure (gave up after 9 attempts over 120000 ms: …)." .
+
+ik:attempts a rdf:Property ;
+    rdfs:domain ik:Failure ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "attempts" ;
+    rdfs:comment "On a gave-up failure: how many times a retry overlay issued the request, the first one included, before it gave up (ikigai_core::Error::GaveUp). Stated beside ik:elapsedMillis." .
+
+ik:elapsedMillis a rdf:Property ;
+    rdfs:domain ik:Failure ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "elapsedMillis" ;
+    rdfs:comment "On a gave-up failure: how long the retry overlay spent, from its first attempt until it gave up and waits included, in whole milliseconds rounded down." .
+
+ik:retryAfterMillis a rdf:Property ;
+    rdfs:domain ik:Failure ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "retryAfterMillis" ;
+    rdfs:comment "On a retry-after failure that states a delay: how long to wait before re-issuing, in whole milliseconds rounded up, the form the wire carries (ikigai_core::Error::retry_after_millis). Absent when the error says not now without a time." .
+
 # ---- topology (urn:kernel:topology — the arrangement as a resource) ----------
 # The resolution arrangement is itself a resource (the formalism's §8.2: doors,
 # corridors and the rules of resolution are resources among resources).

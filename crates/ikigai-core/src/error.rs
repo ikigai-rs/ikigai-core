@@ -243,6 +243,53 @@ pub enum Error {
         /// What is unsupported.
         detail: String,
     },
+    /// A retry overlay **gave up**: it re-issued a transiently failing request
+    /// `attempts` times over `elapsed` and stopped, because its budget or its deadline ran
+    /// out (ledger #3386, #3380). Class [`Transient`](FailureClass::Transient), like the
+    /// last error it stands for: the dependency was away, not refusing, and a caller may
+    /// come back later. An overlay outside it that holds its own budget may repeat it
+    /// exactly as it would have repeated that last error, which is what an overlay
+    /// returned before this variant existed; the run's shared retry pool, not the class,
+    /// is what stops attempts multiplying.
+    ///
+    /// Typed, with both numbers as fields, so a caller can tell "the hub was away for two
+    /// minutes after 9 attempts" from a refusal or a single timeout without reading the
+    /// message. `detail` is the last attempt's error as it displayed.
+    ///
+    /// A new variant rather than fields on [`Unavailable`](Error::Unavailable) or
+    /// [`Timeout`](Error::Timeout): those are one-field variants every downstream crate
+    /// builds and matches as `Unavailable(message)`, and a field added to them would break
+    /// each of those; a new variant breaks none, because `Error` is `#[non_exhaustive]`.
+    /// And a single wait that ran out is not a give-up: the numbers would be absent more
+    /// often than present.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use ikigai_core::{Error, FailureClass};
+    ///
+    /// let err = Error::GaveUp {
+    ///     attempts: 9,
+    ///     elapsed: Duration::from_secs(120),
+    ///     detail: "unavailable: the hub refused the connection".into(),
+    /// };
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "gave up after 9 attempts over 120000 ms: unavailable: the hub refused the connection"
+    /// );
+    /// assert_eq!(err.kind(), "gave-up");
+    /// assert_eq!(err.class(), FailureClass::Transient);
+    /// assert_eq!(err.attempts(), Some(9));
+    /// assert_eq!(err.elapsed_millis(), Some(120_000));
+    /// ```
+    GaveUp {
+        /// How many times the request was issued, the first one included.
+        attempts: u32,
+        /// How long the overlay spent, from the first attempt until it gave up, waits
+        /// included.
+        elapsed: Duration,
+        /// The last attempt's error, as it displayed.
+        detail: String,
+    },
 }
 
 /// **Who may repeat a failure, and when** (ledger #200, #1546; the retry-authority note,
@@ -342,7 +389,7 @@ impl fmt::Display for FailureClass {
 
 impl Error {
     /// Whether re-issuing might succeed: `true` for **transient** failures (timeout,
-    /// unavailable), `false` for **permanent** ones (unresolved, bad argument,
+    /// unavailable, an overlay that gave up), `false` for **permanent** ones (unresolved, bad argument,
     /// denied, or a domain endpoint error). The retry / circuit-breaker / failover
     /// overlays gate on this. Note the request *verb* separately governs whether a
     /// re-issue is *safe* ([`Verb::is_idempotent`]): a non-idempotent `Sink` needs an
@@ -354,7 +401,10 @@ impl Error {
     /// Exactly `class() == FailureClass::Transient`. [`RetryAfter`](Error::RetryAfter)
     /// is NOT transient by this definition, on purpose (see the variant).
     pub fn is_transient(&self) -> bool {
-        matches!(self, Error::Timeout(_) | Error::Unavailable(_))
+        matches!(
+            self,
+            Error::Timeout(_) | Error::Unavailable(_) | Error::GaveUp { .. }
+        )
     }
 
     /// **Who may repeat this failure, and when**: the error's [`FailureClass`], a pure
@@ -381,6 +431,7 @@ impl Error {
     ///     (Error::OverBudget { detail: "past 5000 ms".into() }, FailureClass::OverBudget),
     ///     (Error::Refused("401".into()), FailureClass::Refused),
     ///     (Error::Unsupported { verb: Some(Verb::Sink), detail: "read-only".into() }, FailureClass::Permanent),
+    ///     (Error::GaveUp { attempts: 9, elapsed: Duration::from_secs(120), detail: "down".into() }, FailureClass::Transient),
     /// ];
     /// for (error, class) in classes {
     ///     assert_eq!(error.class(), class, "{error}");
@@ -389,7 +440,9 @@ impl Error {
     /// ```
     pub fn class(&self) -> FailureClass {
         match self {
-            Error::Timeout(_) | Error::Unavailable(_) => FailureClass::Transient,
+            Error::Timeout(_) | Error::Unavailable(_) | Error::GaveUp { .. } => {
+                FailureClass::Transient
+            }
             Error::RetryAfter { .. } => FailureClass::RetryAfter,
             Error::OverBudget { .. } => FailureClass::OverBudget,
             Error::Denied(_) => FailureClass::Denied,
@@ -434,6 +487,294 @@ impl Error {
         Some(u64::try_from(millis).unwrap_or(u64::MAX))
     }
 
+    /// A [`GaveUp`](Error::GaveUp)'s attempt count: how many times the overlay issued the
+    /// request before it gave up. `None` for every other variant.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use ikigai_core::Error;
+    ///
+    /// let gave_up = Error::GaveUp { attempts: 3, elapsed: Duration::from_secs(2), detail: String::new() };
+    /// assert_eq!(gave_up.attempts(), Some(3));
+    /// assert_eq!(Error::Unavailable("down".into()).attempts(), None);
+    /// ```
+    pub fn attempts(&self) -> Option<u32> {
+        match self {
+            Error::GaveUp { attempts, .. } => Some(*attempts),
+            _ => None,
+        }
+    }
+
+    /// A [`GaveUp`](Error::GaveUp)'s elapsed time in **whole milliseconds, rounded
+    /// down**: the form its display prints and its faces carry. Rounded down because it
+    /// reports a time spent, and the overlay spent at least that long. Saturates at
+    /// `u64::MAX`. `None` for every other variant.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use ikigai_core::Error;
+    ///
+    /// let spent = |elapsed| Error::GaveUp { attempts: 2, elapsed, detail: String::new() };
+    /// assert_eq!(spent(Duration::from_secs(120)).elapsed_millis(), Some(120_000));
+    /// assert_eq!(spent(Duration::from_micros(1_900)).elapsed_millis(), Some(1));
+    /// assert_eq!(Error::Timeout("slow".into()).elapsed_millis(), None);
+    /// ```
+    pub fn elapsed_millis(&self) -> Option<u64> {
+        let Error::GaveUp { elapsed, .. } = self else {
+            return None;
+        };
+        Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    /// The error's **JSON face**: an object with its [`kind`](Self::kind) word and its
+    /// payload as fields, the shape the shared failure-class vectors carry in each row's
+    /// `json` (`crates/ikigai-vocab/tests/vectors`), so a face in another language can
+    /// read every number without parsing a message. [`from_json`](Self::from_json) reads
+    /// it back.
+    ///
+    /// | kind | fields beside `kind` |
+    /// | --- | --- |
+    /// | `unresolved` | `iri` |
+    /// | `missing-argument` | `name` |
+    /// | `invalid-argument` | `name`, `detail` |
+    /// | `endpoint`, `denied`, `not-found`, `gone`, `conflict`, `timeout`, `unavailable`, `refused` | `message` |
+    /// | `depth-exceeded` | `depth`, `target` |
+    /// | `retry-after` | `retry_after_ms` (absent without a delay), `detail` |
+    /// | `over-budget` | `detail` |
+    /// | `unsupported` | `verb` (absent for a missing facility), `detail` |
+    /// | `gave-up` | `attempts`, `elapsed_ms`, `detail` |
+    ///
+    /// Durations cross in whole milliseconds, as [`retry_after_millis`](Self::retry_after_millis)
+    /// and [`elapsed_millis`](Self::elapsed_millis) round them, so a sub-millisecond
+    /// remainder does not survive the trip; everything else does.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use ikigai_core::Error;
+    ///
+    /// let err = Error::GaveUp {
+    ///     attempts: 9,
+    ///     elapsed: Duration::from_secs(120),
+    ///     detail: "unavailable: the hub refused the connection".into(),
+    /// };
+    /// let json = err.to_json();
+    /// assert_eq!(
+    ///     json,
+    ///     serde_json::json!({
+    ///         "kind": "gave-up",
+    ///         "attempts": 9,
+    ///         "elapsed_ms": 120000,
+    ///         "detail": "unavailable: the hub refused the connection",
+    ///     })
+    /// );
+    /// assert_eq!(Error::from_json(&json).unwrap(), err);
+    /// ```
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::{json, Value};
+        let mut face = match self {
+            Error::Unresolved(iri) => json!({ "iri": iri.as_str() }),
+            Error::MissingArgument(name) => json!({ "name": name }),
+            Error::InvalidArgument { name, detail } => json!({ "name": name, "detail": detail }),
+            Error::Endpoint(message)
+            | Error::Denied(message)
+            | Error::NotFound(message)
+            | Error::Gone(message)
+            | Error::Conflict(message)
+            | Error::Timeout(message)
+            | Error::Unavailable(message)
+            | Error::Refused(message) => json!({ "message": message }),
+            Error::DepthExceeded { depth, target } => {
+                json!({ "depth": depth, "target": target.as_str() })
+            }
+            Error::RetryAfter { detail, .. } => match self.retry_after_millis() {
+                Some(ms) => json!({ "retry_after_ms": ms, "detail": detail }),
+                None => json!({ "detail": detail }),
+            },
+            Error::OverBudget { detail } => json!({ "detail": detail }),
+            Error::Unsupported { verb, detail } => match verb {
+                Some(verb) => json!({ "verb": verb, "detail": detail }),
+                None => json!({ "detail": detail }),
+            },
+            Error::GaveUp {
+                attempts, detail, ..
+            } => json!({
+                "attempts": attempts,
+                "elapsed_ms": self.elapsed_millis(),
+                "detail": detail,
+            }),
+        };
+        if let Value::Object(fields) = &mut face {
+            fields.insert("kind".into(), Value::from(self.kind()));
+        }
+        face
+    }
+
+    /// The error's **Turtle face**: one `ik:Failure` node (a blank node: an error has no
+    /// name of its own) stating its `ik:failureKind` word, its `ik:failureClass`
+    /// individual, its displayed sentence as `ik:failureMessage`, and its numbers as typed
+    /// counts: `ik:attempts` and `ik:elapsedMillis` for [`GaveUp`](Error::GaveUp),
+    /// `ik:retryAfterMillis` for a [`RetryAfter`](Error::RetryAfter) with a delay. A graph
+    /// reader gets the numbers without parsing the sentence. It describes the error rather
+    /// than encoding it, so read an error back from its [JSON face](Self::to_json).
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use ikigai_core::Error;
+    ///
+    /// let err = Error::GaveUp { attempts: 9, elapsed: Duration::from_secs(120), detail: "unavailable: down".into() };
+    /// assert_eq!(
+    ///     err.to_turtle(),
+    ///     "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
+    ///      @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n\
+    ///      [] a ik:Failure ;\n    \
+    ///      ik:failureKind \"gave-up\" ;\n    \
+    ///      ik:failureClass ik:TransientFailure ;\n    \
+    ///      ik:failureMessage \"gave up after 9 attempts over 120000 ms: unavailable: down\" ;\n    \
+    ///      ik:attempts \"9\"^^xsd:nonNegativeInteger ;\n    \
+    ///      ik:elapsedMillis \"120000\"^^xsd:nonNegativeInteger .\n"
+    /// );
+    /// ```
+    pub fn to_turtle(&self) -> String {
+        use std::fmt::Write as _;
+
+        let class: String = self
+            .class()
+            .word()
+            .split('-')
+            .flat_map(|part| {
+                let mut chars = part.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+            })
+            .collect();
+        let mut ttl = format!(
+            "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n\
+             [] a ik:Failure ;\n    \
+             ik:failureKind \"{}\" ;\n    \
+             ik:failureClass ik:{class}Failure ;\n    \
+             ik:failureMessage \"{}\"",
+            self.kind(),
+            crate::topology::escape_literal(&self.to_string()),
+        );
+        let counts = [
+            ("attempts", self.attempts().map(u64::from)),
+            ("elapsedMillis", self.elapsed_millis()),
+            ("retryAfterMillis", self.retry_after_millis()),
+        ];
+        for (property, value) in counts {
+            if let Some(value) = value {
+                let _ = write!(
+                    ttl,
+                    " ;\n    ik:{property} \"{value}\"^^xsd:nonNegativeInteger"
+                );
+            }
+        }
+        ttl.push_str(" .\n");
+        ttl
+    }
+
+    /// Read an error back from its [JSON face](Self::to_json). Refuses, as
+    /// [`InvalidArgument`](Error::InvalidArgument) naming the field, a value that is not an
+    /// object, a `kind` no variant has, and a field that is absent or of the wrong type.
+    /// Fields the kind does not use are ignored.
+    ///
+    /// ```
+    /// use ikigai_core::Error;
+    ///
+    /// let json = serde_json::json!({"kind": "gave-up", "attempts": "nine", "elapsed_ms": 1, "detail": ""});
+    /// assert_eq!(
+    ///     Error::from_json(&json).unwrap_err().to_string(),
+    ///     "invalid argument `attempts`: expected a whole number from 0 to 4294967295"
+    /// );
+    /// ```
+    pub fn from_json(value: &serde_json::Value) -> Result<Error> {
+        let invalid = |name: &str, detail: &str| Error::InvalidArgument {
+            name: name.into(),
+            detail: detail.into(),
+        };
+        if !value.is_object() {
+            return Err(invalid("error", "expected a JSON object"));
+        }
+        let text = |field: &str| -> Result<String> {
+            value[field]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| invalid(field, "expected a string"))
+        };
+        let whole = |field: &str| -> Result<u64> {
+            value[field]
+                .as_u64()
+                .ok_or_else(|| invalid(field, "expected a whole number"))
+        };
+        let millis = |field: &str| -> Result<Option<Duration>> {
+            match value.get(field) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(_) => whole(field).map(|ms| Some(Duration::from_millis(ms))),
+            }
+        };
+        let iri = |field: &str| -> Result<Iri> {
+            Iri::parse(text(field)?).map_err(|e| invalid(field, &e.to_string()))
+        };
+        let kind = text("kind")?;
+        Ok(match kind.as_str() {
+            "unresolved" => Error::Unresolved(iri("iri")?),
+            "missing-argument" => Error::MissingArgument(text("name")?),
+            "invalid-argument" => Error::InvalidArgument {
+                name: text("name")?,
+                detail: text("detail")?,
+            },
+            "endpoint" => Error::Endpoint(text("message")?),
+            "denied" => Error::Denied(text("message")?),
+            "not-found" => Error::NotFound(text("message")?),
+            "gone" => Error::Gone(text("message")?),
+            "conflict" => Error::Conflict(text("message")?),
+            "timeout" => Error::Timeout(text("message")?),
+            "unavailable" => Error::Unavailable(text("message")?),
+            "refused" => Error::Refused(text("message")?),
+            "depth-exceeded" => Error::DepthExceeded {
+                depth: u32::try_from(whole("depth")?).map_err(|_| {
+                    invalid("depth", "expected a whole number from 0 to 4294967295")
+                })?,
+                target: iri("target")?,
+            },
+            "retry-after" => Error::RetryAfter {
+                delay: millis("retry_after_ms")?,
+                detail: text("detail")?,
+            },
+            "over-budget" => Error::OverBudget {
+                detail: text("detail")?,
+            },
+            "unsupported" => Error::Unsupported {
+                verb: match value.get("verb") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(verb) => Some(
+                        serde_json::from_value::<Verb>(verb.clone())
+                            .map_err(|e| invalid("verb", &e.to_string()))?,
+                    ),
+                },
+                detail: text("detail")?,
+            },
+            "gave-up" => Error::GaveUp {
+                attempts: value["attempts"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| {
+                        invalid("attempts", "expected a whole number from 0 to 4294967295")
+                    })?,
+                elapsed: Duration::from_millis(whole("elapsed_ms")?),
+                detail: text("detail")?,
+            },
+            other => {
+                return Err(invalid(
+                    "kind",
+                    &format!("`{other}` is not the kind of any error"),
+                ))
+            }
+        })
+    }
+
     /// The error's **kind** as one stable lowercase word, carrying nothing from its
     /// payload: no message, no argument name, no IRI, no depth. It is what the kernel
     /// reports under [`FAILED_NOTE`](crate::FAILED_NOTE) when an invocation fails,
@@ -443,6 +784,7 @@ impl Error {
     /// The words, one per variant:
     ///
     /// ```
+    /// use std::time::Duration;
     /// use ikigai_core::{Error, Iri};
     ///
     /// let kinds = [
@@ -461,6 +803,7 @@ impl Error {
     ///     (Error::OverBudget { detail: "past 5000 ms".into() }, "over-budget"),
     ///     (Error::Refused("401".into()), "refused"),
     ///     (Error::Unsupported { verb: None, detail: "no clock".into() }, "unsupported"),
+    ///     (Error::GaveUp { attempts: 9, elapsed: Duration::from_secs(120), detail: "down".into() }, "gave-up"),
     /// ];
     /// for (error, word) in kinds {
     ///     assert_eq!(error.kind(), word);
@@ -487,6 +830,7 @@ impl Error {
             Error::OverBudget { .. } => "over-budget",
             Error::Refused(_) => "refused",
             Error::Unsupported { .. } => "unsupported",
+            Error::GaveUp { .. } => "gave-up",
         }
     }
 }
@@ -521,6 +865,20 @@ impl fmt::Display for Error {
             Error::OverBudget { detail } => write!(f, "over budget: {detail}"),
             Error::Refused(msg) => write!(f, "refused: {msg}"),
             Error::Unsupported { detail, .. } => write!(f, "unsupported: {detail}"),
+            Error::GaveUp {
+                attempts, detail, ..
+            } => {
+                let noun = if *attempts == 1 {
+                    "attempt"
+                } else {
+                    "attempts"
+                };
+                let millis = self.elapsed_millis().unwrap_or_default();
+                write!(
+                    f,
+                    "gave up after {attempts} {noun} over {millis} ms: {detail}"
+                )
+            }
         }
     }
 }

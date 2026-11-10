@@ -272,8 +272,8 @@ compare the copies with this one (it does not know this pair yet).
 
 `failure_class_vectors.json` is the one table of how a typed error fails (ledger #1546, #200):
 for every `ikigai_core::Error` variant, what core computes (its `kind` word, its failure `class`,
-whether it is `transient`, its `display` form, and `retry_after_ms`, the delay in whole
-milliseconds rounded up) beside the DECIDED rows every face pins (decision 4 of ledger #1546):
+whether it is `transient`, its `display` form, `retry_after_ms`, the delay in whole
+milliseconds rounded up, a give-up's `attempts` and `elapsed_ms`, and its `json` face) beside the DECIDED rows every face pins (decision 4 of ledger #1546):
 the wire v9 `wire_tag` and the HTTP edge's `http.status` and `http.retry_after`. The Rust wire
 suite and the edge's `error_status` (ikigai-cli), ikigai-python and ikigai-deno each pin
 themselves against a VERBATIM copy of it.
@@ -285,14 +285,17 @@ not name, so a variant added to core cannot reach the file without a decided tag
 
 | field | what it is |
 |---|---|
-| `error` | the case: `kind` names the variant, then its payload (`iri`, `name`, `detail`, `message`, `depth` and `target`, `verb` as `ikigai_core::Verb` serializes it, `delay_us` in microseconds) |
+| `error` | the case: `kind` names the variant, then its payload (`iri`, `name`, `detail`, `message`, `depth` and `target`, `verb` as `ikigai_core::Verb` serializes it, `delay_us` in microseconds, `attempts` and `elapsed_us` in microseconds) |
 | `kind` | `Error::kind` |
 | `class` | `Error::class`, one of `transient`, `retry-after`, `over-budget`, `denied`, `refused`, `permanent`, `unknown` |
 | `transient` | `Error::is_transient`: true for `transient` alone; `retry-after` is NOT transient |
 | `display` | the `Display` form, which is what a v8 peer receives inside `Endpoint` for a variant its wire has no tag for |
 | `retry_after_ms` | `Error::retry_after_millis`: the wire form of the delay, rounded UP, `null` without one |
-| `wire_tag` | the v9 discriminant: 0-8 as today, then `depth-exceeded` 9, `retry-after` 10, `over-budget` 11, `refused` 12, `unsupported` 13 |
-| `http.status` | the edge's status: 404 unresolved and not-found, 400 the argument errors, 403 denied, 409 conflict, 504 timeout, 503 unavailable, 429 retry-after, 422 over-budget, 502 refused, 500 endpoint and depth-exceeded, 405 an unsupported verb, 501 an unsupported facility |
+| `attempts` | `Error::attempts`: how many times a retry overlay issued the request before it gave up; `null` for every kind but `gave-up` |
+| `elapsed_ms` | `Error::elapsed_millis`: how long it spent, in whole milliseconds rounded DOWN (a time spent, not a time to wait); `null` for every kind but `gave-up` |
+| `json` | `Error::to_json`, the error's JSON face, which `Error::from_json` reads back: `kind` and the payload, durations as `retry_after_ms` and `elapsed_ms` |
+| `wire_tag` | the v9 discriminant: 0-8 as today, then `depth-exceeded` 9, `retry-after` 10, `over-budget` 11, `refused` 12, `unsupported` 13, `gave-up` 14 |
+| `http.status` | the edge's status: 404 unresolved and not-found, 400 the argument errors, 403 denied, 409 conflict, 504 timeout, 503 unavailable and gave-up, 429 retry-after, 422 over-budget, 502 refused, 500 endpoint and depth-exceeded, 405 an unsupported verb, 501 an unsupported facility |
 | `http.retry_after` | the `Retry-After` header in delay-seconds, rounded up and NEVER 0; `null` when no header is sent |
 
 `classes[]` lists every class `word` with its vocabulary individual `iri`
@@ -301,7 +304,10 @@ not name, so a variant added to core cannot reach the file without a decided tag
 Rules worth knowing before porting, each a row: a sub-millisecond delay rounds UP to the next
 millisecond (`retry-after/a-fraction-of-a-millisecond-rounds-up` displays `2 ms`); a zero delay
 still sends `Retry-After: 1`; a `retry-after` with no delay is a 429 with no header and displays
-`retry later: …`; `unsupported` is one class and two statuses, decided by whether it names a verb.
+`retry later: …`; `unsupported` is one class and two statuses, decided by whether it names a verb; a `gave-up` is
+`transient`, a 503 with no header, displays both numbers (`gave up after 9 attempts over 120000
+ms: …`, and `1 attempt` in the singular), and its elapsed time rounds DOWN
+(`gave-up/a-fraction-of-a-millisecond-rounds-down` is `1` ms).
 
 One variant has no row yet: `gone` (HTTP 410, class `permanent`, displayed `gone: …`, ikigai-core
 0.3.1). No wire version has decided a tag for it, so it crosses as `Endpoint(display)`, and it gets

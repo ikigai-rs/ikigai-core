@@ -1,5 +1,5 @@
 {
-  "about": "Inputs for failure_class_vectors.json (crates/ikigai-vocab/tests/failure_class_vectors.rs). Each `error` names a variant by its kind word and gives its payload: `iri`, `name`, `detail`, `message`, `depth` and `target`, `verb` (as ikigai_core::Verb serializes, omitted for none), `delay_us` (microseconds, omitted for none).",
+  "about": "Inputs for failure_class_vectors.json (crates/ikigai-vocab/tests/failure_class_vectors.rs). Each `error` names a variant by its kind word and gives its payload: `iri`, `name`, `detail`, `message`, `depth` and `target`, `verb` (as ikigai_core::Verb serializes, omitted for none), `delay_us` (microseconds, omitted for none), `attempts` and `elapsed_us` (microseconds).",
   "cases": [
     {
       "name": "unresolved",
@@ -139,6 +139,33 @@
       "error": {
         "kind": "unsupported",
         "detail": "the host configured no clock"
+      }
+    },
+    {
+      "name": "gave-up/minutes",
+      "error": {
+        "kind": "gave-up",
+        "attempts": 9,
+        "elapsed_us": 120000000,
+        "detail": "unavailable: the hub refused the connection"
+      }
+    },
+    {
+      "name": "gave-up/a-fraction-of-a-millisecond-rounds-down",
+      "error": {
+        "kind": "gave-up",
+        "attempts": 3,
+        "elapsed_us": 1900,
+        "detail": "timeout: the origin did not answer in 1 ms"
+      }
+    },
+    {
+      "name": "gave-up/one-attempt",
+      "error": {
+        "kind": "gave-up",
+        "attempts": 1,
+        "elapsed_us": 250000,
+        "detail": "unavailable: connection refused"
       }
     }
   ]
