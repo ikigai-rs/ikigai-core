@@ -471,6 +471,14 @@
       "@id": "ik:requires",
       "@type": "@id"
     },
+    "resendKey": {
+      "@id": "ik:resendKey",
+      "@type": "@id"
+    },
+    "resendSafe": {
+      "@id": "ik:resendSafe",
+      "@type": "xsd:boolean"
+    },
     "resolveAt": "ik:resolveAt",
     "resolvedAs": {
       "@id": "ik:resolvedAs",

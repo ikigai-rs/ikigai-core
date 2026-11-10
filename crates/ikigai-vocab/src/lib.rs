@@ -649,6 +649,17 @@ pub fn to_turtle(description: &Description) -> String {
         if action.existence_sensitive {
             preds.push("ik:existenceSensitive true".to_string());
         }
+        // Resend safety (ledger #3381): unconditional, or under the key, which is one of
+        // this contract's input nodes. Nothing when undeclared: not safe.
+        match &action.resend {
+            None => {}
+            Some(ikigai_core::Resend::Safe) => preds.push("ik:resendSafe true".to_string()),
+            Some(ikigai_core::Resend::Key(key)) => preds.push(format!(
+                "ik:resendKey <{action_iri}:input:{}>",
+                name_fragment(key)
+            )),
+            Some(_) => {}
+        }
         for input in &action.inputs {
             let name = name_fragment(&input.name);
             let node_iri = format!("{action_iri}:input:{name}");
@@ -1000,6 +1011,59 @@ mod tests {
             2
         );
         assert!(!to_turtle(&sample()).contains("existenceSensitive"));
+    }
+
+    /// Resend safety (ledger #3381): `ik:resendSafe true` on an unconditionally safe
+    /// action's node, `ik:resendKey` naming the key's input node of the SAME contract on a
+    /// keyed one, nothing on an action that declares neither (not safe), and parsed as Turtle.
+    #[test]
+    fn projects_resend_safety_on_the_action_nodes() {
+        use ikigai_core::{ActionSpec, ArgSpec};
+        let d = Description::new("ledger")
+            .action(
+                ActionSpec::new(Verb::Sink)
+                    .input(ArgSpec::new("content"))
+                    .input(ArgSpec::new("key").optional())
+                    .resend_safe_with_key("key"),
+            )
+            .action(ActionSpec::new(Verb::Delete).resend_safe())
+            .action(ActionSpec::new(Verb::Source));
+        let ttl = to_turtle(&d);
+        let node = |verb: Verb| {
+            let iri = d
+                .action_specs()
+                .into_iter()
+                .find(|a| a.verb == verb)
+                .unwrap()
+                .contract_iri(&d.id);
+            let block = ttl
+                .split("\n\n")
+                .find(|block| block.starts_with(&format!("<{iri}> a ik:Action")))
+                .expect("the contract node")
+                .to_string();
+            (iri, block)
+        };
+        let (sink, sink_node) = node(Verb::Sink);
+        assert!(
+            sink_node.contains(&format!("ik:resendKey <{sink}:input:key>")),
+            "{sink_node}"
+        );
+        assert!(ttl.contains(&format!("<{sink}:input:key>")), "{ttl}");
+        assert!(node(Verb::Delete).1.contains("ik:resendSafe true"));
+        let (_, source_node) = node(Verb::Source);
+        assert!(!source_node.contains("ik:resend"), "{source_node}");
+        let triples: Vec<_> = oxttl::TurtleParser::new()
+            .for_reader(ttl.as_bytes())
+            .map(|t| t.expect("parses"))
+            .collect();
+        let count = |p: &str| {
+            triples
+                .iter()
+                .filter(|t| t.predicate.as_str() == format!("{NS}{p}"))
+                .count()
+        };
+        assert_eq!((count("resendSafe"), count("resendKey")), (1, 1));
+        assert!(!to_turtle(&sample()).contains("ik:resend"));
     }
 
     /// Ledger #2512: an input a named request fixes says `ik:fixed "…"` on the endpoint's

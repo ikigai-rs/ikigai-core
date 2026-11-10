@@ -178,7 +178,7 @@ pub use declare::{
 };
 pub use describe::{
     ActionSpec, ArgSpec, Arguments, ContractCaching, DefaultValue, Description, EndpointKind,
-    Failures, GroupKind, InputGroup, InputSource, ListSeparator, OutputFrom, Transreption,
+    Failures, GroupKind, InputGroup, InputSource, ListSeparator, OutputFrom, Resend, Transreption,
     ValueNote,
 };
 pub use dynamic::{

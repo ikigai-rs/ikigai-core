@@ -430,6 +430,68 @@ pub enum OutputFrom {
     Origin,
 }
 
+/// Whether a RESEND of an action is safe (ledger #3381): what a client may do when it sent
+/// a request and does not know whether it landed (a timeout, a dropped connection). A
+/// [`Source`](crate::Verb::Source) is a read and always safe; for a write the contract has
+/// to say, or a client could only guess from the verb's name. An action that declares
+/// nothing is NOT safe to resend ([`ActionSpec::resend`] is `None`).
+///
+/// ```
+/// use ikigai_core::{ActionSpec, ArgSpec, Resend, Verb};
+///
+/// // A keyed ledger append: a replay under the same key answers `existing` and writes
+/// // nothing, so a resend is safe when the call carries the key.
+/// let append = ActionSpec::new(Verb::Sink)
+///     .input(ArgSpec::new("key"))
+///     .resend_safe_with_key("key");
+/// assert_eq!(
+///     serde_json::to_value(&append).unwrap()["resend"],
+///     serde_json::json!({"key": "key"})
+/// );
+/// assert!(append.resend_is_safe(|name| name == "key"));
+/// assert!(!append.resend_is_safe(|_| false));
+///
+/// let set = ActionSpec::new(Verb::Sink).resend_safe();
+/// assert_eq!(serde_json::to_value(&set).unwrap()["resend"], serde_json::json!("safe"));
+/// assert!(set.resend_is_safe(|_| false));
+///
+/// // Undeclared: not safe, and nothing is written.
+/// let post = ActionSpec::new(Verb::Sink);
+/// assert!(!post.resend_is_safe(|_| true));
+/// assert!(serde_json::to_value(&post).unwrap().get("resend").is_none());
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum Resend {
+    /// Safe whatever the call carries: the action is idempotent (setting a value, deleting
+    /// a name). `ik:resendSafe true`.
+    Safe,
+    /// Safe only when the named argument (the idempotency key) is given, with a non-blank
+    /// value: a replay under the same key does not act twice. Without it a resend is NOT
+    /// safe. `ik:resendKey`, the key's input node.
+    Key(String),
+}
+
+impl Resend {
+    /// Whether a resend is safe for a call that gives the arguments `given` says it does
+    /// (`given(name)` is true when the call carries `name` with a non-blank value).
+    pub fn is_safe(&self, given: impl Fn(&str) -> bool) -> bool {
+        match self {
+            Resend::Safe => true,
+            Resend::Key(name) => given(name),
+        }
+    }
+
+    /// The idempotency key's argument name, when safety depends on one.
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            Resend::Safe => None,
+            Resend::Key(name) => Some(name),
+        }
+    }
+}
+
 /// How a list-valued argument's items are separated in its one value (see
 /// [`ArgSpec::list`]).
 ///
@@ -1026,6 +1088,12 @@ pub struct ActionSpec {
     /// false, and an action that does not set it keeps its contract IRI.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub existence_sensitive: bool,
+    /// Whether a resend of this action is safe, unconditionally or under an idempotency
+    /// key (ledger #3381): see [`Resend`]. `None`, the default, is NOT safe. Omitted from
+    /// serialized output when absent, and an action that declares nothing keeps its
+    /// contract IRI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resend: Option<Resend>,
 }
 
 impl ActionSpec {
@@ -1042,7 +1110,29 @@ impl ActionSpec {
             output_from: None,
             failures: Failures::Unstated,
             existence_sensitive: false,
+            resend: None,
         }
+    }
+
+    /// Declare a resend of this verb safe whatever the call carries (builder):
+    /// [`Resend::Safe`].
+    pub fn resend_safe(mut self) -> Self {
+        self.resend = Some(Resend::Safe);
+        self
+    }
+
+    /// Declare a resend of this verb safe only when the call gives `key`, its idempotency
+    /// key (builder): [`Resend::Key`]. `key` must be one of the verb's declared inputs.
+    pub fn resend_safe_with_key(mut self, key: impl Into<String>) -> Self {
+        self.resend = Some(Resend::Key(key.into()));
+        self
+    }
+
+    /// Whether resending a call to this verb is safe: the declared [`Resend`] admits it
+    /// for the arguments `given` says the call carries. Not safe when nothing is
+    /// declared.
+    pub fn resend_is_safe(&self, given: impl Fn(&str) -> bool) -> bool {
+        self.resend.as_ref().is_some_and(|r| r.is_safe(given))
     }
 
     /// Mark this verb's refusals as hiding the resource's existence (builder): a caller
@@ -1803,6 +1893,7 @@ impl Description {
                         output_from: self.output_from.clone(),
                         failures: self.failures.clone(),
                         existence_sensitive: self.existence_sensitive,
+                        resend: None,
                     })
             })
             .collect()
@@ -2218,6 +2309,14 @@ fn validate_relations(id: &str, verb: Option<Verb>, spec: &ActionSpec) -> crate:
                     format!("the envelope's carrier `{carrier}` is not a declared by-value input"),
                 )
             }
+        }
+    }
+    if let Some(Resend::Key(key)) = &spec.resend {
+        if input(key).is_none() {
+            return refuse(
+                "resend",
+                format!("a resend is safe under the key `{key}`, which is not a declared input"),
+            );
         }
     }
     if let Some(OutputFrom::Input(name)) = &spec.output_from {

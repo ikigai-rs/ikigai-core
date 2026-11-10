@@ -683,6 +683,91 @@ fn reads_body_vectors_pin_the_tail_and_input_triples() {
     assert_eq!(readers, expected);
 }
 
+/// Ledger #3381: resend safety. A declared action is v2 and fed LAST, after the fixed
+/// inputs, as the byte `5` then `0` (safe) or `1` and the key; an absent declaration (or a
+/// JSON `null`) feeds nothing, so a contract that declares none keeps its digest and reads
+/// as NOT safe. The `core/resend` door pins the triples: `ik:resendKey` naming the keyed
+/// contract's own input node, `ik:resendSafe true`, and nothing on the read.
+#[test]
+fn resend_vectors_pin_the_tail_and_the_action_triples() {
+    let doc: Value = serde_json::from_str(&compute()).unwrap();
+    let contract = |name: &str| -> &str {
+        doc["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no contract case {name}"))["contract"]
+            .as_str()
+            .unwrap()
+    };
+    assert_eq!(
+        contract("resend/undeclared"),
+        contract("resend/absent-is-null (same digest as resend/undeclared)")
+    );
+    let distinct = [
+        "resend/undeclared",
+        "resend/safe",
+        "resend/keyed",
+        "resend/keyed-by-another-input",
+        "resend/keyed-after-failures-and-flag",
+    ]
+    .map(contract);
+    assert_eq!(
+        distinct.iter().collect::<BTreeSet<_>>().len(),
+        distinct.len()
+    );
+    // An undeclared contract reads as not safe.
+    assert!(contract("resend/undeclared").starts_with("urn:ikigai:contract:ledgerAppend:sink:"));
+    let undeclared: ActionSpec = serde_json::from_value(
+        doc["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "resend/undeclared")
+            .unwrap()["action"]
+            .clone(),
+    )
+    .unwrap();
+    assert!(undeclared.resend.is_none() && !undeclared.resend_is_safe(|_| true));
+
+    let door = doc["doors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "core/resend")
+        .expect("the resend door");
+    let of = |verb: &str| -> String {
+        door["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["verb"] == verb)
+            .unwrap_or_else(|| panic!("no {verb} action"))["contract"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let triples = door_triples(&doc, "core/resend");
+    let on = |local: &str| -> BTreeSet<(String, Kind)> {
+        let predicate = format!("{}{local}", ikigai_vocab::NS);
+        triples
+            .iter()
+            .filter(|t| t.predicate.as_str() == predicate)
+            .map(|t| (t.subject.to_string(), kind(&t.object)))
+            .collect()
+    };
+    let sink = of("Sink");
+    assert_eq!(
+        on("resendKey"),
+        BTreeSet::from([(format!("<{sink}>"), Kind::Iri(format!("{sink}:input:key")))])
+    );
+    assert_eq!(
+        on("resendSafe"),
+        BTreeSet::from([(format!("<{}>", of("Delete")), Kind::Literal("true".into()))])
+    );
+}
+
 /// Regenerate `contract_vectors.json`./// Regenerate `contract_vectors.json`. Ignored so a normal run only CHECKS; run it with
 /// `-- --ignored` after editing the cases.
 #[test]
