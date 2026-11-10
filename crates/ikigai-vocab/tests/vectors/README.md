@@ -112,6 +112,20 @@ which input names are read, declaration-order independence, and composition afte
 failure classes and existence sensitivity. `core/reads-body` pins `ik:readsBody true` on
 the endpoint and action input nodes, with no triple for absent or false flags.
 
+**Resend safety** (ledger #3381; not yet in a release): an action's `resend` says a resend of it
+is safe, either unconditionally (`"resend": "safe"`) or only when the call gives the named
+argument, its idempotency key (`"resend": {"key": "key"}`, a declared input). Absent (or
+`null`) is NOT safe, the default: a face that reads a contract without it must answer "not
+safe", never guess from the verb. It puts the action in the v2 form, and is fed after the
+inputs a named request fixes (byte `4`), only when declared: the byte `5`, then `0` for
+`safe`, or `1` and the key's name (length-prefixed). The `resend/*` contracts pin that:
+`absent-is-null` has `undeclared`'s digest, and `safe`, `keyed`, `keyed-by-another-input`
+and `keyed-after-failures-and-flag` (after the failure and existence tails) are distinct.
+The `core/resend` door pins the triples on each action node: `ik:resendKey` naming that
+contract's own input node (`{contract}:input:key`), `ik:resendSafe true`, and nothing on an
+action that declares neither. A Python or Deno face that computes contract IRIs or Turtle
+from a description NEEDS the field: without it a declared contract's IRI and Turtle differ.
+
 ## Lenient in, canonical out
 
 Postel's law (ledger #1107, decided 2026-10-10). A percent escape is `%` and exactly two

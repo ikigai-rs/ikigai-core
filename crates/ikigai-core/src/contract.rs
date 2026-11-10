@@ -119,6 +119,7 @@ impl Canon {
 fn uses_v2(spec: &ActionSpec) -> bool {
     !spec.failures.is_unstated()
         || spec.existence_sensitive
+        || spec.resend.is_some()
         || !spec.groups.is_empty()
         || !spec.arguments.is_closed()
         || spec.output_from.is_some()
@@ -552,6 +553,21 @@ impl ActionSpec {
     /// assert_ne!(bound.contract_id("count"), other.contract_id("count"));
     /// ```
     ///
+    /// **Resend safety** (ledger #3381, [`Resend`](crate::Resend)) puts a contract in the v2
+    /// form too, and is appended after the fixed inputs, only when declared, as the byte `5`
+    /// and then `0` (safe) or `1` and the key's name. A contract that declares nothing keeps
+    /// its digest:
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, ArgSpec, Verb};
+    ///
+    /// let append = ActionSpec::new(Verb::Sink).input(ArgSpec::new("key").optional());
+    /// let keyed = append.clone().resend_safe_with_key("key");
+    /// let safe = append.clone().resend_safe();
+    /// assert_ne!(append.contract_id("ledger"), keyed.contract_id("ledger"));
+    /// assert_ne!(keyed.contract_id("ledger"), safe.contract_id("ledger"));
+    /// ```
+    ///
     /// The endpoint id is part of the contract: two endpoints with different ids and
     /// identical specs are two tools, and the contract node must say which one it
     /// belongs to.
@@ -674,6 +690,21 @@ impl ActionSpec {
         if !fixed.is_empty() {
             feed_u8(&mut h, 4);
             feed_set(&mut h, &fixed);
+        }
+        // Resend safety (ledger #3381) is fed ONLY when declared, after the fixed inputs, as
+        // the byte `5`, then `0` for unconditionally safe or `1` and the key's name: an
+        // action that declares nothing keeps its digest, and `5` is no earlier tail's byte.
+        match &self.resend {
+            None => {}
+            Some(crate::describe::Resend::Safe) => {
+                feed_u8(&mut h, 5);
+                feed_u8(&mut h, 0);
+            }
+            Some(crate::describe::Resend::Key(key)) => {
+                feed_u8(&mut h, 5);
+                feed_u8(&mut h, 1);
+                feed_str(&mut h, key);
+            }
         }
         ContentId::from_hasher(h)
     }

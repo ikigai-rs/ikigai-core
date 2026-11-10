@@ -557,6 +557,9 @@ pub struct ActionMatch {
     /// How many *optional typed* inputs the present classes could not fill — the v1
     /// ranking: fewer = a better-fitted match.
     pub missing_optional: usize,
+    /// Whether a resend of the action is safe, and under which key (ledger #3381): the
+    /// contract's [`ActionSpec::resend`](crate::ActionSpec::resend). `None` is not safe.
+    pub resend: Option<crate::describe::Resend>,
 }
 
 impl ActionMatch {
@@ -575,6 +578,7 @@ impl ActionMatch {
     ///     action: ActionSpec::new(Verb::Source).contract_iri("file"),
     ///     requires: Vec::new(),
     ///     missing_optional: 0,
+    ///     resend: None,
     /// };
     /// assert_eq!(m.match_iri(), "urn:ikigai:match:source:urn:file:%7Bpath%7D");
     /// ```
@@ -771,6 +775,7 @@ pub(crate) fn select_actions_bounded(
                     action: action.contract_iri(&description.id),
                     requires: action.requires.clone(),
                     missing_optional,
+                    resend: action.resend.clone(),
                 },
             ));
         }

@@ -297,6 +297,16 @@ ik:existenceSensitive a rdf:Property ;
     rdfs:label "existenceSensitive" ;
     rdfs:comment "Whether the subject hides its EXISTENCE from a caller the capability floor refuses (UX record D28): such a caller gets the answer a name bound nowhere gets, byte for byte (Unresolved, and the trace a miss records), never Denied, so it cannot tell \"exists, and I may not\" from \"does not exist\". On an endpoint (its flat form, for every verb without its own action), one of its ik:Action nodes (that verb; it replaces the flat flag, as ik:requires does), or an ik:Door (its endpoint hides its existence on some verb). A Meta from a caller refused on every declared verb, and a verb the endpoint does not declare, are hidden too; urn:kernel:validate answers such a caller as it answers a name bound nowhere, and urn:kernel:actions never offers it the action. Written only when true; absent, read false: a refusal is Denied when existence is not sensitive. Part of the contract: a sensitive action is a different content-addressed contract, and one that is not keeps its IRI. No domain, for the reason ik:requires has none (ikigai-core 0.2.2, ledger #2176)." .
 
+ik:resendSafe a rdf:Property ;
+    rdfs:range xsd:boolean ;
+    rdfs:label "resendSafe" ;
+    rdfs:comment "On an ik:Action node (or an ik:ActionMatch in urn:kernel:actions): a RESEND of this action is safe whatever the call carries, so a client that does not know whether a request landed (a timeout, a dropped connection) may send it again. Written only when true. An action that says neither this nor ik:resendKey is NOT safe to resend: a client must not guess from the verb's name. Part of the contract: a declared action is a different content-addressed contract, and one that declares nothing keeps its IRI (ledger #3381)." .
+
+ik:resendKey a rdf:Property ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "resendKey" ;
+    rdfs:comment "On an ik:Action node (or an ik:ActionMatch in urn:kernel:actions): a RESEND of this action is safe ONLY when the call gives this input, its idempotency key, with a non-blank value (a keyed ledger append answers existing on a replay and writes nothing); without it a resend is not safe. The value is the key's input node. At most one, and never beside ik:resendSafe (ledger #3381)." .
+
 ik:FailureClass a rdfs:Class ;
     rdfs:label "FailureClass" ;
     rdfs:comment "Who may repeat a failure, and when: one of seven closed classes, each a retry rule. An error's class is a pure function of its kind (ikigai_core::Error::class). The value of ik:mayFail." .

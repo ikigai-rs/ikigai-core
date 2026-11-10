@@ -5953,6 +5953,21 @@ impl Kernel {
                                 m.missing_optional
                             ));
                         }
+                        // Resend safety (ledger #3381), as the catalog's contract node says
+                        // it: the key is that contract's input node, so it joins there too.
+                        match &m.resend {
+                            None => {}
+                            Some(crate::describe::Resend::Safe) => {
+                                body.push_str(" ;\n    ik:resendSafe true");
+                            }
+                            Some(crate::describe::Resend::Key(key)) => {
+                                body.push_str(&format!(
+                                    " ;\n    ik:resendKey <{}:input:{}>",
+                                    m.action,
+                                    crate::contract::encode_name(key)
+                                ));
+                            }
+                        }
                         body.push_str(" .\n");
                     }
                     return Ok(Representation::new(
