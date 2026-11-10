@@ -18,7 +18,7 @@ template](https://github.com/mgifford/ACCESSIBILITY.md) (MIT).
 
 - **Error messages**: the `Display` of `Error` (`crates/ikigai-core/src/error.rs`), which every
   host prints or serves, for example `missing required argument `name``, `invalid argument
-  `as`: …`, `no endpoint resolved for urn:…`, `denied: …`, `not found: …`, `gone: …`; and the
+  `as`: …`, `no endpoint resolved for urn:…`, `denied: …`, `not found: …`, `gone: …`, `gave up after 9 attempts over 120000 ms: …`; and the
   `Display` of the smaller error types (`AliasRefusal` and `AliasParseError` in `alias.rs`,
   `DeclarationError` in `declare.rs`, `TemplateError` in `grammar.rs`, `CacheConfigError`,
   `ContentIdError`, `PrincipalError`, `DynamicRefusal`).
@@ -46,8 +46,9 @@ the Turtle, HTML or JSON faces other modules render from the kernel's descriptio
 Verified by reading the source on 2026-10-31:
 
 - An error names what it is about: a missing or invalid argument by its name, an unresolved
-  target and a depth refusal by the IRI. The first words say the kind of failure in words
-  (`denied:`, `not found:`, `gone:`, `conflict:`, `timeout:`), never a code alone.
+  target and a depth refusal by the IRI, a retry that gave up by its attempts and its time in
+  milliseconds (since 2026-11-10). The first words say the kind of failure in words (`denied:`,
+  `not found:`, `gone:`, `conflict:`, `timeout:`, `gave up`), never a code alone.
 - A kernel operation asked for a face it does not serve refuses with a sentence that names the
   face it was asked for, the operation, and the faces it does serve.
 - No color, no terminal escape and no markup is written: every message and face is plain text.
@@ -61,8 +62,10 @@ Verified by reading the source on 2026-10-31:
   (`single_face_operations_refuse_unsupported_as`, `two_face_operations_refuse_unsupported_as`)
   pins that a refused face names the argument, the face asked for, the operation and the faces
   served.
-- The doctests on `Error::Gone`, `Conflict`, `RetryAfter`, `OverBudget` and `Refused` in
-  `error.rs` pin their displayed text, and `crates/ikigai-vocab/tests/failure_class_vectors.rs` pins the
+- The doctests on `Error::Gone`, `Conflict`, `RetryAfter`, `OverBudget`, `Refused` and
+  `GaveUp` in `error.rs` pin their displayed text,
+  `crates/ikigai-vocab/tests/failure_faces.rs` pins that a give-up's sentence names both its
+  attempts and its time (and says `1 attempt` in the singular), and `crates/ikigai-vocab/tests/failure_class_vectors.rs` pins the
   `display` form of every case in `tests/vectors/failure_class_vectors.json`.
 - `crates/ikigai-core/tests/american_spelling.rs` scans the docs, the Rust sources and the
   vocabulary's prose for British spellings.
