@@ -663,6 +663,17 @@ twice (§10) and the second cut brought it to zero.
     pin: `kernel::tests::meta_gains_no_automatic_thread` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::a_pure_function_gains_a_thread_it_never_needs_and_it_is_harmless` (crates/ikigai-core/src/kernel.rs)
 
+**A cut invalidates lookups, not open readers** (ledger [#2237](http://localhost:1060/l/default/item/2237),
+streamed bodies). "Invalid thereafter" is about the cache: after the cut, no lookup is served
+the entry. A body the kernel had already handed out before the cut is read to its end as the
+version it opened. A `Replay` that cannot keep its bytes stable while a reader is open (a
+file written in place) is asked by the trait's contract to fail the stream with `Conflict`
+rather than hand out torn bytes; that is the implementer's discipline, not a kernel check. So a read that STARTS after a write
+through the kernel is never stale; a read that was already open when the write landed sees the
+version it opened, never a mix.
+
+    pin: `body::a_cut_invalidates_lookups_not_open_readers` (crates/ikigai-core/tests/body.rs)
+
 **Proposition R4.5 (a failed sub-request is a dependency).** Let an invocation issue a
 sub-request for name n and receive an error. The kernel records, on the invocation: for
 `Unresolved` and `NotFound`, an edge on the thread named after the missing resource — the
