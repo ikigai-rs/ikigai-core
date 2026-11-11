@@ -44,7 +44,7 @@ touches these APIs.
     pin: `scope_hypothesis::finding_an_opaque_space_can_place_its_endpoint_in_a_level_the_tree_does_not_show` (crates/ikigai-core/tests/scope_hypothesis.rs)
     pin: `topology::a_rewrite_behind_the_wall_is_not_answered` (crates/ikigai-core/tests/topology.rs)
     pin: `scope_hypothesis::finding_a_view_declared_at_the_root_resolves_from_its_level_when_it_is_inside_one` (crates/ikigai-core/tests/scope_hypothesis.rs)
-    pin: `scope_hypothesis::finding_a_by_reference_argument_is_read_in_the_callees_scope_not_the_callers` (crates/ikigai-core/tests/scope_hypothesis.rs)
+    pin: `scope_hypothesis::designed_a_by_reference_argument_is_read_in_the_callees_scope` (crates/ikigai-core/tests/scope_hypothesis.rs)
     pin: `dynamic::the_hosts_check_runs_before_bind_and_can_refuse` (crates/ikigai-core/tests/dynamic.rs)
     pin: `topology::a_door_bound_to_a_confinement_reports_the_corridor_as_its_confined_to` (crates/ikigai-core/tests/topology.rs)
     pin: `scope_hypothesis::finding_a_host_corridor_and_its_clock_travel_below_the_request_undeclared` (crates/ikigai-core/tests/scope_hypothesis.rs)
