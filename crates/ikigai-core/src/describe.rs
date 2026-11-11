@@ -1859,6 +1859,9 @@ impl Description {
 
     /// Declare a per-verb contract (builder). The verb is added to
     /// [`verbs`](Self::verbs) if not already declared.
+    ///
+    /// Declare each verb's action once: [`action_specs`](Self::action_specs) takes the
+    /// first for its verb, and [`validate`](Self::validate) refuses a second (ledger #2306).
     pub fn action(mut self, action: ActionSpec) -> Self {
         if !self.verbs.contains(&action.verb) {
             self.verbs.push(action.verb);
@@ -2205,6 +2208,22 @@ impl Description {
                         self.id.escape_debug(),
                         value.escape_debug(),
                         u32::from(c)
+                    ),
+                });
+            }
+        }
+        // One explicit action per verb (ledger #2306): `action_specs` keeps the first, so a
+        // second would be dead, its `requires` off the kernel's floor while the wire and
+        // `hides_existence` still carry it.
+        for (i, action) in self.actions.iter().enumerate() {
+            if self.actions[..i].iter().any(|a| a.verb == action.verb) {
+                return Err(crate::Error::InvalidArgument {
+                    name: "actions".to_string(),
+                    detail: format!(
+                        "endpoint `{}`: {:?} is declared by two actions; only the first is \
+                         its contract, so declare each verb's action once",
+                        self.id.escape_debug(),
+                        action.verb
                     ),
                 });
             }
@@ -3074,5 +3093,37 @@ mod tests {
                 "expected `{field}` to be blamed: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn validate_refuses_a_verb_declared_by_two_actions() {
+        // `action_specs` keeps the FIRST action for a verb, so a second one is dead: the
+        // scope it declares is not on the kernel's floor, while the wire and
+        // `hides_existence` still read it (ledger #2306).
+        let d = Description::new("cal")
+            .action(ActionSpec::new(Verb::Sink))
+            .action(
+                ActionSpec::new(Verb::Sink)
+                    .requires("urn:cap:cal:write")
+                    .existence_sensitive(),
+            );
+        assert!(
+            d.required_scopes(Verb::Sink).is_empty(),
+            "the shadowed scope"
+        );
+        let err = d
+            .validate()
+            .expect_err("a verb declared twice must be refused");
+        assert!(
+            matches!(&err, crate::Error::InvalidArgument { name, .. } if name == "actions"),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("Sink"), "{err}");
+        // One action per verb still validates.
+        Description::new("cal")
+            .action(ActionSpec::new(Verb::Source))
+            .action(ActionSpec::new(Verb::Sink).requires("urn:cap:cal:write"))
+            .validate()
+            .expect("distinct verbs validate");
     }
 }
