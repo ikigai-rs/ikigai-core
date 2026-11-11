@@ -229,6 +229,9 @@ files where an endpoint and a held kernel merely sit together, with no call trac
 
 ## Findings: (c)
 
+Each is triaged (declared, an exception the certificate names, or a finding of its own) in
+[scope-hypothesis-triage.md](scope-hypothesis-triage.md).
+
 **C1. `Invocation::with_issuer`.** It starts an invocation in the empty chain, at depth 0, with a
 fresh run. It exists for `ikigai-module`'s shim, whose issuer crosses a wire that carries no chain.
 With a kernel in hand, a decorator can run the endpoint it wraps outside the chain it was given.
