@@ -407,10 +407,10 @@ fn finding_a_view_declared_at_the_root_resolves_from_its_level_when_it_is_inside
     assert_eq!(read(&kernel, "urn:m:view").unwrap(), b"the level's target");
 }
 
-/// An argument given by reference is a name written in the CALLER's scope, and it is read in the
-/// scope the ENDPOINT runs in. Across a level the same name can mean two things.
+/// By design (resolution-scope decision 6), a reference is read in the callee's resolved scope.
+/// Across a level the same name can mean two things.
 #[test]
-fn finding_a_by_reference_argument_is_read_in_the_callees_scope_not_the_callers() {
+fn designed_a_by_reference_argument_is_read_in_the_callees_scope() {
     struct Takes;
     #[async_trait]
     impl Endpoint for Takes {

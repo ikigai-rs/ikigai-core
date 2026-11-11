@@ -75,7 +75,7 @@ host code from endpoint code, and that is the root of finding B4.
 | `Invocation::with_scope`, `with_depth`, `with_run`, `Scope::descend` | (a) | `pub(crate)` | Crate-private |
 | `Invocation::detached(request, bindings, capability)` | (a) | No issuer | Cannot issue |
 | `Invocation::with_issuer(request, bindings, capability, issuer: &dyn Issuer)` | **(c)** | Nowhere | C1 |
-| `ArgRef::Reference(Iri)`, settled by the kernel from the contract | **(c)** | Contract, not scope | C7 |
+| `ArgRef::Reference(Iri)`, settled by the kernel from the contract | (a) | Callee's resolved scope, decision 6 of `resolution-scope.md` | C7: designed behavior |
 
     pin: `scope_hypothesis::a_clock_attached_on_a_reborrow_stays_on_the_handle` (crates/ikigai-core/tests/scope_hypothesis.rs)
 
@@ -281,17 +281,17 @@ resolve past the level stack. The second changes answers only for a view inside 
 
     pin: `scope_hypothesis::finding_a_view_declared_at_the_root_resolves_from_its_level_when_it_is_inside_one` (crates/ikigai-core/tests/scope_hypothesis.rs)
 
-**C7. By-reference arguments cross a scope.** A reference is a name its caller wrote in the caller's
-scope, and the kernel settles it through the callee's invocation, in the callee's resolved scope. So a
-`urn:m:takes` request carrying `ArgRef::Reference(urn:name)`, issued from the root, reads the module's
-`urn:name` when the module binds one. The authority is unchanged, and the cache key holds the caller's chain plus the reference. But
-the module gets to say what the caller's name means. This is the mirror of the hole sealed names close
-(`resolution-context.md`), and it is the one place a name changes meaning across a boundary no one
-declared for it. **Suggested:** decide which scope a reference means; settling in the caller's scope
-would change answers for an endpoint inside a level given a name its level binds. This audit did
-not survey who relies on either reading, so measure before changing it.
+**C7. By-reference arguments are read in the callee's scope (designed).** The kernel settles a
+reference through the callee's invocation, in the callee's resolved scope. A `urn:m:takes` request
+carrying `ArgRef::Reference(urn:name)`, issued from the root, therefore reads the module's `urn:name`
+when the module binds one. This is designed behavior under
+[decision 6 of the resolution-scope design](../design/resolution-scope.md#6-values-are-not-corridors-here):
+a referent outside a confinement is `Unresolved`, which is the trapdoor working. `SettleReferences`
+reads in the chain the endpoint runs in, just as the endpoint would if it sourced the name itself.
+The caller's capability still governs the read. `ArgRef::Reference` documents this scope; C7 is not
+a defect.
 
-    pin: `scope_hypothesis::finding_a_by_reference_argument_is_read_in_the_callees_scope_not_the_callers` (crates/ikigai-core/tests/scope_hypothesis.rs)
+    pin: `scope_hypothesis::designed_a_by_reference_argument_is_read_in_the_callees_scope` (crates/ikigai-core/tests/scope_hypothesis.rs)
 
 **C8. `DynamicSpace`.** The arrangement is a value that changes: whoever may write the declaration can
 add doors for what the registry holds, and a certificate checked on version N says nothing about

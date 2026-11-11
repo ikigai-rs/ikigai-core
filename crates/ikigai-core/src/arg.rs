@@ -11,6 +11,8 @@ use crate::iri::Iri;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub enum ArgRef {
     /// A reference to another resolvable resource; identity is its IRI.
+    /// The referent is read in the callee's resolved scope, as specified by
+    /// [decision 6 of the resolution-scope design](https://github.com/ikigai-rs/ikigai-core/blob/main/docs/design/resolution-scope.md#6-values-are-not-corridors-here).
     ///
     /// **How it reaches the endpoint is settled by the endpoint's contract** (ledger #2511),
     /// by the kernel, before the endpoint runs: an input declared
