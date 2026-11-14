@@ -86,8 +86,9 @@ pub trait Replay: Send + Sync {
     }
 
     /// The length in bytes, when it is known before reading. A hint for framing
-    /// (`Content-Length`) and for the cache's byte bound; a reader still counts what it
-    /// reads.
+    /// (`Content-Length`) and collection bounds; a reader still counts what it reads.
+    /// The representation cache bounds replay handles by entry count, independently
+    /// of this hint (see [`CacheBound::max_bytes`](crate::CacheBound::max_bytes)).
     fn len_hint(&self) -> Option<u64> {
         None
     }

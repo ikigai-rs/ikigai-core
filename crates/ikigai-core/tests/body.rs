@@ -217,7 +217,7 @@ fn a_body_that_can_be_read_again_is_stored_and_served_as_bytes_are() {
 }
 
 #[test]
-fn a_replay_that_does_not_know_its_length_is_not_admitted_by_the_byte_bound() {
+fn a_replay_that_does_not_know_its_length_is_bounded_by_entry_count() {
     struct Unknown;
     impl Replay for Unknown {
         fn open(&self) -> ByteStream {
@@ -225,14 +225,21 @@ fn a_replay_that_does_not_know_its_length_is_not_admitted_by_the_byte_bound() {
         }
     }
     let (file, _) = streamer(true, || Body::replay(Unknown));
+    let (other, _) = streamer(true, || Body::replay(Unknown));
     let kernel = Kernel::new(Arc::new(
-        EndpointSpace::new().bind(Exact::new("urn:file"), file),
-    ));
-    assert_eq!(
-        uncached_note(&kernel, "urn:file").as_deref(),
-        Some("policy")
-    );
+        EndpointSpace::new()
+            .bind(Exact::new("urn:file"), file)
+            .bind(Exact::new("urn:other"), other),
+    ))
+    .with_cache_policy(Arc::new(ikigai_core::Lru::with_bound(
+        ikigai_core::CacheBound::new(1, 1),
+    )));
+    assert_eq!(uncached_note(&kernel, "urn:file").as_deref(), None);
+    assert!(kernel.is_cached(&source("urn:file"), &Capability::root()));
+    block_on(kernel.issue_body(source("urn:other"), &Capability::root())).unwrap();
+    assert_eq!(kernel.cache_len(), 1);
     assert!(!kernel.is_cached(&source("urn:file"), &Capability::root()));
+    assert!(kernel.is_cached(&source("urn:other"), &Capability::root()));
 }
 
 #[test]

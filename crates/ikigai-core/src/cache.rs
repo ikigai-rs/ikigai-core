@@ -292,19 +292,19 @@ enum Served<T> {
     Miss,
 }
 
-/// What a body counts against the byte bound: its length, or `usize::MAX` when it does
-/// not know it (see [`Slot::bytes`]).
+/// Buffered payload bytes retained by the cache. Replay backing storage belongs to
+/// the producer; its handle is bounded by the entry count, not the byte budget.
 fn body_size(body: &Body) -> usize {
-    body.len_hint()
-        .and_then(|len| usize::try_from(len).ok())
-        .unwrap_or(usize::MAX)
+    match body {
+        Body::Bytes(bytes) => bytes.len(),
+        Body::Replay(_) => 0,
+        // One-shot bodies are refused before admission.
+        Body::Once(_) => usize::MAX,
+    }
 }
 
 impl Slot {
-    /// [`CacheEntry::bytes`] over a body. A [`Replay`](crate::Replay) counts its length
-    /// hint, which is conservative for one backed by a file (it holds no memory) until a
-    /// spill budget exists; one that does not know its length counts as `usize::MAX`, so
-    /// no bounded policy admits it.
+    /// The charge against [`CacheBound::max_bytes`].
     fn bytes(&self) -> usize {
         body_size(&self.representation.bytes)
     }
@@ -344,7 +344,7 @@ pub struct EntryFacts<'a> {
     pub target: &'a str,
     /// The representation's media type.
     pub media_type: &'a str,
-    /// The entry's payload size in bytes.
+    /// The entry's buffered payload charge in bytes; replay handles count zero.
     pub bytes: usize,
     /// What it cost to produce, in milliseconds — `None` on a clock-free kernel.
     pub cost_millis: Option<u64>,
@@ -368,7 +368,7 @@ pub struct CacheRow {
     pub target: String,
     /// The representation's media type.
     pub media_type: String,
-    /// The entry's payload size in bytes.
+    /// The entry's buffered payload charge in bytes; replay handles count zero.
     pub bytes: usize,
     /// How many golden threads it depends on.
     pub threads: usize,
@@ -434,7 +434,15 @@ impl EntryState {
 pub struct CacheBound {
     /// The most entries the cache may hold.
     pub max_entries: usize,
-    /// The most bytes of cached representations it may hold in total.
+    /// The most buffered payload bytes the cache may hold in total.
+    ///
+    /// `Body::Bytes` counts its length. `Body::Replay` counts zero bytes and one
+    /// entry against `max_entries`, regardless of its length hint. The cache keeps
+    /// a shared replay handle, without collecting its backing content. Metadata and
+    /// handle overhead are bounded by the entry count rather than this byte budget.
+    /// Replay producers must separately bound their backing memory, file descriptors,
+    /// and disk or remote storage; this is not a bound on total process memory.
+    /// `Body::Once` is never stored.
     pub max_bytes: usize,
 }
 
@@ -1636,7 +1644,8 @@ impl ReprCache {
         self.len() == 0
     }
 
-    /// Total payload bytes currently held.
+    /// Total buffered payload charge currently held; replay handles count zero.
+    /// See [`CacheBound::max_bytes`] for the accounting rules.
     pub fn bytes(&self) -> usize {
         self.state.lock().expect("cache lock").bytes
     }
@@ -1740,7 +1749,7 @@ impl ReprCache {
     }
 
     /// One row per entry for `urn:kernel:cache`: the IRI it was resolved from, its
-    /// media type, its size in bytes, and how many golden threads it depends on.
+    /// media type, its buffered payload charge, and how many golden threads it depends on.
     /// [`rows_with_scope`](Self::rows_with_scope) adds the chain.
     pub fn rows(&self) -> Vec<(String, String, usize, usize)> {
         let state = self.state.lock().expect("cache lock");
