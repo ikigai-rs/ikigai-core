@@ -14,6 +14,19 @@
 //!    to find them invalid, so a long-lived process driven by ungated cacheable
 //!    operations grew without limit. Both maps are bounded now.
 //!
+//! # Byte accounting
+//!
+//! The byte bound charges resident payload: a buffer's length, or a replay's
+//! [`resident_bytes`](crate::Replay::resident_bytes) estimate. A file-backed replay
+//! can report zero when it retains no payload in memory; file length is not memory
+//! usage. Existing replay implementations default to their length hint, so memory-backed
+//! replays keep their charge. Unknown or unrepresentable sizes count as `usize::MAX`.
+//! Shared payload is charged per entry, without deduplication. This is an estimate,
+//! not a process-memory limit: reader buffers are outside the cache, and handles and
+//! metadata are bounded separately by [`CacheBound::max_entries`]. Producers must opt
+//! in to a smaller charge by implementing `Replay::resident_bytes`; simply returning
+//! a `Replay` does not make an in-memory body free.
+//!
 //! # The lost-cut race
 //!
 //! A cache entry pins each of its golden threads to the generation that thread held
@@ -292,19 +305,20 @@ enum Served<T> {
     Miss,
 }
 
-/// What a body counts against the byte bound: its length, or `usize::MAX` when it does
-/// not know it (see [`Slot::bytes`]).
+/// Resident payload charged to the byte bound; unknown sizes are conservative.
 fn body_size(body: &Body) -> usize {
-    body.len_hint()
+    let resident = match body {
+        Body::Bytes(bytes) => return bytes.len(),
+        Body::Replay(replay) => replay.resident_bytes(),
+        Body::Once(_) => None,
+    };
+    resident
         .and_then(|len| usize::try_from(len).ok())
         .unwrap_or(usize::MAX)
 }
 
 impl Slot {
-    /// [`CacheEntry::bytes`] over a body. A [`Replay`](crate::Replay) counts its length
-    /// hint, which is conservative for one backed by a file (it holds no memory) until a
-    /// spill budget exists; one that does not know its length counts as `usize::MAX`, so
-    /// no bounded policy admits it.
+    /// Resident payload charged as described in the module's byte accounting docs.
     fn bytes(&self) -> usize {
         body_size(&self.representation.bytes)
     }
@@ -344,7 +358,7 @@ pub struct EntryFacts<'a> {
     pub target: &'a str,
     /// The representation's media type.
     pub media_type: &'a str,
-    /// The entry's payload size in bytes.
+    /// The entry's resident payload charge in bytes.
     pub bytes: usize,
     /// What it cost to produce, in milliseconds — `None` on a clock-free kernel.
     pub cost_millis: Option<u64>,
@@ -368,7 +382,7 @@ pub struct CacheRow {
     pub target: String,
     /// The representation's media type.
     pub media_type: String,
-    /// The entry's payload size in bytes.
+    /// The entry's resident payload charge in bytes.
     pub bytes: usize,
     /// How many golden threads it depends on.
     pub threads: usize,
@@ -434,7 +448,7 @@ impl EntryState {
 pub struct CacheBound {
     /// The most entries the cache may hold.
     pub max_entries: usize,
-    /// The most bytes of cached representations it may hold in total.
+    /// The most resident payload bytes it may hold in total (see the module docs).
     pub max_bytes: usize,
 }
 
@@ -454,7 +468,7 @@ impl Default for CacheBound {
     /// It is a real number rather than "unbounded, configure it yourself" because
     /// the process that most needs a bound is the edge — the one facing strangers —
     /// and it is exactly the process nobody remembers to configure. The two halves
-    /// do different jobs: the byte budget is the memory ceiling, and the entry count
+    /// do different jobs: the byte budget bounds estimated resident payload, and the entry count
     /// guards against a flood of tiny entries whose per-entry overhead (key, target
     /// IRI, thread names) the byte budget does not see.
     ///
@@ -1636,7 +1650,7 @@ impl ReprCache {
         self.len() == 0
     }
 
-    /// Total payload bytes currently held.
+    /// Total resident payload bytes charged to the cache (see the module docs).
     pub fn bytes(&self) -> usize {
         self.state.lock().expect("cache lock").bytes
     }

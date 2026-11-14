@@ -86,10 +86,24 @@ pub trait Replay: Send + Sync {
     }
 
     /// The length in bytes, when it is known before reading. A hint for framing
-    /// (`Content-Length`) and for the cache's byte bound; a reader still counts what it
-    /// reads.
+    /// (`Content-Length`) and collection limits; a reader still counts what it reads.
     fn len_hint(&self) -> Option<u64> {
         None
+    }
+
+    /// The resident payload bytes retained by this replay, for the representation
+    /// cache's byte bound. This estimate must stay stable for the replay's lifetime.
+    /// Count retained buffers, including shared buffers, conservatively per entry;
+    /// exclude bytes stored only on disk or remotely and buffers created by readers.
+    /// Handle and metadata overhead is covered by the cache's separate entry bound.
+    ///
+    /// The default uses [`len_hint`](Self::len_hint), preserving the charge for
+    /// existing memory-backed implementations. A file-backed replay holding no payload
+    /// in memory should override this with `Some(0)`. A replay retaining buffers larger
+    /// than its output must override it with their resident size. `None` means unknown:
+    /// a bounded cache conservatively charges `usize::MAX`, rather than zero.
+    fn resident_bytes(&self) -> Option<u64> {
+        self.len_hint()
     }
 
     /// A strong validator: the content id of exactly these bytes, when the producer
@@ -112,6 +126,10 @@ impl Replay for Arc<dyn Replay> {
 
     fn len_hint(&self) -> Option<u64> {
         self.as_ref().len_hint()
+    }
+
+    fn resident_bytes(&self) -> Option<u64> {
+        self.as_ref().resident_bytes()
     }
 
     fn validator(&self) -> Option<ContentId> {
