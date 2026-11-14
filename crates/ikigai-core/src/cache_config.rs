@@ -55,7 +55,8 @@ pub struct CacheConfig {
     /// The most entries the whole cache may hold, partitions included.
     #[serde(default)]
     pub max_entries: Option<u64>,
-    /// The most bytes the whole cache may hold, partitions included.
+    /// The most resident payload bytes the whole cache may hold, partitions included.
+    /// See the byte accounting rules in [`crate::cache`].
     #[serde(default)]
     pub max_bytes: Option<u64>,
     /// The share of the bound protected entries may hold, `1..=99`; `scan-resistant` only.
@@ -74,7 +75,8 @@ pub struct CacheConfig {
 pub struct PartitionConfig {
     /// The IRI prefix whose entries this budget holds.
     pub prefix: String,
-    /// The most bytes the partition may hold. Required: a partition is a byte budget.
+    /// The most resident payload bytes the partition may hold. Required.
+    /// See the byte accounting rules in [`crate::cache`].
     pub max_bytes: u64,
     /// The most entries it may hold; by default its byte share of the cache's entries.
     #[serde(default)]

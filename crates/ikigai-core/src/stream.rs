@@ -297,6 +297,11 @@ impl Replay for Utf8Replay {
         self.0.len_hint()
     }
 
+    fn resident_bytes(&self) -> Option<u64> {
+        // Validation allocates only in open readers, not in the cached replay.
+        self.0.resident_bytes()
+    }
+
     fn validator(&self) -> Option<ContentId> {
         self.0.validator()
     }

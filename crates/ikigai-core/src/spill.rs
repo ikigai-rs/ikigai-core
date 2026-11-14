@@ -71,6 +71,11 @@ use crate::error::Result;
 /// [`Kernel::with_spill`](crate::Kernel::with_spill), in the shape of
 /// [`ContentStore`](crate::ContentStore); called by `urn:stream:spill`.
 ///
+/// A file-backed facility should also implement [`Replay::resident_bytes`] to report
+/// only the payload it retains in memory (often `Some(0)`), while keeping `len_hint`
+/// equal to the spilled file's length. The default still charges that full length to
+/// the representation cache; a facility that spills to memory must count its buffers.
+///
 /// The contract, which `urn:stream:spill` checks on every answer:
 ///
 /// - the replay's [`validator`](Replay::validator) is the content id of the bytes it

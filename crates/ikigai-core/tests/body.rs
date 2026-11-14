@@ -501,3 +501,222 @@ fn a_sink_reads_referenced_content_as_a_body() {
         "{err:?}"
     );
 }
+
+/// A real file on disk, held by path rather than by a resident buffer. Test files stay
+/// immutable until the kernel and its readers have been dropped.
+struct DiskReplay(std::path::PathBuf);
+
+impl Replay for DiskReplay {
+    fn open(&self) -> ByteStream {
+        use std::io::Read;
+        let file = std::fs::File::open(&self.0).unwrap();
+        Box::pin(futures::stream::try_unfold(file, |mut file| async move {
+            let mut chunk = vec![0; 256];
+            let count = file
+                .read(&mut chunk)
+                .map_err(|e| Error::Unavailable(e.to_string()))?;
+            chunk.truncate(count);
+            Ok((count != 0).then(|| (Bytes::from(chunk), file)))
+        }))
+    }
+
+    fn len_hint(&self) -> Option<u64> {
+        Some(std::fs::metadata(&self.0).unwrap().len())
+    }
+
+    fn resident_bytes(&self) -> Option<u64> {
+        Some(0)
+    }
+}
+
+struct TestFile(std::path::PathBuf);
+impl TestFile {
+    fn new(len: usize) -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!(
+            "replay-cache-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(len as u64).unwrap();
+        Self(path)
+    }
+}
+impl Drop for TestFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.0).unwrap();
+    }
+}
+
+#[test]
+fn file_replays_and_their_compositions_fit_by_resident_payload_not_file_length() {
+    use ikigai_core::{CacheBound, Lru};
+
+    // Exercise both an oversized file (formerly refused) and files that individually
+    // fit but formerly evicted the previous file and its small composition.
+    for file_len in [48, 4096] {
+        let file = TestFile::new(file_len);
+        let path = file.0.clone();
+        let (endpoint, file_runs) = streamer(true, move || Body::replay(DiskReplay(path.clone())));
+        let parses = Arc::new(AtomicUsize::new(0));
+        let counted = parses.clone();
+        let summary = AsyncFnEndpoint::new("summary", move |inv| {
+            let counted = counted.clone();
+            Box::pin(async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let target = inv.inline_str("file")?;
+                let body = inv.source_body(&iri(target)).await?;
+                let bytes = body.bytes.collect(8192).await?;
+                assert_eq!(bytes.len(), file_len);
+                Ok(Representation::new(text(), vec![b's'; 16]).cacheable())
+            })
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:file:a"), endpoint)
+                .bind(Exact::new("urn:file:b"), {
+                    let path = file.0.clone();
+                    streamer(true, move || Body::replay(DiskReplay(path.clone()))).0
+                })
+                .bind(Exact::new("urn:summary"), summary),
+        ))
+        .with_cache_policy(Arc::new(Lru::with_bound(CacheBound::new(8, 64))));
+        let root = Capability::root();
+        let summary = |file: &str| {
+            source("urn:summary").with_arg("file", ArgRef::Inline(file.as_bytes().to_vec()))
+        };
+        for _ in 0..2 {
+            for target in ["urn:file:a", "urn:file:b"] {
+                assert_eq!(
+                    block_on(kernel.issue(summary(target), &root))
+                        .unwrap()
+                        .bytes,
+                    vec![b's'; 16]
+                );
+            }
+        }
+        assert_eq!(parses.load(Ordering::SeqCst), 2, "file length {file_len}");
+        assert_eq!(file_runs.load(Ordering::SeqCst), 1);
+        assert!(kernel.is_cached(&source("urn:file:a"), &root));
+        assert!(kernel.is_cached(&source("urn:file:b"), &root));
+        assert_eq!(kernel.cache_len(), 4);
+    }
+}
+
+#[test]
+fn memory_backed_replays_keep_their_default_byte_charge() {
+    use ikigai_core::{CacheBound, Lru};
+
+    struct InMemory(Bytes);
+    impl Replay for InMemory {
+        fn open(&self) -> ByteStream {
+            Box::pin(futures::stream::iter([Ok(self.0.clone())]))
+        }
+        fn len_hint(&self) -> Option<u64> {
+            Some(self.0.len() as u64)
+        }
+    }
+    let (endpoint, runs) = streamer(true, || Body::replay(InMemory(vec![0; 65].into())));
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:memory"), endpoint),
+    ))
+    .with_cache_policy(Arc::new(Lru::with_bound(CacheBound::new(8, 64))));
+    for _ in 0..2 {
+        let answer =
+            block_on(kernel.issue_body(source("urn:memory"), &Capability::root())).unwrap();
+        assert_eq!(block_on(answer.bytes.collect(128)).unwrap().len(), 65);
+    }
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        kernel.cache_len(),
+        0,
+        "resident bytes still enforce the bound"
+    );
+}
+
+#[test]
+fn replay_resident_estimates_are_independent_of_length_and_entry_bounds() {
+    use ikigai_core::{CacheBound, CacheKey, Lru, ReprCache};
+
+    struct Estimated {
+        length: Option<u64>,
+        resident: Option<u64>,
+    }
+    impl Replay for Estimated {
+        fn open(&self) -> ByteStream {
+            panic!("cache accounting must not read a body")
+        }
+        fn len_hint(&self) -> Option<u64> {
+            self.length
+        }
+        fn resident_bytes(&self) -> Option<u64> {
+            self.resident
+        }
+    }
+    // Known residency works without a length, and a short output cannot conceal a
+    // larger retained input. Unknown residency remains conservative even for short output.
+    for (length, resident, admitted) in [
+        (None, Some(0), true),
+        (Some(4096), Some(16), true),
+        (Some(1), Some(65), false),
+        (Some(1), None, false),
+        (Some(1), Some(u64::MAX), false),
+    ] {
+        let cache = ReprCache::new(Arc::new(Lru::with_bound(CacheBound::new(1, 64))));
+        for target in ["urn:estimate:a", "urn:estimate:b"] {
+            // Pass through Arc<dyn Replay> too: its forwarding must preserve the estimate.
+            let replay: Arc<dyn Replay> = Arc::new(Estimated { length, resident });
+            let body = Body::replay(replay);
+            assert_eq!(body.len_hint(), length, "framing length stays independent");
+            let key = CacheKey::new(source(target).id(), 0);
+            assert_eq!(
+                cache.store_body(
+                    key,
+                    target.into(),
+                    Representation::from_body(text(), body).cacheable(),
+                    cache.snapshot(),
+                    None,
+                ),
+                admitted
+            );
+        }
+        assert_eq!(
+            cache.len(),
+            usize::from(admitted),
+            "entry bound still applies"
+        );
+        assert_eq!(
+            cache.bytes(),
+            if admitted {
+                resident.unwrap() as usize
+            } else {
+                0
+            }
+        );
+    }
+}
+
+#[test]
+fn text_replay_preserves_file_residency_and_framing_length() {
+    use ikigai_core::{CacheBound, Lru};
+
+    let file = TestFile::new(4096);
+    let path = file.0.clone();
+    let (endpoint, _) = streamer(true, move || Body::replay(DiskReplay(path.clone())));
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:file"), endpoint),
+    ))
+    .with_cache_policy(Arc::new(Lru::with_bound(CacheBound::new(8, 64))));
+    let request = source("urn:stream:text").with_arg("content", ArgRef::Reference(iri("urn:file")));
+    let answer = block_on(kernel.issue_body(request.clone(), &Capability::root())).unwrap();
+    assert_eq!(answer.bytes.len_hint(), Some(4096));
+    assert!(kernel.is_cached(&request, &Capability::root()));
+    assert_eq!(block_on(answer.bytes.collect(4096)).unwrap().len(), 4096);
+}
