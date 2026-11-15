@@ -275,7 +275,8 @@ for every `ikigai_core::Error` variant, what core computes (its `kind` word, its
 whether it is `transient`, its `display` form, `retry_after_ms`, the delay in whole
 milliseconds rounded up, a give-up's `attempts` and `elapsed_ms`, and its `json` face) beside the DECIDED rows every face pins (decision 4 of ledger #1546):
 the wire v9 `wire_tag` and the HTTP edge's `http.status` and `http.retry_after`.
-ikigai-python and ikigai-deno each pin themselves against a VERBATIM copy of it.
+ikigai-python, ikigai-ts (formerly ikigai-deno), ikigai-dotnet and ikigai-clojure each pin
+themselves against a VERBATIM copy of it.
 The wire tags and HTTP statuses also specify the expected behavior of ikigai-cli's Rust
 wire suite and the edge's `error_status`; ikigai-cli does not currently track a copy of
 this file. Its MCP validation-vector copy is a separate contract (see above).
