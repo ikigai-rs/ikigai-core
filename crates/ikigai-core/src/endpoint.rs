@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -543,6 +544,10 @@ struct Recorded {
     /// when the endpoint stated one ([`Invocation::failure_expires_at`]). Read by the
     /// kernel only if the endpoint then answers an error.
     failure_until: Mutex<Option<Time>>,
+    /// The deepest nesting level any sub-request of this invocation reached (ledger
+    /// #3792), absolute; `0` before the first. The kernel subtracts the invocation's own
+    /// depth to get the depth its result consumed, which is stored with the cache entry.
+    reach: AtomicU32,
 }
 
 /// What a resolution depended on before it FAILED: the meet of its sub-requests'
@@ -580,6 +585,14 @@ pub struct Dependencies {
     /// becoming uncacheable at once. `None` for every other failure, which is never
     /// cached.
     pub failure_until: Option<Time>,
+    /// The deepest nesting level the resolution reached (ledger #3792), absolute: its
+    /// own depth, the depth of every sub-request below it, and for a sub-request served
+    /// from the cache, that depth plus the entry's recorded depth consumed. Written by the
+    /// kernel on success as well as on failure, so the issuing invocation knows how deep
+    /// what it read went. `0` when the issuer cannot say: the issuing invocation then
+    /// counts the sub-request's own depth, which is all a non-kernel issuer that restarts
+    /// the count ([`Issuer::issue_at_depth`]) can be charged for.
+    pub(crate) reach: u32,
 }
 
 impl Dependencies {
@@ -590,6 +603,7 @@ impl Dependencies {
             expiry: Expiry::Never,
             threads: BTreeSet::new(),
             failure_until: None,
+            reach: 0,
         }
     }
 }
@@ -676,12 +690,19 @@ impl Recorded {
     ///   consulted, not the name that was requested (a move conflicts on the board's
     ///   cells, not on the move's own IRI), so a thread on `requested` is one no write
     ///   would ever cut.
+    ///
+    /// Whatever the outcome, the sub-request issued at depth `at` reached at least `at`,
+    /// and as deep as the kernel says it went (`carried.reach`, ledger #3792): the depth
+    /// this invocation's result consumes is the greatest of them.
     fn record<B>(
         &self,
         requested: &Iri,
         result: &Result<Representation<B>>,
         carried: Dependencies,
+        at: u32,
     ) {
+        self.reach
+            .fetch_max(carried.reach.max(at), Ordering::Relaxed);
         match result {
             Ok(representation) => {
                 let mut deps = self.deps.lock().expect("deps lock");
@@ -1600,7 +1621,8 @@ impl<'a> Invocation<'a> {
         // `Recorded::record`): the endpoint may catch it and return a cacheable
         // fallback, and that fallback must hang from something — from the name it
         // asked for AND from what the failure itself read (`carried`).
-        self.recorded.record(&requested, &result, carried);
+        self.recorded
+            .record(&requested, &result, carried, self.depth + 1);
         result
     }
 
@@ -1641,7 +1663,8 @@ impl<'a> Invocation<'a> {
                 run,
             )
             .await;
-        self.recorded.record(&requested, &result, carried);
+        self.recorded
+            .record(&requested, &result, carried, self.depth + 1);
         result
     }
 
@@ -2053,7 +2076,8 @@ impl<'a> Invocation<'a> {
                 .expect("fan-out slot")
                 .take()
                 .expect("spawned fan-out task completed");
-            self.recorded.record(requested, &result, carried);
+            self.recorded
+                .record(requested, &result, carried, self.depth + 1);
             results.push(result);
         }
         results
@@ -2242,6 +2266,12 @@ impl<'a> Invocation<'a> {
         self.recorded.deps.lock().expect("deps lock").expiry
     }
 
+    /// The deepest nesting level this invocation and everything it issued reached
+    /// (ledger #3792), absolute: at least its own [`depth`](Self::depth).
+    pub(crate) fn reach(&self) -> u32 {
+        self.recorded.reach.load(Ordering::Relaxed).max(self.depth)
+    }
+
     /// The sub-requests that made this invocation's dependencies `Always`, by the
     /// name the endpoint requested — drained, like the trace notes, by the kernel
     /// once the invocation completes and only when the result was not cached.
@@ -2296,6 +2326,7 @@ impl<'a> Invocation<'a> {
             expiry: self.dependency_expiry(),
             threads,
             failure_until: None,
+            reach: self.reach(),
         }
     }
 

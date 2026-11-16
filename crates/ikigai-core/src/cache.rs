@@ -179,6 +179,51 @@ impl CacheEntry {
 /// What the cache actually holds for one key: [`CacheEntry`]'s fields over a body that
 /// can be read again (ledger #2237). Private, so the public entry keeps its 0.1.112
 /// shape (ledger #2261).
+///
+/// ★ **And the depth its computation consumed** (`consumed`, δ; ledger #3792): the
+/// deepest nesting level any part of the computation reached, minus the depth it started
+/// at, a sub-request served from the cache counting its own entry's δ. The kernel serves
+/// the entry to a request at depth `n` only when `n + δ ≤ max_depth`
+/// ([`Kernel::with_max_depth`](crate::Kernel::with_max_depth)): anywhere deeper, a fresh
+/// evaluation would be refused somewhere below with
+/// [`Error::DepthExceeded`](crate::Error::DepthExceeded), so the entry is a miss there
+/// and the request evaluates afresh. With the entry, not in the [`CacheKey`], so one entry
+/// serves every depth it fits. The public [`CacheEntry`] does not carry it (adding a field
+/// would break its 0.1.112 shape), and an entry stored through the public
+/// [`store`](ReprCache::store) records δ = 0, the claim that it issued nothing.
+///
+/// ```
+/// use std::sync::Arc;
+/// use futures::executor::block_on;
+/// use ikigai_core::{
+///     AsyncFnEndpoint, Capability, EndpointSpace, Error, Exact, Iri, Kernel, ReprType,
+///     Representation, Request, Verb,
+/// };
+///
+/// let iri = |s: &str| Iri::parse(s).unwrap();
+/// // `urn:two` sources `urn:one` sources `urn:leaf`: δ = 2. `urn:pad` issues `urn:two` at
+/// // depth 1, where 1 + 2 = 3 > the budget of 2.
+/// let relay = |next: &'static str| {
+///     AsyncFnEndpoint::new("relay", move |inv| {
+///         Box::pin(async move { Ok(inv.source(&Iri::parse(next).unwrap()).await?.cacheable()) })
+///     })
+/// };
+/// let leaf = AsyncFnEndpoint::new("leaf", |_| {
+///     Box::pin(async { Ok(Representation::new(ReprType::new("text/plain"), b"x".to_vec()).cacheable()) })
+/// });
+/// let kernel = Kernel::new(Arc::new(
+///     EndpointSpace::new()
+///         .bind(Exact::new("urn:pad"), relay("urn:two"))
+///         .bind(Exact::new("urn:two"), relay("urn:one"))
+///         .bind(Exact::new("urn:one"), relay("urn:leaf"))
+///         .bind(Exact::new("urn:leaf"), leaf),
+/// ))
+/// .with_max_depth(2);
+/// let source = |target: &str| block_on(kernel.issue(Request::new(Verb::Source, iri(target)), &Capability::root()));
+/// assert!(source("urn:two").is_ok()); // computed at depth 0 and cached, δ = 2
+/// // Not served at depth 1: the fresh evaluation's refusal comes back instead.
+/// assert!(matches!(source("urn:pad"), Err(Error::DepthExceeded { depth: 3, .. })));
+/// ```
 #[derive(Debug)]
 struct Slot {
     // The incoming provenance is a logical part of the kernel's cache key. Keep
@@ -192,6 +237,8 @@ struct Slot {
     hits: u64,
     stored_tick: u64,
     last_used_tick: u64,
+    /// The depth its computation consumed, δ (above).
+    consumed: u32,
 }
 
 /// One failure the cache holds until a stated time (ledger #2657).
@@ -203,6 +250,9 @@ struct FailedSlot {
     until: Time,
     threads: BTreeSet<Thread>,
     edges: Vec<(Thread, u64)>,
+    /// The depth the failed computation consumed, δ, as for an entry ([`Slot`]): a
+    /// failure is served only where a fresh evaluation would get as far.
+    consumed: u32,
 }
 
 /// A failure served from the cache (ledger #2657): the error as the endpoint answered
@@ -213,6 +263,7 @@ pub(crate) struct CachedFailure {
     pub(crate) error: Error,
     pub(crate) until: Time,
     pub(crate) threads: BTreeSet<Thread>,
+    pub(crate) consumed: u32,
 }
 
 /// One cached failure for the readouts (`urn:kernel:cache`, `urn:kernel:uncached`):
@@ -266,8 +317,8 @@ impl Answer {
 /// What the kernel's lookup found (ledger #2534): an answer to serve, a stale answer to
 /// offer the endpoint for revalidation, or nothing.
 enum Lookup {
-    /// A live entry, answered in the face asked for.
-    Hit(Answer),
+    /// A live entry, answered in the face asked for, with the depth it consumed.
+    Hit((Answer, u32)),
     /// An entry expired by time only, carrying an origin validator: kept, and offered.
     /// Shared: the kernel's resolution path and its `Revalidate` wrapper each hold one
     /// pointer to it.
@@ -288,6 +339,10 @@ pub(crate) struct Offer {
     stored: Mutex<Representation<Body>>,
     /// Which entry it was ([`ReprCache::discard`] forgets only that one).
     stored_tick: u64,
+    /// The depth the stored answer's computation consumed, δ ([`Slot`]): an answer of
+    /// "still valid" serves that computation's body, so its refreshed entry keeps at least
+    /// this δ, whatever the revalidating invocation itself issued.
+    pub(crate) consumed: u32,
 }
 
 impl Offer {
@@ -1208,8 +1263,8 @@ impl ReprCache {
         buffer: bool,
         incoming: Option<&Provenance>,
     ) -> Option<Answer> {
-        match self.lookup(key, now, buffer, incoming, false) {
-            Lookup::Hit(answer) => Some(answer),
+        match self.lookup(key, now, buffer, incoming, false, u32::MAX) {
+            Lookup::Hit((answer, _)) => Some(answer),
             Lookup::Offer(_) | Lookup::Miss => None,
         }
     }
@@ -1220,6 +1275,11 @@ impl ReprCache {
     /// ([`store_outcome`](Self::store_outcome) of the offered body under the new
     /// deadline) or [`discard`](Self::discard)s it. A cut entry is never offered: it is
     /// evicted, as every stale entry was before.
+    ///
+    /// `room` is the nesting budget left at the lookup's depth (`max_depth - depth`): an
+    /// entry whose computation consumed more ([`Slot`]'s δ) is neither served nor offered
+    /// nor evicted, so the request evaluates afresh (ledger #3792). A hit answers with the
+    /// entry's δ.
     pub(crate) fn get_or_offer(
         &self,
         key: &CacheKey,
@@ -1227,8 +1287,9 @@ impl ReprCache {
         buffer: bool,
         incoming: Option<&Provenance>,
         offer: &mut Option<Arc<Offer>>,
-    ) -> Option<Answer> {
-        match self.lookup(key, now, buffer, incoming, true) {
+        room: u32,
+    ) -> Option<(Answer, u32)> {
+        match self.lookup(key, now, buffer, incoming, true, room) {
             Lookup::Hit(answer) => Some(answer),
             Lookup::Offer(stale) => {
                 *offer = Some(stale);
@@ -1245,6 +1306,7 @@ impl ReprCache {
         buffer: bool,
         incoming: Option<&Provenance>,
         offer: bool,
+        room: u32,
     ) -> Lookup {
         let served = self.serve_or_offer(
             key,
@@ -1252,20 +1314,24 @@ impl ReprCache {
             |entry| {
                 // Effective expiry/threads already include the upstream. They cannot
                 // be reused under a different upstream, even when the bytes match.
-                if entry.incoming.as_ref() != incoming {
+                // Nor deeper than the budget left fits what the computation consumed.
+                if entry.incoming.as_ref() != incoming || entry.consumed > room {
                     return None;
                 }
                 let stored = &entry.representation;
                 if buffer {
                     if let Some(copy) = stored.copied() {
-                        return Some(Answer::Buffer(copy));
+                        return Some((Answer::Buffer(copy), entry.consumed));
                     }
                 }
-                stored.share().map(Answer::Body)
+                stored
+                    .share()
+                    .map(|body| (Answer::Body(body), entry.consumed))
             },
             |entry| {
-                // An offer is an answer too: only under the upstream it was stored under.
-                if !offer || entry.incoming.as_ref() != incoming {
+                // An offer is an answer too: only under the upstream it was stored under,
+                // and only where it fits.
+                if !offer || entry.incoming.as_ref() != incoming || entry.consumed > room {
                     return None;
                 }
                 let stored = entry.representation.share()?;
@@ -1277,6 +1343,7 @@ impl ReprCache {
                     }),
                     stored: Mutex::new(stored),
                     stored_tick: entry.stored_tick,
+                    consumed: entry.consumed,
                 }))
             },
         );
@@ -1403,7 +1470,7 @@ impl ReprCache {
         taken: CutSnapshot,
         cost_millis: Option<u64>,
     ) -> bool {
-        self.store_outcome(key, target, &representation, taken, cost_millis, None)
+        self.store_outcome(key, target, &representation, taken, cost_millis, None, 0)
             .is_ok()
     }
 
@@ -1416,6 +1483,9 @@ impl ReprCache {
     /// (ledger #2237) that handle is a reference count, not a copy; before them an answer
     /// over the byte budget was cloned in full and then thrown away, so it cost twice its
     /// size (ledger #1734, measured 832 MB against 509 MB on a store dump).
+    ///
+    /// `consumed` is the depth the computation consumed, δ ([`Slot`], ledger #3792).
+    #[allow(clippy::too_many_arguments)] // the key, the answer, its facts, its race check
     pub(crate) fn store_outcome(
         &self,
         key: CacheKey,
@@ -1424,6 +1494,7 @@ impl ReprCache {
         taken: CutSnapshot,
         cost_millis: Option<u64>,
         incoming: Option<&Provenance>,
+        consumed: u32,
     ) -> Result<(), Declined> {
         // A one-shot body cannot be read again, so there is nothing to keep. The kernel
         // never offers one (it names the cause itself, `one-shot body`); this is the
@@ -1491,6 +1562,7 @@ impl ReprCache {
             hits: 0,
             stored_tick: state.tick,
             last_used_tick: state.tick,
+            consumed,
         };
         let bytes = entry.bytes();
         // An answer supersedes a failure cached under the same key (ledger #2657).
@@ -1519,6 +1591,7 @@ impl ReprCache {
         threads: &BTreeSet<Thread>,
         taken: CutSnapshot,
         incoming: Option<&Provenance>,
+        consumed: u32,
     ) -> Result<(), Declined> {
         let mut state = self.state.lock().expect("cache lock");
         if state.cut_since(threads, taken) {
@@ -1548,6 +1621,7 @@ impl ReprCache {
                 until,
                 threads: threads.clone(),
                 edges,
+                consumed,
             },
         );
         Ok(())
@@ -1561,21 +1635,26 @@ impl ReprCache {
 
     /// The failure cached under `key`, if it is still to be served as of `now` (and was
     /// stored under the same upstream); a stale one is forgotten. `None` on a
-    /// clock-free kernel, which can never tell a deadline has not passed.
+    /// clock-free kernel, which can never tell a deadline has not passed. Nor where its
+    /// computation's δ does not fit the `room` left (ledger #3792), as for an entry.
     pub(crate) fn get_failure(
         &self,
         key: &CacheKey,
         now: Option<Time>,
         incoming: Option<&Provenance>,
+        room: u32,
     ) -> Option<CachedFailure> {
         let mut state = self.state.lock().expect("cache lock");
         let slot = state.failures.get(key)?;
         match state.failure_state(slot, now) {
-            EntryState::Live if slot.incoming.as_ref() == incoming => Some(CachedFailure {
-                error: slot.error.clone(),
-                until: slot.until,
-                threads: slot.threads.clone(),
-            }),
+            EntryState::Live if slot.incoming.as_ref() == incoming && slot.consumed <= room => {
+                Some(CachedFailure {
+                    error: slot.error.clone(),
+                    until: slot.until,
+                    threads: slot.threads.clone(),
+                    consumed: slot.consumed,
+                })
+            }
             EntryState::Live => None,
             _ => {
                 state.failures.remove(key);
@@ -2014,6 +2093,7 @@ mod tests {
                 cache.snapshot(),
                 None,
                 Some(&up),
+                0,
             )
             .unwrap();
         for buffer in [false, true] {
@@ -2519,7 +2599,7 @@ mod tests {
         assert!(cache.store(key(1), "a".into(), validated(), cache.snapshot(), None));
         let mut offer = None;
         assert!(cache
-            .get_or_offer(&key(1), later, true, None, &mut offer)
+            .get_or_offer(&key(1), later, true, None, &mut offer, u32::MAX)
             .is_none());
         assert!(offer.is_some());
         assert_eq!(cache.evictions(), 0, "offering retains the entry");
@@ -2528,7 +2608,7 @@ mod tests {
         assert_eq!(cache.evictions(), 1);
         assert!(cache.store(key(1), "a".into(), validated(), cache.snapshot(), None));
         assert!(cache
-            .get_or_offer(&key(1), later, true, None, &mut offer)
+            .get_or_offer(&key(1), later, true, None, &mut offer, u32::MAX)
             .is_none());
         assert!(cache.store(key(1), "a".into(), repr(8), cache.snapshot(), None));
         cache.discard(&key(1), &offer);

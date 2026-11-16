@@ -2507,6 +2507,7 @@ impl Kernel {
         trace: &Option<TraceScope>,
         scope: &Scope,
         depth: u32,
+        reach: &mut u32,
     ) -> Result<Representation> {
         let renderer = self
             .meta
@@ -2558,6 +2559,9 @@ impl Kernel {
             // issue) is a cycle the compiler must size via indirection, even though at
             // runtime these are plain `Source` transreptions, never `Meta`. A step runs
             // one level below the Meta resolution, in its chain and its trace.
+            // …and as deep as it went, for the depth the description consumes (ledger
+            // #3792): a transreptor may issue sub-requests of its own.
+            let mut step_deps = Dependencies::none();
             current = Box::pin(self.issue_inner(
                 request,
                 capability,
@@ -2566,10 +2570,12 @@ impl Kernel {
                     trace: trace.clone(),
                     scope: scope.clone(),
                     depth: depth + 1,
+                    failed: Some(&mut step_deps),
                     ..IssueCtx::top()
                 },
             ))
             .await?;
+            *reach = (*reach).max(step_deps.reach).max(depth + 1);
         }
         Ok(current.cacheable())
     }
@@ -3037,16 +3043,22 @@ impl Kernel {
     #[allow(clippy::type_complexity)]
     fn served_from_cache(
         &self,
-        (key, buffer, incoming, offer, run): (
+        (key, buffer, incoming, offer, run, depth): (
             CacheKey,
             bool,
             Option<&Provenance>,
             &mut Option<Arc<Offer>>,
             &crate::run::IssueContext,
+            u32,
         ),
         failed: Option<&mut Dependencies>,
         hit: Hit<'_>,
     ) -> Option<Result<Answer>> {
+        // ★ A HIT ONLY WHERE IT FITS (ledger #3792): the budget left at this depth must
+        // cover the depth the stored computation consumed, or a fresh evaluation would be
+        // refused below and the entry is a miss here. Checked before this function is
+        // reached: `depth <= max_depth`.
+        let room = self.max_depth.saturating_sub(depth);
         let Hit {
             trace,
             request,
@@ -3058,7 +3070,7 @@ impl Kernel {
             ..
         } = hit;
         if self.cache.has_failures() {
-            if let Some(cached) = self.cache.get_failure(&key, started, incoming) {
+            if let Some(cached) = self.cache.get_failure(&key, started, incoming, room) {
                 if trace.is_some() {
                     let mut notes = vec![
                         (FAILED_NOTE.to_string(), cached.error.kind().to_string()),
@@ -3078,14 +3090,20 @@ impl Kernel {
                         expiry: Expiry::At(cached.until),
                         threads: cached.threads,
                         failure_until: Some(cached.until),
+                        reach: depth + cached.consumed,
                     };
                 }
                 return Some(Err(cached.error));
             }
         }
-        let cached = self
+        let (cached, consumed) = self
             .cache
-            .get_or_offer(&key, started, buffer, incoming, offer)?;
+            .get_or_offer(&key, started, buffer, incoming, offer, room)?;
+        // A hit at depth `d` for an entry that consumed δ reaches `d + δ`: what the
+        // issuing invocation's own δ counts (ledger #3792).
+        if let Some(failed) = failed {
+            failed.reach = depth + consumed;
+        }
         // A stored `Replay` is collected by a buffer caller under the run's pool,
         // admitted here only for such a hit: a buffer hit admits nothing.
         let cached = cached.budgeted(|| {
@@ -3132,6 +3150,7 @@ impl Kernel {
                 &depended,
                 taken,
                 incoming,
+                depended.reach.saturating_sub(invocation.depth()),
             );
         }
         if let Some(until) = depended.failure_until {
@@ -3156,10 +3175,12 @@ impl Kernel {
         depended: &Dependencies,
         taken: crate::cache::CutSnapshot,
         incoming: Option<&Provenance>,
+        consumed: u32,
     ) -> Option<Time> {
         let stated = stated?;
-        // A denial has no thread to cut; a miss already hangs one; a depth refusal must
-        // never be served to a shallower request (B.7), and the key does not carry depth.
+        // A denial has no thread to cut; a miss already hangs one; a depth refusal is
+        // never cached (B.7): it is answered for the depth it was refused at, and a
+        // shallower request would not be refused.
         if matches!(
             error,
             Error::Denied(_)
@@ -3193,6 +3214,7 @@ impl Kernel {
                 &threads,
                 taken,
                 incoming,
+                consumed,
             )
             .ok()?;
         Some(until)
@@ -4198,6 +4220,7 @@ impl Kernel {
         levels: &'a LevelPath,
         depth: u32,
         started: Option<Time>,
+        reach: &'a mut u32,
     ) -> MetaAnswering<'a> {
         Box::pin(async move {
             // Selection-driven Meta: the renderer emits the endpoint's description in its
@@ -4232,6 +4255,7 @@ impl Kernel {
                         trace,
                         &scope.descend(levels.clone()),
                         depth,
+                        reach,
                     )
                     .await?
                 }
@@ -4376,6 +4400,8 @@ impl Kernel {
                 taken,
                 self.elapsed_since(started),
                 incoming.as_ref(),
+                // A kernel operation issues no sub-request: it consumes no depth.
+                0,
             ) {
                 // A chain-keyed entry names its chain in the readout, as a scoped
                 // resolution's does; every other kernel operation is keyed with
@@ -4838,7 +4864,7 @@ impl Kernel {
                 defaulted: &defaulted,
                 collected: &collected,
             };
-            let lookup = (key, buffer, incoming.as_ref(), &mut offer, &run);
+            let lookup = (key, buffer, incoming.as_ref(), &mut offer, &run, depth);
             if let Some(served) = self.served_from_cache(lookup, failed.as_deref_mut(), hit) {
                 return served;
             }
@@ -4854,6 +4880,9 @@ impl Kernel {
         // The run's byte pool as admitted for this request, attached to a streamed answer
         // so a buffer caller collects it under the run's budget (ledger #2238).
         let mut pool: Option<crate::MemoryBudget> = None;
+        // The deepest level this computation reached, absolute (ledger #3792): its own
+        // depth, raised by every sub-request it issued, a hit counting its entry's δ.
+        let mut reach = depth;
         let representation = if request.verb == Verb::Meta {
             self.meta_answering(
                 &resolved.endpoint,
@@ -4865,6 +4894,7 @@ impl Kernel {
                 levels,
                 depth,
                 started,
+                &mut reach,
             )
             .await?
         } else {
@@ -4910,7 +4940,10 @@ impl Kernel {
             let endpoint =
                 settle_references(&resolved.endpoint, &request, references, offer.as_ref());
             let representation = match endpoint.invoke_body(&invocation).await {
-                Ok(representation) => representation,
+                Ok(representation) => {
+                    reach = invocation.reach();
+                    representation
+                }
                 // ★ A FAILURE CARRIES ITS DEPENDENCIES (ledger #611). What this
                 // invocation read before it failed is handed back beside the error, so
                 // an issuing invocation that catches a `NotFound` and caches a fallback
@@ -5089,6 +5122,10 @@ impl Kernel {
         // the verbs that store (`is_cacheable`) and the verbs that cut
         // (`is_mutating`) are disjoint, so moving the store ahead of the cut below
         // changes no request's outcome.
+        // ★ THE DEPTH IT CONSUMED, stored with the entry (ledger #3792): served later
+        // only where `depth + consumed <= max_depth`. An answer of "still valid" to an
+        // offer serves the offered computation's body, so it keeps that one's δ too.
+        let consumed = (reach - depth).max(offer.as_ref().map_or(0, |offer| offer.consumed));
         if cacheable_verb {
             match representation.expiry {
                 Expiry::Always => {
@@ -5130,6 +5167,7 @@ impl Kernel {
                     taken,
                     self.elapsed_since(started),
                     incoming.as_ref(),
+                    consumed,
                 ) {
                     // Remember what the fingerprint meant, for the readout. Off the
                     // empty-chain path entirely: a plain `issue` never takes this lock.
@@ -5150,6 +5188,11 @@ impl Kernel {
                     why,
                 );
             }
+        }
+
+        // How deep this computation went, for the invocation that issued it (ledger #3792).
+        if let Some(failed) = failed {
+            failed.reach = reach;
         }
 
         // Computed (not served from cache) — record after the invocation completes.

@@ -129,10 +129,12 @@ pub enum Error {
     /// have run at (a host's own request is 0; each sub-request is one deeper);
     /// `target` is the canonical name it asked for. Never cached, not even by an
     /// endpoint that propagates it after stating a failure expiry
-    /// (`Invocation::failure_expires_at`): the cache key does not carry depth, so a
-    /// cached refusal could reach a shallower request. And a composite that swallows this error
-    /// and returns a cacheable fallback is forced uncacheable (see
-    /// `Invocation::issue` on failed sub-requests).
+    /// (`Invocation::failure_expires_at`): a refusal holds for the depth it was refused
+    /// at, so a cached one could reach a shallower request. And a composite that swallows
+    /// this error and returns a cacheable fallback is forced uncacheable (see
+    /// `Invocation::issue` on failed sub-requests). The converse holds too: a cached
+    /// answer is served only at a depth where its computation still fits the budget, so a
+    /// request deep enough to be refused fresh is refused, not answered from the cache.
     DepthExceeded {
         /// The depth the refused sub-request would have run at.
         depth: u32,
