@@ -123,6 +123,7 @@ mod dynamic;
 mod endpoint;
 mod error;
 mod explain;
+mod exposure;
 mod forward;
 mod grammar;
 pub(crate) mod hashing;
@@ -192,6 +193,7 @@ pub use endpoint::{
     Issuer, Spawner,
 };
 pub use error::{Error, FailureClass, Result};
+pub use exposure::{check_exposure, ExposedDoor, Exposes, ExposureReport};
 pub use forward::Forward;
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
