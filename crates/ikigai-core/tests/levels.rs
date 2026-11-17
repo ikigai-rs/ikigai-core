@@ -384,6 +384,66 @@ fn a_sub_request_falls_outward_through_the_enclosing_levels_to_the_root() {
 }
 
 #[test]
+fn the_root_stays_whole_so_a_later_module_reaches_an_earlier_one_through_its_guard() {
+    // A deliberate difference from the paper (R7.11): the resolved scope ends with the
+    // WHOLE root, so an endpoint found in a later member of the root's `Fallback` still
+    // reaches the members AHEAD of it. The paper drops the levels ahead of the one
+    // found. The root is a namespace of sibling modules, each behind its own guard, so
+    // what the later module reaches is the earlier one's PUBLIC surface: its private
+    // names stay private, and `b`'s own binding still wins for `b`'s sub-requests.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let kernel = Kernel::new(Arc::new(Fallback::new(vec![
+        module(
+            "urn:a:",
+            "urn:example:level:a",
+            EndpointSpace::new()
+                .bind(Exact::new("urn:a:door"), constant("a", b"a's door"))
+                .bind(
+                    Exact::new("urn:a-internal:secret"),
+                    constant("ap", b"a's secret"),
+                )
+                .bind(Exact::new("urn:helper"), constant("ah", b"a's helper")),
+        ),
+        module(
+            "urn:b:",
+            "urn:example:level:b",
+            EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:b:public"),
+                    reader(&seen, "b:public", "urn:a:door"),
+                )
+                .bind(
+                    Exact::new("urn:b:private"),
+                    reader(&seen, "b:private", "urn:a-internal:secret"),
+                )
+                .bind(
+                    Exact::new("urn:b:helper"),
+                    reader(&seen, "b:helper", "urn:helper"),
+                )
+                .bind(Exact::new("urn:helper"), constant("bh", b"b's helper")),
+        ),
+    ])));
+
+    // b is found SECOND at the root, and its sub-request is answered by a, the first.
+    assert_eq!(get(&kernel, "urn:b:public"), "a's door");
+    // Through a's guard: a name outside a's prefix is a's own, and b cannot reach it.
+    assert_eq!(
+        get(&kernel, "urn:b:private"),
+        "unresolved urn:a-internal:secret"
+    );
+    // b's own level is consulted before the root, so b's binding wins for b.
+    assert_eq!(get(&kernel, "urn:b:helper"), "b's helper");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            "b:public: @urn:example:level:b root",
+            "b:private: @urn:example:level:b root",
+            "b:helper: @urn:example:level:b root",
+        ]
+    );
+}
+
+#[test]
 fn an_injected_corridor_still_stands_in_for_a_name_inside_a_level() {
     // The host's corridors are consulted BEFORE the level stack: host-chosen context
     // (a game's stored squares, a pinned time) stands in for any name, including a
