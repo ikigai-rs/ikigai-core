@@ -111,7 +111,7 @@ tracks it.
 | Door (φ, F, Ω) | Def. 1 | a `(Grammar, Endpoint)` binding in an `EndpointSpace`: φ is `Grammar::match_iri`, which also returns the capture (the paper's "division into captured parts"); F is the set it accepts; Ω is `Endpoint::invoke`. Shipped grammars: `Exact` (a singleton family) and `UriTemplate` (RFC 6570 level 1, non-empty captures, adjacent variables refused at construction — so the capture function is a function of the identifier, as Thm. 4(a)(ii) and B.2 require). Regularity is a property of the shipped grammars, not of the trait: any decidable `Grammar` may be bound. | realized | pin: `grammar::tests::exact_matches_only_itself` (crates/ikigai-core/src/grammar.rs); pin: `grammar::tests::template_captures_trailing_var` (crates/ikigai-core/src/grammar.rs); pin: `grammar::tests::expand_is_inverse_of_match` (crates/ikigai-core/src/grammar.rs); pin: `grammar::tests::rejects_ambiguous_and_malformed` (crates/ikigai-core/src/grammar.rs) |
 | Corridor, first-match; effective families (Def. 3, Prop. 1) | §2.2 | `EndpointSpace::resolve`: bindings in declaration order, the first grammar that matches wins. The partition of Prop. 1 is what `entries()` enumerates, in the same order. A shadowed binding is invisible to selection rather than misattributed. | realized | pin: `space::tests::endpoint_space_enumerates_its_bindings` (crates/ikigai-core/src/space.rs); pin: `resolution::grammar_bindings_flow_to_endpoint` (crates/ikigai-core/tests/resolution.rs); pin: `resolution::unresolved_target_misses` (crates/ikigai-core/tests/resolution.rs); pin: `select::tests::a_shadowed_probe_is_discarded_not_misattributed` (crates/ikigai-core/src/select.rs) |
 | Context chain Γ, innermost first | §3 | Two things, and the difference is §1.1. **Per request:** `Scope` — ⟨injected corridors innermost first, level stack, root⟩, carried on the `Invocation` into every sub-request; the level stack is empty unless the endpoint that issued the request was found inside a `Level` (R7.11). **Static:** the root's tree, of which `Fallback` is the ordered first-hit member list — one corridor, except where a `Level` marks the scope an endpoint found below it runs in (since [#563](http://localhost:1060/l/default/item/563)). | realized, deviation §1.1 narrowed | pin: `levels::a_sub_request_falls_outward_through_the_enclosing_levels_to_the_root` (crates/ikigai-core/tests/levels.rs); pin: `scope::an_injected_corridor_shadows_a_root_door_for_the_request_and_for_its_sub_requests` (crates/ikigai-core/tests/scope.rs); pin: `resolution::fallback_tries_in_order` (crates/ikigai-core/tests/resolution.rs); pin: `space::tests::fallback_concatenates_enumerable_members_in_order` (crates/ikigai-core/src/space.rs); doctest: `Kernel::issue_in` |
-| Level — an endpoint runs in the scope at the level where it was found | §3, B.2 | `Level::new(name, inner)`: opt-in and always named. A hit through one reports its **found path** (`Resolved::levels`, innermost first); the kernel hands the endpoint its **resolved scope** — the host's corridors, then that path (each level's own space, without the guard it was entered through), then the root — and its sub-requests resolve there. `Mount(prefix, Level(…))` guards the way in and not the module's own sub-requests: module-relative names, private internals (Cor. 2); privacy is admission only, and a door that overlaps the exposed prefix without being declared public is reported by `check_exposure` (#3796). Since [#563](http://localhost:1060/l/default/item/563); R7.11. **Deviation, deliberate:** the root stays whole at the end of the resolved scope, so a later module still reaches an earlier one through its guard (§1.1). | realized, deviation §1.1 | pin: `levels::an_endpoint_in_a_level_reaches_its_siblings_by_short_name_and_they_stay_private` (crates/ikigai-core/tests/levels.rs); pin: `levels::the_root_stays_whole_so_a_later_module_reaches_an_earlier_one_through_its_guard` (crates/ikigai-core/tests/levels.rs); pin: `levels::an_injected_corridor_still_stands_in_for_a_name_inside_a_level` (crates/ikigai-core/tests/levels.rs); pin: `exposure::the_check_flags_the_internal_door_under_the_prefix_and_not_the_one_outside_it` (crates/ikigai-core/tests/exposure.rs); pin: `levels::a_kernel_without_a_level_is_byte_identical_in_answers_cache_keys_and_traces` (crates/ikigai-core/tests/levels.rs); doctest: `Level`; doctest: `Resolved::levels` |
+| Level — an endpoint runs in the scope at the level where it was found | §3, B.2 | `Level::new(name, inner)`: opt-in and always named. A hit through one reports its **found path** (`Resolved::levels`, innermost first); the kernel hands the endpoint its **resolved scope** — the host's corridors, then that path (each level's own space, without the guard it was entered through), then the root — and its sub-requests resolve there. `Mount(prefix, Level(…))` guards the way in and not the module's own sub-requests: module-relative names, private internals (Cor. 2); privacy is admission only, and a door that overlaps the exposed prefix without being declared public is reported by `check_exposure` ([#3796](http://localhost:1060/l/default/item/3796)). Since [#563](http://localhost:1060/l/default/item/563); R7.11. **Deviation, deliberate:** the root stays whole at the end of the resolved scope, so a later module still reaches an earlier one through its guard (§1.1). | realized, deviation §1.1 | pin: `levels::an_endpoint_in_a_level_reaches_its_siblings_by_short_name_and_they_stay_private` (crates/ikigai-core/tests/levels.rs); pin: `levels::the_root_stays_whole_so_a_later_module_reaches_an_earlier_one_through_its_guard` (crates/ikigai-core/tests/levels.rs); pin: `levels::an_injected_corridor_still_stands_in_for_a_name_inside_a_level` (crates/ikigai-core/tests/levels.rs); pin: `exposure::the_check_flags_the_internal_door_under_the_prefix_and_not_the_one_outside_it` (crates/ikigai-core/tests/exposure.rs); pin: `levels::a_kernel_without_a_level_is_byte_identical_in_answers_cache_keys_and_traces` (crates/ikigai-core/tests/levels.rs); doctest: `Level`; doctest: `Resolved::levels` |
 | Import (union) | Def. 4 | `Mount` — an import guarded by a prefix: the inner space's families, restricted to identifiers under the prefix, added to what resolution reaches at the mount's position. No rewrite; the inner patterns are already full identifiers. | realized | pin: `resolution::mount_gates_by_prefix` (crates/ikigai-core/tests/resolution.rs) |
 | Mapper (preimage) | Def. 6 | `Rewrite` (a closure τ) and `Alias` (a table of exact and prefix rules, with counters). Both resolve τ(i) **once** in the enclosed space and **report** the rewrite on `Resolved::canonical`, which the kernel adopts before the cache key, the capability floor and the write-cut. **No outward fallback with τ(i)** — §1.2 and §5. | realized, deviation §1.2 | pin: `resolution::rewrite_remaps_target_before_resolution` (crates/ikigai-core/tests/resolution.rs); doctest: `Resolved::canonical`; pin: `alias::an_alias_can_never_launder_authority` (crates/ikigai-core/tests/alias.rs); pin: `alias::every_core_overlay_forwards_a_reported_canonical` (crates/ikigai-core/tests/alias.rs) |
 | Transparent overlay | Def. 5 | the interception family: `Resolution::map_endpoint` decorates the endpoint of an inner resolution and forwards `entries()`, so the overlay's family is exactly the union of what it encloses — the paper's transparent family, by enumeration. Every governor in `ikigai-throttle` is this shape; core's own overlays forward a reported canonical through it. | realized | doctest: `Resolution::map_endpoint`; pin: `space::tests::a_governor_stacks_on_an_already_erased_space` (crates/ikigai-core/src/space.rs) |
@@ -196,25 +196,6 @@ seals is never answered inside a level, and one a level seals only inside that l
 push can never reach a door of a host-sealed family, and the walk counts a sealed family's
 doors only where its owner is.
 
-**A module's privacy is admission, and its hazard is checked statically**
-([#3796](http://localhost:1060/l/default/item/3796); decided 2026-11-17). Nothing marks a door
-public or private: `Mount(prefix, Level(name, inner))` keeps the module's other names private
-only because the guard never admits them, so a door inside the level whose pattern matches an
-admitted name SERVES it, whatever its author meant (`urn:mod:cache:{key}` under `urn:mod:` is
-public). `check_exposure(&Topology, &Exposes)` reports every door inside a level whose pattern
-overlaps the prefix the level is exposed under (every mount above the door, narrowed to one) and
-which the host has not declared public. Exact, prefix and template doors are decided (a
-template by its literal head, over-approximated when the prefix extends it); a custom grammar,
-an opaque space, and a door behind a rewrite or an alias inside the level are reported UNDECIDED
-by name, never clean. It reports and never refuses a binding. The declaration is passed to the
-check, as the reachability walk is told the host's seals; carrying it in the graph (`ik:exposes`
-on the level) adds a vocabulary term and is not done here.
-
-    pin: `exposure::an_internal_helper_under_the_exposed_prefix_is_served_from_outside` (crates/ikigai-core/tests/exposure.rs)
-    pin: `exposure::the_check_flags_the_internal_door_under_the_prefix_and_not_the_one_outside_it` (crates/ikigai-core/tests/exposure.rs)
-    pin: `exposure::an_opaque_grammar_is_reported_undecided_by_name_never_clean` (crates/ikigai-core/tests/exposure.rs)
-    doctest: `check_exposure`
-
 Pinned by the sub-request half of the shadowing test, by the reborrow test, by the byte-for-byte
 transcript, and by the check with and without pushes:
 
@@ -226,6 +207,26 @@ transcript, and by the check with and without pushes:
     pin: `topology::a_limiter_injected_as_a_host_corridor_still_walls_the_push` (crates/ikigai-core/tests/topology.rs)
     pin: `topology::the_push_goes_outward_through_the_enclosing_levels_and_is_bounded_by_their_nesting` (crates/ikigai-core/tests/topology.rs)
     pin: `topology::a_host_sealed_family_has_exactly_the_reach_it_had_without_levels` (crates/ikigai-core/tests/topology.rs)
+
+**A module's privacy is admission, and its hazard is checked statically**
+([#3796](http://localhost:1060/l/default/item/3796); decided 2026-11-17). Nothing marks a door
+public or private: `Mount(prefix, Level(name, inner))` keeps the module's other names private
+only because the guard never admits them, so a door inside the level whose pattern matches an
+admitted name SERVES it, whatever its author meant (`urn:mod:cache:{key}` under `urn:mod:` is
+public). `check_exposure(&Topology, &Exposes)` reports every door inside a level whose pattern
+overlaps the prefix the level is exposed under (every mount above the door, narrowed to one) and
+which the host has not declared public. Exact, prefix and template doors are decided (a
+template by its literal head, over-approximated when the prefix extends it); a custom grammar,
+an opaque space, and a door behind a rewrite or an alias inside the level are reported UNDECIDED
+by name, never clean. A `Limit` is not read, so a door a limiter walls off is still flagged:
+a false alarm, never a miss. It reports and never refuses a binding. The declaration is passed to the
+check, as the reachability walk is told the host's seals; carrying it in the graph (`ik:exposes`
+on the level) adds a vocabulary term and is not done here.
+
+    pin: `exposure::an_internal_helper_under_the_exposed_prefix_is_served_from_outside` (crates/ikigai-core/tests/exposure.rs)
+    pin: `exposure::the_check_flags_the_internal_door_under_the_prefix_and_not_the_one_outside_it` (crates/ikigai-core/tests/exposure.rs)
+    pin: `exposure::an_opaque_grammar_is_reported_undecided_by_name_never_clean` (crates/ikigai-core/tests/exposure.rs)
+    doctest: `check_exposure`
 
 ### 1.2 The mapper does not fall back with τ(i)
 

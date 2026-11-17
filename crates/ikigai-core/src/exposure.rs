@@ -100,7 +100,8 @@ impl ExposureReport {
 /// of the other — an over-approximation for a head the prefix extends, in the
 /// direction this check can afford. A **custom** grammar is opaque: reported
 /// undecided, by its pattern and endpoint. A nested level is its own module and is
-/// checked against its own declaration.
+/// checked against its own declaration. A [`Limit`](crate::Limit) is not read, so a door a
+/// limiter walls off is still flagged: a false alarm, never a miss.
 ///
 /// ```
 /// use std::sync::Arc;
