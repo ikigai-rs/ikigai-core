@@ -717,3 +717,122 @@ fn confine_describes_and_names_as_its_inner_endpoint() {
     let chain = confined.chain_from(&Scope::empty().with_named(iri("urn:ctx:host"), space));
     assert_eq!(chain.to_string(), "urn:ctx:host urn:ctx:c severed");
 }
+
+// ---- Nested confinement keeps only the host's corridors (ledger #3825) ------
+
+#[test]
+fn a_confinement_inside_a_confinement_drops_the_outer_confined_corridor() {
+    // An endpoint confined to T1 confines again to T2. Inside T2 the chain is
+    // ⟨host corridors, T2⟩, severed: a fresh trapdoor. T1 is gone, so a name only
+    // T1 serves is unresolvable, and a name both serve answers from T2 — T1 can
+    // neither be reached nor shadow T2's own door.
+    let t1_hits = Arc::new(AtomicU32::new(0));
+    let t2_hits = Arc::new(AtomicU32::new(0));
+    let t1 = Arc::new(
+        EndpointSpace::new()
+            .bind(
+                Exact::new("urn:only:t1"),
+                counted("t1-only", b"t1 only", &t1_hits),
+            )
+            .bind(
+                Exact::new("urn:shared"),
+                counted("t1-shared", b"from T1", &t1_hits),
+            ),
+    ) as Arc<dyn Space>;
+    let t2 = space_with("t2-shared", "urn:shared", b"from T2", &t2_hits);
+    let outer = AsyncFnEndpoint::new("outer", move |inv| {
+        let t2 = Arc::clone(&t2);
+        Box::pin(async move {
+            // In T1, T1's door answers — and is now cached under ⟨host, T1⟩.
+            let mine = inv.source(&iri("urn:shared")).await?;
+            assert_eq!(mine.bytes, b"from T1");
+            let inner = inv.confine(iri("urn:ctx:t2"), t2);
+            let only = inner.source(&iri("urn:only:t1")).await;
+            assert!(
+                matches!(only, Err(Error::Unresolved(ref t)) if t.as_str() == "urn:only:t1"),
+                "the outer confinement's corridor is not reachable from the inner one",
+            );
+            let shared = inner.source(&iri("urn:shared")).await?;
+            assert_eq!(shared.bytes, b"from T2", "T1 does not shadow T2's own door");
+            // The host's corridor is kept.
+            let host = inner.source(&iri("urn:host:door")).await?;
+            assert_eq!(host.bytes, b"host");
+            assert_eq!(inner.scope().to_string(), "urn:ctx:host urn:ctx:t2 severed");
+            Ok(text(b"ok"))
+        })
+    });
+    let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind_arc(
+        Exact::new("urn:run"),
+        Arc::new(Confine::new(iri("urn:ctx:t1"), t1, Arc::new(outer))),
+    )));
+    let host_hits = Arc::new(AtomicU32::new(0));
+    let host = Scope::empty().with_named(
+        iri("urn:ctx:host"),
+        space_with("host", "urn:host:door", b"host", &host_hits),
+    );
+    let out = block_on(kernel.issue_in(source("urn:run"), &Capability::root(), host)).unwrap();
+    assert_eq!(out.bytes, b"ok");
+    assert_eq!(
+        t1_hits.load(Ordering::SeqCst),
+        1,
+        "only T1's own sub-request ran T1"
+    );
+    assert_eq!(
+        t2_hits.load(Ordering::SeqCst),
+        1,
+        "T2's door ran: T1's cached answer was not reused"
+    );
+}
+
+#[test]
+fn a_nested_confinement_is_the_fresh_confinement_fingerprint_rendering_and_cache() {
+    let door = |name: &'static str, body: &'static [u8], hits: &Arc<AtomicU32>| {
+        space_with(name, "urn:shared", body, hits)
+    };
+    let t1_hits = Arc::new(AtomicU32::new(0));
+    let t2_hits = Arc::new(AtomicU32::new(0));
+    let host_hits = Arc::new(AtomicU32::new(0));
+    let t1 = door("t1", b"from T1", &t1_hits);
+    let t2 = door("t2", b"from T2", &t2_hits);
+    let host = Scope::empty().with_named(
+        iri("urn:ctx:host"),
+        space_with("host", "urn:host:door", b"host", &host_hits),
+    );
+    let only_t1 = host.clone().confined(iri("urn:ctx:t1"), Arc::clone(&t1));
+    let nested = only_t1.clone().confined(iri("urn:ctx:t2"), Arc::clone(&t2));
+    let fresh = host.clone().confined(iri("urn:ctx:t2"), Arc::clone(&t2));
+    assert_eq!(nested.to_string(), "urn:ctx:host urn:ctx:t2 severed");
+    assert_eq!(nested.fingerprint(), fresh.fingerprint());
+    assert_ne!(nested.fingerprint(), only_t1.fingerprint());
+    assert_eq!(
+        nested.spaces().len(),
+        2,
+        "the host's corridor and T2, nothing else"
+    );
+    // `stack` follows the same rule: stacking a confinement onto a confined chain
+    // is confining it again.
+    let stacked = only_t1
+        .clone()
+        .stack(&Scope::empty().confined(iri("urn:ctx:t2"), Arc::clone(&t2)));
+    assert_eq!(stacked.to_string(), nested.to_string());
+    assert_eq!(stacked.fingerprint(), nested.fingerprint());
+
+    // The cache: an answer computed in ⟨host, T1⟩ is not served in the nested
+    // chain, and the nested chain shares its entry with the fresh confinement.
+    let kernel = Kernel::new(Arc::new(EndpointSpace::new()));
+    let cap = Capability::root();
+    let get = |scope: Scope| {
+        block_on(kernel.issue_in(source("urn:shared"), &cap, scope))
+            .unwrap()
+            .bytes
+    };
+    assert_eq!(get(only_t1), b"from T1");
+    assert_eq!(get(nested), b"from T2");
+    assert_eq!(get(fresh), b"from T2");
+    assert_eq!(t1_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        t2_hits.load(Ordering::SeqCst),
+        1,
+        "nested and fresh share one entry"
+    );
+}

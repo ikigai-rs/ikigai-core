@@ -125,7 +125,8 @@ struct Chain {
     /// **confinement** ([`Scope::confined`]) rather than injected by a host. They sit
     /// where the root was, so they are consulted AFTER the level stack; a host's
     /// corridors are consulted before it. With no levels the two runs are adjacent
-    /// and the order is exactly the one this chain had before levels existed.
+    /// and the order is exactly the one this chain had before levels existed. At most
+    /// one: a confinement drops every earlier one.
     confined: usize,
     /// The **level stack** — the levels the endpoint that issued this request was
     /// found in, innermost first ([`Level`]). Empty for every chain a host builds;
@@ -382,9 +383,9 @@ impl Scope {
     ///   corridor), else `self`'s;
     /// - **severed-ness** — severed if either is: cutting the root is not undone by
     ///   stacking onto a chain that still has one;
-    /// - **confinement** — `inner`'s confined corridors go behind `self`'s, where the
-    ///   root was, and, as [`confined`](Self::confined) does, sever the chain and leave
-    ///   `self`'s level stack behind;
+    /// - **confinement** — `inner`'s confined corridor replaces `self`'s, where the
+    ///   root was, and, as [`confined`](Self::confined) does, drops `self`'s earlier
+    ///   confinements, severs the chain and leaves `self`'s level stack behind;
     /// - **the level stack** — `self`'s, unchanged, unless `inner` carries one (only
     ///   a resolved scope an endpoint saw on [`Invocation::scope`](crate::Invocation::scope)
     ///   does, never a chain a host builds), which replaces it as the kernel's descent
@@ -463,12 +464,16 @@ impl Scope {
             // confined prefix is untouched by a push).
             chain.injected.extend(host.iter().cloned());
             chain.identities.extend(host_ids.iter().cloned());
-            // Confinements insert at the front, behind everything `self` confined —
-            // the placement `confined` gives each one, replayed as a block.
+            // `inner`'s confinement replaces `self`'s, as `confined` replayed would:
+            // it drops every earlier confined corridor and goes behind the host's.
             if !behind.is_empty() {
-                chain.injected.splice(0..0, behind.iter().cloned());
-                chain.identities.splice(0..0, behind_ids.iter().cloned());
-                chain.confined += behind.len();
+                chain
+                    .injected
+                    .splice(0..chain.confined, behind.iter().cloned());
+                chain
+                    .identities
+                    .splice(0..chain.confined, behind_ids.iter().cloned());
+                chain.confined = behind.len();
                 chain.levels = LevelPath::default();
             }
             if !other.levels.is_empty() {
@@ -490,16 +495,19 @@ impl Scope {
         self.edit(|chain| chain.severed = true)
     }
 
-    /// The chain an endpoint runs in once confined to `space`: everything already
-    /// injected, then `space` **behind** it — where the root used to be — and no
-    /// root. The one chain-changing operation an endpoint can reach
+    /// The chain an endpoint runs in once confined to `space`: the corridors the host
+    /// injected, then `space` **behind** them — where the root used to be — and no
+    /// root. Earlier confinements are dropped, host corridors kept: a confinement
+    /// inside a confinement is a fresh one, and cannot reach the outer confined
+    /// corridor or be shadowed by it. The one chain-changing operation an endpoint can reach
     /// ([`Invocation::confine`](crate::Invocation::confine)), and its placement
     /// is the whole authority argument: a confining endpoint can only ever put a
     /// space where the root was and cut the root off. It cannot get ahead of a
     /// corridor the host injected, so it can never shadow one; and the root's
     /// doors are exactly what confinement exists to remove. Relative to the chain
     /// it started in, nothing resolves differently except what the root would
-    /// have answered.
+    /// have answered — or an earlier confinement's corridor, which dropping only
+    /// removes.
     ///
     /// A self-named `space` is the corridor under its own identity and `name` must
     /// agree with it, as for [`with_named`](Self::with_named).
@@ -516,9 +524,15 @@ impl Scope {
     pub fn confined(self, name: Iri, space: Arc<dyn Space>) -> Self {
         let identity = claim(name, &space);
         self.edit(|chain| {
-            chain.injected.insert(0, space);
-            chain.identities.insert(0, identity);
-            chain.confined += 1;
+            // Earlier confinements are dropped: a trapdoor inside a trapdoor is a
+            // fresh one, behind the host's corridors only (ledger #3825).
+            chain
+                .injected
+                .splice(0..chain.confined, std::iter::once(space));
+            chain
+                .identities
+                .splice(0..chain.confined, std::iter::once(identity));
+            chain.confined = 1;
             chain.levels = LevelPath::default();
             chain.severed = true;
         })

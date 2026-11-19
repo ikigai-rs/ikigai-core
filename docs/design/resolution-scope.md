@@ -154,9 +154,14 @@ already-wrapped form: bound under the inner endpoint's own name and description,
 never exposed outward, so that leak cannot arise here — nothing outside the confinement can
 resolve a door of `S` at all, only the one identifier the decorator is bound at.
 
-Nested confinement follows: an endpoint confined to `S1` that confines again with `S2`
-runs in `⟨host corridors…, S1, S2⟩`, severed — `S2` adds doors `S1` lacks and shadows
-nothing. Test: `an_endpoint_can_only_narrow_its_chain`, which also pins that an endpoint
+Nested confinement: an endpoint confined to `S1` that confines again with `S2` runs in
+`⟨host corridors…, S2⟩`, severed — earlier confinements are dropped, host corridors kept, so
+a trapdoor inside a trapdoor is a fresh one. `S1` is neither reachable from inside `S2` nor
+consulted ahead of it, so it cannot shadow `S2`'s doors; dropping it only removes reach
+(ledger #3825; through 0.3.5 the chain was `⟨host corridors…, S1, S2⟩` with `S1` consulted
+first, which nothing chose). Tests: `a_confinement_inside_a_confinement_drops_the_outer_confined_corridor`
+and `a_nested_confinement_is_the_fresh_confinement_fingerprint_rendering_and_cache`
+(`tests/scope.rs`); `an_endpoint_can_only_narrow_its_chain` also pins that an endpoint
 reached *through* the corridor is confined too (the chain is closed under the subtree).
 
 An open question recorded rather than decided: whether `confine` should be allowed to
@@ -370,7 +375,7 @@ parts fingerprints differently from the original and can never be faithful.
 `outer.stack(&inner)` is the chain you get by applying to `outer` the steps that built
 `inner`: `inner`'s injected corridors go innermost under their own identities; its clock wins
 when it has one (it is the innermost temporal corridor); severed if either is; its confined
-corridors go behind `outer`'s and, as `confined` does, sever and drop `outer`'s level stack; a
+corridor replaces `outer`'s and, as `confined` does, severs and drops `outer`'s level stack; a
 level stack on `inner` (only a resolved scope an endpoint saw can carry one) replaces
 `outer`'s, as the kernel's descent would. The fingerprint is recomputed over the whole result,
 so the two orders of one pair are two chains, and a stacked chain equals the one built by the
