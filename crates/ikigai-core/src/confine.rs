@@ -6,7 +6,8 @@
 //! for anything the chain does not bind is [`Error::Unresolved`], never
 //! [`Error::Denied`], and the root endpoint it would have reached is never
 //! entered — there is no decision to misconfigure, only a name with nowhere to
-//! go. See `docs/design/resolution-scope.md`.
+//! go. A `Confine` inside a confinement is a fresh one: earlier confinements are
+//! dropped, host corridors kept. See `docs/design/resolution-scope.md`.
 
 use std::sync::Arc;
 
@@ -22,7 +23,9 @@ use crate::topology::{SpaceKind, Topology};
 
 /// Run `inner` confined to `space`: its sub-requests resolve only against the
 /// corridors the host injected for the request and against `space`, and the
-/// root is cut off. `name` is the corridor's identity for the cache — see
+/// root is cut off. Earlier confinements are dropped, host corridors kept: inside
+/// another confinement, `inner` cannot reach that confinement's corridor, and
+/// that corridor cannot shadow `space`'s doors. `name` is the corridor's identity for the cache — see
 /// [`Scope`] on what naming claims: two confinements naming alike share cached
 /// answers and must bind the same doors.
 ///

@@ -260,7 +260,9 @@ deviations, one argument each:
   (`docs/design/resolution-scope.md`, decision 3). The paper puts injection and severing in
   different hands too (the arrangement injects, the trapdoor severs); ikigai makes the
   ordering enforce it. Recorded as open, not decided: whether `confine` should be allowed to
-  drop the host's corridors as well.
+  drop the host's corridors as well. It does drop every **earlier confinement**: a confinement
+  inside a confinement constructs ⟨host-injected corridors…, S₂⟩, not ⟨…, S₁, S₂⟩, so it is
+  a fresh trapdoor, as Def. 10 has it, and still only narrows (ledger #3825).
 - **Bound at one door, not transparent.** The paper's trapdoor is a transparent overlay: from
   outside it admits everything S serves, which is why §12.3 finds the model client reachable
   from the application corridor and prescribes wrapping the trapdoor in a mapper. `Confine`
@@ -273,6 +275,8 @@ Pinned by the chain the decorator reports and by nested confinement:
 
     pin: `scope::confine_describes_and_names_as_its_inner_endpoint` (crates/ikigai-core/tests/scope.rs)
     pin: `scope::an_endpoint_can_only_narrow_its_chain` (crates/ikigai-core/tests/scope.rs)
+    pin: `scope::a_confinement_inside_a_confinement_drops_the_outer_confined_corridor` (crates/ikigai-core/tests/scope.rs)
+    pin: `scope::a_nested_confinement_is_the_fresh_confinement_fingerprint_rendering_and_cache` (crates/ikigai-core/tests/scope.rs)
     pin: `scope_hypothesis::finding_an_endpoint_holding_the_kernel_leaves_the_confinement_its_door_reports` (crates/ikigai-core/tests/scope_hypothesis.rs)
 
 **With levels, confinement leaves the level stack behind.** An endpoint found inside a `Level`

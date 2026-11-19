@@ -1010,9 +1010,13 @@ impl<'a> Invocation<'a> {
     ///
     /// It narrows, structurally. Relative to the chain this invocation runs in,
     /// the confined chain resolves nothing differently except what the **root**
-    /// would have answered: `space` sits behind every injected corridor, so it
+    /// (or an earlier confinement) would have answered: `space` sits behind every
+    /// corridor the host injected, so it
     /// cannot shadow one, and the root's doors are exactly what confinement
-    /// exists to remove. The worst outcome of calling it is an `Unresolved`. The
+    /// exists to remove. Earlier confinements are dropped, host corridors kept: a
+    /// confinement inside a confinement is a fresh one, so the outer confined
+    /// corridor is neither reachable nor ahead of `space`, and dropping it only
+    /// removes reach. The worst outcome of calling it is an `Unresolved`. The
     /// widening counterpart — injecting a corridor ahead of the root, with the
     /// root still present — is [`Kernel::issue_in`](crate::Kernel::issue_in),
     /// reachable only by whoever holds the kernel, for the same reason a
