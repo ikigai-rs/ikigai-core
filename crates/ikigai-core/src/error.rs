@@ -9,6 +9,106 @@ use crate::verb::Verb;
 /// The crate result type.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The payload of [`Error::Denied`]: the message its display form shows after
+/// `denied: `, and the capability scopes the caller lacked when the kernel's declared
+/// floor is what refused (ledger #3840).
+///
+/// The floor knows exactly which scopes it found missing, so it says so here rather
+/// than leaving a door to parse the sentence: a host's access log reads
+/// [`Error::lacking`] to record WHICH capability a refused request needed. The
+/// scopes are spelled as the endpoint declared them (a family requirement keeps its
+/// trailing `*`), every unmet one in declaration order, and they are public names:
+/// the sentence already names the first.
+///
+/// Built from a message alone (`"…".into()`, `String::into`) it lacks nothing; that is
+/// every refusal an endpoint raises at run time. It reads as its message: it
+/// dereferences to `str` and displays as the message, so `m.contains(…)` and
+/// `format!("{m}")` keep working on a matched `Error::Denied(m)`.
+///
+/// ```
+/// use ikigai_core::{Denial, Error};
+///
+/// let floor = Error::Denied(Denial::lacking(
+///     "capability does not grant `urn:cap:fs:read` (declared by `urn:fs:etc`)",
+///     vec!["urn:cap:fs:read".into(), "urn:cap:fs:list".into()],
+/// ));
+/// assert_eq!(
+///     floor.to_string(),
+///     "denied: capability does not grant `urn:cap:fs:read` (declared by `urn:fs:etc`)"
+/// );
+/// assert_eq!(floor.lacking(), ["urn:cap:fs:read", "urn:cap:fs:list"]);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Denial {
+    message: String,
+    lacking: Vec<String>,
+}
+
+impl Denial {
+    /// A refusal that names the scopes the caller lacked: what the kernel's declared
+    /// floor builds. `lacking` is kept as given.
+    pub fn lacking(message: impl Into<String>, lacking: Vec<String>) -> Self {
+        Self {
+            message: message.into(),
+            lacking,
+        }
+    }
+
+    /// The message, as the display form shows it after `denied: `.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The scopes the caller lacked, empty unless the declared floor refused.
+    pub fn scopes(&self) -> &[String] {
+        &self.lacking
+    }
+
+    /// The same refusal under another message, the scopes kept: how a refusal is
+    /// re-worded on its way out (a referent's denial names the argument it came by)
+    /// without losing what was missing.
+    pub fn reworded(self, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            lacking: self.lacking,
+        }
+    }
+
+    /// The message, giving up the scopes.
+    pub fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl From<String> for Denial {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            lacking: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for Denial {
+    fn from(message: &str) -> Self {
+        Self::from(message.to_string())
+    }
+}
+
+impl std::ops::Deref for Denial {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for Denial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Errors raised during resolution and endpoint invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -30,7 +130,20 @@ pub enum Error {
     /// Typed (rather than a generic `Endpoint` string) so the trace, the manifold,
     /// and a future structured wire error recognize a 403-equivalent without
     /// sniffing the message text.
-    Denied(String),
+    ///
+    /// The payload is a [`Denial`]: the message, and — when the kernel's declared
+    /// capability floor refused the request before dispatch — the scopes the caller
+    /// lacked, read with [`lacking`](Error::lacking) (since 0.4.0, ledger #3840). An
+    /// endpoint's own refusal builds one from its message alone and lacks nothing:
+    ///
+    /// ```
+    /// use ikigai_core::Error;
+    ///
+    /// let own = Error::Denied("no grant for /etc/secret".into());
+    /// assert_eq!(own.to_string(), "denied: no grant for /etc/secret");
+    /// assert!(own.lacking().is_empty());
+    /// ```
+    Denied(Denial),
     /// The named resource is absent — a **permanent** not-found. Typed (rather than a
     /// generic `Endpoint` string) so a caller, the trace, and a structured wire error
     /// can recognize a 404-equivalent — an upstream "it isn't here" — without sniffing
@@ -528,6 +641,29 @@ impl Error {
         Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
     }
 
+    /// The capability scopes the caller lacked, when this is the kernel's **declared
+    /// floor** refusing a request before dispatch (ledger #3840): every scope the
+    /// endpoint declares for the verb that the capability does not satisfy, as declared,
+    /// in declaration order. Empty for every other error, and for a
+    /// [`Denied`](Error::Denied) an endpoint raised itself at run time.
+    ///
+    /// What a host's door reads to log which capability a refused request needed,
+    /// without parsing the sentence. The sentence is unchanged: it still names the first
+    /// of these.
+    ///
+    /// ```
+    /// use ikigai_core::Error;
+    ///
+    /// assert!(Error::Denied("no grant".into()).lacking().is_empty());
+    /// assert!(Error::Endpoint("boom".into()).lacking().is_empty());
+    /// ```
+    pub fn lacking(&self) -> &[String] {
+        match self {
+            Error::Denied(denial) => denial.scopes(),
+            _ => &[],
+        }
+    }
+
     /// The error's **JSON face**: an object with its [`kind`](Self::kind) word and its
     /// payload as fields, the shape the shared failure-class vectors carry in each row's
     /// `json` (`crates/ikigai-vocab/tests/vectors`), so a face in another language can
@@ -539,7 +675,8 @@ impl Error {
     /// | `unresolved` | `iri` |
     /// | `missing-argument` | `name` |
     /// | `invalid-argument` | `name`, `detail` |
-    /// | `endpoint`, `denied`, `not-found`, `gone`, `conflict`, `timeout`, `unavailable`, `refused` | `message` |
+    /// | `endpoint`, `not-found`, `gone`, `conflict`, `timeout`, `unavailable`, `refused` | `message` |
+    /// | `denied` | `message`, and `lacking` (the [scopes the floor found missing](Self::lacking)) only when there are any |
     /// | `depth-exceeded` | `depth`, `target` |
     /// | `retry-after` | `retry_after_ms` (absent without a delay), `detail` |
     /// | `over-budget` | `detail` |
@@ -577,8 +714,11 @@ impl Error {
             Error::Unresolved(iri) => json!({ "iri": iri.as_str() }),
             Error::MissingArgument(name) => json!({ "name": name }),
             Error::InvalidArgument { name, detail } => json!({ "name": name, "detail": detail }),
+            Error::Denied(denial) if !denial.scopes().is_empty() => {
+                json!({ "message": denial.message(), "lacking": denial.scopes() })
+            }
+            Error::Denied(denial) => json!({ "message": denial.message() }),
             Error::Endpoint(message)
-            | Error::Denied(message)
             | Error::NotFound(message)
             | Error::Gone(message)
             | Error::Conflict(message)
@@ -728,7 +868,17 @@ impl Error {
                 detail: text("detail")?,
             },
             "endpoint" => Error::Endpoint(text("message")?),
-            "denied" => Error::Denied(text("message")?),
+            "denied" => Error::Denied(Denial::lacking(text("message")?, {
+                match value.get("lacking") {
+                    None | Some(serde_json::Value::Null) => Vec::new(),
+                    Some(serde_json::Value::Array(scopes)) => scopes
+                        .iter()
+                        .map(|scope| scope.as_str().map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| invalid("lacking", "expected an array of strings"))?,
+                    Some(_) => return Err(invalid("lacking", "expected an array of strings")),
+                }
+            })),
             "not-found" => Error::NotFound(text("message")?),
             "gone" => Error::Gone(text("message")?),
             "conflict" => Error::Conflict(text("message")?),
