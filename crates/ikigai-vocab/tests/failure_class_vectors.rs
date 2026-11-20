@@ -20,7 +20,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use ikigai_core::{Error, FailureClass, Iri, Verb};
+use ikigai_core::{Denial, Error, FailureClass, Iri, Verb};
 use serde_json::{json, Map, Value};
 
 const CASES: &str = concat!(
@@ -80,7 +80,13 @@ fn error_of(name: &Value, spec: &Value) -> Error {
             detail: s("detail"),
         },
         "endpoint" => Error::Endpoint(s("message")),
-        "denied" => Error::Denied(s("message")),
+        "denied" => Error::Denied(Denial::lacking(
+            s("message"),
+            spec.get("lacking").map_or_else(Vec::new, |scopes| {
+                serde_json::from_value(scopes.clone())
+                    .unwrap_or_else(|_| panic!("case {name}: `lacking` is a list of strings"))
+            }),
+        )),
         "not-found" => Error::NotFound(s("message")),
         "conflict" => Error::Conflict(s("message")),
         "timeout" => Error::Timeout(s("message")),

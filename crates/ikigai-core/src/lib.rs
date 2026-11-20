@@ -192,7 +192,7 @@ pub use endpoint::{
     AsyncFnEndpoint, BoxFuture, Dependencies, Endpoint, FnEndpoint, Invocation, InvokeFuture,
     Issuer, Spawner,
 };
-pub use error::{Error, FailureClass, Result};
+pub use error::{Denial, Error, FailureClass, Result};
 pub use exposure::{check_exposure, ExposedDoor, Exposes, ExposureReport};
 pub use forward::Forward;
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};

@@ -254,10 +254,13 @@ fn attenuate(asker: &Capability, list: &str) -> Result<Capability> {
         .iter()
         .find(|scope| !is_deny_scope(scope) && !asker.allows(scope))
     {
-        return Err(Error::Denied(format!(
-            "urn:kernel:explain answers for a capability attenuated from the asker's, never a \
+        return Err(Error::Denied(
+            format!(
+                "urn:kernel:explain answers for a capability attenuated from the asker's, never a \
              wider one: `scopes` names `{wider}`, which the asker does not hold"
-        )));
+            )
+            .into(),
+        ));
     }
     Ok(asker.attenuate(scopes))
 }

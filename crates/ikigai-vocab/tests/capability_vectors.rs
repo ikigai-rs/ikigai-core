@@ -134,15 +134,25 @@ enum Answer {
     Unresolved(String),
 }
 
-/// What the kernel answers `verb` on `target` under `capability`.
-fn answer(kernel: &Kernel, target: &str, verb: Verb, capability: &Capability) -> Answer {
+/// What the kernel returns for `verb` on `target` under `capability`.
+fn outcome(
+    kernel: &Kernel,
+    target: &str,
+    verb: Verb,
+    capability: &Capability,
+) -> Result<(), Error> {
     let target = Iri::parse(target).unwrap_or_else(|e| panic!("target {target}: {e}"));
     let mut request = Request::new(verb, target);
     if verb.is_mutating() {
         request = request.with_arg("content", ArgRef::Inline(b"x".to_vec()));
     }
-    match block_on(kernel.issue(request, capability)) {
-        Err(Error::Denied(message)) => Answer::Denied(message),
+    block_on(kernel.issue(request, capability)).map(drop)
+}
+
+/// What the kernel answers `verb` on `target` under `capability`.
+fn answer(kernel: &Kernel, target: &str, verb: Verb, capability: &Capability) -> Answer {
+    match outcome(kernel, target, verb, capability) {
+        Err(Error::Denied(denial)) => Answer::Denied(denial.into_message()),
         Err(Error::Unresolved(iri)) => Answer::Unresolved(iri.as_str().to_string()),
         _ => Answer::Admitted,
     }
@@ -255,8 +265,9 @@ fn the_shared_capability_vectors_are_what_core_computes() {
 
 /// `floors` is `Description::required_scopes`, a helper; this pins it to the floor the
 /// kernel ENFORCES, row by row. For every floor and every verb, a caller holding nothing
-/// is refused naming the first required scope (or admitted when none is required), and
-/// a caller holding exactly the required scopes is admitted. A trailing-`*` scope held
+/// is refused naming the first required scope (or admitted when none is required), the
+/// refusal carries every required scope as the ones it lacked (`Error::lacking`, ledger
+/// #3840), and a caller holding exactly the required scopes is admitted. A trailing-`*` scope held
 /// literally is a grant under its own prefix, so holding the list satisfies it.
 #[test]
 fn every_floor_row_is_what_the_kernel_enforces() {
@@ -283,6 +294,16 @@ fn every_floor_row_is_what_the_kernel_enforces() {
                     matches!(&refused, Answer::Denied(m) if m.contains(&format!("grant `{first}`"))),
                     "{name} {v:?}: expected a refusal naming {first}, got {refused:?}"
                 ),
+            }
+            if !required.is_empty() {
+                let lacking = outcome(&k, target, v, &nobody)
+                    .expect_err("a caller holding nothing is refused")
+                    .lacking()
+                    .to_vec();
+                assert_eq!(
+                    lacking, required,
+                    "{name} {v:?}: the scopes the refusal lacks"
+                );
             }
             let holder = Capability::scoped(required.clone());
             assert_eq!(

@@ -56,7 +56,7 @@ use crate::cache::{Answer, CacheKey, CachePolicy, Offer, ReprCache};
 use crate::capability::Capability;
 use crate::describe::{ContractCaching, Description};
 use crate::endpoint::{Dependencies, Endpoint, Invocation, Issuer, Spawner};
-use crate::error::{Error, Result};
+use crate::error::{Denial, Error, Result};
 use crate::grammar::Bindings;
 use crate::iri::Iri;
 use crate::listen::{CutListener, Hearing, ListenSpec, Listeners, CAP_LISTEN};
@@ -1086,9 +1086,10 @@ impl Endpoint for SettleReferences {
 fn referent_error(error: Error, name: &str, iri: &Iri) -> Error {
     let refers = format!("argument `{name}` refers to <{}>", iri.as_str());
     match error {
-        Error::Denied(detail) => Error::Denied(format!(
-            "{refers}, which this caller may not read: {detail}"
-        )),
+        Error::Denied(denial) => {
+            let message = format!("{refers}, which this caller may not read: {denial}");
+            Error::Denied(denial.reworded(message))
+        }
         Error::OverBudget { detail } => Error::OverBudget {
             detail: format!(
                 "{refers}, which the kernel reads because `{name}` is not declared \
@@ -1378,14 +1379,17 @@ impl Floor {
         }
     }
 
-    /// The first scope `request.verb` requires that `capability` does not satisfy —
-    /// on the same `cap_satisfies` predicate selection and `urn:kernel:validate` use, so
-    /// what the manifold offers is exactly what the kernel admits. `None` ⇒ admitted.
-    fn unsatisfied(&self, request: &Request, capability: &Capability) -> Option<String> {
+    /// Every scope `request.verb` requires that `capability` does not satisfy, in
+    /// declaration order — on the same `cap_satisfies` predicate selection and
+    /// `urn:kernel:validate` use, so what the manifold offers is exactly what the kernel
+    /// admits. Empty ⇒ admitted. The refusal names the first in its sentence and carries
+    /// them all on the error ([`Error::lacking`], ledger #3840).
+    fn unsatisfied(&self, request: &Request, capability: &Capability) -> Vec<String> {
         self.requirements(request.verb)
             .iter()
-            .find(|scope| !crate::select::cap_satisfies(capability, scope))
+            .filter(|scope| !crate::select::cap_satisfies(capability, scope))
             .cloned()
+            .collect()
     }
 }
 
@@ -1412,7 +1416,8 @@ fn undeclared_failure(
 }
 
 struct Admission {
-    lacking: Option<String>,
+    /// Every scope the capability lacks; empty when the floor admits the request.
+    lacking: Vec<String>,
     /// Whether the refusal (or, for a `Meta`, the description) must answer as a name
     /// bound nowhere: see [`Floor::conceals`].
     conceal: bool,
@@ -1561,6 +1566,8 @@ impl FloorMemo {
     ) -> Option<String> {
         self.admit(endpoint, request, &Bindings::new(), capability, now)
             .lacking
+            .into_iter()
+            .next()
     }
 
     /// [`unsatisfied`](Self::unsatisfied), the declared defaults the request leaves out
@@ -4799,14 +4806,16 @@ impl Kernel {
         // own declaration, not the root's. The declaration comes from the
         // per-endpoint memo: `describe()` runs once per bound endpoint, not once per
         // request, and a cut of `urn:kernel:bindings` forgets it (ledger #22, #510).
-        if let Some(lacking) = lacking {
+        // The refusal carries every scope the caller lacked, structurally (ledger
+        // #3840), so a host's door can log which capability was missing without parsing
+        // the sentence; the sentence and the trace note name the first, as they always
+        // have.
+        if let Some(first) = lacking.first() {
             self.trace_denial(
-                &trace, &request, capability, span, parent, &lacking, alias, answered, levels,
-                &scope,
+                &trace, &request, capability, span, parent, first, alias, answered, levels, &scope,
             );
-            return Err(Error::Denied(
-                self.denial_message(&lacking, &request, capability, alias),
-            ));
+            let message = self.denial_message(first, &request, capability, alias);
+            return Err(Error::Denied(Denial::lacking(message, lacking)));
         }
 
         // ★ AN ATTACHED BODY REACHES ONLY A DECLARED BODY READER (ledger #2402). A body a
@@ -5316,9 +5325,9 @@ impl Kernel {
     /// cache (recompute before the first reader), or push a notice to a page.
     pub fn listen(&self, spec: ListenSpec, capability: &Capability) -> Result<CutListener> {
         if !capability.allows(CAP_LISTEN) {
-            return Err(Error::Denied(format!(
-                "capability does not grant `{CAP_LISTEN}`"
-            )));
+            return Err(Error::Denied(
+                format!("capability does not grant `{CAP_LISTEN}`").into(),
+            ));
         }
         let hearing = if capability.is_root() {
             Hearing::Everything
@@ -5430,9 +5439,9 @@ impl Kernel {
                 &LevelPath::default(),
                 &Scope::empty(),
             );
-            Err(Error::Denied(format!(
-                "capability does not grant `{scope}`"
-            )))
+            Err(Error::Denied(
+                format!("capability does not grant `{scope}`").into(),
+            ))
         };
         // ★ DECLARED = ENFORCED, made mechanical rather than intentional. Each kernel
         // operation's [`Description`](crate::Description) states the scopes its verb
