@@ -1,6 +1,7 @@
 //! A downstream resolver can accept a BodyIssue and collect its attachment in a default.
 use async_trait::async_trait;
 use futures::executor::block_on;
+use ikigai_core::testkit;
 use ikigai_core::{Body, BodyIssue, Bytes, IssueContext, Result};
 
 #[async_trait]
@@ -82,7 +83,7 @@ fn taking_attachment_preserves_resolution_context() {
     assert!(issue.attachment().is_none());
     assert!(issue.take_attachment().is_none());
     assert_eq!(issue.scope().fingerprint(), scope.fingerprint());
-    assert_eq!(issue.scope().spaces().len(), 1);
+    assert_eq!(testkit::spaces(issue.scope()).len(), 1);
     assert_eq!(issue.incoming(), Some(&incoming));
     assert_eq!(issue.context().memory_budget().unwrap().remaining(), 5);
     assert_eq!(issue.context().retry_budget().unwrap().remaining(), 2);

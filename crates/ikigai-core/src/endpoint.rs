@@ -976,10 +976,8 @@ impl<'a> Invocation<'a> {
     ///                 Ok(Representation::new(ReprType::new("text/plain"), b"the document".to_vec()))
     ///             }),
     ///         ));
-    ///         assert!(inv.scope().is_empty()); // the plain root, before
+    ///         // A new handle, severed from the root; `inv` itself is untouched.
     ///         let confined = inv.confine(Iri::parse("urn:ctx:doc:1").unwrap(), document);
-    ///         assert!(confined.scope().is_severed()); // no root, after…
-    ///         assert!(inv.scope().is_empty()); // …and the original handle is untouched
     ///
     ///         // What the corridor binds resolves…
     ///         let doc = confined.source(&Iri::parse("urn:doc:1").unwrap()).await?;
@@ -1047,8 +1045,93 @@ impl<'a> Invocation<'a> {
     /// resolve against. Empty (nothing injected, root present) for every plain
     /// [`Kernel::issue`](crate::Kernel::issue); [`severed`](Scope::is_severed)
     /// inside a [`confine`](Self::confine).
-    pub fn scope(&self) -> &Scope {
+    ///
+    /// # Crate-private: an endpoint uses its scope only by issuing requests into it
+    ///
+    /// **Opacity** (ledger #3866). What an endpoint requests, the value it returns and
+    /// how long that value is valid must not depend on the scope itself, only on what
+    /// its requests into the scope answer. The kernel's semantics require it: the
+    /// cache keys an answer on the REQUEST chain's fingerprint (corridor names, the
+    /// severed flag, the level stack), so an endpoint that could read anything else
+    /// about its scope (a corridor's live space, its address, a clock the name stands
+    /// for) could return a cacheable answer the key does not cover, and the kernel
+    /// would serve it to another scope that shares the key. Through 0.3.x this method
+    /// was public and handed endpoint code the resolved [`Scope`], with its levels, its
+    /// live corridors ([`Scope::spaces`], which also let an endpoint dispatch past a
+    /// corridor door's capability floor) and its printed form. Now only the kernel
+    /// reads it.
+    ///
+    /// What an endpoint still has: [`now`](Self::now), and
+    /// [`clock_pinned`](Self::clock_pinned) for whether that time is a temporal
+    /// corridor's. A test that must see the chain uses `ikigai_core::testkit::scope`,
+    /// behind the `testkit` feature, which is not API.
+    ///
+    /// From outside the crate it fails to compile with E0624, *method `scope` is
+    /// private*:
+    ///
+    /// ```compile_fail,E0624
+    /// use ikigai_core::{Bindings, Capability, Invocation, Iri, Request, Verb};
+    ///
+    /// let request = Request::new(Verb::Source, Iri::parse("urn:x").unwrap());
+    /// let bindings = Bindings::new();
+    /// let cap = Capability::root();
+    /// let inv = Invocation::detached(&request, &bindings, &cap);
+    ///
+    /// // An endpoint cannot read the chain it runs in.
+    /// let _ = inv.scope();
+    /// ```
+    #[cfg_attr(not(feature = "testkit"), allow(dead_code))] // the kernel reads the field; the testkit door reads this
+    pub(crate) fn scope(&self) -> &Scope {
         &self.scope
+    }
+
+    /// Whether the time [`now`](Self::now) reads is a **temporal corridor's**: `true` when
+    /// the resolution chain carries a clock that a corridor injected with
+    /// [`Scope::with_named_at`] derived, `false` when it carries none and `now` falls back
+    /// to the kernel's clock (or to a clock attached with [`with_clock`](Self::with_clock),
+    /// which this does not report).
+    ///
+    /// This is the one fact about its scope an endpoint may read besides the time, and it
+    /// is **covered by the cache key**: a clock reaches a chain only beside the corridor
+    /// it is derived from, whose NAME is in the chain's fingerprint, and a named corridor
+    /// is a claim that every corridor of that name holds the same doors and the same
+    /// clock (see [`Scope::with_named_at`]). So an answer cached under a pinned chain is
+    /// never served to a chain with no temporal corridor, or with a different one. An
+    /// endpoint uses it to declare an as-of answer [`cacheable`](Representation::cacheable)
+    /// and a live one not:
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     Capability, EndpointSpace, Exact, FixedClock, FnEndpoint, Iri, Kernel, ReprType,
+    ///     Representation, Request, Scope, Verb,
+    /// };
+    ///
+    /// let stamp = FnEndpoint::new("stamp", |inv| {
+    ///     let now = inv.now().map_or(0, |t| t.as_millis());
+    ///     let answer = Representation::new(ReprType::new("text/plain"), now.to_string().into_bytes());
+    ///     // As of an instant: a pure function of the context. Live: not cacheable.
+    ///     Ok(if inv.clock_pinned() { answer.cacheable() } else { answer })
+    /// });
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:stamp"), stamp)))
+    ///     .with_clock(Arc::new(FixedClock::at(2_000)));
+    /// let cap = Capability::root();
+    /// let stamp = || Request::new(Verb::Source, Iri::parse("urn:stamp").unwrap());
+    /// let as_of = Scope::empty().with_named_at(
+    ///     Iri::parse("urn:ctx:time:then").unwrap(),
+    ///     Arc::new(EndpointSpace::new()),
+    ///     Arc::new(FixedClock::at(1_000)),
+    /// );
+    ///
+    /// assert_eq!(block_on(kernel.issue_in(stamp(), &cap, as_of.clone())).unwrap().bytes, b"1000");
+    /// assert!(kernel.is_cached_in(&stamp(), &cap, &as_of));
+    /// // The live chain is another key: the pinned answer is not served to it.
+    /// assert_eq!(block_on(kernel.issue(stamp(), &cap)).unwrap().bytes, b"2000");
+    /// assert!(!kernel.is_cached(&stamp(), &cap));
+    /// ```
+    pub fn clock_pinned(&self) -> bool {
+        self.scope.clock().is_some()
     }
 
     /// Attach the resolution chain the request was resolved in (set by the
@@ -1963,7 +2046,7 @@ impl<'a> Invocation<'a> {
 
     /// Plan a transreptor chain converting media type `from` → `to` over what
     /// **this invocation's resolution chain** can resolve — the same chain its
-    /// sub-requests run in ([`scope`](Self::scope)) — or `None` if there's no kernel
+    /// sub-requests run in — or `None` if there's no kernel
     /// context (detached) or no chain exists. The endpoint then issues each
     /// [`TransreptionStep`] — piping the bytes in as `content` and setting `as` to
     /// the step's target — to run the conversion. This is the seam
@@ -1996,7 +2079,7 @@ impl<'a> Invocation<'a> {
     /// Find endpoints whose required inputs are satisfiable by the RDF classes in `present`
     /// — the actions available given a set of typed entities (see
     /// [`select_action`](crate::select_action)) — among what **this invocation's
-    /// resolution chain** can resolve ([`scope`](Self::scope)). Empty if there's no
+    /// resolution chain** can resolve. Empty if there's no
     /// kernel context (detached). The seed of layer action-inference: a layer endpoint
     /// can surface "what you can do with what's on the canvas," then issue the chosen
     /// one — and inside a [`confine`](Self::confine) the list never names a root-only

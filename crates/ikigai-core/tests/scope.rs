@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
+use ikigai_core::testkit;
 use ikigai_core::{
     AsyncFnEndpoint, BoxFuture, CacheKey, Capability, Confine, Description, Endpoint,
     EndpointSpace, Error, Exact, FnEndpoint, Invocation, Iri, Issuer, Kernel, ReprType,
@@ -348,7 +349,10 @@ fn an_endpoint_can_only_narrow_its_chain() {
     )) as Arc<dyn Space>;
     let nested = AsyncFnEndpoint::new("nested", |inv| {
         Box::pin(async move {
-            assert!(inv.scope().is_severed(), "runs inside a confinement");
+            assert!(
+                testkit::scope(inv).is_severed(),
+                "runs inside a confinement"
+            );
             // Confining again — with a corridor that binds the secret's NAME —
             // does not bring the root back and does not put this corridor ahead
             // of the one it runs in. The root name stays unresolvable…
@@ -359,7 +363,7 @@ fn an_endpoint_can_only_narrow_its_chain() {
                     FnEndpoint::new("mine", |_| Ok(text(b"mine"))),
                 )),
             );
-            assert!(again.scope().is_severed());
+            assert!(testkit::scope(&again).is_severed());
             // …except where the NEW corridor binds it: that is the one thing a
             // confinement may add, in the root's old position.
             let mine = again.source(&iri("urn:data:secret")).await?;
@@ -392,8 +396,8 @@ fn an_endpoint_can_only_narrow_its_chain() {
     // At the top level, the chain is the empty one: nothing injected, root present.
     let top = AsyncFnEndpoint::new("top", |inv| {
         Box::pin(async move {
-            assert!(inv.scope().is_empty());
-            assert_eq!(inv.scope().to_string(), "root");
+            assert!(testkit::scope(inv).is_empty());
+            assert_eq!(testkit::scope(inv).to_string(), "root");
             Ok(text(b"top"))
         })
     });
@@ -757,7 +761,10 @@ fn a_confinement_inside_a_confinement_drops_the_outer_confined_corridor() {
             // The host's corridor is kept.
             let host = inner.source(&iri("urn:host:door")).await?;
             assert_eq!(host.bytes, b"host");
-            assert_eq!(inner.scope().to_string(), "urn:ctx:host urn:ctx:t2 severed");
+            assert_eq!(
+                testkit::scope(&inner).to_string(),
+                "urn:ctx:host urn:ctx:t2 severed"
+            );
             Ok(text(b"ok"))
         })
     });
@@ -805,7 +812,7 @@ fn a_nested_confinement_is_the_fresh_confinement_fingerprint_rendering_and_cache
     assert_eq!(nested.fingerprint(), fresh.fingerprint());
     assert_ne!(nested.fingerprint(), only_t1.fingerprint());
     assert_eq!(
-        nested.spaces().len(),
+        testkit::spaces(&nested).len(),
         2,
         "the host's corridor and T2, nothing else"
     );

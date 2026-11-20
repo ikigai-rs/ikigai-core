@@ -10,6 +10,9 @@ the formalism's Theorem 4(b) (`docs/formalism/README.md` §1.1, R7.3, R7.5). The
 **Gate:** every `pin:` and `doctest:` below is resolved by `crates/ikigai-core/tests/formalism_pins.rs`.
 A test whose name starts `finding_` holds a defect as it stands: fixing the finding turns it red,
 and that pull request rewrites the row here.
+**Since:** B3 is closed by [#3866](http://localhost:1060/l/default/item/3866): an endpoint uses its
+scope only by issuing requests into it (opacity, `docs/formalism/README.md` R7.14), and the B3 rows
+below are rewritten.
 
 ## The answer
 
@@ -66,9 +69,10 @@ host code from endpoint code, and that is the root of finding B4.
 | `Invocation::{issue, source, issue_body, source_body, issue_attenuated, source_attenuated, fan_out}(…Request or &Iri…)`, `transrept`, `content_body` | (a) | The chain is the kernel's: root, corridors and the found path | None takes a scope. All route through private `issue_under`, or carry `self.scope` across the spawn. The target IRI is free, so a checker must assume any name is asked, which the walk already does |
 | `Invocation::scope_sync`, `SyncIssuer::{issue, source}` | (a) | As above | Each call is served by the minting invocation's `issue`. No chain parameter exists |
 | `Invocation::confine(&self, name: Iri, space: Arc<dyn Space>) -> Invocation` | **(b)** | Nowhere | B1, B2 |
-| `Invocation::scope(&self) -> &Scope` | (b) through `spaces` | Read-only otherwise | B3. The rest of what it returns only reads |
-| `Scope::spaces(&self) -> &[Arc<dyn Space>]` | **(b)** | Nowhere | B3 |
-| `Scope::{levels, is_severed, is_empty, fingerprint, clock, now}`, `LevelPath::{names, len, is_empty}` | (a) | Read-only | An endpoint may branch on them and can change nothing. A level path gives names, never spaces |
+| `Invocation::scope(&self) -> &Scope` | (a) | `pub(crate)` since [#3866](http://localhost:1060/l/default/item/3866) | B3, closed. An endpoint never receives a `Scope`; a `compile_fail` doctest pins E0624 |
+| `Scope::spaces(&self) -> &[Arc<dyn Space>]`, `Scope::levels` | (a) | `pub(crate)` since [#3866](http://localhost:1060/l/default/item/3866) | B3, closed. Tests read them through the `testkit` feature, which is not API |
+| `Invocation::{now, clock_pinned}` | (a) | Read-only | The time, and whether it is a temporal corridor's: covered by the key through the corridor's name (R7.10, R7.14) |
+| `Scope::{is_severed, is_empty, fingerprint, clock, now}`, `LevelPath::{names, len, is_empty}` | (a) | Read-only, host side | No endpoint holds a `Scope` to call them on. A `Space` still receives the request chain in `resolve` and can read these (see R7.14) |
 | `Scope::{empty, with, with_named, with_named_at, sever, confined, stack}`, `Confine::chain_from` | (a) | Inert values | A `Scope` takes effect only when issued in, and that takes a kernel (B4) |
 | `Invocation::{with_bindings, with_retries, with_memory_limit, with_not_after, with_stale}` | (a) | No scope effect | Each reborrow keeps the chain |
 | `Invocation::with_clock(self, Arc<dyn Clock>) -> Self` | (a) | No scope effect | Reachable on a reborrow, contrary to `resolution-scope.md`, but the clock stays on that handle |
@@ -156,26 +160,25 @@ does. **Cost:** none for callers in the repositories searched: `Confine::new` ap
 only in `ikigai-sexpr`'s tests. A corridor that is opaque cannot be compared, so the check would
 state that limit.
 
-### B3. `Scope::spaces` hands an endpoint live corridors, and dispatching through one skips the floor
+### B3 (closed). `Scope::spaces` no longer hands an endpoint live corridors
 
-`inv.scope().spaces()` returns the chain's corridors, the host's and the confined ones, as live
-spaces. The endpoint can resolve in one and invoke what it finds, outside the kernel. So a door whose
-declared floor refuses this caller answers it anyway, with no cache entry or trace event of its own.
+**Was:** `inv.scope().spaces()` returned the chain's corridors, the host's and the confined ones, as
+live spaces. An endpoint could resolve in one and invoke what it found, outside the kernel, so a
+door whose declared floor refused this caller answered it anyway, with no cache entry or trace
+event of its own. It added no reach by name, since the chain already held these doors, but it
+contradicted R7.4 (the floor runs against whichever corridor answered) for any corridor on the
+chain.
 
-```rust
-let Resolution::Hit(hit) = inv.scope().spaces()[0].resolve(&request, inv.scope()) else { .. };
-hit.endpoint.invoke(inv).await // `urn:cap:gated` is required of a sub-request, and never asked here
-```
+**Now** ([#3866](http://localhost:1060/l/default/item/3866)): `Invocation::scope` and
+`Scope::spaces` are crate-private, so an endpoint reaches a corridor's door only by issuing a
+request, which meets the floor of the corridor door that answers, however it is phrased (a
+source, a whole request, a confinement of its own, which goes behind the host's corridors). This
+is the suggested fix, taken further: the endpoint API exposes no part of its scope's structure at
+all (opacity, R7.14), and the probes core's own tests need moved behind the `testkit` feature.
 
-It adds no reach by name, since the chain already held these doors. It does contradict R7.4 (the
-floor runs against whichever corridor answered) for any corridor on the chain. The same space value
-fed to `Kernel::new` gives C2.
-
-    pin: `scope_hypothesis::finding_scope_spaces_lets_an_endpoint_dispatch_past_a_corridors_capability_floor` (crates/ikigai-core/tests/scope_hypothesis.rs)
-
-**To make it declared:** make `spaces` `pub(crate)`, and offer the corridor names if anyone needs
-them. **Cost:** no caller outside core in the repositories searched (`.spaces()` in `ikigai-gonk` is
-a different method on its own types). Inside core: `tests/stack.rs` twice, `tests/body_issue.rs` once.
+    pin: `scope_hypothesis::an_endpoint_reaches_a_corridors_door_only_through_its_floor` (crates/ikigai-core/tests/scope_hypothesis.rs)
+    doctest: `Invocation::scope`
+    doctest: `Scope::spaces`
 
 ### B4. An endpoint holding a `Kernel` chooses any chain, and its door can report the opposite
 
@@ -245,8 +248,8 @@ Elsewhere it appears in test code of `ikigai-conformance`, `ikigai-encrypt`, `ik
 **C2. `Kernel::new` inside an endpoint.** Any endpoint can build a kernel over a space value it holds
 and issue in it under `Capability::root()`. That is reach only into what it already holds, but it
 dispatches past every floor, and it uses a cache and a chain no one else sees. Example:
-`Kernel::new(Arc::clone(&inv.scope().spaces()[0])).issue(req, &Capability::root())`. The fix for B3
-removes the source inside core; a space held by capture is H's question. No test pins this one: it
+`Kernel::new(Arc::clone(&space)).issue(req, &Capability::root())`. Inside core its source was B3,
+`inv.scope().spaces()`, which [#3866](http://localhost:1060/l/default/item/3866) closed; a space held by capture is H's question. No test pins this one: it
 follows from B3 and the public constructors.
 
 **C3. Direct dispatch.** An overlay holding a space or endpoint can call `resolve` and `invoke`
@@ -320,7 +323,7 @@ state that in the certificate, and pin overlays in each repository the way `ikig
 | Context | Travels? | Declared? | Finding |
 |---|---|---|---|
 | A host's injected corridors (`Kernel::issue_in`) | Yes, at every depth and across `fan_out` | **No**: not in the root's topology, only in `topology_in(scope)` and the trace | **C10** |
-| The chain's clock (`Scope::with_named_at`) | Yes, read by `Invocation::now` | **No**; the trace's `SCOPE_CLOCK_NOTE` shows it. It is not fingerprinted, on purpose (`resolution-scope.md`) | **C10** |
+| The chain's clock (`Scope::with_named_at`) | Yes, read by `Invocation::now`, and whether there is one by `Invocation::clock_pinned` | **No**; the trace's `SCOPE_CLOCK_NOTE` shows it. It is not fingerprinted, on purpose (`resolution-scope.md`) | **C10** |
 | Confined corridors | Yes, below the confining endpoint | At the door for `Confine`; nowhere for `Invocation::confine` | B1 |
 | The level stack | **No**: each resolution replaces it with the found path | `ik:Level` | None |
 | Capability, depth, trace scope | Yes | Not scope: they refuse or observe | None |
@@ -347,7 +350,7 @@ with the certificate's wording rather than ahead of it.
 ## Why these findings are in the open
 
 `AGENTS.md` sends security reports to private vulnerability reporting, so this was weighed. B2 and B3
-are the two that could read as vulnerabilities. Both need Rust code already linked into the host's
+are the two that could read as vulnerabilities (B3 is now closed). Both need Rust code already linked into the host's
 process and running as an endpoint, and such code can also call `Capability::root()` and read the
 filesystem, which is what the ambient gate polices. A dynamically loaded module reaches its host
 through an issuer that has no `Scope` to read and refuses a non-empty chain. No caller of
