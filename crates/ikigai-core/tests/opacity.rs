@@ -13,8 +13,9 @@
 //! 1. two scopes that share a key are indistinguishable to an endpoint, even recomputed;
 //! 2. the one scope fact an endpoint may still read, `Invocation::clock_pinned`, is covered by
 //!    the key: a pinned-clock answer is not served to an unpinned scope;
-//! 3. and the limit of that coverage, stated: a corridor's name claims its clock, so the same
-//!    name injected with and without one is one key, as `Scope::with_named_at` documents.
+//! 3. and that coverage holds under one name: the chain's identity is a temporal corridor's
+//!    name AND its instant (ledger #3869), so the same name injected with and without a clock
+//!    is two keys, as `Scope::with_named_at` documents.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -145,13 +146,10 @@ fn a_pinned_clock_answer_is_not_served_to_an_unpinned_scope() {
     assert_eq!(runs.load(Ordering::SeqCst), 3);
 }
 
+/// Before ledger #3869 this was one key ("the name claims the clock"), and the unpinned
+/// chain was served the pinned answer.
 #[test]
-fn a_corridors_name_claims_its_clock_so_one_name_is_one_key() {
-    // The coverage is the name's claim (`Scope::with_named_at`): every corridor of one name
-    // holds the same doors AND the same clock. A host that injects one name with a clock and
-    // without one makes that claim twice with different content, and the cache treats the two
-    // as one context, exactly as it would two different spaces under one name. Pinned so the
-    // limit is visible rather than assumed away.
+fn one_name_with_and_without_a_clock_is_two_keys() {
     let runs = Arc::new(AtomicU32::new(0));
     let kernel = kernel(&runs);
     let cap = Capability::root();
@@ -161,10 +159,17 @@ fn a_corridors_name_claims_its_clock_so_one_name_is_one_key() {
     let name = || iri("urn:ctx:time:then");
     let with_clock = Scope::empty().with_named_at(name(), doors(), Arc::new(FixedClock::at(1_000)));
     let without = Scope::empty().with_named(name(), doors());
-    assert_eq!(with_clock.fingerprint(), without.fingerprint());
+    assert_ne!(with_clock.fingerprint(), without.fingerprint());
 
     let first = block_on(kernel.issue_in(source("urn:observer"), &cap, with_clock)).unwrap();
     let second = block_on(kernel.issue_in(source("urn:observer"), &cap, without)).unwrap();
-    assert_eq!(first.bytes, second.bytes, "served under the name's claim");
-    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        String::from_utf8_lossy(&first.bytes),
+        "pinned=true now=Some(1000) asked=then depth=0"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&second.bytes),
+        "pinned=false now=Some(2000) asked=then depth=0"
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
 }

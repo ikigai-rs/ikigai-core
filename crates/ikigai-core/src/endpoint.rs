@@ -1093,10 +1093,11 @@ impl<'a> Invocation<'a> {
     ///
     /// This is the one fact about its scope an endpoint may read besides the time, and it
     /// is **covered by the cache key**: a clock reaches a chain only beside the corridor
-    /// it is derived from, whose NAME is in the chain's fingerprint, and a named corridor
-    /// is a claim that every corridor of that name holds the same doors and the same
-    /// clock (see [`Scope::with_named_at`]). So an answer cached under a pinned chain is
-    /// never served to a chain with no temporal corridor, or with a different one. An
+    /// it is derived from, and the chain's fingerprint hashes that corridor's name AND
+    /// the instant its clock read at injection (ledger #3869, see
+    /// [`Scope::with_named_at`]). So an answer cached under a pinned chain is never
+    /// served to a chain with no temporal corridor, with a different one, or with the
+    /// same name at another instant. An
     /// endpoint uses it to declare an as-of answer [`cacheable`](Representation::cacheable)
     /// and a live one not:
     ///
@@ -2239,10 +2240,12 @@ impl<'a> Invocation<'a> {
     /// ★ **Under a pinned chain that deadline is in the corridor's time and is
     /// judged in the kernel's.** The kernel never reads the chain's clock for
     /// validity — a pinned past must not un-expire a live entry — so a window
-    /// computed from a pinned past is already expired (never cached) and one from
-    /// a pinned future outlives its window. Data that is as-of a pinned instant is
-    /// a pure function of its context: declare it [`cacheable`](Representation::cacheable),
-    /// not `cacheable_until`.
+    /// computed from a pinned past is already expired (never cached). One computed
+    /// from a pinned FUTURE is put back on the kernel's clock (ledger #3869): a
+    /// deadline after the chain's instant is served at most its window from the
+    /// kernel's now, never until the corridor's time comes round. Data that is
+    /// as-of a pinned instant is a pure function of its context: declare it
+    /// [`cacheable`](Representation::cacheable), not `cacheable_until`.
     ///
     /// A [`detached`](Self::detached) invocation with none of the three has no time
     /// — which is the honest answer, not a fallback to the system clock: reading
@@ -2286,6 +2289,17 @@ impl<'a> Invocation<'a> {
     ///   already hangs its caller from a thread named after it, and a depth refusal
     ///   must never reach a shallower request. Neither is a write's failure: only a
     ///   cacheable verb's.
+    /// - Nor is a refusal the run context decided (ledger #3869):
+    ///   [`OverBudget`](Error::OverBudget), [`Timeout`](Error::Timeout) or
+    ///   [`GaveUp`](Error::GaveUp). Depth and the run context (the memory and retry
+    ///   pools, the deadline, the time left) are admission inputs: they decide
+    ///   whether an answer is produced, never what it is, and none of them is in the
+    ///   cache key, so a run with a larger budget or a later deadline must not be
+    ///   served this run's refusal. The variant decides, whoever produced it: an
+    ///   origin's 504 is a `Timeout` too, and is not cached.
+    /// - Stated under a pinned FUTURE ([`now`](Self::now) is a temporal corridor's
+    ///   instant ahead of the kernel's clock), `until` is served at most its window
+    ///   from the kernel's now, as a success's deadline is.
     ///
     /// Stating it more than once keeps the earliest. A failure WITHOUT a stated expiry
     /// is never cached, exactly as before this existed.
