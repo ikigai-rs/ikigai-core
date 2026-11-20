@@ -278,6 +278,9 @@ intended reading of "the root of the caller's resolution chain", and the pushdow
 it, but `ik:resolveAt "root"` reads as the opposite, and a checker taking the keyword at its word is
 wrong. **Suggested:** decide, and either document it on `ResolveAt::Root` and in the vocabulary, or
 resolve past the level stack. The second changes answers only for a view inside a level.
+`Meta` of such a view now describes the same target the invocation reaches, resolved in the
+view's resolved scope ([#3867](http://localhost:1060/l/default/item/3867)); before, it resolved
+the target in the request's chain and described the root's binding.
 
     pin: `scope_hypothesis::finding_a_view_declared_at_the_root_resolves_from_its_level_when_it_is_inside_one` (crates/ikigai-core/tests/scope_hypothesis.rs)
 

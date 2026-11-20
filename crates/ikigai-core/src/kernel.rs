@@ -3285,7 +3285,7 @@ impl Kernel {
     #[inline(never)]
     fn unoffered(&self, request: &Request) -> Error {
         if request.verb.is_mutating() {
-            self.cut(request.target.as_str());
+            self.cut_thread(request.target.as_str());
         }
         Error::Endpoint("answered `revalidated` with no stale answer offered".to_string())
     }
@@ -4240,9 +4240,16 @@ impl Kernel {
                 .meta
                 .as_ref()
                 .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
-            // A forwarder (a view, a named request) is described by its TARGET's contract,
-            // the target resolved in this request's chain (ledger #2513; `forward.rs`).
-            let description = self.meta_description(endpoint, scope, capability);
+            // The RESOLVED scope: this request's chain with its level stack replaced by
+            // the levels the endpoint was found in, the chain its invocation would run in.
+            let resolved_scope = scope.descend(levels.clone());
+            // A forwarder (a view, a named request) is described by its TARGET's contract
+            // (ledger #2513; `forward.rs`), the target resolved where the forward itself
+            // resolves it: in the forwarder's resolved scope, its own level first (audit
+            // C6). Resolving it in the request's chain instead described the root's binding
+            // of a name a level shadows, while a `Source` through the view reached the
+            // level's (ledger #3867).
+            let description = self.meta_description(endpoint, &resolved_scope, capability);
             let target = meta_target(request);
             let policy = meta_policy(request)?;
             let rendered = match renderer.render(&description, &target) {
@@ -4260,7 +4267,7 @@ impl Kernel {
                         capability,
                         span,
                         trace,
-                        &scope.descend(levels.clone()),
+                        &resolved_scope,
                         depth,
                         reach,
                     )
@@ -5017,7 +5024,7 @@ impl Kernel {
                     // so a refusal before dispatch never cuts, and only a caller
                     // holding the endpoint's declared capabilities can.
                     if request.verb.is_mutating() {
-                        self.cut(request.target.as_str());
+                        self.cut_thread(request.target.as_str());
                     }
                     // A failed revalidation forgets the stale entry, as the lookup did
                     // before revalidation existed.
@@ -5225,7 +5232,7 @@ impl Kernel {
         // thread on an out-of-band change. A failed one that RAN cuts too, in the
         // invocation's error arm above (ledger #1105).
         if request.verb.is_mutating() {
-            self.cut(request.target.as_str());
+            self.cut_thread(request.target.as_str());
         }
         Ok(Answer::Body(representation).budgeted(|| pool))
     }
@@ -5279,7 +5286,52 @@ impl Kernel {
     ///
     /// The cut is also *sequenced*, so a request already in flight cannot file a
     /// result that predates it (see [`cache`](crate::cache)).
+    ///
+    /// # A logical name cuts its canonical thread too
+    ///
+    /// A name the kernel's alias table ([`with_aliases`](Self::with_aliases)) rewrites is
+    /// canonicalized here exactly as a request's target is, so cutting the logical name
+    /// invalidates every read of it, which hangs from the CANONICAL name's thread (ledger
+    /// #3867). The name as given is cut first and always: a thread is any string an
+    /// endpoint hangs a dependency from ([`Invocation::depends_on`](crate::Invocation::depends_on)),
+    /// so canonicalizing adds a cut and never moves one. A name no rule matches, a
+    /// non-IRI thread, and a name the table refuses (a cycle) are cut once, as given.
+    /// `urn:kernel:cut` cuts through this method, so it canonicalizes the same way.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     AliasTable, Capability, EndpointSpace, Exact, FnEndpoint, Iri, Kernel, ReprType,
+    ///     Representation, Request, Verb,
+    /// };
+    ///
+    /// let upper = FnEndpoint::new("upper", |_| {
+    ///     Ok(Representation::new(ReprType::new("text/plain"), b"UP".to_vec()).cacheable())
+    /// });
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:example:new:upper"), upper)))
+    ///     .with_aliases(Arc::new(AliasTable::new().exact("urn:example:old:upper", "urn:example:new:upper")));
+    /// let read = Request::new(Verb::Source, Iri::parse("urn:example:old:upper").unwrap());
+    /// block_on(kernel.issue(read.clone(), &Capability::root())).unwrap();
+    /// assert!(kernel.is_cached(&read, &Capability::root()));
+    ///
+    /// kernel.cut("urn:example:old:upper"); // the logical name
+    /// assert!(!kernel.is_cached(&read, &Capability::root()));
+    /// ```
     pub fn cut(&self, thread: impl Into<Thread>) {
+        let thread = thread.into();
+        let canonical = Iri::parse(thread.as_str())
+            .ok()
+            .and_then(|name| self.canonical(&name).ok().flatten());
+        self.cut_thread(thread);
+        if let Some(canonical) = canonical {
+            self.cut_thread(canonical.as_str());
+        }
+    }
+
+    /// Cut exactly `thread`, with no canonicalization: the kernel's own cuts, whose names
+    /// are already canonical (a dispatched write's target, the binding-change thread).
+    fn cut_thread(&self, thread: impl Into<Thread>) {
         let thread = thread.into();
         // The binding-change thread also forgets the floor memo, which is not a cache
         // entry but hangs from the same predicate — so whoever cuts it, by this
@@ -5388,7 +5440,7 @@ impl Kernel {
     /// assert!(!kernel.is_cached(&manifold(), &root), "recomputed on its next read");
     /// ```
     pub fn bindings_changed(&self) {
-        self.cut(BINDINGS_THREAD);
+        self.cut_thread(BINDINGS_THREAD);
     }
 
     /// Resolve a `urn:kernel:*` request — a kernel operation exposed as a
@@ -6432,6 +6484,8 @@ impl Kernel {
     /// The description the `Meta` arm answers for `endpoint`: its own, or for a forwarder
     /// its target's contract projected (ledger #2513), the target resolved in `scope` as
     /// the forward itself would resolve it, following at most `MAX_FORWARDS` forwards.
+    /// `scope` is the forwarder's RESOLVED scope, the chain its invocation runs in, so a
+    /// view inside a level is described by the binding its `Source` reaches (ledger #3867).
     fn meta_description(
         &self,
         endpoint: &Arc<dyn Endpoint>,
@@ -6482,9 +6536,12 @@ impl Kernel {
         match resolved.endpoint.forwards() {
             None => Some(own),
             Some(forward) => {
-                let inner = left
-                    .checked_sub(1)
-                    .and_then(|left| self.forward_target(&forward.target, scope, capability, left));
+                // A forward found in a level forwards from that level (ledger #3867), as
+                // its own invocation would.
+                let inner_scope = scope.descend(resolved.levels().clone());
+                let inner = left.checked_sub(1).and_then(|left| {
+                    self.forward_target(&forward.target, &inner_scope, capability, left)
+                });
                 Some(crate::forward::project(&forward, own, inner.as_ref()))
             }
         }
