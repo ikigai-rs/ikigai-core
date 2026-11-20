@@ -558,18 +558,30 @@ fn the_innermost_clock_wins_and_confinement_keeps_it() {
     assert_eq!(Scope::empty().now(), None);
 }
 
+/// The fingerprint is the corridor's name AND the instant its clock read at injection
+/// (ledger #3869). Before, it was the name alone, and these three were one context.
 #[test]
-fn the_fingerprint_is_the_corridors_name_not_its_clock() {
+fn the_fingerprint_is_the_corridors_name_and_its_instant() {
     let doors: Arc<dyn Space> = Arc::new(EndpointSpace::new());
     let name = || iri("urn:ctx:time:2026-09-25T18:00Z");
     let with_clock =
         Scope::empty().with_named_at(name(), Arc::clone(&doors), Arc::new(FixedClock::at(PINNED)));
+    let same_instant =
+        Scope::empty().with_named_at(name(), Arc::clone(&doors), Arc::new(FixedClock::at(PINNED)));
     let other_clock =
         Scope::empty().with_named_at(name(), Arc::clone(&doors), Arc::new(FixedClock::at(LATER)));
     let no_clock = Scope::empty().with_named(name(), Arc::clone(&doors));
-    assert_eq!(with_clock.fingerprint(), no_clock.fingerprint());
-    assert_eq!(with_clock.fingerprint(), other_clock.fingerprint());
+    assert_eq!(with_clock.fingerprint(), same_instant.fingerprint());
+    assert_ne!(with_clock.fingerprint(), no_clock.fingerprint());
+    assert_ne!(with_clock.fingerprint(), other_clock.fingerprint());
+    // A chain with no clock hashes what it hashed before: the empty chain stays 0 and
+    // the printed form names the corridor alone.
     assert_eq!(with_clock.to_string(), no_clock.to_string());
+    // Stacking carries the instant with the clock.
+    assert_eq!(
+        Scope::empty().stack(&with_clock).fingerprint(),
+        with_clock.fingerprint()
+    );
 }
 
 /// A clock that can be moved — the kernel's, for the validity tests.

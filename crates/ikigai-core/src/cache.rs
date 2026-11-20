@@ -101,6 +101,19 @@ pub(crate) const CACHED_FAILURES: usize = 1024;
 /// The kernel additionally checks incoming pipe provenance in the private cache
 /// slot before reuse. A changed upstream expiry or thread set is a miss, even for
 /// the same public key; a successful store replaces that key's previous variant.
+///
+/// ★ **What is NOT in the key cannot decide an answer** (ledger #3869), and the kernel
+/// guarantees it:
+/// - **Depth and the run context are admission inputs only.** The depth a request runs
+///   at, and its memory and retry pools, deadline and time left, may decide whether an
+///   answer is produced, never what it is. A depth refusal, `OverBudget`, `Timeout` and
+///   `GaveUp` are never stored, even with a stated failure expiry; a stored answer
+///   records the depth it consumed and is served only where it fits.
+/// - **The clock reaches content only through an expiry or a named instant.** A live
+///   read states how long it holds, judged on the kernel's clock; a temporal corridor's
+///   identity in the chain fingerprint is its name and the instant its clock read
+///   ([`Scope::with_named_at`](crate::Scope::with_named_at)), and a deadline stated
+///   after a pinned future instant is served at most its window on the kernel's clock.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct CacheKey {
     /// The content-addressed identity of the request that produced the entry.

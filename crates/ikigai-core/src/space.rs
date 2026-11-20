@@ -140,10 +140,16 @@ struct Chain {
     /// The chain's clock: the one a temporal corridor DERIVED at injection
     /// ([`Scope::with_named_at`]), read by [`Invocation::now`](crate::Invocation::now)
     /// ahead of the issuer's. Innermost wins; a corridor injected without one leaves
-    /// it as it was; confinement keeps it. **Not fingerprinted** — the clock is a
-    /// property of the corridor's name (see `with_named_at` on why), and the kernel
-    /// never reads it for validity.
+    /// it as it was; confinement keeps it. The clock itself is not fingerprinted (an
+    /// `Arc<dyn Clock>` has no stable identity); the instant it read at injection is
+    /// (`instant`, see `with_named_at`), and the kernel never reads it for validity.
     clock: Option<Arc<dyn Clock>>,
+    /// The instant `clock` read when its corridor was injected, and **fingerprinted**
+    /// (ledger #3869): a temporal corridor's identity is its name AND its instant, so
+    /// two injections under one name at two instants are two contexts, never one cache
+    /// entry. `None` exactly when `clock` is, so a chain without a clock hashes the
+    /// bytes it hashed before.
+    instant: Option<Time>,
 }
 
 /// What a corridor is fingerprinted by: the name its injector claimed for it, or
@@ -260,14 +266,38 @@ impl Scope {
     /// is any [`Space`]. So `with_named_at(n, s, c)` asserts, beside what
     /// [`with_named`](Self::with_named) already asserts about `n` and `s`: *the time
     /// `s` binds under `n` is the time `c` reads.* That is the same shape as a
-    /// corridor's name being a claim, and it is why the clock is **not** part of
-    /// the [fingerprint](Self::fingerprint): the clock is a property of the name.
-    /// Two injections under one name with different clocks are one claim made
-    /// twice with different content — the injector's error, exactly as two
-    /// different spaces under one name would be — and the cache treats them as one
-    /// context. (The alternative, fingerprinting the clock, has nothing to hash: an
-    /// `Arc<dyn Clock>` has no stable identity, and the instant exists only for a
-    /// clock that does not move.)
+    /// corridor's name being a claim.
+    ///
+    /// # The instant is part of the corridor's identity
+    ///
+    /// The clock reaches an answer's content only through a name that carries its
+    /// instant (ledger #3869), and core checks that half rather than trusting it:
+    /// `with_named_at` reads `c` once, at injection, and the
+    /// [fingerprint](Self::fingerprint) hashes that instant beside `n`. So two
+    /// injections under one name at two instants are two contexts with two cache
+    /// entries, and the same name injected with and without a clock are two as well;
+    /// an injector that names its corridors by their instant (`urn:ctx:time:<RFC
+    /// 3339>`) shares entries exactly as before. The clock itself is not hashed (an
+    /// `Arc<dyn Clock>` has no stable identity), so a clock that MOVES is identified
+    /// by the instant it read at injection: two injections a millisecond apart do not
+    /// share, which is sound and caches little. Pin time with a clock that does not
+    /// move ([`FixedClock`](crate::FixedClock)).
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{EndpointSpace, FixedClock, Iri, Scope, Space};
+    ///
+    /// let doors: Arc<dyn Space> = Arc::new(EndpointSpace::new());
+    /// let at = |millis| {
+    ///     Scope::empty().with_named_at(
+    ///         Iri::parse("urn:ctx:time:pinned").unwrap(),
+    ///         Arc::clone(&doors),
+    ///         Arc::new(FixedClock::at(millis)),
+    ///     )
+    /// };
+    /// assert_eq!(at(1_000).fingerprint(), at(1_000).fingerprint());
+    /// assert_ne!(at(1_000).fingerprint(), at(2_000).fingerprint());
+    /// ```
     ///
     /// At most one clock per chain, and the **innermost** wins: a temporal corridor
     /// injected inside another replaces its clock, as its `urn:time:now` shadows the
@@ -342,6 +372,7 @@ impl Scope {
         self.edit(|chain| {
             chain.injected.push(space);
             chain.identities.push(identity);
+            chain.instant = Some(clock.now());
             chain.clock = Some(clock);
         })
     }
@@ -484,6 +515,7 @@ impl Scope {
             }
             if let Some(clock) = &other.clock {
                 chain.clock = Some(Arc::clone(clock));
+                chain.instant = other.instant;
             }
         })
     }
@@ -583,6 +615,7 @@ impl Scope {
                 levels: LevelPath::default(),
                 fingerprint: 0,
                 clock: None,
+                instant: None,
             },
             Some(shared) => Arc::try_unwrap(shared).unwrap_or_else(|shared| (*shared).clone()),
         };
@@ -1023,6 +1056,12 @@ impl Chain {
                     hasher.update(&id.to_le_bytes());
                 }
             }
+        }
+        // The chain's instant, only when a temporal corridor set one (ledger #3869), so
+        // a chain without a clock hashes exactly the bytes it hashed before.
+        if let Some(instant) = self.instant {
+            crate::hashing::feed_u8(&mut hasher, 4);
+            hasher.update(&instant.as_millis().to_le_bytes());
         }
         // The level stack, only when there is one — so a chain without levels hashes
         // exactly the bytes it hashed before levels existed, and every key built

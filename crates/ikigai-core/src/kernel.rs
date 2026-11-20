@@ -3149,11 +3149,14 @@ impl Kernel {
         let request = invocation.request;
         let mut depended = invocation.failure_dependencies(&request.target);
         if let Some(key) = key {
+            let stated = invocation
+                .stated_failure_expiry()
+                .map(|until| self.on_kernel_clock(until, invocation.scope().now()));
             depended.failure_until = self.cache_failure(
                 key,
                 request,
                 error,
-                invocation.stated_failure_expiry(),
+                stated,
                 &depended,
                 taken,
                 incoming,
@@ -3188,12 +3191,25 @@ impl Kernel {
         // A denial has no thread to cut; a miss already hangs one; a depth refusal is
         // never cached (B.7): it is answered for the depth it was refused at, and a
         // shallower request would not be refused.
+        //
+        // ★ AND NEITHER IS A REFUSAL THE RUN CONTEXT DECIDED (ledger #3869). Depth and the
+        // run context (the memory and retry pools, the deadline, the time left) are
+        // ADMISSION inputs: they decide whether an answer is produced, never what it is,
+        // and none of them is in the cache key. A budget run out (`OverBudget`), a wait
+        // that ran out (`Timeout`) and a retry layer that stopped (`GaveUp`) are each what
+        // a run with a larger budget, a later deadline or more retries would not answer,
+        // so a stated expiry on one would serve that run this run's refusal. The kernel
+        // cannot tell which producer derived a `Timeout` from the deadline (a retry
+        // overlay does) and which did not (an origin's 504), so the variant decides.
         if matches!(
             error,
             Error::Denied(_)
                 | Error::NotFound(_)
                 | Error::Unresolved(_)
                 | Error::DepthExceeded { .. }
+                | Error::OverBudget { .. }
+                | Error::Timeout(_)
+                | Error::GaveUp { .. }
         ) {
             return None;
         }
@@ -3260,6 +3276,28 @@ impl Kernel {
 
     fn now_stamp(&self) -> Option<Time> {
         self.clock.as_ref().map(|clock| clock.now())
+    }
+
+    /// ★ A DEADLINE STATED UNDER A PINNED FUTURE LIVES NO LONGER THAN ITS WINDOW ON THE
+    /// KERNEL'S CLOCK (ledger #3869). An endpoint turns a freshness window into a deadline
+    /// from [`Invocation::now`], which under a temporal corridor is the chain's instant,
+    /// while the kernel judges every deadline on its own clock. Under a pinned FUTURE the
+    /// stated deadline would then outlive its window by the distance to the pinned
+    /// instant. So a deadline after `chain` is read as a window from it, and is served at
+    /// most that long from the kernel's `now`: `min(until, now + (until - chain))`.
+    ///
+    /// Only ever shortens. With no pinned chain, a chain at or behind the kernel's clock
+    /// (a pinned past: its window was never served past `until`, and is not extended), a
+    /// deadline at or before the chain's instant (no window from it: read as stated, on
+    /// the kernel's clock), or no kernel clock, `until` is returned as it came.
+    fn on_kernel_clock(&self, until: Time, chain: Option<Time>) -> Time {
+        match (chain, self.now_stamp()) {
+            (Some(chain), Some(now)) if chain > now && until > chain => {
+                let window = until.as_millis() - chain.as_millis();
+                until.min(now.plus_millis(window))
+            }
+            _ => until,
+        }
     }
 
     /// Milliseconds elapsed since `started`, per the injected clock — the honest
@@ -5042,9 +5080,16 @@ impl Kernel {
             // fresher than its most volatile part. The endpoint's own expiry is met
             // with the combined dependency expiry — `Always` if either is volatile,
             // the earlier deadline if both are time-bounded, `Never` only if all are.
-            let mut effective = representation
-                .expiry
-                .most_restrictive(invocation.dependency_expiry());
+            // The endpoint's own deadline first goes onto the kernel's clock, so one
+            // stated under a pinned future cannot outlive its window (ledger #3869,
+            // `on_kernel_clock`); its dependencies' already did, in their own invocations.
+            let own = match representation.expiry {
+                Expiry::At(until) => {
+                    Expiry::At(self.on_kernel_clock(until, invocation.scope().now()))
+                }
+                other => other,
+            };
+            let mut effective = own.most_restrictive(invocation.dependency_expiry());
             // Golden threads propagate too: the result depends on its own declared
             // threads plus those of every sub-resource it resolved, so cutting any
             // of them invalidates this composite.

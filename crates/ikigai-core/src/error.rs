@@ -230,6 +230,11 @@ pub enum Error {
     /// caller holds costs the same and fails the same on a repeat, and is
     /// [`OverBudget`](Error::OverBudget) instead (since 0.1.108; the budgeted modules move
     /// to it in their own releases).
+    ///
+    /// **Never cached**, even with a stated failure expiry (ledger #3869): a wait is bounded
+    /// by the run's deadline, which is not in the cache key, so a later run with more time
+    /// must not be served this one's timeout. The same holds for `OverBudget` and
+    /// [`GaveUp`](Error::GaveUp).
     Timeout(String),
     /// A dependency or transport is unavailable (down, connection refused,
     /// unreachable). **Transient**, like [`Timeout`](Error::Timeout).

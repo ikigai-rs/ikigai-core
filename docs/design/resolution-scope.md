@@ -344,6 +344,17 @@ counter), so it would have to be the instant, which exists only for a clock that
 move — a derived clock that ticks from a pinned origin has none. Pinned:
 `the_fingerprint_is_the_corridors_name_not_its_clock`.
 
+> **Superseded by ledger [#3869](http://localhost:1062/l/default/item/3869).** The kernel's
+> cache contract now requires the clock to reach an answer's content only through an expiry or
+> a name that carries its instant, so core checks that half instead of trusting the claim:
+> `with_named_at` reads the clock once at injection and the fingerprint hashes that instant
+> beside the name (a ticking clock is identified by the instant it read, which is sound and
+> shares little). Two instants under one name are two entries, and so are one name with and
+> without a clock. And a deadline stated after a pinned FUTURE instant is served at most its
+> window on the kernel's clock. Pinned: `temporal_corridor::the_fingerprint_is_the_corridors_name_and_its_instant`,
+> `admission_only::two_instants_under_one_name_never_share_an_entry` and
+> `admission_only::a_success_stated_under_a_pinned_future_is_served_only_its_window`.
+
 **Trace.** One reserved key beside `SCOPE_NOTE`: `SCOPE_CLOCK_NOTE` (`"scope-clock"`), the
 instant the chain's clock read as the event was recorded, only when the chain carries one.
 Added because the name alone cannot tell a reader whether `inv.now()` was pinned — a chain
