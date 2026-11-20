@@ -2,8 +2,9 @@
 
 ## Unreleased: needs a minor bump (0.4.0)
 
-This minor release carries two changes: the nested confinement below (ledger #3825), and the
-missing scopes on a capability-floor refusal (ledger #3840).
+This minor release carries the nested confinement below (ledger #3825), the missing scopes on a
+capability-floor refusal (ledger #3840), and two corrections pinned with three other kernel
+behaviors (ledger #3867).
 
 ### Added
 
@@ -43,3 +44,25 @@ missing scopes on a capability-floor refusal (ledger #3840).
   follows the same rule: an inner chain's confinement replaces the outer one's. This only
   narrows: dropping `T₁` removes reach and grants nothing. The chain fingerprint follows the
   chain, so a result cached in the old nested chain is not reused.
+- **`Meta` of a view inside a `Level` describes the target a `Source` through it reaches**
+  (ledger #3867). A view's invocation resolves its target in the view's resolved scope, its own
+  level first. `Meta` resolved the target in the request's chain instead, so where a level
+  shadowed the target's name, `Meta` described the root's binding while `Source` reached the
+  level's. `Meta` now resolves it where the invocation does, and so does each further forward
+  it follows. Only a view inside a level whose target name the level also binds sees a
+  different description.
+- **A cut of an alias's logical name cuts its canonical thread too** (ledger #3867).
+  `Kernel::cut` and `urn:kernel:cut` canonicalize the name through the kernel's alias table, as
+  a request's target is, and cut the canonical thread after the name as given. Before, a cut of
+  the logical name invalidated no read, since every read hangs from the canonical name. The
+  name as given is still cut, so a dependency registered under it still invalidates; a name no
+  rule matches is cut once, as before. `urn:kernel:cut`'s answer still names the thread as given.
+
+### Pinned (no change)
+
+- **Five kernel behaviors gain tests** (ledger #3867, `tests/view_cut_alias_pins.rs`): a `Sink`
+  or `Delete` through a plain view writes the target and cuts both the target's thread and the
+  view's name; the two corrections above; the kernel's alias table rewrites a name before
+  resolution inside a severed or confined chain too, so the rewritten name is what resolves
+  there; and a cycle through a view in one table and an alias in the kernel's table is stopped
+  only by the nesting budget (`DepthExceeded`), which is load-bearing for it.

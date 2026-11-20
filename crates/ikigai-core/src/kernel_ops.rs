@@ -347,7 +347,8 @@ fn cut() -> Description {
              resolving rather than through a special method — so an endpoint, a filesystem \
              watcher or a remote peer all invalidate the same way. Name the thread in \
              `thread`, or sink it as content (`sink urn:kernel:cut <thread>`); exactly one \
-             of the two, and a blank one counts as neither.",
+             of the two, and a blank one counts as neither. A name the kernel's alias table \
+             renames cuts its canonical thread too, as a request to it would resolve there.",
         )
         .verb(Verb::Sink)
         .verb(Verb::Meta)
