@@ -648,7 +648,7 @@ impl Recorded {
     /// A success contributes its expiry and its golden threads, as ever. A failure
     /// contributes too, by error class, because an endpoint that catches the failure
     /// and returns a cacheable fallback is otherwise cached with nothing to invalidate
-    /// it — hole B of [#512](http://localhost:1060/l/default/item/512):
+    /// it — hole B of [#512](http://localhost:1062/l/default/item/512):
     ///
     /// - [`Error::Unresolved`] / [`Error::NotFound`]: a thread named after the missing
     ///   resource, so a `Sink` that later creates it (or a watcher that sees it appear)

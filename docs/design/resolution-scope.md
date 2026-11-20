@@ -1,9 +1,9 @@
 # Resolution scope: the chain, its two faces, and what the cache owes it
 
-**Status:** built, core 0.1.72 (ledger [#509](http://localhost:1060/l/default/item/509));
+**Status:** built, core 0.1.72 (ledger [#509](http://localhost:1062/l/default/item/509));
 the chain reaches selection, the probe and the pipe, and carries a clock, core 0.1.75
-([#516](http://localhost:1060/l/default/item/516),
-[#517](http://localhost:1060/l/default/item/517)).
+([#516](http://localhost:1062/l/default/item/516),
+[#517](http://localhost:1062/l/default/item/517)).
 **Anchor types:** `ikigai_core::{Scope, Scope::with_named_at, Confine, Invocation::confine,
 Kernel::issue_in, Kernel::issue_with_incoming_in, Kernel::is_cached_in,
 Kernel::select_transreptor_in, Kernel::select_action_in, Kernel::select_actions_in,
@@ -11,11 +11,11 @@ Issuer::issue_in_scope, Issuer::select_action_in, CacheKey::scope, CacheRow, SCO
 SCOPE_MISS_NOTE, SCOPE_CLOCK_NOTE}`.
 **Companions:** `docs/design/resolution-context.md` (levels: the resolved scope an endpoint
 found inside a `Level` runs in, and sealed names — ledger
-[#563](http://localhost:1060/l/default/item/563)),
+[#563](http://localhost:1062/l/default/item/563)),
 `docs/design/sub-request-authority.md` (the authority argument this reuses
 verbatim), `docs/design/cache-ejection.md` §2 (a fingerprint is not an identity),
 `docs/design/spaces-as-named-graphs.md` (where corridor identity goes next, ledger
-[#515](http://localhost:1060/l/default/item/515)), `docs/formalism/README.md` (the formal
+[#515](http://localhost:1062/l/default/item/515)), `docs/formalism/README.md` (the formal
 companion to the paper: this chain as the paper's Γ, every claim pinned to a test).
 **Normative reference:** Peter Rodgers, *Peter's Hotel: A Set-Theoretic Formalism* v5.18 —
 §3 (context chains, value corridors), §9.1 (the trapdoor, Def. 10), §9.3 (confinement,

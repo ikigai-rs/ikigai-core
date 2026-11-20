@@ -1,6 +1,6 @@
 # The resolution context: levels, the resolved scope, and sealed names
 
-**Status:** phase 1 of ledger [#563](http://localhost:1060/l/default/item/563), built in
+**Status:** phase 1 of ledger [#563](http://localhost:1062/l/default/item/563), built in
 three PRs in this repository: `Level`, the found path and the resolved scope (PR #132); sealed
 names (PR #133); the pushdown gatekeeper walk and the formal document (PR #134). Released in
 0.1.81.
@@ -84,6 +84,8 @@ the backward-compatibility property, and it is pinned three ways at once by
 workload's answers, every endpoint's `inv.scope()` and its fingerprint, every traced event, the
 `urn:kernel:cache` readout and the fingerprints of six host-built scopes, compared against the
 transcript main produced at `7774fc2` before any of this existed.
+(Historical: `inv.scope()` has been crate-private since ledger #3866. That test now reads each
+endpoint's chain through `ikigai_core::testkit`.)
 
 Mechanically the chain gains two things and changes nothing else: a **level stack**
 (`Scope::levels`), and a count of how many of its corridors a confinement placed rather than a
@@ -137,7 +139,7 @@ resolved in, and both are in the key. Pinned by
 
 This is sound and over-partitioned: two scopes that consulted the same corridors do not share
 an entry. Keying on the FOUND part of the scope — NetKernel's up-to-eight keys per entry,
-ledger [#548](http://localhost:1060/l/default/item/548) — is phase 2, after measuring the
+ledger [#548](http://localhost:1062/l/default/item/548) — is phase 2, after measuring the
 fragmentation.
 
 ## Space-scoped transreptors
@@ -223,7 +225,7 @@ things are refused, naming what collided — a builder panics with the message,
 
 **What the topology cannot show** — an opaque space or a closure `Rewrite` inside a level, a
 level hidden under an overlay that does not forward `Space::topology` (ledger
-[#546](http://localhost:1060/l/default/item/546)) — is checked on every resolution: a sealed
+[#546](http://localhost:1062/l/default/item/546)) — is checked on every resolution: a sealed
 name (the target, or a canonical the hit reported) found at a path whose innermost level is not
 its owner, and a hit through a sealing level the kernel never registered, are refused with an
 `Error::Endpoint` naming the name, the owner and the level, and traced under `SEALED_NOTE`.
@@ -283,14 +285,14 @@ graph read `false`/`false` — the query would have called a leak safe.
   a real host (gonk, the cli), distinct `urn:kernel:cache` rows per request id once modules are
   levels, and the hit rate on root reads issued from inside levels versus from the root. That
   number decides whether found-scope keying
-  ([#548](http://localhost:1060/l/default/item/548)) is worth its complexity.
+  ([#548](http://localhost:1062/l/default/item/548)) is worth its complexity.
 - **The descent cost on a hot composite.** ~170 ns per invocation inside a level (the table
   below). If a profile shows it, memoize the resolved scope per (chain, found path) — the
   inputs are two `Arc`s, so the memo key is cheap.
 - **Construction cost of the seal walk** on the largest real root (a module host with thousands
   of bindings), once a sealing level exists in the process: `Kernel::new` walks the topology
   then, and nothing measured it on a big tree.
-- **Thread invalidation across levels** ([#581](http://localhost:1060/l/default/item/581)):
+- **Thread invalidation across levels** ([#581](http://localhost:1062/l/default/item/581)):
   a golden thread is a name, so a write through one level cuts a same-named resource another
   level answers. Sound (over-invalidation) but unmeasured.
 

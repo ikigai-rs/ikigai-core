@@ -1,7 +1,7 @@
 # Space declarations: the arrangement as data, coming in
 
-**Status:** arc 1 built, core 0.1.83 (ledger [#633](http://localhost:1060/l/default/item/633),
-with [#608](http://localhost:1060/l/default/item/608) ahead of it). The design and Brian's five
+**Status:** arc 1 built, core 0.1.83 (ledger [#633](http://localhost:1062/l/default/item/633),
+with [#608](http://localhost:1062/l/default/item/608) ahead of it). The design and Brian's five
 decisions of 2026-09-29 are in the hub's brief `ikigai-core-space-declarations.md`; this note says
 what core now does and does not do.
 
@@ -52,7 +52,7 @@ that names the node's IRI exactly as the Turtle does (skolems included) and says
 
 | refused | why |
 |---|---|
-| `ik:OpaqueSpace` | a remote peer or a hand-written resolver: nothing to rebuild. Under an `ik:Mount` the error names the prefix and points at [#630](http://localhost:1060/l/default/item/630) (declared remote mounts) |
+| `ik:OpaqueSpace` | a remote peer or a hand-written resolver: nothing to rebuild. Under an `ik:Mount` the error names the prefix and points at [#630](http://localhost:1062/l/default/item/630) (declared remote mounts) |
 | `ik:Rewrite` | its rule is a closure. The table-driven form is `ik:Alias` |
 | `ik:Chain` as the root | a declaration describes a space; the chain is per request. `urn:kernel:topology` answers a chain, so a host reading one back declares its root layer: `Kernel::root_topology()` is that layer, without unwrapping the chain by hand |
 | `ik:Confine` where a space belongs | a confinement lives at a door: declare it as the door's `ik:confinedTo` |
@@ -78,7 +78,7 @@ wants them.
 A declaration is operator input (`ikigai --arrangement` hands its Turtle straight to
 `from_turtle`), so core reads and builds it within three bounds, each a public constant and each
 REFUSED whole with `DeclarationError::TooLarge` — never a crash, never a truncation (ledger
-[#643](http://localhost:1060/l/default/item/643)):
+[#643](http://localhost:1062/l/default/item/643)):
 
 | bound | limit | why |
 |---|---|---|
@@ -133,21 +133,21 @@ Turtle is the canonical form and the one core reads. Every other surface reaches
 | Turtle | here |
 | s-expressions | next, in `ikigai-sexpr`, which already transrepts s-expressions to Turtle (decision 1) |
 | JSON-LD | free, through the existing JSON-LD transreptors and the regenerated context |
-| YAML | deferred, [#629](http://localhost:1060/l/default/item/629) |
+| YAML | deferred, [#629](http://localhost:1062/l/default/item/629) |
 
 ## Deferred, by decision
 
 | what | ledger |
 |---|---|
-| hot reload: a watched declaration, a swappable root, and who may rebind a running kernel (`urn:cap:kernel:arrange`) | [#628](http://localhost:1060/l/default/item/628) |
-| YAML as a surface | [#629](http://localhost:1060/l/default/item/629) |
-| declared remote mounts, behind a host-granted capability | [#630](http://localhost:1060/l/default/item/630) |
-| a factory registry: a module instantiated with configuration from the file | [#631](http://localhost:1060/l/default/item/631) |
-| corridor templates: temporal and personal spaces, instantiated per request from values | [#632](http://localhost:1060/l/default/item/632) |
+| hot reload: a watched declaration, a swappable root, and who may rebind a running kernel (`urn:cap:kernel:arrange`) | [#628](http://localhost:1062/l/default/item/628) |
+| YAML as a surface | [#629](http://localhost:1062/l/default/item/629) |
+| declared remote mounts, behind a host-granted capability | [#630](http://localhost:1062/l/default/item/630) |
+| a factory registry: a module instantiated with configuration from the file | [#631](http://localhost:1062/l/default/item/631) |
+| corridor templates: temporal and personal spaces, instantiated per request from values | [#632](http://localhost:1062/l/default/item/632) |
 
 Also not here, and not core's: the cli registry and the start-time option that builds the root
 from a declaration resource, the s-expression grammar, the tutorial's proving case, and the
-picture of a space ([#635](http://localhost:1060/l/default/item/635), which reads the doors'
+picture of a space ([#635](http://localhost:1062/l/default/item/635), which reads the doors'
 endpoint names this arc added).
 
 ## In the browser
