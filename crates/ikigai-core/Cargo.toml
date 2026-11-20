@@ -61,12 +61,21 @@ oxrdf = { workspace = true, optional = true }
 # ⚠ The tests behind this feature run only in a job that enables it: CI's
 # `features: "*"` (--all-features) is that job.
 declare = ["dep:oxttl", "dep:oxrdf", "dep:getrandom"]
+# NOT API. The test-only door onto a chain (`ikigai_core::testkit`, ledger #3866): an
+# endpoint uses its scope only by issuing requests into it, so the readers a test needs to
+# see what resolution did live here instead of on `Invocation` or `Scope`. This crate's
+# own tests turn it on through the self dev-dependency below, so `cargo test` sees it and
+# `cargo build` never does. No host or module enables it.
+testkit = []
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 # Only under `declare`, only in the browser: see oxttl/oxrdf above.
 getrandom = { version = "0.3.4", features = ["wasm_js"], optional = true }
 
 [dev-dependencies]
+# This crate with the `testkit` feature, so its own tests, unit and integration and doc,
+# reach `ikigai_core::testkit` (ledger #3866). Path only, so `cargo publish` strips it.
+ikigai-core = { path = ".", features = ["testkit"] }
 futures = "0.3" # block_on for async tests
 # Test-only: the IPC wire's codec, so the duplicate-argument refusal (ledger #1731) is
 # pinned on the bytes a peer actually sends, not only on JSON.

@@ -1306,14 +1306,17 @@ chain's own list, so the same queries find it.
 
 **R7.4 (kernel dispatch checks the answering corridor's floor).** For requests dispatched
 through the kernel, a corridor shadowing an open root door with a gated one is gated on its own
-declaration, and its cached entry is fenced from a caller the declaration refuses. This holds
-only when dispatch goes through the kernel: `Scope::spaces` exposes live corridor spaces, so an
-endpoint can call `Space::resolve` and `Endpoint::invoke` directly and skip the floor. The
-[scope-hypothesis audit, B3](../formal/scope-hypothesis-audit.md#b3-scopespaces-hands-an-endpoint-live-corridors-and-dispatching-through-one-skips-the-floor)
-pins that exception; core does not enforce the kernel-dispatch condition.
+declaration, and its cached entry is fenced from a caller the declaration refuses. Since
+[#3866](http://localhost:1060/l/default/item/3866) an endpoint reaches a corridor only by
+dispatching through the kernel: `Invocation::scope` and `Scope::spaces` are crate-private (R7.14),
+so no endpoint holds a chain's live corridor spaces to resolve in and invoke past the floor. The
+[scope-hypothesis audit, B3](../formal/scope-hypothesis-audit.md#b3-closed-scopespaces-no-longer-hands-an-endpoint-live-corridors)
+is closed. An endpoint that holds a space value by capture, or a `Kernel`, is the audit's C3 and
+B4, and R7.5's trust condition, not this rule.
 
     pin: `scope::the_capability_floor_is_evaluated_on_the_corridor_endpoint_that_answered` (crates/ikigai-core/tests/scope.rs)
-    pin: `scope_hypothesis::finding_scope_spaces_lets_an_endpoint_dispatch_past_a_corridors_capability_floor` (crates/ikigai-core/tests/scope_hypothesis.rs)
+    pin: `scope_hypothesis::an_endpoint_reaches_a_corridors_door_only_through_its_floor` (crates/ikigai-core/tests/scope_hypothesis.rs)
+    doctest: `Scope::spaces`
 
 **R7.5 (injection is authority; severing is not).** Whoever pushes a corridor innermost can
 stand in for any door for every sub-request of that resolution, so injection with the root
@@ -1521,6 +1524,42 @@ built. A corridor arriving by `stack` is a host corridor, so it stands in for a 
     pin: `stack::stacking_onto_a_resolved_scope_keeps_its_level_stack` (crates/ikigai-core/tests/stack.rs)
     pin: `stack::a_stacked_host_corridor_still_stands_in_for_a_sealed_name` (crates/ikigai-core/tests/stack.rs)
     doctest: `Scope::stack`
+
+**R7.14 (opacity: an endpoint uses its scope only by issuing requests into it).** Decided
+2026-11-20 ([#3866](http://localhost:1060/l/default/item/3866)), and now a property the kernel
+guarantees. What an endpoint requests, the value it returns and that value's validity depend on
+its scope only through what its requests into the scope answer. The kernel's semantics require
+it: the cache keys an answer on the request chain's fingerprint (R7.2), so an endpoint able to
+read more of its scope than the key covers could return a cacheable answer the kernel serves to
+another scope that shares the key, which makes reusing a cached answer across scopes unsound.
+Through 0.3.x `Invocation::scope` was public and handed endpoint code the resolved scope, with
+its level stack, its live corridors, their count, whether it was severed, its fingerprint and
+its printed form. Now:
+- `Invocation::scope` is crate-private, and so are `Scope::spaces` and `Scope::levels`, each
+  refused from outside the crate with E0624 by a `compile_fail` doctest. An endpoint never
+  receives a `Scope` at all; the kernel keeps its own access.
+- Time stays: `Invocation::now`, unchanged (R7.10). The one scope fact an endpoint may read
+  besides it is `Invocation::clock_pinned`, whether that time is a temporal corridor's. It is
+  covered by the key through the corridor's name: a clock reaches a chain only beside the
+  corridor it is derived from, and the name claims the clock (R7.10). So a pinned answer is never
+  served to a chain without that corridor; the same name injected with and without a clock is one
+  claim made twice, the injector's error, and is pinned as such.
+- A test that must see what resolution did reads the chain through `ikigai_core::testkit`,
+  behind the `testkit` feature, which is not API; core's own tests enable it through a
+  dev-dependency on the crate itself.
+
+What it does not reach: a `Space` still receives the request chain in `Space::resolve`, and can
+read what remains public on a host's chain (its fingerprint, its rendering, whether it is
+severed, its clock). A space is the arrangement, composed by the host, and a resolution is not
+an answer the cache keys; whether that path needs closing too is open.
+
+    pin: `opacity::two_scopes_that_share_a_key_are_indistinguishable_to_an_endpoint` (crates/ikigai-core/tests/opacity.rs)
+    pin: `opacity::a_pinned_clock_answer_is_not_served_to_an_unpinned_scope` (crates/ikigai-core/tests/opacity.rs)
+    pin: `opacity::a_corridors_name_claims_its_clock_so_one_name_is_one_key` (crates/ikigai-core/tests/opacity.rs)
+    pin: `scope_hypothesis::an_endpoint_reaches_a_corridors_door_only_through_its_floor` (crates/ikigai-core/tests/scope_hypothesis.rs)
+    doctest: `Invocation::scope`
+    doctest: `Scope::spaces`
+    doctest: `Invocation::clock_pinned`
 
 **The read measurement** (§10): injecting the chain into every issue cost 0–10 ns on a ~410 ns
 cache-hit read once the empty chain became a null handle; reaching the four faces and adding the
@@ -1953,7 +1992,7 @@ ecosystem was grepped first and holds none (the last moved to `Resolved::new` at
 one hit is a text fixture in ikigai-browse's test corpus, not a crate), so no consumer
 recompiles differently; `Resolved { endpoint, .. }` still matches. **What a consumer observes
 without code of its own changing:** nothing, for a kernel with no `Level` and no host seal —
-pinned byte for byte in answers, `inv.scope()` fingerprints, traces, the cache readout and
+pinned byte for byte in answers, the fingerprints of the chains endpoints ran in, traces, the cache readout and
 host-built scope fingerprints against a transcript captured on main at `7774fc2`. A kernel
 that adopts levels sees `LEVEL_NOTE` and `@name` in `SCOPE_NOTE`; one that seals sees
 refusals at build for a module binding a sealed name, and a confined corridor no longer

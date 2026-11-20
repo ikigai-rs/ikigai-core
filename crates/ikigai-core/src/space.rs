@@ -369,8 +369,8 @@ impl Scope {
     /// One corridor at a time needs nothing new: [`with`](Self::with),
     /// [`with_named`](Self::with_named) and [`with_named_at`](Self::with_named_at)
     /// already push innermost onto a chain that is not empty. What they cannot do is
-    /// take a corridor out of a [`Scope`] someone else built — `spaces()` gives the
-    /// spaces but not the names they were injected under, and an anonymous corridor
+    /// take a corridor out of a [`Scope`] someone else built — a chain does not hand out
+    /// its spaces or the names they were injected under, and an anonymous corridor
     /// re-injected with [`with`](Self::with) would be a NEW identity, so a chain
     /// rebuilt from its parts would fingerprint differently from the original. `stack`
     /// carries the identities across, so it is faithful where a rebuild cannot be.
@@ -387,8 +387,8 @@ impl Scope {
     ///   root was, and, as [`confined`](Self::confined) does, drops `self`'s earlier
     ///   confinements, severs the chain and leaves `self`'s level stack behind;
     /// - **the level stack** — `self`'s, unchanged, unless `inner` carries one (only
-    ///   a resolved scope an endpoint saw on [`Invocation::scope`](crate::Invocation::scope)
-    ///   does, never a chain a host builds), which replaces it as the kernel's descent
+    ///   a resolved scope the kernel derived for an endpoint inside a [`Level`] does,
+    ///   never a chain a host builds), which replaces it as the kernel's descent
     ///   would.
     ///
     /// The [fingerprint](Self::fingerprint) is recomputed over the whole result: two
@@ -560,9 +560,14 @@ impl Scope {
     /// The level stack this chain consults after the host's corridors — the levels
     /// the endpoint issuing a request in this chain was found in, innermost first.
     /// Empty for every chain a host builds ([`Scope::empty`], injection,
-    /// confinement); what an endpoint inside a [`Level`] sees on
-    /// [`Invocation::scope`](crate::Invocation::scope).
-    pub fn levels(&self) -> &LevelPath {
+    /// confinement); non-empty only in the resolved scope the kernel derives for an
+    /// endpoint inside a [`Level`].
+    ///
+    /// Crate-private (ledger #3866): the level stack is part of the scope an endpoint
+    /// runs in, and an endpoint uses its scope only by issuing requests into it (see
+    /// `Invocation::scope`). A test reads it through `ikigai_core::testkit::levels`.
+    #[cfg_attr(not(feature = "testkit"), allow(dead_code))] // read by the testkit door only
+    pub(crate) fn levels(&self) -> &LevelPath {
         static NONE: LevelPath = LevelPath(Vec::new());
         self.chain.as_ref().map_or(&NONE, |chain| &chain.levels)
     }
@@ -596,7 +601,23 @@ impl Scope {
 
     /// The injected corridors, outermost first (the most recently injected is
     /// last, and is consulted first).
-    pub fn spaces(&self) -> &[Arc<dyn Space>] {
+    ///
+    /// Crate-private (ledger #3866). These are LIVE spaces: whoever holds one can
+    /// resolve in it and invoke what it finds outside the kernel, past the capability
+    /// floor the kernel checks on the corridor door that answers (the scope-hypothesis
+    /// audit's B3). The kernel consults them; nothing else may. A test reads them
+    /// through `ikigai_core::testkit::spaces`. From outside the crate:
+    ///
+    /// ```compile_fail,E0624
+    /// use std::sync::Arc;
+    /// use ikigai_core::{EndpointSpace, Iri, Scope};
+    ///
+    /// let scope = Scope::empty()
+    ///     .with_named(Iri::parse("urn:ctx:c").unwrap(), Arc::new(EndpointSpace::new()));
+    /// let _ = scope.spaces(); // E0624: the corridors are the kernel's to consult
+    /// ```
+    #[cfg_attr(not(feature = "testkit"), allow(dead_code))] // read by the testkit door only
+    pub(crate) fn spaces(&self) -> &[Arc<dyn Space>] {
         self.chain.as_ref().map_or(&[], |chain| &chain.injected)
     }
 
@@ -2118,7 +2139,7 @@ static LEVEL_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 
 /// A path of [`Level`]s, innermost first — the found path a resolution reports
 /// ([`Resolved::levels`]) and the level stack a chain consults
-/// ([`Scope::levels`]).
+/// (the kernel's own, never an endpoint's).
 #[derive(Clone, Default)]
 pub struct LevelPath(Vec<Arc<LevelCore>>);
 

@@ -10,6 +10,7 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use futures::executor::block_on;
+use ikigai_core::testkit;
 use ikigai_core::{
     Alias, AliasTable, ArgRef, ArgSpec, AsyncFnEndpoint, Bindings, Capability, Confine,
     Description, Endpoint, EndpointSpace, Error, Exact, Fallback, FixedClock, FnEndpoint,
@@ -129,13 +130,16 @@ fn finding_a_confinement_name_is_unchecked_so_one_endpoint_can_answer_for_anothe
     assert_eq!(read(&kernel, "urn:verifier").unwrap(), b"forged");
 }
 
-// ---- (b) `Scope::spaces`: a live corridor, reachable from any invocation --------------------
+// ---- B3, closed: an endpoint reaches a corridor only by requesting it -----------------------
 
-/// `inv.scope().spaces()` hands over the chain's corridors as live spaces. Resolving one and
-/// invoking what it found dispatches outside the kernel, so the door's declared capability
-/// floor, which a sub-request meets, is never consulted.
+/// Before ledger #3866, `inv.scope().spaces()` handed an endpoint the chain's corridors as live
+/// spaces, and resolving one and invoking what it found dispatched outside the kernel, past the
+/// door's declared capability floor. Neither reader is public now (`Invocation::scope` and
+/// `Scope::spaces` are crate-private, each pinned by a `compile_fail` doctest), so the only way
+/// an endpoint reaches a corridor's door is a request, and a request meets the floor of the
+/// corridor door that answers, whichever way it is phrased.
 #[test]
-fn finding_scope_spaces_lets_an_endpoint_dispatch_past_a_corridors_capability_floor() {
+fn an_endpoint_reaches_a_corridors_door_only_through_its_floor() {
     let gated = text(b"gated answer").with_description(
         Description::new("gated")
             .verb(Verb::Source)
@@ -147,28 +151,38 @@ fn finding_scope_spaces_lets_an_endpoint_dispatch_past_a_corridors_capability_fl
     let asks = AsyncFnEndpoint::new("asks", |inv| {
         Box::pin(async move { inv.source(&iri("urn:gated")).await })
     });
-    let reaches_in = AsyncFnEndpoint::new("reaches-in", |inv| {
+    // The other phrasings an endpoint has: a whole request, and a confinement of its own,
+    // which puts a corridor behind the host's and so cannot get ahead of the gated door.
+    let issues = AsyncFnEndpoint::new("issues", |inv| {
+        Box::pin(async move { inv.issue(source("urn:gated")).await })
+    });
+    let confines = AsyncFnEndpoint::new("confines", |inv| {
         Box::pin(async move {
-            let request = source("urn:gated");
-            let spaces = inv.scope().spaces();
-            let Resolution::Hit(hit) = spaces[0].resolve(&request, inv.scope()) else {
-                panic!("the corridor binds the name");
-            };
-            hit.endpoint.invoke(inv).await
+            inv.confine(iri("urn:ctx:mine"), door("urn:gated", b"mine"))
+                .source(&iri("urn:gated"))
+                .await
         })
     });
     let kernel = Kernel::new(Arc::new(
         EndpointSpace::new()
             .bind(Exact::new("urn:asks"), asks)
-            .bind(Exact::new("urn:reaches-in"), reaches_in),
+            .bind(Exact::new("urn:issues"), issues)
+            .bind(Exact::new("urn:confines"), confines),
     ));
 
     let scope = || Scope::empty().with_named(iri("urn:ctx:gated"), Arc::clone(&corridor));
     let weak = Capability::scoped(["urn:cap:other"]);
-    let asked = block_on(kernel.issue_in(source("urn:asks"), &weak, scope()));
-    assert!(matches!(asked, Err(Error::Denied(_))), "{asked:?}");
-    let reached = block_on(kernel.issue_in(source("urn:reaches-in"), &weak, scope())).unwrap();
-    assert_eq!(reached.bytes, b"gated answer");
+    for entry in ["urn:asks", "urn:issues", "urn:confines"] {
+        let answer = block_on(kernel.issue_in(source(entry), &weak, scope()));
+        assert!(
+            matches!(answer, Err(Error::Denied(_))),
+            "{entry}: {answer:?}"
+        );
+    }
+    // A caller holding the scope the door declares is answered, through every phrasing.
+    let strong = Capability::scoped(["urn:cap:gated"]);
+    let asked = block_on(kernel.issue_in(source("urn:asks"), &strong, scope())).unwrap();
+    assert_eq!(asked.bytes, b"gated answer");
 }
 
 // ---- (b) A kernel handle: `Issuer` and `Kernel::issue_in` take any chain ---------------------
@@ -184,7 +198,10 @@ fn finding_an_endpoint_holding_the_kernel_leaves_the_confinement_its_door_report
         AsyncFnEndpoint::new("escapes", move |inv| {
             let kernel = handle.get().and_then(Weak::upgrade).expect("attached");
             Box::pin(async move {
-                assert!(inv.scope().is_severed(), "runs inside the confinement");
+                assert!(
+                    testkit::scope(inv).is_severed(),
+                    "runs inside the confinement"
+                );
                 let confined = inv.source(&iri("urn:secret")).await;
                 assert!(
                     matches!(confined, Err(Error::Unresolved(_))),
@@ -227,7 +244,7 @@ fn finding_with_issuer_starts_an_invocation_in_the_empty_chain() {
     let root = Capability::root();
     let kernel = Kernel::new(door("urn:x", b"x"));
     let inv = Invocation::with_issuer(&request, &bindings, &root, &kernel);
-    assert!(inv.scope().is_empty());
+    assert!(testkit::scope(&inv).is_empty());
     assert_eq!(inv.depth(), 0);
     assert_eq!(block_on(inv.source(&iri("urn:x"))).unwrap().bytes, b"x");
 }
@@ -240,15 +257,15 @@ fn finding_with_issuer_starts_an_invocation_in_the_empty_chain() {
 fn a_scope_an_endpoint_builds_is_inert() {
     let tries = AsyncFnEndpoint::new("tries", |inv| {
         Box::pin(async move {
-            let own = inv.scope().fingerprint();
-            let _built = inv
-                .scope()
-                .clone()
+            let own = testkit::scope(inv).fingerprint();
+            // An endpoint no longer holds its own chain (ledger #3866), so it builds from the
+            // empty one; what it builds is inert either way.
+            let _built = Scope::empty()
                 .with_named(iri("urn:ctx:fake"), door("urn:x", b"from the fake"))
                 .stack(&Scope::empty().with(door("urn:x", b"stacked")))
                 .sever()
                 .confined(iri("urn:ctx:behind"), door("urn:x", b"behind"));
-            assert_eq!(inv.scope().fingerprint(), own);
+            assert_eq!(testkit::scope(inv).fingerprint(), own);
             inv.source(&iri("urn:x")).await
         })
     });
@@ -492,7 +509,10 @@ fn the_level_stack_does_not_travel_into_an_endpoint_found_outside_it() {
         AsyncFnEndpoint::new("reports", move |inv| {
             let seen = Arc::clone(&seen);
             Box::pin(async move {
-                seen.store(inv.scope().levels().len() as u32 + 1, Ordering::SeqCst);
+                seen.store(
+                    testkit::levels(testkit::scope(inv)).len() as u32 + 1,
+                    Ordering::SeqCst,
+                );
                 Ok(Representation::new(
                     ReprType::new("text/plain"),
                     b"ok".to_vec(),
@@ -507,7 +527,10 @@ fn the_level_stack_does_not_travel_into_an_endpoint_found_outside_it() {
         AsyncFnEndpoint::new("calls", move |inv| {
             let in_level = Arc::clone(&in_level);
             Box::pin(async move {
-                in_level.store(inv.scope().levels().len() as u32 + 1, Ordering::SeqCst);
+                in_level.store(
+                    testkit::levels(testkit::scope(inv)).len() as u32 + 1,
+                    Ordering::SeqCst,
+                );
                 inv.source(&iri("urn:at-root")).await
             })
         })

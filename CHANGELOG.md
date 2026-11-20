@@ -3,8 +3,9 @@
 ## Unreleased: needs a minor bump (0.4.0)
 
 This minor release carries the nested confinement below (ledger #3825), the missing scopes on a
-capability-floor refusal (ledger #3840), and two corrections pinned with three other kernel
-behaviors (ledger #3867).
+capability-floor refusal (ledger #3840), two corrections pinned with three other kernel behaviors
+(ledger #3867), and scope opacity, which removes `Invocation::scope` from the endpoint API
+(ledger #3866).
 
 ### Added
 
@@ -23,6 +24,27 @@ behaviors (ledger #3867).
   `denied-by-the-floor` row that pins it, and the plain `denied` row is unchanged.
 
 ### Changed (breaking)
+
+- **An endpoint uses its scope only by issuing requests into it: `Invocation::scope` is gone
+  from the endpoint API** (ledger #3866). The kernel's semantics require it: the cache keys an
+  answer on the request chain's fingerprint, so an endpoint that could read more of its scope
+  than the key covers could return a cacheable answer the kernel serves to another scope that
+  shares the key. Removed from public API:
+  - `Invocation::scope()`, now crate-private. An endpoint never receives a `Scope`.
+  - `Scope::spaces()` and `Scope::levels()`, now crate-private. `spaces` handed out live corridor
+    spaces, which also let an endpoint invoke a corridor door past its capability floor (the
+    scope-hypothesis audit's B3, now closed).
+
+  Kept: `Invocation::now()`, unchanged. Added: `Invocation::clock_pinned()`, whether that time is
+  a temporal corridor's, covered by the cache key through the corridor's name. A host's own
+  readers on a chain it built stay (`Scope::fingerprint`, `is_severed`, `is_empty`, `clock`,
+  `now`, `Display`). Migrating:
+  - `inv.scope().clock().is_some()` becomes `inv.clock_pinned()`.
+  - `inv.scope().now()` becomes `inv.now()`, which already prefers the chain's clock.
+  - Printing `inv.scope()` in a message has no replacement: name the resource or the condition
+    instead.
+  - A test that probes the chain an endpoint ran in uses `ikigai_core::testkit::{scope, spaces,
+    levels}` behind the new `testkit` feature. It is NOT API and carries no semver promise.
 
 - **`Error::Denied` holds a `Denial`, not a `String`** (ledger #3840). A `Denial` is the
   message and the missing scopes. It dereferences to `str` and displays as its message, so

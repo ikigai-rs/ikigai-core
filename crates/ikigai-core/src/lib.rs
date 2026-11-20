@@ -143,6 +143,8 @@ mod select;
 mod space;
 mod spill;
 pub mod stream;
+#[cfg(feature = "testkit")]
+pub mod testkit;
 mod topology;
 mod uncached;
 mod verb;

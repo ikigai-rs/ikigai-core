@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
+use ikigai_core::testkit;
 use ikigai_core::{
     builtins, ArgRef, AsyncFnEndpoint, Capability, Confine, Description, EndpointSpace, Error,
     Exact, Fallback, FnEndpoint, Invocation, Iri, Kernel, Level, MetaRenderer, Mount, ReprType,
@@ -67,8 +68,8 @@ fn probe(
         Box::pin(async move {
             log.lock().unwrap().push(format!(
                 "{name}: {} {:016x}",
-                inv.scope(),
-                inv.scope().fingerprint()
+                testkit::scope(inv),
+                testkit::scope(inv).fingerprint()
             ));
             let inner = inv.source(&iri(target)).await?;
             Ok(text(&inner.bytes).cacheable())
@@ -256,7 +257,7 @@ fn reader(
         Box::pin(async move {
             seen.lock()
                 .unwrap()
-                .push(format!("{name}: {}", inv.scope()));
+                .push(format!("{name}: {}", testkit::scope(inv)));
             match inv.source(&iri(target)).await {
                 Ok(inner) => Ok(text(&inner.bytes).cacheable()),
                 Err(Error::Unresolved(t)) => Ok(text(format!("unresolved {t}").as_bytes())),
@@ -528,10 +529,10 @@ fn the_level_path_is_in_the_fingerprint_by_name_and_only_when_there_is_one() {
         move |name: &'static str| {
             let prints = Arc::clone(&prints);
             FnEndpoint::new(name, move |inv| {
-                prints
-                    .lock()
-                    .unwrap()
-                    .push((inv.scope().fingerprint(), inv.scope().to_string()));
+                prints.lock().unwrap().push((
+                    testkit::scope(inv).fingerprint(),
+                    testkit::scope(inv).to_string(),
+                ));
                 Ok(text(b"ok"))
             })
         }

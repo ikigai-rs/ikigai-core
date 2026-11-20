@@ -12,6 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
+use ikigai_core::testkit;
 use ikigai_core::{
     AsyncFnEndpoint, Capability, EndpointSpace, Exact, FixedClock, FnEndpoint, Iri, Kernel, Level,
     Mount, ReprType, Representation, Request, Scope, Space, Verb,
@@ -108,7 +109,7 @@ fn a_chain_built_by_stacking_is_the_chain_built_by_the_same_pushes_at_once() {
         );
     assert_eq!(stacked.fingerprint(), at_once.fingerprint());
     assert_eq!(stacked.to_string(), at_once.to_string());
-    assert_eq!(stacked.spaces().len(), 3);
+    assert_eq!(testkit::spaces(&stacked).len(), 3);
     assert_eq!(stacked.is_severed(), at_once.is_severed());
     assert_eq!(
         stacked.now().map(|t| t.as_millis()),
@@ -149,7 +150,7 @@ fn stacking_the_empty_chain_on_either_side_changes_nothing() {
     );
     assert_ne!(
         Scope::empty()
-            .with(Arc::clone(&anonymous.spaces()[0]))
+            .with(Arc::clone(&testkit::spaces(&anonymous)[0]))
             .fingerprint(),
         anonymous.fingerprint()
     );
@@ -225,7 +226,7 @@ fn reader(seen: &Arc<Mutex<Vec<String>>>, targets: &'static [&'static str]) -> A
     AsyncFnEndpoint::new("reader", move |inv| {
         let seen = Arc::clone(&seen);
         Box::pin(async move {
-            seen.lock().unwrap().push(inv.scope().to_string());
+            seen.lock().unwrap().push(testkit::scope(inv).to_string());
             let mut out = Vec::new();
             for target in targets {
                 let got = inv.source(&iri(target)).await?;
@@ -268,7 +269,7 @@ fn stacked_corridors_stand_in_inside_a_level_and_the_level_stack_is_unaffected()
     // Stacked: the game's square AND the pinned time, inside the level.
     let both = game().stack(&as_of());
     assert!(
-        both.levels().is_empty(),
+        testkit::levels(&both).is_empty(),
         "a host-built chain has no level stack"
     );
     assert_eq!(get(&kernel, "urn:game:read", both), "game's a1 | 18:00");
@@ -288,7 +289,7 @@ fn stacking_onto_a_resolved_scope_keeps_its_level_stack() {
     let grab = {
         let captured = Arc::clone(&captured);
         FnEndpoint::new("grab", move |inv| {
-            *captured.lock().unwrap() = Some(inv.scope().clone());
+            *captured.lock().unwrap() = Some(testkit::scope(inv).clone());
             Ok(text(b"ok"))
         })
     };
@@ -302,8 +303,7 @@ fn stacking_onto_a_resolved_scope_keeps_its_level_stack() {
     get(&kernel, "urn:game:grab", Scope::empty());
     let resolved = captured.lock().unwrap().clone().unwrap();
     let names = |scope: &Scope| {
-        scope
-            .levels()
+        testkit::levels(scope)
             .names()
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
