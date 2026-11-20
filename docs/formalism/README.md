@@ -7,29 +7,29 @@ constructs, realized in `ikigai-core`, with the places where ikigai's mathematic
 an extension and the deviations that were deliberate, each argued.
 
 **Status:** written 2026-09-25 against ikigai-core **0.1.72** (`2504ad5`, published). Outline:
-ledger [#522](http://localhost:1060/l/default/item/522). The explainer in a different register
-is [#523](http://localhost:1060/l/default/item/523); the book review is
-[#521](http://localhost:1060/l/default/item/521). Revised 2026-09-26
-([#525](http://localhost:1060/l/default/item/525)): the gate left the packaged crate (§11), four
+ledger [#522](http://localhost:1062/l/default/item/522). The explainer in a different register
+is [#523](http://localhost:1062/l/default/item/523); the book review is
+[#521](http://localhost:1062/l/default/item/521). Revised 2026-09-26
+([#525](http://localhost:1062/l/default/item/525)): the gate left the packaged crate (§11), four
 doctests landed (the visibility halves of R2.2 and R7.5 as `compile_fail`, `Kernel::issue_in`,
 `Invocation::confine`), and §7 cross-links the two sentences `resolution-scope.md` owed.
-Revised again 2026-09-26 for **0.1.73** ([#512](http://localhost:1060/l/default/item/512),
-[#513](http://localhost:1060/l/default/item/513)): R4.4 is unconditional (the kernel supplies
+Revised again 2026-09-26 for **0.1.73** ([#512](http://localhost:1062/l/default/item/512),
+[#513](http://localhost:1062/l/default/item/513)): R4.4 is unconditional (the kernel supplies
 its precondition), R4.5 closes hole B, R5.3 is the nesting budget, and §10 carries the two
-read measurements those cost. Revised 2026-09-26 for **0.1.74** ([#510](http://localhost:1060/l/default/item/510),
-[#26](http://localhost:1060/l/default/item/26), [#22](http://localhost:1060/l/default/item/22)): `urn:kernel:bindings` is the binding-change thread every
+read measurements those cost. Revised 2026-09-26 for **0.1.74** ([#510](http://localhost:1062/l/default/item/510),
+[#26](http://localhost:1062/l/default/item/26), [#22](http://localhost:1062/l/default/item/22)): `urn:kernel:bindings` is the binding-change thread every
 self-description face hangs from, R3.2's binding row splits into a pinned half (derived faces)
 and a decided half (stored reads), the capability floor memoizes `describe()` per endpoint, and
 §10 carries that read; the path cache stays absent, its design written down. Revised 2026-09-26
-for **0.1.75** ([#516](http://localhost:1060/l/default/item/516),
-[#517](http://localhost:1060/l/default/item/517)): the chain reaches selection, the cache probe
+for **0.1.75** ([#516](http://localhost:1062/l/default/item/516),
+[#517](http://localhost:1062/l/default/item/517)): the chain reaches selection, the cache probe
 and the pipe (R7.8, R7.9; R2.3's second qualification is discharged), and carries a clock derived
 from the corridor that pins time, with validity kept on the kernel's clock (R7.10); §10 carries
-that read. Revised 2026-09-26 for **0.1.76** ([#511](http://localhost:1060/l/default/item/511)):
+that read. Revised 2026-09-26 for **0.1.76** ([#511](http://localhost:1062/l/default/item/511)):
 the limiter is realized — `Limit`, a hit on a kernel-known ⊥ rather than a third `Resolution`
 outcome — so §1's "Limiter (difference)" row is pinned, R2.3's first qualification gains the
 subtraction, and the register loses its first absent construct. Revised 2026-09-28 for
-**levels and sealed names** ([#563](http://localhost:1060/l/default/item/563)): the root's tree can now hold the paper's LEVELS
+**levels and sealed names** ([#563](http://localhost:1062/l/default/item/563)): the root's tree can now hold the paper's LEVELS
 (`Level`) — an endpoint runs in the scope at the level where it was found — so §1.1 is
 rewritten (the tree pushes, and the gatekeeper check follows the pushes), R7.1–R7.3 and R7.5
 say what changed, and R7.11 (the resolved scope) and R7.12 (sealed names) are new.
@@ -110,25 +110,25 @@ tracks it.
 | Identifier, I = Σ* | §1.2 | `Iri` — a validated **absolute IRI**. The identifier space is the RFC 3987 subset of Σ*, not all of it; the empty string ε is not an identifier. | deviation, §1.5 | pin: `iri::tests::accepts_absolute_iris` (crates/ikigai-core/src/iri.rs); pin: `iri::tests::rejects_relative_or_malformed` (crates/ikigai-core/src/iri.rs) |
 | Door (φ, F, Ω) | Def. 1 | a `(Grammar, Endpoint)` binding in an `EndpointSpace`: φ is `Grammar::match_iri`, which also returns the capture (the paper's "division into captured parts"); F is the set it accepts; Ω is `Endpoint::invoke`. Shipped grammars: `Exact` (a singleton family) and `UriTemplate` (RFC 6570 level 1, non-empty captures, adjacent variables refused at construction — so the capture function is a function of the identifier, as Thm. 4(a)(ii) and B.2 require). Regularity is a property of the shipped grammars, not of the trait: any decidable `Grammar` may be bound. | realized | pin: `grammar::tests::exact_matches_only_itself` (crates/ikigai-core/src/grammar.rs); pin: `grammar::tests::template_captures_trailing_var` (crates/ikigai-core/src/grammar.rs); pin: `grammar::tests::expand_is_inverse_of_match` (crates/ikigai-core/src/grammar.rs); pin: `grammar::tests::rejects_ambiguous_and_malformed` (crates/ikigai-core/src/grammar.rs) |
 | Corridor, first-match; effective families (Def. 3, Prop. 1) | §2.2 | `EndpointSpace::resolve`: bindings in declaration order, the first grammar that matches wins. The partition of Prop. 1 is what `entries()` enumerates, in the same order. A shadowed binding is invisible to selection rather than misattributed. | realized | pin: `space::tests::endpoint_space_enumerates_its_bindings` (crates/ikigai-core/src/space.rs); pin: `resolution::grammar_bindings_flow_to_endpoint` (crates/ikigai-core/tests/resolution.rs); pin: `resolution::unresolved_target_misses` (crates/ikigai-core/tests/resolution.rs); pin: `select::tests::a_shadowed_probe_is_discarded_not_misattributed` (crates/ikigai-core/src/select.rs) |
-| Context chain Γ, innermost first | §3 | Two things, and the difference is §1.1. **Per request:** `Scope` — ⟨injected corridors innermost first, level stack, root⟩, carried on the `Invocation` into every sub-request; the level stack is empty unless the endpoint that issued the request was found inside a `Level` (R7.11). **Static:** the root's tree, of which `Fallback` is the ordered first-hit member list — one corridor, except where a `Level` marks the scope an endpoint found below it runs in (since [#563](http://localhost:1060/l/default/item/563)). | realized, deviation §1.1 narrowed | pin: `levels::a_sub_request_falls_outward_through_the_enclosing_levels_to_the_root` (crates/ikigai-core/tests/levels.rs); pin: `scope::an_injected_corridor_shadows_a_root_door_for_the_request_and_for_its_sub_requests` (crates/ikigai-core/tests/scope.rs); pin: `resolution::fallback_tries_in_order` (crates/ikigai-core/tests/resolution.rs); pin: `space::tests::fallback_concatenates_enumerable_members_in_order` (crates/ikigai-core/src/space.rs); doctest: `Kernel::issue_in` |
-| Level — an endpoint runs in the scope at the level where it was found | §3, B.2 | `Level::new(name, inner)`: opt-in and always named. A hit through one reports its **found path** (`Resolved::levels`, innermost first); the kernel hands the endpoint its **resolved scope** — the host's corridors, then that path (each level's own space, without the guard it was entered through), then the root — and its sub-requests resolve there. `Mount(prefix, Level(…))` guards the way in and not the module's own sub-requests: module-relative names, private internals (Cor. 2); privacy is admission only, and a door that overlaps the exposed prefix without being declared public is reported by `check_exposure` ([#3796](http://localhost:1060/l/default/item/3796)). Since [#563](http://localhost:1060/l/default/item/563); R7.11. **Deviation, deliberate:** the root stays whole at the end of the resolved scope, so a later module still reaches an earlier one through its guard (§1.1). | realized, deviation §1.1 | pin: `levels::an_endpoint_in_a_level_reaches_its_siblings_by_short_name_and_they_stay_private` (crates/ikigai-core/tests/levels.rs); pin: `levels::the_root_stays_whole_so_a_later_module_reaches_an_earlier_one_through_its_guard` (crates/ikigai-core/tests/levels.rs); pin: `levels::an_injected_corridor_still_stands_in_for_a_name_inside_a_level` (crates/ikigai-core/tests/levels.rs); pin: `exposure::the_check_flags_the_internal_door_under_the_prefix_and_not_the_one_outside_it` (crates/ikigai-core/tests/exposure.rs); pin: `levels::a_kernel_without_a_level_is_byte_identical_in_answers_cache_keys_and_traces` (crates/ikigai-core/tests/levels.rs); doctest: `Level`; doctest: `Resolved::levels` |
+| Context chain Γ, innermost first | §3 | Two things, and the difference is §1.1. **Per request:** `Scope` — ⟨injected corridors innermost first, level stack, root⟩, carried on the `Invocation` into every sub-request; the level stack is empty unless the endpoint that issued the request was found inside a `Level` (R7.11). **Static:** the root's tree, of which `Fallback` is the ordered first-hit member list — one corridor, except where a `Level` marks the scope an endpoint found below it runs in (since [#563](http://localhost:1062/l/default/item/563)). | realized, deviation §1.1 narrowed | pin: `levels::a_sub_request_falls_outward_through_the_enclosing_levels_to_the_root` (crates/ikigai-core/tests/levels.rs); pin: `scope::an_injected_corridor_shadows_a_root_door_for_the_request_and_for_its_sub_requests` (crates/ikigai-core/tests/scope.rs); pin: `resolution::fallback_tries_in_order` (crates/ikigai-core/tests/resolution.rs); pin: `space::tests::fallback_concatenates_enumerable_members_in_order` (crates/ikigai-core/src/space.rs); doctest: `Kernel::issue_in` |
+| Level — an endpoint runs in the scope at the level where it was found | §3, B.2 | `Level::new(name, inner)`: opt-in and always named. A hit through one reports its **found path** (`Resolved::levels`, innermost first); the kernel hands the endpoint its **resolved scope** — the host's corridors, then that path (each level's own space, without the guard it was entered through), then the root — and its sub-requests resolve there. `Mount(prefix, Level(…))` guards the way in and not the module's own sub-requests: module-relative names, private internals (Cor. 2); privacy is admission only, and a door that overlaps the exposed prefix without being declared public is reported by `check_exposure` ([#3796](http://localhost:1062/l/default/item/3796)). Since [#563](http://localhost:1062/l/default/item/563); R7.11. **Deviation, deliberate:** the root stays whole at the end of the resolved scope, so a later module still reaches an earlier one through its guard (§1.1). | realized, deviation §1.1 | pin: `levels::an_endpoint_in_a_level_reaches_its_siblings_by_short_name_and_they_stay_private` (crates/ikigai-core/tests/levels.rs); pin: `levels::the_root_stays_whole_so_a_later_module_reaches_an_earlier_one_through_its_guard` (crates/ikigai-core/tests/levels.rs); pin: `levels::an_injected_corridor_still_stands_in_for_a_name_inside_a_level` (crates/ikigai-core/tests/levels.rs); pin: `exposure::the_check_flags_the_internal_door_under_the_prefix_and_not_the_one_outside_it` (crates/ikigai-core/tests/exposure.rs); pin: `levels::a_kernel_without_a_level_is_byte_identical_in_answers_cache_keys_and_traces` (crates/ikigai-core/tests/levels.rs); doctest: `Level`; doctest: `Resolved::levels` |
 | Import (union) | Def. 4 | `Mount` — an import guarded by a prefix: the inner space's families, restricted to identifiers under the prefix, added to what resolution reaches at the mount's position. No rewrite; the inner patterns are already full identifiers. | realized | pin: `resolution::mount_gates_by_prefix` (crates/ikigai-core/tests/resolution.rs) |
 | Mapper (preimage) | Def. 6 | `Rewrite` (a closure τ) and `Alias` (a table of exact and prefix rules, with counters). Both resolve τ(i) **once** in the enclosed space and **report** the rewrite on `Resolved::canonical`, which the kernel adopts before the cache key, the capability floor and the write-cut. **No outward fallback with τ(i)** — §1.2 and §5. | realized, deviation §1.2 | pin: `resolution::rewrite_remaps_target_before_resolution` (crates/ikigai-core/tests/resolution.rs); doctest: `Resolved::canonical`; pin: `alias::an_alias_can_never_launder_authority` (crates/ikigai-core/tests/alias.rs); pin: `alias::every_core_overlay_forwards_a_reported_canonical` (crates/ikigai-core/tests/alias.rs) |
 | Transparent overlay | Def. 5 | the interception family: `Resolution::map_endpoint` decorates the endpoint of an inner resolution and forwards `entries()`, so the overlay's family is exactly the union of what it encloses — the paper's transparent family, by enumeration. Every governor in `ikigai-throttle` is this shape; core's own overlays forward a reported canonical through it. | realized | doctest: `Resolution::map_endpoint`; pin: `space::tests::a_governor_stacks_on_an_already_erased_space` (crates/ikigai-core/src/space.rs) |
 | Opaque overlay | Def. 5 | `MountedRemote` in `ikigai-cli`: declares the remote's published patterns as its own family and hides the rest. Outside this crate. | realized elsewhere | UNPINNED — lives in ikigai-cli (`MountedRemote`), which a test in this crate cannot reach |
-| Limiter (difference) | Def. 7 | `Limit::new(prefix)` / `Limit::matching(grammar)` — a door whose endpoint is the distinguished ⊥, exactly as Def. 7 has it: for a name in its family it **hits** a kernel-known endpoint (`Endpoint::is_limiter`, defaulted `false`, so no implementor changed), and the kernel answers `Unresolved` — the same variant, the same text — as for a name bound nowhere, right after canonical adoption and before the floor, the cache and dispatch. `Fallback([Limit("urn:personal:"), S])` is S minus the family; a `Limit` injected as a corridor is the limiter at a position. **Not a third `Resolution` outcome** — nine external match sites would each have been a flag day ([#511](http://localhost:1060/l/default/item/511)). `entries()` is `Some(vec![])` and every `entries → Meta → describe` walk drops a hit on ⊥ (`select::probe`): the manifold subtracts (R2.3). `Meta` on a limited name is unresolved (a trapdoor passes metadata; a limiter is a hole, and describing it would reveal it). A governor cannot decorate ⊥ away. Since 0.1.76. | realized | pin: `limiter::a_limiter_carves_a_family_out_of_the_chain_and_out_of_every_manifold` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::a_limited_name_answers_exactly_as_an_unbound_name_does` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::an_alias_into_a_limited_family_is_limited_under_the_canonical_and_one_out_of_it_resolves` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::a_limiter_injected_as_a_corridor_limits_under_that_scope_only` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::inside_a_confinement_a_limited_name_is_traced_as_limited_not_scope_unresolved` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::a_governor_over_a_limited_family_still_limits_it` (crates/ikigai-core/tests/limiter.rs); pin: `space::tests::a_decorated_limiter_is_still_a_limiter` (crates/ikigai-core/src/space.rs); pin: `space::tests::a_limiter_is_enumerable_and_binds_nothing` (crates/ikigai-core/src/space.rs); pin: `select::tests::a_probe_that_lands_in_a_limited_family_is_subtracted_not_listed` (crates/ikigai-core/src/select.rs); doctest: `Limit` |
+| Limiter (difference) | Def. 7 | `Limit::new(prefix)` / `Limit::matching(grammar)` — a door whose endpoint is the distinguished ⊥, exactly as Def. 7 has it: for a name in its family it **hits** a kernel-known endpoint (`Endpoint::is_limiter`, defaulted `false`, so no implementor changed), and the kernel answers `Unresolved` — the same variant, the same text — as for a name bound nowhere, right after canonical adoption and before the floor, the cache and dispatch. `Fallback([Limit("urn:personal:"), S])` is S minus the family; a `Limit` injected as a corridor is the limiter at a position. **Not a third `Resolution` outcome** — nine external match sites would each have been a flag day ([#511](http://localhost:1062/l/default/item/511)). `entries()` is `Some(vec![])` and every `entries → Meta → describe` walk drops a hit on ⊥ (`select::probe`): the manifold subtracts (R2.3). `Meta` on a limited name is unresolved (a trapdoor passes metadata; a limiter is a hole, and describing it would reveal it). A governor cannot decorate ⊥ away. Since 0.1.76. | realized | pin: `limiter::a_limiter_carves_a_family_out_of_the_chain_and_out_of_every_manifold` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::a_limited_name_answers_exactly_as_an_unbound_name_does` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::an_alias_into_a_limited_family_is_limited_under_the_canonical_and_one_out_of_it_resolves` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::a_limiter_injected_as_a_corridor_limits_under_that_scope_only` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::inside_a_confinement_a_limited_name_is_traced_as_limited_not_scope_unresolved` (crates/ikigai-core/tests/limiter.rs); pin: `limiter::a_governor_over_a_limited_family_still_limits_it` (crates/ikigai-core/tests/limiter.rs); pin: `space::tests::a_decorated_limiter_is_still_a_limiter` (crates/ikigai-core/src/space.rs); pin: `space::tests::a_limiter_is_enumerable_and_binds_nothing` (crates/ikigai-core/src/space.rs); pin: `select::tests::a_probe_that_lands_in_a_limited_family_is_subtracted_not_listed` (crates/ikigai-core/src/select.rs); doctest: `Limit` |
 | Trapdoor (severs the chain) | Def. 10 | `Confine` (endpoint-side) and `Invocation::confine`: the inner endpoint's sub-requests resolve in ⟨host corridors…, S⟩ with no root; a root-bound name is `Unresolved`, never `Denied`, and the root endpoint is never entered. Two deviations from Def. 10, argued in §1.3. | realized, deviation §1.3 | doctest: `Confine`; doctest: `Invocation::confine`; pin: `scope::a_confined_sub_request_for_a_root_bound_iri_is_unresolved_and_the_root_endpoint_is_never_entered` (crates/ikigai-core/tests/scope.rs); pin: `scope::an_endpoint_can_only_narrow_its_chain` (crates/ikigai-core/tests/scope.rs); pin: `scope::fan_out_from_a_confined_endpoint_stays_confined` (crates/ikigai-core/tests/scope.rs); pin: `scope::confine_describes_and_names_as_its_inner_endpoint` (crates/ikigai-core/tests/scope.rs) |
 | Gatekeeper | §9.5 | Not a construct. The kernel's **capability floor** is a gatekeeper on every door at once: the scopes a description `requires` for the verb are checked before dispatch and before the cache, and a refusal is recorded on the trace before it is returned. Who is asking is established at the transport (per-identity grants, `ikigai-cli`), outside this crate. This is the paper's *interception*: a decision, not structure (§9.6). | realized as the floor | pin: `kernel::tests::declared_requires_is_kernel_enforced_before_dispatch` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_denied_bound_endpoint_reports_the_refusal` (crates/ikigai-core/src/kernel.rs) |
 | Projection across a boundary (restricted union) | §9.6 | Two halves. The **authority** half is in core: a carried capability is clamped to the ceiling the channel authenticated (`Capability::clamp`). The **surface** half — only declared doors are visible to the far side — is the served kernel's choice of root per process (`ikigai-embedded`), outside this crate; since 0.1.76 it can be structure instead — the one root behind `Fallback([Limit(family), root])` — and the `Limit` doctest shows the two forms side by side. | realized, half here | pin: `capability::tests::clamp_bounds_a_carried_capability_to_the_ceiling` (crates/ikigai-core/src/capability.rs); pin: `capability::tests::clamp_keeps_the_ceilings_principal_and_never_the_carried_one` (crates/ikigai-core/src/capability.rs); UNPINNED — the served surface is chosen in ikigai-embedded, which a test in this crate cannot reach |
 | Value corridors | §3 | **Not modeled.** Values travel on the `Request` as `ArgRef`s (inline bytes, a content address, or a by-reference IRI) and are part of the request's identity; they are never doors and can shadow nothing. A by-reference argument naming something outside the chain is `Unresolved` inside it — the trapdoor working. §1.4. | deviation §1.4 | pin: `request::tests::distinct_inputs_have_distinct_identity` (crates/ikigai-core/src/request.rs); UNPINNED — a test would confine an endpoint, hand it `ArgRef::Reference` to a root-bound IRI, and assert `Unresolved` on dereference |
-| Sticky header (who is asking) | §3 | the **capability**: carried into every sub-request, and only ever narrowed (§2). WHO it is for is a scope inside it, `urn:cap:principal:<iri>`, minted by the door that authenticated it (`Capability::with_principal`) and read back with `Capability::principal`; there is no principal field on the request ([#1077](http://localhost:1060/l/default/item/1077), `docs/design/principal-capability.md`). Narrowing can shed the name, never add or change it; a door's clamp keeps the ceiling's. Since 0.1.93. | realized as the capability | pin: `kernel::tests::each_event_records_the_capability_it_ran_under` (crates/ikigai-core/src/kernel.rs); pin: `capability::tests::property_narrowing_never_adds_or_changes_a_principal` (crates/ikigai-core/src/capability.rs); pin: `kernel::tests::cache_is_keyed_by_principal` (crates/ikigai-core/src/kernel.rs); doctest: `Capability::with_principal` |
+| Sticky header (who is asking) | §3 | the **capability**: carried into every sub-request, and only ever narrowed (§2). WHO it is for is a scope inside it, `urn:cap:principal:<iri>`, minted by the door that authenticated it (`Capability::with_principal`) and read back with `Capability::principal`; there is no principal field on the request ([#1077](http://localhost:1062/l/default/item/1077), `docs/design/principal-capability.md`). Narrowing can shed the name, never add or change it; a door's clamp keeps the ceiling's. Since 0.1.93. | realized as the capability | pin: `kernel::tests::each_event_records_the_capability_it_ran_under` (crates/ikigai-core/src/kernel.rs); pin: `capability::tests::property_narrowing_never_adds_or_changes_a_principal` (crates/ikigai-core/src/capability.rs); pin: `kernel::tests::cache_is_keyed_by_principal` (crates/ikigai-core/src/kernel.rs); doctest: `Capability::with_principal` |
 | Continuation vs sub-request | §3 | A mapper's continuation is a nested `resolve` call inside one synchronous resolution, never a new request; every request an endpoint issues is a sub-request through `Invocation`. The two cannot be confused because only one of them exists as a request. | realized | pin: `with_bindings::a_sub_request_through_the_reborrow_reaches_the_kernel` (crates/ikigai-core/tests/with_bindings.rs) |
-| Path cache γ_path | §5.1 | **Absent, measured, designed.** `resolve` runs on every request, before the representation-cache lookup, so that the declared-capability floor fences cached answers too. A cached read is ~0.6 µs end to end of which resolution is 7–330 ns (§10, [#510](http://localhost:1060/l/default/item/510)). Since 0.1.74 its validity predicate exists — `urn:kernel:bindings`, `BINDINGS_THREAD` — and the contract half of what it would hold is memoized per endpoint identity (the floor memo, `FloorMemo`, ~135 ns off a module-shaped read, §10). The route half stays absent; its key, value, bound and the triggers that would make it worth building are `docs/design/path-cache.md`. | absent, predicate realized | pin: `kernel::tests::declared_requires_is_kernel_enforced_before_dispatch` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::the_floor_describes_an_endpoint_once_until_the_bindings_change` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_swapped_endpoint_is_floored_on_its_own_contract` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_per_resolution_wrapper_is_bounded_and_floored_correctly` (crates/ikigai-core/src/kernel.rs); UNPINNED — the measurement is a scratch bench, not a test (§10) |
+| Path cache γ_path | §5.1 | **Absent, measured, designed.** `resolve` runs on every request, before the representation-cache lookup, so that the declared-capability floor fences cached answers too. A cached read is ~0.6 µs end to end of which resolution is 7–330 ns (§10, [#510](http://localhost:1062/l/default/item/510)). Since 0.1.74 its validity predicate exists — `urn:kernel:bindings`, `BINDINGS_THREAD` — and the contract half of what it would hold is memoized per endpoint identity (the floor memo, `FloorMemo`, ~135 ns off a module-shaped read, §10). The route half stays absent; its key, value, bound and the triggers that would make it worth building are `docs/design/path-cache.md`. | absent, predicate realized | pin: `kernel::tests::declared_requires_is_kernel_enforced_before_dispatch` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::the_floor_describes_an_endpoint_once_until_the_bindings_change` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_swapped_endpoint_is_floored_on_its_own_contract` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_per_resolution_wrapper_is_bounded_and_floored_correctly` (crates/ikigai-core/src/kernel.rs); UNPINNED — the measurement is a scratch bench, not a test (§10) |
 | Representation cache γ_rep, keyed by identifier and context | §5.1 | `CacheKey { request: RequestId, capability: u64, scope: u64 }` — the content-addressed request (verb, canonical target, arguments including `as=`), the authority fingerprint, the chain fingerprint (covering the level stack by name when there is one — R7.2). §3 and §7. The depth a result's computation consumed, δ, is recorded with the entry, not in the key, and the entry is served at depth n only when n + δ ≤ `max_depth` (§1.3, R5.3; ledger #3792). | realized, extended | pin: `levels::two_levels_binding_the_same_short_name_keep_separate_cache_entries` (crates/ikigai-core/tests/levels.rs); pin: `depth_reuse::a_deep_reuse_that_does_not_fit_is_not_served` (crates/ikigai-core/tests/depth_reuse.rs); pin: `depth_reuse::an_entry_that_exactly_fits_is_reused` (crates/ikigai-core/tests/depth_reuse.rs); pin: `kernel::tests::cache_is_keyed_by_capability` (crates/ikigai-core/src/kernel.rs); pin: `scope::the_empty_scope_is_the_status_quo` (crates/ikigai-core/tests/scope.rs); pin: `request::tests::identity_is_deterministic` (crates/ikigai-core/src/request.rs) |
 | Validity predicate ν | §5.1 | `Expiry { Always, At(t), Never }` on the representation, plus golden-thread edges pinned to generations, plus the cut sequence that closes the lost-cut race. §4. | realized, extended | pin: `cache::tests::a_cut_after_the_snapshot_declines_the_store` (crates/ikigai-core/src/cache.rs); pin: `cache::tests::a_deadline_is_honored_and_a_clockless_kernel_assumes_the_worst` (crates/ikigai-core/src/cache.rs) |
 | Dependency graph δ(r), golden thread | §5.3, B.6 | `Representation::depends_on(thread)` declares; sub-request results are inherited — the failed ones too, by error class (R4.5); every cacheable `Source`/`Exists` answer carries the thread named after its own canonical target, whether or not it declared it (R4.4); a `Sink`/`Delete` cuts that thread; an external watcher cuts the same thread. §4. | realized | pin: `kernel::tests::a_thread_propagates_up_through_composition` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_sink_invalidates_the_cached_source_of_its_target` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_cacheable_read_hangs_from_its_own_canonical_target_without_declaring_it` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::a_composite_over_a_not_found_name_recomputes_when_a_sink_creates_it` (crates/ikigai-core/src/kernel.rs) |
 | Clocks may be read; results are then not cacheable | Hyp. H, §5.1 | `Expiry::Always` is the default (an endpoint opts in to caching); a deadline is `At`, judged against the kernel's injected `Clock`; a clockless kernel declines to cache a deadline at all. | realized | pin: `kernel::tests::a_clockless_kernel_declines_to_cache_a_deadline` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::the_shipped_fixed_clock_drives_a_deadline_and_does_not_move` (crates/ikigai-core/src/kernel.rs); pin: `verb::tests::cacheability_matches_idempotency` (crates/ikigai-core/src/verb.rs) |
-| Metadata verb, self-description (§8.2) | §3, §8.2 | `Verb::Meta` routed to a `MetaRenderer`; `urn:kernel:catalog` lists every binding; every kernel operation describes itself. **And the arrangement is a resource**, since 0.1.78 ([#515](http://localhost:1060/l/default/item/515)): a space claims an identity (`Space::id`, `.named(iri)` on every core combinator — a claim, *same name ⇒ same doors*, the one `Scope::with_named` and `Resolved::canonical` already make; `Scope::with` injects a self-named space under its own name, and renaming one at injection is refused), reports its structure (`Space::topology`, a `Topology` tree; a space that says nothing is `ik:OpaqueSpace`, where the graph honestly stops), and `urn:kernel:topology` renders the **chain** the request is resolved in — corridors innermost first, then the root unless severed — as Turtle over `ik:Chain` / `ik:Fallback` (ordered `ik:layers`) / `ik:Mount` / `ik:Limit` / `ik:EndpointSpace` / `ik:Alias` / `ik:Rewrite` / `ik:Level` (since [#563](http://localhost:1060/l/default/item/563), with its `ik:seals`), every node an IRI (no blank nodes; anonymous spaces skolemized `urn:ikigai:space:_:{n}`). Since 0.1.83 ([#608](http://localhost:1060/l/default/item/608)) each door names the endpoint that answers it: an `ik:EndpointSpace` lists its doors in order (`ik:doors`, each an `ik:Door` with `ik:pattern`, `ik:matchKind` and `ik:endpointName`, and `ik:confinedTo` when the endpoint is a `Confine`), an `ik:Limit` says whether its family is a prefix, an exact name or a template (`ik:matchKind`), and an `ik:Alias` states its hop bound (`ik:maxHops`) — so the graph says what to bind as well as where. **And it comes back IN** ([#633](http://localhost:1060/l/default/item/633)): `build(&Topology, &Registry)` turns the tree into a live space from a registry of endpoints the host provides, and `Topology::from_turtle` (the `declare` feature) reads the graph back; the round trip is a fixpoint and answers every sampled name as the original does, and what is not data (an opaque space, a closure rewrite, a custom grammar, an unregistered endpoint) is refused by name (`docs/design/space-declarations.md`). A hit reports which space answered (`Resolved::answered_by`, the innermost named space on the path or the named corridor; `ANSWERED_NOTE` on every traced event). Thm. 4(b) over the tree is then a query — §1.1, R7.3. | realized | pin: `kernel::tests::meta_is_routed_through_the_renderer` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::catalog_enumerates_every_bound_endpoint_through_the_renderer` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::every_kernel_operation_describes_itself` (crates/ikigai-core/src/kernel.rs); pin: `topology::a_space_that_names_itself_is_injected_under_its_own_name_and_shares_one_cache_entry` (crates/ikigai-core/tests/topology.rs); pin: `topology::renaming_a_self_named_space_at_injection_is_refused` (crates/ikigai-core/tests/topology.rs); pin: `topology::every_core_combinator_can_be_named_and_reports_its_name` (crates/ikigai-core/tests/topology.rs); pin: `topology::a_hit_reports_the_innermost_named_space_and_every_combinator_forwards_it` (crates/ikigai-core/tests/topology.rs); pin: `topology::a_named_corridor_answers_for_an_anonymous_space_and_every_traced_event_says_who` (crates/ikigai-core/tests/topology.rs); pin: `topology::the_topology_renders_the_chain_and_every_core_combinator_as_iris_with_ordered_layers` (crates/ikigai-core/tests/topology.rs); pin: `topology::a_confinement_reports_the_corridor_it_severs_into` (crates/ikigai-core/tests/topology.rs); pin: `topology::a_door_bound_to_a_confinement_reports_the_corridor_as_its_confined_to` (crates/ikigai-core/tests/topology.rs); pin: `topology::every_door_and_limiter_says_how_its_pattern_matches` (crates/ikigai-core/tests/topology.rs); pin: `declare::every_rebuildable_kind_round_trips_to_a_fixpoint_that_answers_every_name_the_same` (crates/ikigai-core/tests/declare.rs); pin: `declare::a_tic_tac_toe_shaped_space_round_trips` (crates/ikigai-core/tests/declare.rs); pin: `declare::what_is_not_data_is_refused_by_name_never_skipped` (crates/ikigai-core/tests/declare.rs); doctest: `build`; doctest: `EndpointSpace::named`; doctest: `Scope::with_named`; doctest: `Resolved::with_answered_by` |
+| Metadata verb, self-description (§8.2) | §3, §8.2 | `Verb::Meta` routed to a `MetaRenderer`; `urn:kernel:catalog` lists every binding; every kernel operation describes itself. **And the arrangement is a resource**, since 0.1.78 ([#515](http://localhost:1062/l/default/item/515)): a space claims an identity (`Space::id`, `.named(iri)` on every core combinator — a claim, *same name ⇒ same doors*, the one `Scope::with_named` and `Resolved::canonical` already make; `Scope::with` injects a self-named space under its own name, and renaming one at injection is refused), reports its structure (`Space::topology`, a `Topology` tree; a space that says nothing is `ik:OpaqueSpace`, where the graph honestly stops), and `urn:kernel:topology` renders the **chain** the request is resolved in — corridors innermost first, then the root unless severed — as Turtle over `ik:Chain` / `ik:Fallback` (ordered `ik:layers`) / `ik:Mount` / `ik:Limit` / `ik:EndpointSpace` / `ik:Alias` / `ik:Rewrite` / `ik:Level` (since [#563](http://localhost:1062/l/default/item/563), with its `ik:seals`), every node an IRI (no blank nodes; anonymous spaces skolemized `urn:ikigai:space:_:{n}`). Since 0.1.83 ([#608](http://localhost:1062/l/default/item/608)) each door names the endpoint that answers it: an `ik:EndpointSpace` lists its doors in order (`ik:doors`, each an `ik:Door` with `ik:pattern`, `ik:matchKind` and `ik:endpointName`, and `ik:confinedTo` when the endpoint is a `Confine`), an `ik:Limit` says whether its family is a prefix, an exact name or a template (`ik:matchKind`), and an `ik:Alias` states its hop bound (`ik:maxHops`) — so the graph says what to bind as well as where. **And it comes back IN** ([#633](http://localhost:1062/l/default/item/633)): `build(&Topology, &Registry)` turns the tree into a live space from a registry of endpoints the host provides, and `Topology::from_turtle` (the `declare` feature) reads the graph back; the round trip is a fixpoint and answers every sampled name as the original does, and what is not data (an opaque space, a closure rewrite, a custom grammar, an unregistered endpoint) is refused by name (`docs/design/space-declarations.md`). A hit reports which space answered (`Resolved::answered_by`, the innermost named space on the path or the named corridor; `ANSWERED_NOTE` on every traced event). Thm. 4(b) over the tree is then a query — §1.1, R7.3. | realized | pin: `kernel::tests::meta_is_routed_through_the_renderer` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::catalog_enumerates_every_bound_endpoint_through_the_renderer` (crates/ikigai-core/src/kernel.rs); pin: `kernel::tests::every_kernel_operation_describes_itself` (crates/ikigai-core/src/kernel.rs); pin: `topology::a_space_that_names_itself_is_injected_under_its_own_name_and_shares_one_cache_entry` (crates/ikigai-core/tests/topology.rs); pin: `topology::renaming_a_self_named_space_at_injection_is_refused` (crates/ikigai-core/tests/topology.rs); pin: `topology::every_core_combinator_can_be_named_and_reports_its_name` (crates/ikigai-core/tests/topology.rs); pin: `topology::a_hit_reports_the_innermost_named_space_and_every_combinator_forwards_it` (crates/ikigai-core/tests/topology.rs); pin: `topology::a_named_corridor_answers_for_an_anonymous_space_and_every_traced_event_says_who` (crates/ikigai-core/tests/topology.rs); pin: `topology::the_topology_renders_the_chain_and_every_core_combinator_as_iris_with_ordered_layers` (crates/ikigai-core/tests/topology.rs); pin: `topology::a_confinement_reports_the_corridor_it_severs_into` (crates/ikigai-core/tests/topology.rs); pin: `topology::a_door_bound_to_a_confinement_reports_the_corridor_as_its_confined_to` (crates/ikigai-core/tests/topology.rs); pin: `topology::every_door_and_limiter_says_how_its_pattern_matches` (crates/ikigai-core/tests/topology.rs); pin: `declare::every_rebuildable_kind_round_trips_to_a_fixpoint_that_answers_every_name_the_same` (crates/ikigai-core/tests/declare.rs); pin: `declare::a_tic_tac_toe_shaped_space_round_trips` (crates/ikigai-core/tests/declare.rs); pin: `declare::what_is_not_data_is_refused_by_name_never_skipped` (crates/ikigai-core/tests/declare.rs); doctest: `build`; doctest: `EndpointSpace::named`; doctest: `Scope::with_named`; doctest: `Resolved::with_answered_by` |
 | Verbs folded into identifiers | §3 | **Deviation, deliberate:** `Verb` is first-class and part of the request identity. §6. | deviation §6 | pin: `request::tests::distinct_inputs_have_distinct_identity` (crates/ikigai-core/src/request.rs) |
 | `new` verb | §3 | Absent: `Sink` to an unbound-but-resolvable name makes it reifiable. `exists` is `Verb::Exists`, answered by the endpoint (the paper's decidable approximation of reifiability). | deviation §6 | pin: `verb::tests::cacheability_matches_idempotency` (crates/ikigai-core/src/verb.rs) |
 | Hop bound (Cor. 3), nesting budget (B.7) | §10 | The hop counter is not needed (§5: resolution terminates by construction). The nesting budget is `Kernel::with_max_depth` (default 64): a request the host issues is at depth 0, each sub-request one deeper, and one past the bound is refused with `Error::DepthExceeded` before it resolves anything and recorded on the trace under `DEPTH_NOTE`. A cached result records with its entry the depth its computation consumed, δ (a sub-request served from the cache counting its entry's δ), and is reused only where n + δ ≤ `max_depth`, so a hit answers what a fresh evaluation would. Within one kernel only — R5.3. | realized, within one kernel | pin: `kernel::tests::a_self_issuing_endpoint_is_refused_at_the_bound_and_the_trace_says_where` (crates/ikigai-core/src/kernel.rs); pin: `depth_reuse::depth_consumed_propagates_through_a_hit_inside_a_computation` (crates/ikigai-core/tests/depth_reuse.rs); pin: `depth_reuse::cached_and_fresh_answers_always_agree` (crates/ikigai-core/tests/depth_reuse.rs); doctest: `Kernel::with_max_depth` |
@@ -137,7 +137,7 @@ tracks it.
 ### 1.1 One corridor with internal structure — until a `Level` says otherwise
 
 The paper's chain has levels; an endpoint runs *in the scope at the level where it was found*,
-inner levels dropped, and its sub-requests resolve from there (§3, B.2). Until [#563](http://localhost:1060/l/default/item/563) ikigai
+inner levels dropped, and its sub-requests resolve from there (§3, B.2). Until [#563](http://localhost:1062/l/default/item/563) ikigai
 had that structure only in the per-request `Scope`: the chain was exactly ⟨injected
 corridors…, root⟩, and the **root was one corridor**, however it was composed. It still is,
 for every tree without a `Level` in it — and that is pinned byte for byte, against a transcript
@@ -188,7 +188,7 @@ public endpoint — which the kernel confirms by serving it — and NO again whe
 host corridor, which the frames stand behind. The reduction holds for the FRAGMENT R7.3
 states; a closure rewrite behind a wall, an opaque space and a template astride the family are
 outside it, and the check answers "unknown" for those rather than "no"
-([#552](http://localhost:1060/l/default/item/552)). The SPARQL form follows no pushes and says
+([#552](http://localhost:1062/l/default/item/552)). The SPARQL form follows no pushes and says
 so: its second question reports any `ik:Level` on a reachable path.
 
 **Sealed names have exactly the reach they had without levels** (R7.12): a family the host
@@ -209,7 +209,7 @@ transcript, and by the check with and without pushes:
     pin: `topology::a_host_sealed_family_has_exactly_the_reach_it_had_without_levels` (crates/ikigai-core/tests/topology.rs)
 
 **A module's privacy is admission, and its hazard is checked statically**
-([#3796](http://localhost:1060/l/default/item/3796); decided 2026-11-17). Nothing marks a door
+([#3796](http://localhost:1062/l/default/item/3796); decided 2026-11-17). Nothing marks a door
 public or private: `Mount(prefix, Level(name, inner))` keeps the module's other names private
 only because the guard never admits them, so a door inside the level whose pattern matches an
 admitted name SERVES it, whatever its author meant (`urn:mod:cache:{key}` under `urn:mod:` is
@@ -325,18 +325,18 @@ value-corridor tail. The behavioral half — a by-reference argument outside the
 
 ### 1.5 What is absent, and the empty identifier
 
-- **Path cache** ([#510](http://localhost:1060/l/default/item/510)) is the one row above
+- **Path cache** ([#510](http://localhost:1062/l/default/item/510)) is the one row above
   still absent and UNPINNED. Not a decision against the paper; core grows capabilities
   incrementally, and a gap is not a design until it is written down as one. Its validity
   predicate (`urn:kernel:bindings`) landed in 0.1.74 and its design is written down
   (`docs/design/path-cache.md`); the cache itself stays on this list until a trigger named
   there arrives. The others have left it, one release each: the **nesting budget**
-  ([#513](http://localhost:1060/l/default/item/513)) in 0.1.73 (R5.3); the **limiter**
-  ([#511](http://localhost:1060/l/default/item/511)) in 0.1.76, as a hit on a kernel-known
+  ([#513](http://localhost:1062/l/default/item/513)) in 0.1.73 (R5.3); the **limiter**
+  ([#511](http://localhost:1062/l/default/item/511)) in 0.1.76, as a hit on a kernel-known
   ⊥ rather than the third `Resolution` outcome the item first sketched — the same
   construct, at no consumer's cost; the **lossless flag**
-  ([#514](http://localhost:1060/l/default/item/514)) in 0.1.77; and **topology as a
-  resource** ([#515](http://localhost:1060/l/default/item/515)) in 0.1.78 — identity on
+  ([#514](http://localhost:1062/l/default/item/514)) in 0.1.77; and **topology as a
+  resource** ([#515](http://localhost:1062/l/default/item/515)) in 0.1.78 — identity on
   the space, the answering space on the resolution, and the chain as `urn:kernel:topology`
   (the §8.2 row, R7.3).
 - **ε.** The paper's null identifier resolves entirely from context (§2.3, Cor. 1). An `Iri`
@@ -370,7 +370,7 @@ otherwise the intersection. There is no join, by construction: no operation wide
 exclusion by specificity: the scopes matching `urn:cap:<w>:-…` or `urn:cap:<w>:<w>:-…` for
 words w (`is_deny_scope`) form D ⊆ S, the rest are the grants G = S ∖ D. Under the plain
 intersection above, dropping an element of D is a narrowing of the SET and a WIDENING of what
-the holder reaches (ledger [#858](http://localhost:1060/l/default/item/858)), so the order the
+the holder reaches (ledger [#858](http://localhost:1062/l/default/item/858)), so the order the
 meet respects is not ⊆ on t but ⊆ on grants and ⊇ on exclusions:
 `Scoped(t) ⊓ s = Scoped((t ∩ s ∩ G) ∪ (t ∩ D) ∪ (s ∩ D))`, and clamp is the same meet with
 `Root` still the top. `Root ⊓ s = Scoped(s)` is unchanged. `allows` never answers yes for an
@@ -447,7 +447,7 @@ Three qualifications, each the difference between the theorem and the code:
    computed by the same resolution the kernel performs, and `Kernel::entries()` — the raw
    pattern list, names and not content — is the one face that still lists what a limiter
    carved out.
-2. **Selection is over the chain** (since 0.1.75, [#516](http://localhost:1060/l/default/item/516);
+2. **Selection is over the chain** (since 0.1.75, [#516](http://localhost:1062/l/default/item/516);
    R7.8). Before it selected over the root, so inside a confinement the manifold could offer
    an action the chain could not resolve — an over-offer, the unsafe direction, one layer up
    from the rule that prevents it at the door. Now Reach(Γ) is computed over Γ: an endpoint's
@@ -664,7 +664,7 @@ aliased resource (the thread is canonical, so the logical and backing names stay
 through a nested alias, and for a composite over such a read, which inherits the edge through
 the dependency record and is cut by the same write.
 
-**A write that ran and failed cuts too** (ledger [#1105](http://localhost:1060/l/default/item/1105),
+**A write that ran and failed cuts too** (ledger [#1105](http://localhost:1062/l/default/item/1105),
 decided 2026-10-10). The cut fires when the kernel DISPATCHED the `Sink` or `Delete` — the
 endpoint was entered — whether it returned `Ok` or `Err`, because an endpoint can change state
 before it fails (ikigai-script's `:runs` records a run, then the run errors) and no endpoint can
@@ -693,19 +693,19 @@ P: *a cacheable `Source` of t carries an edge on thread t*. Every pinned test su
 (`Cell` declared `.depends_on(target)`; the file endpoint declared `.depends_on("urn:file:notes.txt")`;
 `ikigai-fs` does the same), and every other cacheable endpoint fronting mutable state was one
 forgotten line from serving stale bytes after a write through the same name — hole A of
-[#512](http://localhost:1060/l/default/item/512), the declared-versus-enforced shape. The first
+[#512](http://localhost:1062/l/default/item/512), the declared-versus-enforced shape. The first
 pin above is the old `cutting_a_thread_invalidates_the_entry_that_declared_it` with the manual
 declaration removed; a declared thread still works (the sixth pin), it is merely no longer
 load-bearing. What does **not** get the edge, by decision: `Meta`, which is served from
 `describe()` and changes on a binding change, not a write (that thread is
-[#510](http://localhost:1060/l/default/item/510)); and the `urn:kernel:*` intrinsics, which are
+[#510](http://localhost:1062/l/default/item/510)); and the `urn:kernel:*` intrinsics, which are
 live state or the catalog. A pure function gains a thread nobody cuts; the cost was measured
 twice (§10) and the second cut brought it to zero.
 
     pin: `kernel::tests::meta_gains_no_automatic_thread` (crates/ikigai-core/src/kernel.rs)
     pin: `kernel::tests::a_pure_function_gains_a_thread_it_never_needs_and_it_is_harmless` (crates/ikigai-core/src/kernel.rs)
 
-**A cut invalidates lookups, not open readers** (ledger [#2237](http://localhost:1060/l/default/item/2237),
+**A cut invalidates lookups, not open readers** (ledger [#2237](http://localhost:1062/l/default/item/2237),
 streamed bodies). "Invalid thereafter" is about the cache: after the cut, no lookup is served
 the entry. A body the kernel had already handed out before the cut is read to its end as the
 version it opened. A `Replay` that cannot keep its bytes stable while a reader is open (a
@@ -975,9 +975,9 @@ went is charged its own depth only, which is the same stop R5.3 already states.
 `Issuer::issue_at_depth`; an issuer that implements only the plain `issue` seam (a module host
 bridge) restarts the count on its side, and the wire has no field for it (`ikigai-wire`'s
 `Call`), so a cycle between two peers that mount each other — the shape of ledger
-[#408](http://localhost:1060/l/default/item/408) — stays unbounded by this budget. Carrying it
+[#408](http://localhost:1062/l/default/item/408) — stays unbounded by this budget. Carrying it
 costs a wire-protocol version bump, which is a separate decision
-([#513](http://localhost:1060/l/default/item/513)'s remainder).
+([#513](http://localhost:1062/l/default/item/513)'s remainder).
 
     UNPINNED — the depth does not cross the wire: a test in ikigai-cli would mount two kernels on each other, source a cycle, and observe that no `DepthExceeded` arrives
 
@@ -1039,7 +1039,7 @@ pinned and where the realization is coarser than the paper's rule.
 with the chain its request resolved in, and every sub-request — through `issue`, `source`,
 `issue_attenuated`, `fan_out` across a spawn — resolves in the same chain. An injected corridor
 shadows a root door for the request and for everything below it; a severed chain leaves a
-root-bound name `Unresolved` for everything below it. Since [#563](http://localhost:1060/l/default/item/563) what the invocation is stamped
+root-bound name `Unresolved` for everything below it. Since [#563](http://localhost:1062/l/default/item/563) what the invocation is stamped
 with is the **resolved** scope — the chain with its level stack replaced by the levels the
 endpoint was found in (R7.11) — which for an endpoint found in no level is the chain its request
 resolved in, unchanged: the host's corridors and a confinement hold below it exactly as before.
@@ -1070,7 +1070,7 @@ on the path, or the named corridor the hit came from — disclosed as `ANSWERED_
 keying on it is **not built**: the datum exists, the cache still hashes the whole chain. The
 same holds with levels: the whole RESOLUTION scope, level stack included, is keyed; keying on
 the FOUND part of it — NetKernel's up-to-eight keys per entry,
-[#548](http://localhost:1060/l/default/item/548) — is phase 2 of #563, after measuring the
+[#548](http://localhost:1062/l/default/item/548) — is phase 2 of #563, after measuring the
 fragmentation.
 
     pin: `levels::two_levels_binding_the_same_short_name_keep_separate_cache_entries` (crates/ikigai-core/tests/levels.rs)
@@ -1087,17 +1087,17 @@ cannot shadow a kernel operation, a severed chain still reaches one (capability-
 and `Alias` refuses to alias one away. The answer therefore does not depend on the chain and is
 keyed with scope 0. Consequence, stated: a confined endpoint can read `urn:kernel:catalog` and
 see names it cannot resolve — names, not content, the same leak golden-thread names already
-carry. Since [#563](http://localhost:1060/l/default/item/563) `urn:kernel:` is the first of the kernel's **sealed prefixes** — core's — and
+carry. Since [#563](http://localhost:1062/l/default/item/563) `urn:kernel:` is the first of the kernel's **sealed prefixes** — core's — and
 the host and levels may add their own, each with exactly one owner (R7.12).
 
 **One operation answers FOR the chain rather than ahead of it.** `urn:kernel:topology`'s
 subject is the chain: it renders ⟨corridors innermost first, root unless severed⟩ as an
 `ik:Chain` whose `ik:layers` are those spaces in that order, and it is keyed by the chain's
 fingerprint as any scoped resolution is (`urn:kernel:cache` names the chain on its row). It is
-the resource face of "what can I see from here" ([#516](http://localhost:1060/l/default/item/516)
+the resource face of "what can I see from here" ([#516](http://localhost:1062/l/default/item/516)
 said the manifold had one and the arrangement did not), and the reachability check of §1.1 is
 a query over it — **for a fragment of the arrangement, and it says so**
-([#552](http://localhost:1060/l/default/item/552)). Two questions, both over the graph; the check is the pair, and *safe* is
+([#552](http://localhost:1062/l/default/item/552)). Two questions, both over the graph; the check is the pair, and *safe* is
 the first `false` AND the second `false`.
 
 **The first: is a door of the family reachable from the entry with no limiter over it ahead
@@ -1307,7 +1307,7 @@ chain's own list, so the same queries find it.
 **R7.4 (kernel dispatch checks the answering corridor's floor).** For requests dispatched
 through the kernel, a corridor shadowing an open root door with a gated one is gated on its own
 declaration, and its cached entry is fenced from a caller the declaration refuses. Since
-[#3866](http://localhost:1060/l/default/item/3866) an endpoint reaches a corridor only by
+[#3866](http://localhost:1062/l/default/item/3866) an endpoint reaches a corridor only by
 dispatching through the kernel: `Invocation::scope` and `Scope::spaces` are crate-private (R7.14),
 so no endpoint holds a chain's live corridor spaces to resolve in and invoke past the floor. The
 [scope-hypothesis audit, B3](../formal/scope-hypothesis-audit.md#b3-closed-scopespaces-no-longer-hands-an-endpoint-live-corridors)
@@ -1402,7 +1402,7 @@ folded as in the empty chain. Each unscoped form is its scoped form at the empty
     pin: `temporal_corridor::a_pipe_stage_resolves_in_the_chain_and_folds_its_upstream` (crates/ikigai-core/tests/temporal_corridor.rs)
 
 **R7.10 (the chain's clock is derived from the corridor that pins time; validity is not).**
-Decided 2026-09-25 ([#517](http://localhost:1060/l/default/item/517)), built 0.1.75.
+Decided 2026-09-25 ([#517](http://localhost:1062/l/default/item/517)), built 0.1.75.
 `Scope::with_named_at(name, space, clock)` injects a corridor and sets the chain's clock in one
 call — the only way a chain acquires a clock, so the binding and the clock cannot be set
 independently. `Invocation::now()` answers from an attached clock, then the chain's, then the
@@ -1428,7 +1428,7 @@ from the cache on a second request under the same name.
     UNPINNED — by construction: that the corridor's time door answers the instant its clock reads is the injector's claim; core would have to resolve the door to check it, and a corridor is any `Space`
 
 **R7.11 (an endpoint runs in the scope at the level where it was found).** Decided
-2026-09-28 ([#563](http://localhost:1060/l/default/item/563); all five of the brief's questions as recommended). A `Level` is explicit,
+2026-09-28 ([#563](http://localhost:1062/l/default/item/563); all five of the brief's questions as recommended). A `Level` is explicit,
 opt-in and always named: nothing in a kernel changes until a host wraps a space in one, and
 `Mount`, `Fallback`, `Rewrite`, `Alias` and `Limit` keep their meaning. A hit through levels
 reports its found path, innermost first (`Resolved::levels`, a PRIVATE field with a builder,
@@ -1501,7 +1501,7 @@ exactly the reach they had before levels existed (§1.1).
     doctest: `Kernel::with_sealed`
     doctest: `Level::sealing`
 
-**R7.13 (two injectors compose).** Ledger [#582](http://localhost:1060/l/default/item/582).
+**R7.13 (two injectors compose).** Ledger [#582](http://localhost:1062/l/default/item/582).
 `outer.stack(&inner)` is the chain built by applying to `outer` the steps that built `inner`:
 `inner`'s host corridors innermost under their own identities (an anonymous one keeps its
 number, which a rebuild could not); its clock if it has one; severed if either is; its confined
@@ -1526,7 +1526,7 @@ built. A corridor arriving by `stack` is a host corridor, so it stands in for a 
     doctest: `Scope::stack`
 
 **R7.14 (opacity: an endpoint uses its scope only by issuing requests into it).** Decided
-2026-11-20 ([#3866](http://localhost:1060/l/default/item/3866)), and now a property the kernel
+2026-11-20 ([#3866](http://localhost:1062/l/default/item/3866)), and now a property the kernel
 guarantees. What an endpoint requests, the value it returns and that value's validity depend on
 its scope only through what its requests into the scope answer. The kernel's semantics require
 it: the cache keys an answer on the request chain's fingerprint (R7.2), so an endpoint able to
@@ -1586,7 +1586,7 @@ direct edge from → to if one exists, else a two-hop pivot through the canonica
 are selected; identity and unreachable pairs select nothing. Meta rendering rides the same
 selection to reach a non-canonical type.
 
-**Injectivity is a declaration** ([#514](http://localhost:1060/l/default/item/514)), and stays
+**Injectivity is a declaration** ([#514](http://localhost:1062/l/default/item/514)), and stays
 one. Core cannot decide from a description whether a function on representations is injective;
 like `requires` before 0.1.49 it carries the claim and plans by it, and conformance can
 round-trip a declared-lossless transreptor where a reverse edge exists. A declaration that is
@@ -1688,10 +1688,10 @@ item that would discharge it where one exists. The gate counts these; it does no
 - R7.2 — the fingerprint covers the whole chain, not the corridors consulted; the corridor
   that answered is reported since 0.1.78 (`Resolved::answered_by`), the keying on it is not
   built. With levels the whole resolution scope is keyed, level stack included; keying on
-  the found part of it ([#548](http://localhost:1060/l/default/item/548)) is phase 2 of [#563](http://localhost:1060/l/default/item/563), after measuring the fragmentation.
+  the found part of it ([#548](http://localhost:1062/l/default/item/548)) is phase 2 of [#563](http://localhost:1062/l/default/item/563), after measuring the fragmentation.
 - R7.11 — a level's name is a claim (same name ⇒ same doors), as a corridor's is: it enters
   the key, and the kernel cannot observe that two levels named alike hold the same doors.
-- R7.3 — the gatekeeper check answers for a fragment ([#552](http://localhost:1060/l/default/item/552)): a closure rewrite
+- R7.3 — the gatekeeper check answers for a fragment ([#552](http://localhost:1062/l/default/item/552)): a closure rewrite
   behind a wall, an opaque space, a template astride the family and a template family that
   touches it are reported unanswered by the second query, never answered `false`; an
   `Exact` limiter's family is read as a prefix; the SPARQL form is per list where the kernel
@@ -1724,13 +1724,13 @@ arrangement as a resource (#515) — the third, leaving {path cache} — with id
 space, the answering space on the resolution and the check of §1.1 as a query, 0.1.78 (§1,
 R7.3); the paper's per-level scope — an endpoint runs where it was found — narrowing §1.1's
 deviation to a host's choice, with sealed names beside it and the check following the pushes,
-[#563](http://localhost:1060/l/default/item/563) (R7.11, R7.12).
+[#563](http://localhost:1062/l/default/item/563) (R7.11, R7.12).
 
 **Not built, by decision:**
 
 - §2 — delegation (Part B of `sub-request-authority.md`).
 - §7 — the chain on the wire (#516's fourth face): a protocol bump, not a default.
-- §1.3 — "confine to my own level" (a module sandbox in one call): deferred, [#563](http://localhost:1060/l/default/item/563)'s fifth
+- §1.3 — "confine to my own level" (a module sandbox in one call): deferred, [#563](http://localhost:1062/l/default/item/563)'s fifth
   question.
 - §1.4 — the behavioral half of "values are not corridors" has no test.
 - R3.2 — a stored read does not hang from `urn:kernel:bindings` (0.1.74; argued above and at
@@ -1765,9 +1765,9 @@ all three rungs of `now()` be set).
 | 304–311 ns → 298–305 ns | cache-hit read before / after the chain reached selection, the probe and the pipe and gained a clock (0.1.75) | 2026-09-26 | the same twenty-line bench (one cacheable `FnEndpoint`, warmed, 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop, load 2.4–3.4), main (a detached worktree of `d99a180`) and branch interleaved three times each. 0–10 ns under main: nothing added is on the hit path — `resolve_in`'s empty-chain fast path is untouched, `now()` is never called on a hit, the scope-name map is written only on a scoped store. Table in `docs/design/resolution-scope.md`. Not committed. |
 | 431–454 ns → 297–328 ns | cache-hit read of an endpoint with an explicit `ActionSpec` (the module shape), before / after the floor memo; a bare `FnEndpoint` 312–324 → 299–316 ns | 2026-09-26 | the same twenty-line bench, three cases (a bare `FnEndpoint`; one declaring an `ActionSpec` that requires a scope, read as root and as the holder), 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop, main (a detached worktree of `fb63bb0`) and branch interleaved three times each, load 1.5–2.6. The memo took ~135 ns (≈ 31 %) off the module-shaped read — the per-request `describe()` AND the `action_specs()` clone it fed the floor — and ~10 ns off the bare one, whose default description is a single string. Ledger #22. Not committed. |
 | 376–458 ns → 352–396 ns (anonymous); +19–45 ns for a NAMED leaf | cache-hit read before / after the topology landed (0.1.78), and the cost of the one opt-in allocation | 2026-09-27 | the same twenty-line bench (one cacheable `FnEndpoint`, warmed, 200 000 re-issues × 3 rounds, release, `futures::block_on`, M-series laptop), main (a detached worktree of `4dfe3f2`) and branch interleaved three times each. First run at load 4.4: main 376–458, branch 352–396 — at or under main; nothing added is on the anonymous hit path (`EndpointSpace::resolve` gained one `Option` compare, the kernel one `Option` borrow). A hit through a **named** leaf pays one `Iri` clone to report `answered_by`: +19–45 ns over the anonymous read in the second run (load 6.4–6.7, absolutes 527–688 — read the interleaved pairs, not the rows). The first cut of that path cost ~+100 ns (a second clone in the kernel and note strings built untraced at the cache-hit site); both were removed before merge, which is what the second run measures. Not committed. |
-| 314–320 ns → 312–317 ns; 962–1026 ns → 945–978 ns | cache-hit read, and an uncacheable composite sourcing a cached sibling, before / after levels ([#563](http://localhost:1060/l/default/item/563), PR 1) — no level in the kernel | 2026-09-28 | the same twenty-line bench (warmed, 200 000 issues × 3 rounds, release, `futures::block_on`, M-series laptop), main (an export of `7774fc2`) and branch interleaved three times, load 3.0–3.6. Nothing added is on the level-less path: `descend` of an empty path over a level-less chain returns the handle it already cloned. Not committed. |
+| 314–320 ns → 312–317 ns; 962–1026 ns → 945–978 ns | cache-hit read, and an uncacheable composite sourcing a cached sibling, before / after levels ([#563](http://localhost:1062/l/default/item/563), PR 1) — no level in the kernel | 2026-09-28 | the same twenty-line bench (warmed, 200 000 issues × 3 rounds, release, `futures::block_on`, M-series laptop), main (an export of `7774fc2`) and branch interleaved three times, load 3.0–3.6. Nothing added is on the level-less path: `descend` of an empty path over a level-less chain returns the handle it already cloned. Not committed. |
 | 341–362 ns; 1117–1144 ns | the same two reads with the endpoints inside `Mount(Level(…))` | 2026-09-28 | same run. A hit through a level: +~30 ns (its name cloned into `answered_by`, one frame pushed). A composite that RUNS inside one: +~170 ns per invocation — `descend` builds the resolved scope (one `Arc`, one BLAKE3 over the level names) and the sub-request walks the level frame before the root. Memoizing the resolved scope per (chain, path) would take most of it back; not built. Not committed. |
-| 306–314 ns vs 307–328 ns | cache-hit read with eight host seals vs none ([#563](http://localhost:1060/l/default/item/563), PR 2) | 2026-09-28 | same bench, interleaved, load 3.3–3.6. Within noise: the seal table is a short scan of prefixes, taken only when a host or level sealed something; a kernel with only core's seal reads one `bool`. Not committed. |
+| 306–314 ns vs 307–328 ns | cache-hit read with eight host seals vs none ([#563](http://localhost:1062/l/default/item/563), PR 2) | 2026-09-28 | same bench, interleaved, load 3.3–3.6. Within noise: the seal table is a short scan of prefixes, taken only when a host or level sealed something; a kernel with only core's seal reads one `bool`. Not committed. |
 | 439–466 ns → 455–484 ns; ~1.6 µs → ~1.6 µs; ~310 ns → ~310 ns | an uncacheable read, an uncacheable composite (one cached and one volatile sub-request), and a cache-hit read, before / after R4.6 | 2026-09-29 | scratch crate over the public API, three endpoints, warmed, 200 000 / 100 000 / 500 000 issues × 5 rounds, release, `futures::block_on`, M-series laptop; main (an export of `9243f11`) and branch interleaved twice. The uncached path pays ~+15–25 ns (one lock on the log, one hash lookup, a structural compare); the composite is within noise; the hit path is untouched (nothing added there). Not committed. |
 | ~307 ns → ~307 ns; ~1.62 µs → ~1.62 µs | a composite cache hit, and a cut plus a recompute of a composite over one cached sub-request, before / after the invalidation arc (R4.5's carried dependencies, R4.7, R4.8) | 2026-09-29 | scratch crate over the public API, release, `futures::block_on`, best of 7 rounds of 200 000 / 50 000, M-series laptop, load 3.2–4.4; base an export of `9e834a5`, head the R4.8 branch, interleaved base / head / base (306.9–318.0 vs 304.6–316.9 ns; 1615.7–1687.5 vs 1613.3–1677.9 ns). Within noise: the success path of a sub-request gains an empty `Dependencies` (no allocation). Not committed. |
 | ~46–49 ns → ~48–51 ns; +2–5 ns | `Kernel::cut` with no listener, and with a listener whose spec does not match, at 0 and 4096 resident entries | 2026-09-29 | same run. With none registered a cut reads one atomic; with a non-matching one it takes a read lock and runs one prefix compare per listener, and never scans the cache. Not committed. |
@@ -1835,8 +1835,8 @@ on the same argument as 0.1.73. `vocabulary.ttl`'s `owl:versionInfo` moved with 
 nothing semantic changed, so the `/ns` deploy is header-only drift. Not built, on purpose: a
 mutable root (§9), and a path cache (`docs/design/path-cache.md`).
 
-**0.1.75** carries the three faces of [#516](http://localhost:1060/l/default/item/516) and the
-clock of [#517](http://localhost:1060/l/default/item/517): on `Kernel`, `select_transreptor_in`,
+**0.1.75** carries the three faces of [#516](http://localhost:1062/l/default/item/516) and the
+clock of [#517](http://localhost:1062/l/default/item/517): on `Kernel`, `select_transreptor_in`,
 `select_action_in`, `select_actions_in`, `is_cached_in`, `issue_with_incoming_in`; on `Scope`,
 `with_named_at`, `clock`, `now`; on `Issuer`, two defaulted methods (`select_transreptor_in`,
 `select_action_in`); on `ReprCache`, `rows_with_scope` and the `CacheRow` it returns; one
@@ -1851,14 +1851,14 @@ lockstep 0.1.x line on the same argument as 0.1.73. `vocabulary.ttl`'s `owl:vers
 with the crate; nothing semantic changed, so the `/ns` deploy is header-only drift; `ikigai-log`
 wants one term for `scope-clock`.
 
-**0.1.76** carries the limiter ([#511](http://localhost:1060/l/default/item/511)): `Limit`
+**0.1.76** carries the limiter ([#511](http://localhost:1062/l/default/item/511)): `Limit`
 (a `Space`: `new(prefix)`, `matching(grammar)`), one new **defaulted** `Endpoint` method
 (`is_limiter`, `false` unless overridden — no implementor changed), one constant
 (`LIMITED_NOTE`) — all additive — and one new kernel branch. The design decision, made on
 purpose: a limiter is a HIT on a kernel-known ⊥, not a third `Resolution` variant, because
 `Resolution` is matched exhaustively at nine sites outside core and both a new variant and a
 prior `#[non_exhaustive]` would each have been a flag day on the `SpaceEntry` scar;
-`#[non_exhaustive]` stays with [#27](http://localhost:1060/l/default/item/27)'s one-time
+`#[non_exhaustive]` stays with [#27](http://localhost:1062/l/default/item/27)'s one-time
 sweep. Two changes in what a consumer observes without code of its own changing, each
 deliberate: `Resolution::map_endpoint` no longer runs the wrapper for a hit on ⊥ and
 `Resolved::with_endpoint` keeps ⊥ (a governor cannot un-limit — only a stack that contains a
@@ -1871,7 +1871,7 @@ changed here, on purpose: `ikigai-embedded`'s per-process surfaces (the follow-u
 `Fallback([Limit("urn:personal:"), root])` is the hub's), and `Kernel::entries()`, which stays
 the raw pattern list.
 
-**0.1.77** carries the lossless flag of [#514](http://localhost:1060/l/default/item/514):
+**0.1.77** carries the lossless flag of [#514](http://localhost:1062/l/default/item/514):
 `Transreption::lossless` (default `true`; `#[non_exhaustive]` on the struct now, while no
 literal exists outside core — the ecosystem was grepped, only the builder is in use — so the
 next field is never a flag day), `Description::lossy`, `Transreption::is_lossless`,
@@ -1903,7 +1903,7 @@ built here: the engine's spelling of the consent (`describe <iri> <type>` has no
 `lossy=allow` yet), any per-module `.lossy()` declaration (each is a one-line PR in its own
 repo), and conformance's round-trip check.
 
-**0.1.78** carries the arrangement as a resource ([#515](http://localhost:1060/l/default/item/515)),
+**0.1.78** carries the arrangement as a resource ([#515](http://localhost:1062/l/default/item/515)),
 in three parts. **Identity on the space**: one new defaulted `Space` method (`id`, `None`
 unless overridden — no implementor changed) and a `.named(iri)` builder on `EndpointSpace`,
 `Fallback`, `Mount`, `Rewrite`, `Alias` and `Limit`; `Scope::with` injects a self-named space
@@ -1942,7 +1942,7 @@ engine's `topology` command, and `Space::topology` on the overlays outside core
 (`ikigai-throttle`'s governors, `ikigai-embedded`'s guards), each of which today makes the
 tree under it `ik:OpaqueSpace` — one forwarding line each.
 
-**0.1.79** carries the gatekeeper check's fragment ([#552](http://localhost:1060/l/default/item/552)): a document-and-test
+**0.1.79** carries the gatekeeper check's fragment ([#552](http://localhost:1062/l/default/item/552)): a document-and-test
 change, nothing in `src/`. The check of R7.3 — the SPARQL a host doctor runs and the walk
 `tests/topology.rs` runs — answers only for what the graph shows in full, and says so. An
 alias's visible table is expanded, so a rule into the family behind the wall is reported as
@@ -1961,15 +1961,15 @@ nothing semantic changed, so the `/ns` deploy is header-only drift. Not built he
 purpose: a kind marker on `ik:family` (an `Exact` limiter is read as a prefix — a vocabulary
 term, the hub's call), template evaluation in the check, the two-step CONSTRUCT form that
 would keep path identity, and the walk inside the crate (it stays a test until a host doctor
-exists, [#67](http://localhost:1060/l/default/item/67)).
+exists, [#67](http://localhost:1062/l/default/item/67)).
 
 The gate itself is as the previous revision left it: a dev-only integration test that reads
 this file from the repository, **excluded from the packaged crate**
-(`exclude = ["tests/formalism_pins.rs"]`, [#525](http://localhost:1060/l/default/item/525)),
+(`exclude = ["tests/formalism_pins.rs"]`, [#525](http://localhost:1062/l/default/item/525)),
 because `docs/` lives above the crate directory and a skip-with-a-message is the silent pass the
 gate was built to refuse.
 
-**0.1.80** carries `Error::Conflict` ([#575](http://localhost:1060/l/default/item/575)): a
+**0.1.80** carries `Error::Conflict` ([#575](http://localhost:1062/l/default/item/575)): a
 typed refusal for a request that is well-formed, authorized and names something that exists,
 which the current state of the resource refuses — the 409 of the taxonomy. Found by the
 tutorial's tic-tac-toe, whose move endpoint had to refuse a taken square as `InvalidArgument`
@@ -1981,7 +1981,7 @@ it as `Endpoint` carrying the displayed text — the same degradation `DepthExce
 `vocabulary.ttl` names no error kinds, so only its `owl:versionInfo` moves.
 
 **0.1.81** carries levels, the
-resolved scope and sealed names ([#563](http://localhost:1060/l/default/item/563), phase 1, three PRs). **Additive:** `Level`
+resolved scope and sealed names ([#563](http://localhost:1062/l/default/item/563), phase 1, three PRs). **Additive:** `Level`
 (`new`, `name`, `sealing`, `in_namespace`), `LevelPath`, `Resolved::levels` and
 `Resolved::within`, `Scope::levels`, `SealOwner` and `SealError` (`#[non_exhaustive]`),
 `Kernel::with_sealed` / `check_sealing` / `sealed`, `SpaceKind::Level` (the enum is
@@ -2002,34 +2002,34 @@ external issuer wrapper that does not override `issue_in_scope` fails loudly on 
 from inside a level, as R7.7 intends. **In the vocabulary:** `ik:Level`, `ik:seals`,
 `ik:namespace` — a semantic change, so the context is regenerated and the `/ns` deploy after
 the vocab publish is a real change. **Not built, on purpose:** keying on the found scope
-([#548](http://localhost:1060/l/default/item/548)), threads identified by name and answering
-corridor ([#581](http://localhost:1060/l/default/item/581)), `Kernel::is_cached` through a
-resolution ([#561](http://localhost:1060/l/default/item/561)), a scope operation that pushes a
-named corridor onto an existing scope ([#582](http://localhost:1060/l/default/item/582)) — phase
+([#548](http://localhost:1062/l/default/item/548)), threads identified by name and answering
+corridor ([#581](http://localhost:1062/l/default/item/581)), `Kernel::is_cached` through a
+resolution ([#561](http://localhost:1062/l/default/item/561)), a scope operation that pushes a
+named corridor onto an existing scope ([#582](http://localhost:1062/l/default/item/582)) — phase
 2 — and "confine to my own level", deferred.
 
 **0.1.82** carries corridor stacking, the reasons a read was not cached, and invalidation you can
 trust and watch. **Additive:** `Scope::stack` (two injectors compose; associative, the empty chain an
-identity, R7.13, ledger [#582](http://localhost:1060/l/default/item/582)); `UNCACHED_NOTE` and
+identity, R7.13, ledger [#582](http://localhost:1062/l/default/item/582)); `UNCACHED_NOTE` and
 `urn:kernel:uncached` (every read the kernel computes and does not store names why: `declared`,
 `dependency <iri>`, `denied`, `failed`, `expired`, `cut-in-flight`, `policy`, …; R4.6, NetKernel News
 2.47); `Issuer::issue_recording` and `Dependencies` (a failed sub-request carries its own dependency
 set, so a fallback over a composite's NotFound is cut when the atom changes; R4.5 amended, ledger
-[#611](http://localhost:1060/l/default/item/611)); `CacheRow.state` (`Live` / `Cut` / `Expired`) and
-`urn:kernel:cached target=` (ledger [#612](http://localhost:1060/l/default/item/612)); and
+[#611](http://localhost:1062/l/default/item/611)); `CacheRow.state` (`Live` / `Cut` / `Expired`) and
+`urn:kernel:cached target=` (ledger [#612](http://localhost:1062/l/default/item/612)); and
 `Kernel::listen` with `ListenSpec`, `CutListener`, `CutEvent` and `CutBatch` (cut listeners, R4.7–R4.8,
 NetKernel News 7.5 and 7.6: a bounded queue per listener, capability-filtered, never a callback).
 **What a consumer observes without code of its own changing:** every uncacheable read's trace event
 carries one more note (`uncached`); the `urn:kernel:cache` readout gains a state word per row and a
 `(N stale)` count, with the target still the first token; the cache declines to store an `At` result
 that has already expired. **Not built, on purpose:** early cutoff (ledger
-[#613](http://localhost:1060/l/default/item/613)), cut notices across a mount, and the failure
+[#613](http://localhost:1062/l/default/item/613)), cut notices across a mount, and the failure
 dependency set across module and wire issuers (both need a wire decision). `vocabulary.ttl` gains no
 terms; only its `owl:versionInfo` moves.
 
 **0.1.83** carries spaces as data, arc 1: the arrangement coming IN, the inverse of
 `urn:kernel:topology` (design: `docs/design/space-declarations.md`, ledger
-[#633](http://localhost:1060/l/default/item/633)). **Breaking (a `SpaceKind` field flag day, no known
+[#633](http://localhost:1062/l/default/item/633)). **Breaking (a `SpaceKind` field flag day, no known
 downstream Rust consumer):** `SpaceKind::EndpointSpace { doors: Vec<Door> }` replaces `{ patterns }`,
 `SpaceKind::Limit` gains `kind: MatchKind`, and `SpaceKind::Alias` gains `max_hops`. **Additive:**
 `Door` (`#[non_exhaustive]`), `MatchKind`, `Grammar::match_kind` and `Endpoint::confinement` (both
@@ -2038,18 +2038,18 @@ defaulted, so an overlay that does not forward them reports `Custom` / unconfine
 feature (strict: a triple not reached from the one root, a blank node, a cycle or an unknown kind is
 refused, never skipped). The round trip `build(from_turtle(topology(K)))` is a fixpoint on every
 rebuildable kind. **Vocabulary:** `ik:Door`, `ik:doors`, `ik:endpointName`, `ik:matchKind`,
-`ik:confinedTo`, `ik:maxHops` (ledger [#608](http://localhost:1060/l/default/item/608): every door
+`ik:confinedTo`, `ik:maxHops` (ledger [#608](http://localhost:1062/l/default/item/608): every door
 names the endpoint that answers it). **What a consumer observes without code of its own changing:**
 the topology Turtle gains the door nodes beside the flat `ik:pattern` it already carried, and a named
 space reached twice is rendered once, where it is first met (it was rendered at each occurrence, which
 numbered its anonymous children twice). **Not built, on purpose:** hot reload
-([#628](http://localhost:1060/l/default/item/628)), declared remote mounts
-([#630](http://localhost:1060/l/default/item/630)), factories
-([#631](http://localhost:1060/l/default/item/631)), corridor templates
-([#632](http://localhost:1060/l/default/item/632)).
+([#628](http://localhost:1062/l/default/item/628)), declared remote mounts
+([#630](http://localhost:1062/l/default/item/630)), factories
+([#631](http://localhost:1062/l/default/item/631)), corridor templates
+([#632](http://localhost:1062/l/default/item/632)).
 
 **0.1.84** bounds declarations and closes the arrangement nits the s-expression surface found (ledgers
-[#643](http://localhost:1060/l/default/item/643), [#644](http://localhost:1060/l/default/item/644)).
+[#643](http://localhost:1062/l/default/item/643), [#644](http://localhost:1062/l/default/item/644)).
 **Additive:** `MAX_DECLARATION_DEPTH` (48), `MAX_DECLARATION_NODES` (65,536) and `MAX_DECLARATION_TEXT`
 (16 MiB), `DeclarationBound`, and `DeclarationError::TooLarge { bound, limit, node }`: `from_turtle` checks
 depth before each descent and counts nodes and text as it produces them, and `build` measures a tree
@@ -2064,7 +2064,7 @@ order is documented as what it always was, sorted precedence (the vocabulary's `
 says "table order" and is corrected with the next vocabulary change); and the `getrandom` floor is 0.3.4,
 whose `wasm_js` feature needs no `--cfg` flag. No new vocabulary terms.
 
-**0.1.85** is THE AUDIT RELEASE (ledger [#750](http://localhost:1060/l/default/item/750): an unled audit of 0.1.84
+**0.1.85** is THE AUDIT RELEASE (ledger [#750](http://localhost:1062/l/default/item/750): an unled audit of 0.1.84
 @fc3accc, 11 bugs reproduced, all fixed). **Security, and what a consumer observes:** the capability floor now covers
 EVERY verb an endpoint can be asked for, not only the verbs it declares: a declared verb is gated by its own requires;
 an undeclared Exists by the Source requires (or every declared requires when Source is not declared); an undeclared
@@ -2073,7 +2073,7 @@ endpoint; an endpoint that declares no requires stays open. A requires declared 
 (it was silently inert, while the catalog rendered it). ⚠ So a module whose endpoint ignores `request.verb` and was
 reachable through an undeclared verb under a narrowed capability is now refused there, which is the fix; and
 `ikigai-conformance`'s test that asserted the inert behavior fails until it is updated (ledger
-[#756](http://localhost:1060/l/default/item/756)). Nothing answers inside `urn:kernel:` any more except the kernel: a
+[#756](http://localhost:1062/l/default/item/756)). Nothing answers inside `urn:kernel:` any more except the kernel: a
 space or corridor rewrite whose canonical lands in that namespace is refused at canonical adoption and by the seals, so
 a module can neither answer `urn:kernel:actions` nor cut a kernel thread without `urn:cap:kernel:cut`. Seals identify a
 level by the REGISTERED level object, not its name, so a space wrapping a self-built `Level` under the owner's name is
@@ -2090,7 +2090,7 @@ precedence (the correction 0.1.84 promised), so the deployed `/ns` should be ref
 
 **0.1.86** is a patch on the lockstep line like every release since 0.1.73, on the same
 argument: a `^0.1.x` pin is a ceiling, and a 0.2.0 would freeze all of the kernel's dependents out of a security fix
-until each re-pinned. **Security: exclusions are sticky** (ledger [#858](http://localhost:1060/l/default/item/858),
+until each re-pinned. **Security: exclusions are sticky** (ledger [#858](http://localhost:1062/l/default/item/858),
 found by audit round 3 in ikigai-fs). A deny-shaped scope, defined once as `is_deny_scope` (new, public), is never
 dropped by `Capability::attenuate` or `Capability::clamp`: grants only shrink, exclusions only accumulate, and a request
 or a carried capability can add one. Before this, `attenuate([read:<root>])` from `read:<root>` + `read:-<root>/secret`
@@ -2106,8 +2106,8 @@ the module refuses), as before and as now documented. **No type or wire change:*
 serializes byte-for-byte as before (pinned). **Vocabulary:** nothing.
 
 **0.1.87** is a patch on the lockstep line (same argument as 0.1.86: a `^0.1.x` pin is a ceiling). **Additive: the
-module author's "why"** (ledger [#906](http://localhost:1060/l/default/item/906), [#907](http://localhost:1060/l/default/item/907),
-[#14](http://localhost:1060/l/default/item/14)). `urn:kernel:explain target= verb= scopes=` is a DRY RUN of resolution:
+module author's "why"** (ledger [#906](http://localhost:1062/l/default/item/906), [#907](http://localhost:1062/l/default/item/907),
+[#14](http://localhost:1062/l/default/item/14)). `urn:kernel:explain target= verb= scopes=` is a DRY RUN of resolution:
 one walk shared with real resolution (`Scope::resolve_observed`), reporting per chain member answered / declined /
 opaque / **shadowed**, the alias rules that fired (`AliasTable::preview`, which moves no counters), the endpoint, its
 door and grammar bindings, and its declared `requires` against the caller's capability; it never invokes, and it is
@@ -2121,14 +2121,14 @@ and `urn:kernel:cache`, `threads` and `dependents` gain Turtle faces that join t
 `ik:cutCount`), so the deployed `/ns` must be refreshed with this release.
 
 **0.1.88** is a vocabulary patch on the lockstep line: no kernel change. **New terms for natural-language drafting**
-(ledger [#974](http://localhost:1060/l/default/item/974)): ikigai-nl's `urn:nl:grounding` and `urn:nl:sparql` move from a
+(ledger [#974](http://localhost:1062/l/default/item/974)): ikigai-nl's `urn:nl:grounding` and `urn:nl:sparql` move from a
 private `nl:` namespace into `ik:`: `ik:Grounding`, `ik:GroundingPart`, `ik:groundingFocus`, `ik:shownItems`,
 `ik:offeredItems`, `ik:sampleTriple`, `ik:shownSampleTriples`, `ik:shownClassPartitions`, `ik:shownPropertyPartitions`,
 `ik:draftAsk`, `ik:draftValid`, `ik:draftError`, `ik:draftWarning`, and `ik:model` reused for a draft attempt's model.
 The deployed `/ns` must be refreshed with this release.
 
 **0.1.89** is a patch on the lockstep line. **A space's name survives only what keeps its doors** (ledger
-[#987](http://localhost:1060/l/default/item/987), step 1). A name is a cache claim, but `EndpointSpace::bind` and
+[#987](http://localhost:1062/l/default/item/987), step 1). A name is a cache claim, but `EndpointSpace::bind` and
 `bind_arc` kept it, so extending a self-named space carried its name over a different door set: the cache served the
 extended corridor's answer under the plain one, and a tree holding both was refused as one name claimed twice. Both now
 drop the name; `.named(..)` after the last `bind` names the extended space. No other core combinator gains members after
@@ -2140,7 +2140,7 @@ sweep of every sibling repo found none). No space in core or vocab is named yet.
 nothing.
 
 **0.1.90** is a vocabulary-crate patch on the lockstep line: no kernel change. **`ikigai_vocab::space()` names itself**
-(ledger [#987](http://localhost:1060/l/default/item/987), step 3): it is configuration-free (one door, `urn:ikigai:vocab`,
+(ledger [#987](http://localhost:1062/l/default/item/987), step 3): it is configuration-free (one door, `urn:ikigai:vocab`,
 over the compiled-in ontology), so it claims `urn:iki:space:vocab`, exported as `ikigai_vocab::SPACE_ID`, and a
 conformance test (`ikigai-conformance` 0.6.0) holds it to that. **What a consumer observes:** a tree that mounts the
 vocabulary space now shows `urn:iki:space:vocab` instead of a skolem in `urn:kernel:topology` and the space diagrams,
@@ -2151,7 +2151,7 @@ deliberate re-pin. `ikigai-vocab` now states its true core floor, 0.1.89. **No t
 `owl:versionInfo`.
 
 **0.1.91** gives an action match its own identity and makes contracts content-addressed (ledger
-[#948](http://localhost:1060/l/default/item/948)). An endpoint's description id is not unique in a kernel (a mount
+[#948](http://localhost:1062/l/default/item/948)). An endpoint's description id is not unique in a kernel (a mount
 surfaces a peer's endpoint under its own id; one endpoint can sit at two doors), yet every manifold row was named
 `urn:ikigai:endpoint:{id}:action:{verb}`, so copies wrote onto one subject: a mount hid the local copy, two doors
 collapsed into one action, and a mounted copy with a different contract merged into the local node, which then appeared
@@ -2167,27 +2167,27 @@ alias prelude, MCP's local SHACL report, ikigai-nl, the python and deno Turtle m
 change** (no public field). **Vocabulary:** new `ik:contract` (domain `ik:ActionMatch`, range `ik:Action`); the
 `ik:ActionMatch`, `ik:Action` and `ik:action` comments change.
 
-**0.1.92** makes a failed invocation a trace node (ledger [#559](http://localhost:1060/l/default/item/559),
-[#20](http://localhost:1060/l/default/item/20)). Since 0.1.73 a failed sub-request has been a cache dependency, yet the
+**0.1.92** makes a failed invocation a trace node (ledger [#559](http://localhost:1062/l/default/item/559),
+[#20](http://localhost:1062/l/default/item/20)). Since 0.1.73 a failed sub-request has been a cache dependency, yet the
 kernel recorded a `TraceEvent` only after an invocation returned `Ok`, so the trace and the cache disagreed about what a
 resolution touched, and a module's own `Denied` from inside `invoke` (a path or host ACL) reached no tracer. Now an
 invocation that ran and failed records an event under its parent noted `(FAILED_NOTE, kind)`, with the new
 `Error::kind()` word (`not-found`, `denied`, ...): timed, never a cache hit, carrying no text from the error's message.
 The floor's refusal stays `DENIED_NOTE` on an event that never ran, so the two refusals differ by key. It also carries
-two determinism fixes to the cache readouts (ledger [#1029](http://localhost:1060/l/default/item/1029),
-[#1044](http://localhost:1060/l/default/item/1044)): `urn:kernel:cache`
+two determinism fixes to the cache readouts (ledger [#1029](http://localhost:1062/l/default/item/1029),
+[#1044](http://localhost:1062/l/default/item/1044)): `urn:kernel:cache`
 rows, and the entries of its graph faces, sort by every column, so rows sharing a name stop flipping between kernels.
 **What a consumer observes:** a tracer receives one more event per failed invocation, where it received none (a test that
 counts events on a failing path sees more). **No type change** to `TraceEvent` or `Tracer` (no postcard bump); new public
 `Error::kind` and `FAILED_NOTE`. **Vocabulary:** only `owl:versionInfo`.
 
-**0.1.93** puts WHO a request is for into its capability (ledger [#1077](http://localhost:1060/l/default/item/1077),
-answering [#76](http://localhost:1060/l/default/item/76)) and lets an endpoint hang a failure from a thread it names
-(ledger [#1079](http://localhost:1060/l/default/item/1079)). A door mints `urn:cap:principal:<iri>` with
+**0.1.93** puts WHO a request is for into its capability (ledger [#1077](http://localhost:1062/l/default/item/1077),
+answering [#76](http://localhost:1062/l/default/item/76)) and lets an endpoint hang a failure from a thread it names
+(ledger [#1079](http://localhost:1062/l/default/item/1079)). A door mints `urn:cap:principal:<iri>` with
 `Capability::with_principal`; an endpoint reads it with `Capability::principal` or gates on `Capability::acts_as`. One
 principal per capability (several read as none), an absolute IRI carried verbatim (what cannot be is refused, never
 escaped), narrowing never adds or changes it, `clamp` keeps the ceiling's (so a client's narrower carried capability
-cannot shed the identity its channel authenticated, the ledger [#879](http://localhost:1060/l/default/item/879)
+cannot shed the identity its channel authenticated, the ledger [#879](http://localhost:1062/l/default/item/879)
 failure), root names none and acts as everyone, a held wildcard is never an identity. Rules on `Capability`, reasons in
 `docs/design/principal-capability.md`. `Invocation::depends_on(thread)` records a thread for the answer whether the
 endpoint succeeds or fails; on a failure it is honored for `NotFound` and `Unresolved` only, so a refusal stays
@@ -2197,8 +2197,8 @@ ecosystem holds one yet). **No type change**, no wire change (the serialized cap
 **Vocabulary:** only `owl:versionInfo`.
 
 **0.1.94** makes a percent escape in a match or contract IRI exactly `%` and two hex digits (ledger
-[#1096](http://localhost:1060/l/default/item/1096)): `u8::from_str_radix` takes a leading `+`, so `%+1` decoded to the same
-byte as `%01` and two IRIs parsed to one door, the twin of ledger [#750](http://localhost:1060/l/default/item/750) E2's
+[#1096](http://localhost:1062/l/default/item/1096)): `u8::from_str_radix` takes a leading `+`, so `%+1` decoded to the same
+byte as `%01` and two IRIs parsed to one door, the twin of ledger [#750](http://localhost:1062/l/default/item/750) E2's
 `ContentId` fix. ikigai-vocab gains `tests/vectors/contract_vectors.json`, the one file of match IRIs, contract IRIs, their
 parses and door Turtle that the hand-mirrored faces (ikigai-python, ikigai-deno) pin against, recomputed by a test so it
 cannot drift. **What a consumer observes:** `parse_match_iri` and `parse_contract_iri` return `None` for an IRI with a sign
@@ -2207,11 +2207,11 @@ escapes and an upper-case digest still parse as before. **No type change**, no w
 `owl:versionInfo`.
 
 **0.1.95** carries two decisions of 2026-10-10. **Lenient in, canonical out** for match and contract IRIs (ledger
-[#1107](http://localhost:1060/l/default/item/1107)): the parse stays lenient, and every match or contract IRI core emits is
+[#1107](http://localhost:1062/l/default/item/1107)): the parse stays lenient, and every match or contract IRI core emits is
 the canonical spelling. New `canonical_match_iri` and `canonical_contract_iri`; `urn:kernel:validate` compares a contract IRI
 by its parsed digest, so an upper-case digest or an unnecessary escape in the id now pre-flights where it was refused, and
 its errors name the canonical spelling rather than echoing the caller's. The shared vectors gain a `canonical` field per
-parse case. **A write that ran and failed cuts its target** (ledger [#1105](http://localhost:1060/l/default/item/1105),
+parse case. **A write that ran and failed cuts its target** (ledger [#1105](http://localhost:1062/l/default/item/1105),
 R4.4 restated): a `Sink` or `Delete` the kernel dispatched cuts the canonical target's thread whether the endpoint returned
 `Ok` or `Err`; a refusal before dispatch (floor, limiter, depth, unbound) still cuts nothing. **What a consumer observes:**
 a cached read over a target whose write failed after running now recomputes (ikigai-script's pinned
@@ -2220,8 +2220,8 @@ a cached read over a target whose write failed after running now recomputes (iki
 floor stays 0.1.91 (its library uses nothing new; only its tests call the new functions). **Vocabulary:** only
 `owl:versionInfo`.
 
-**0.1.96** adds the layer vocabulary (ledger [#1182](http://localhost:1060/l/default/item/1182), layers arc 1 of
-[#1170](http://localhost:1060/l/default/item/1170)), in core before anything emits it. Classes `ik:Layer`,
+**0.1.96** adds the layer vocabulary (ledger [#1182](http://localhost:1062/l/default/item/1182), layers arc 1 of
+[#1170](http://localhost:1062/l/default/item/1170)), in core before anything emits it. Classes `ik:Layer`,
 `ik:Collaboration`, `ik:Machine` (⊑ `prov:SoftwareAgent`), `ik:Message`, `ik:Question` (⊑ `ik:Message`), `ik:Offer`,
 `ik:Progress`, `ik:Release`, `ik:Handback` (each entry class ⊑ `prov:Entity`); properties `ik:layerModel`, `ik:body`,
 `ik:brief`, `ik:note`, `ik:repository` (an IRI, where `ik:repo` stays a browse root's name), `ik:offer`, `ik:addressedTo`,
@@ -2232,7 +2232,7 @@ a node typed into a family it is not in. **What a consumer observes:** nothing i
 `owl:versionInfo`; `/ns` needs a deploy.
 
 **0.1.97** makes a floor refusal for a FAMILY requirement say what satisfies it (ledger
-[#1292](http://localhost:1060/l/default/item/1292)). A declared `prefix*` is met by any held grant under the prefix
+[#1292](http://localhost:1062/l/default/item/1292)). A declared `prefix*` is met by any held grant under the prefix
 (`cap_satisfies`), and the endpoint is never entered on a denial, so the kernel's text is the only explanation a caller gets.
 **What a consumer observes:** a wildcard denial reads ``capability does not grant `urn:cap:script:run:open-*` (declared by
 `urn:script:open-door`; any grant under `urn:cap:script:run:open-` satisfies it)``; a bare `*` says "any grant at all
@@ -2246,20 +2246,20 @@ of the release commit `e7d21b5`. So the published 0.1.97 carries draft terms (`i
 `ik:egressContext`, `ik:sharedWith`, `ik:maxEntryBytes`, `ik:regionCount` among them) and lacks PRs 186-190. **Those draft
 terms are NOT part of the vocabulary**: they await PR 185's review, `/ns` never served them, and 0.1.97 is yanked. Take
 0.1.98: it is 0.1.97 as merged (the family floor refusal above) plus five PRs merged on main after its release commit:
-- **PR 186** (ledger [#1113](http://localhost:1060/l/default/item/1113)), tests only: `contract_vectors.json` gains the
+- **PR 186** (ledger [#1113](http://localhost:1062/l/default/item/1113)), tests only: `contract_vectors.json` gains the
   `core/hostile-terms` door (a hostile class and requires, control characters in summaries), and every door's Turtle is
   parsed back.
-- **PR 187** (ledger [#1345](http://localhost:1060/l/default/item/1345)): a `%` in an endpoint id or input name is encoded
+- **PR 187** (ledger [#1345](http://localhost:1062/l/default/item/1345)): a `%` in an endpoint id or input name is encoded
   as `%25` in the Meta Turtle face's endpoint and input node IRIs and in explain's `ik:answer`, so `to_turtle` no longer
   emits an IRI a parser refuses. New door `core/percent-names`; `deno/edge` and `python/guarded` change bytes.
-- **PR 188** (ledger [#1352](http://localhost:1060/l/default/item/1352)): the same rule in the other NAME positions: plan
+- **PR 188** (ledger [#1352](http://localhost:1062/l/default/item/1352)): the same rule in the other NAME positions: plan
   var, input and argument IRIs, thread IRIs (`urn:kernel:cache`, `threads`, `dependents`), explain binding keys and
   validate's `sh:resultPath` (which now joins the catalog for a name like `a%41`). A plan id keeps every real `%XX` escape;
   only a bare `%` becomes `%25`, so no plan IRI that parsed before changes.
-- **PR 189** (ledger [#1356](http://localhost:1060/l/default/item/1356)): an authored scope is one term in every face. The
+- **PR 189** (ledger [#1356](http://localhost:1062/l/default/item/1356)): an authored scope is one term in every face. The
   manifold's `ik:requires` and explain's `ik:requires`/`ik:lacks` use the catalog's rule: a `urn:`/`http(s)://` scope is
   escaped and then parsed, bracketed only when the escaped form is an IRI, and a literal otherwise.
-- **PR 190** (ledger [#791](http://localhost:1060/l/default/item/791)): the floor memo degrades gracefully past its bound
+- **PR 190** (ledger [#791](http://localhost:1062/l/default/item/791)): the floor memo degrades gracefully past its bound
   (a sweep evicts down to three quarters of it, so a round-robin over 4097 live endpoints misses a quarter of the time,
   not every time), and `escape_iri_fragment` writes hex directly (same bytes, about 7x faster).
 
@@ -2270,7 +2270,7 @@ contract IRIs and match IRIs do not move. **No type change**, no wire change. ik
 **Vocabulary:** only `owl:versionInfo` (0.1.97 → 0.1.98 against `/ns`, which was deployed from main and never served
 the draft terms).
 
-**0.1.99** carries one PR on top of 0.1.98, **PR 192** (ledger [#1351](http://localhost:1060/l/default/item/1351)):
+**0.1.99** carries one PR on top of 0.1.98, **PR 192** (ledger [#1351](http://localhost:1062/l/default/item/1351)):
 `Description::validate` refuses a NAME no IRI can carry. DEL, the C1 controls, private use and the noncharacters (every
 code point outside RFC 3987's `ucschar`) are legal in a Turtle `IRIREF`, so neither escaper encodes them, and an IRI
 parser refuses them: an endpoint id or input name holding one was spelled into the endpoint node, the input nodes and the

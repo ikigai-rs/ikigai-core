@@ -1,7 +1,7 @@
 # The path cache — parked, with its shape written down
 
 **Status:** design only, 2026-09-26. Nothing here is built, by decision — ledger
-[#510](http://localhost:1060/l/default/item/510). Brian, 2026-09-25: *revisit once scope,
+[#510](http://localhost:1062/l/default/item/510). Brian, 2026-09-25: *revisit once scope,
 limiter, depth bound, lossless transreption and topology are in; re-measure then, do not
 inherit the numbers below.* Companion to `docs/formalism/README.md` §1 (the γ_path row) and
 §10 (the numbers); the code is the spec where they differ.
@@ -86,7 +86,7 @@ is the same condition every dependent of the thread already accepts.
   resolution or a corridor per tenant means the same target resolves in many chains, each a
   fresh walk; the key above is what makes those walks shareable.
 - **Expensive grammars**: regex, SHACL-validated captures (ledger
-  [#70](http://localhost:1060/l/default/item/70)), anything past a prefix compare.
+  [#70](http://localhost:1062/l/default/item/70)), anything past a prefix compare.
 - **A `Space` whose `resolve` consults a resource**: a routing table in the store, a wasm
   module that resolves in its own code. Then a resolve is a sub-request, and its cost is the
   cost of that resource, not a scan.

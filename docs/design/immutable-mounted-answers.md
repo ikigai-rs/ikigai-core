@@ -1,8 +1,8 @@
 # Immutable mounted answers — design
 
 **Status:** design only, 2026-10-30. Nothing here is built. Ledger
-[#2686](http://localhost:1060/l/default/item/2686), from the very-large-graphs direction
-(register entry 12, section 4). Follows [#2660](http://localhost:1060/l/default/item/2660)
+[#2686](http://localhost:1062/l/default/item/2686), from the very-large-graphs direction
+(register entry 12, section 4). Follows [#2660](http://localhost:1062/l/default/item/2660)
 (the `mounted` uncached reason, core 0.2.9). The hub briefs the build from this; the code is
 the spec where they differ once it exists.
 

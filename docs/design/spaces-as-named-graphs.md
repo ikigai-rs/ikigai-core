@@ -1,7 +1,7 @@
 # Spaces: composition, resolution, and named-graph representation (design draft)
 
 **Status:** §3(b) — the topology graph — is **built**, core 0.1.78
-(`urn:kernel:topology`, ledger [#515](http://localhost:1060/l/default/item/515)); §3(a)
+(`urn:kernel:topology`, ledger [#515](http://localhost:1062/l/default/item/515)); §3(a)
 — one named graph per space carrying its endpoints' descriptions — is not (the catalog
 stays one flat graph). See "What landed" at the end for where the built vocabulary
 diverges from the sketch below, which is kept as the picture. Companion to
@@ -203,9 +203,9 @@ without passing a limiter? — is the SPARQL in `docs/formalism/README.md` R7.3 
 triple walk in `tests/topology.rs`.
 
 **Since 0.1.83 each door names its endpoint** (ledger
-[#608](http://localhost:1060/l/default/item/608)), so the graph can be read back as a
+[#608](http://localhost:1062/l/default/item/608)), so the graph can be read back as a
 declaration ([`space-declarations.md`](space-declarations.md), ledger
-[#633](http://localhost:1060/l/default/item/633)). The flat `ik:pattern` per
+[#633](http://localhost:1062/l/default/item/633)). The flat `ik:pattern` per
 door stays on the leaf — every reader since 0.1.78 queries it — and beside it:
 
 | added | on | says |
