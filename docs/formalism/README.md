@@ -664,6 +664,16 @@ aliased resource (the thread is canonical, so the logical and backing names stay
 through a nested alias, and for a composite over such a read, which inherits the edge through
 the dependency record and is cut by the same write.
 
+A cut names a thread, not a scope, so it is **global across scopes**: a write in chain Y to t
+drops chain X's stored read of t, though X and Y are different keys. And the thread is the
+canonical name **in the chain the request resolved in**: where one logical name maps to m1 in X
+and m2 in Y, X's read hangs from m1, so a write to m2 (directly, or through the logical name in Y)
+leaves it and a write to m1 drops it (both pinned by ledger
+[#3869](http://localhost:1062/l/default/item/3869)).
+
+    pin: `admission_only::a_write_in_one_scope_drops_another_scopes_cached_read_of_the_same_name` (crates/ikigai-core/tests/admission_only.rs)
+    pin: `admission_only::a_write_to_another_scopes_canonical_leaves_this_scopes_entry` (crates/ikigai-core/tests/admission_only.rs)
+
 **A write that ran and failed cuts too** (ledger [#1105](http://localhost:1060/l/default/item/1105),
 decided 2026-10-10). The cut fires when the kernel DISPATCHED the `Sink` or `Delete` — the
 endpoint was entered — whether it returned `Ok` or `Err`, because an endpoint can change state
@@ -763,7 +773,12 @@ default), and the kernel caches the failure until then, exactly as it would an `
 like one, pinned to the threads the failed invocation hung from (its own canonical target's
 among them, so a cut on it drops the cached failure), clamped to `now + ceiling`
 (`Kernel::with_failure_ceiling`, `DEFAULT_FAILURE_CEILING` five minutes), never past what the
-failure depended on, and never on a clock-free kernel. A failure served from the cache hands
+failure depended on, and never on a clock-free kernel. A refusal the run context decided is never
+cached, whatever it states (ledger [#3869](http://localhost:1062/l/default/item/3869)):
+`OverBudget`, `Timeout` and `GaveUp` are what a run with a larger budget, a later deadline or more
+retries would not answer, and neither the run context nor depth is in the key, so serving one
+would let an admission input decide what a later request is answered. The variant decides,
+whoever produced it: an origin's 504 is a `Timeout` and is not cached either. A failure served from the cache hands
 back `Dependencies::failure_until`, and an issuing invocation that catches it meets `At(that
 time)` with the failure's carried set instead of `Always`: the composite is cached until the
 earliest of its dependencies' expiries, and recomputes on schedule. Three things do not change.
@@ -779,6 +794,8 @@ with its state, the time it is served until and its error's kind, and its trace 
     pin: `negative_caching::a_cut_on_the_failing_resource_drops_the_cached_failure` (crates/ikigai-core/tests/negative_caching.rs)
     pin: `negative_caching::the_ceiling_clamps_a_stated_expiry` (crates/ikigai-core/tests/negative_caching.rs)
     pin: `negative_caching::a_denial_a_miss_a_depth_refusal_or_a_clock_free_kernel_caches_no_failure` (crates/ikigai-core/tests/negative_caching.rs)
+    pin: `admission_only::a_run_context_refusal_is_never_cached_even_with_a_stated_expiry` (crates/ikigai-core/tests/admission_only.rs)
+    pin: `admission_only::a_later_run_with_a_longer_deadline_is_not_served_an_earlier_runs_timeout` (crates/ikigai-core/tests/admission_only.rs)
     doctest: `Invocation::failure_expires_at`
     pin: `depends_on::a_fallback_over_a_declared_absence_is_cut_by_the_publish` (crates/ikigai-core/tests/depends_on.rs)
     pin: `depends_on::every_other_error_stays_uncached_whatever_thread_is_attached` (crates/ikigai-core/tests/depends_on.rs)
@@ -1409,9 +1426,16 @@ independently. `Invocation::now()` answers from an attached clock, then the chai
 issuer's; innermost wins; a corridor without a clock leaves the chain's; confinement keeps it.
 The kernel judges `Expiry::At` against its **own** clock, never the chain's: a pinned past
 cannot un-expire a live entry and a pinned future cannot expire a fresh one. The fingerprint
-does not include the clock — it is a property of the corridor's name, and two injections under
-one name with different clocks are one claim made twice, the injector's error (an `Arc<dyn
-Clock>` has no stable identity; the instant exists only for a fixed clock). The pairing of door
+includes the corridor's name AND the instant its clock read at injection (since ledger
+[#3869](http://localhost:1062/l/default/item/3869); before, the name alone, and two injections
+under one name at two instants were one context): the clock reaches an answer's content only
+through an expiry or a name that carries its instant, and core checks the instant rather than
+trusting the name to carry it. The clock itself is not hashed (an `Arc<dyn Clock>` has no stable
+identity), so a ticking clock is identified by the instant it read, which is sound and shares
+little. And a deadline an endpoint states after a pinned FUTURE instant is put on the kernel's
+clock: served at most `min(until, now + (until - instant))`, never until the corridor's time comes
+round; under no corridor, a pinned past, or a deadline at or before the instant it is served as
+stated. A failure's stated expiry takes the same clamp beside the ceiling. The pairing of door
 and clock is a **claim** core cannot observe, pinned as a declaration; the trace discloses the
 instant the chain's clock read beside the chain (`SCOPE_CLOCK_NOTE`). The payoff is one test: an
 endpoint reading time by resolution and by `now()` sees one instant under the corridor and the
@@ -1421,7 +1445,11 @@ from the cache on a second request under the same name.
     pin: `temporal_corridor::a_temporal_corridor_pins_both_faces_of_time_and_the_pinned_read_is_cacheable` (crates/ikigai-core/tests/temporal_corridor.rs)
     pin: `temporal_corridor::validity_is_judged_on_the_kernels_clock_never_the_chains` (crates/ikigai-core/tests/temporal_corridor.rs)
     pin: `temporal_corridor::the_innermost_clock_wins_and_confinement_keeps_it` (crates/ikigai-core/tests/temporal_corridor.rs)
-    pin: `temporal_corridor::the_fingerprint_is_the_corridors_name_not_its_clock` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `temporal_corridor::the_fingerprint_is_the_corridors_name_and_its_instant` (crates/ikigai-core/tests/temporal_corridor.rs)
+    pin: `admission_only::two_instants_under_one_name_never_share_an_entry` (crates/ikigai-core/tests/admission_only.rs)
+    pin: `admission_only::a_success_stated_under_a_pinned_future_is_served_only_its_window` (crates/ikigai-core/tests/admission_only.rs)
+    pin: `admission_only::a_failure_stated_under_a_pinned_future_is_served_only_its_window` (crates/ikigai-core/tests/admission_only.rs)
+    pin: `admission_only::the_clamp_leaves_a_live_read_and_a_pinned_past_as_stated` (crates/ikigai-core/tests/admission_only.rs)
     pin: `temporal_corridor::the_trace_discloses_the_chains_clock_beside_the_chain` (crates/ikigai-core/tests/temporal_corridor.rs)
     pin: `endpoint::tests::now_prefers_an_attached_clock_then_the_chain_then_the_issuer` (crates/ikigai-core/src/endpoint.rs)
     doctest: `Scope::with_named_at`
@@ -1540,10 +1568,11 @@ its printed form. Now:
   receives a `Scope` at all; the kernel keeps its own access.
 - Time stays: `Invocation::now`, unchanged (R7.10). The one scope fact an endpoint may read
   besides it is `Invocation::clock_pinned`, whether that time is a temporal corridor's. It is
-  covered by the key through the corridor's name: a clock reaches a chain only beside the
-  corridor it is derived from, and the name claims the clock (R7.10). So a pinned answer is never
-  served to a chain without that corridor; the same name injected with and without a clock is one
-  claim made twice, the injector's error, and is pinned as such.
+  covered by the key through the corridor's name and instant: a clock reaches a chain only beside
+  the corridor it is derived from, and the fingerprint hashes the instant it read at injection
+  (R7.10, since ledger [#3869](http://localhost:1062/l/default/item/3869)). So a pinned answer is
+  never served to a chain without that corridor, nor to the same name with no clock or another
+  instant.
 - A test that must see what resolution did reads the chain through `ikigai_core::testkit`,
   behind the `testkit` feature, which is not API; core's own tests enable it through a
   dev-dependency on the crate itself.
@@ -1555,7 +1584,7 @@ an answer the cache keys; whether that path needs closing too is open.
 
     pin: `opacity::two_scopes_that_share_a_key_are_indistinguishable_to_an_endpoint` (crates/ikigai-core/tests/opacity.rs)
     pin: `opacity::a_pinned_clock_answer_is_not_served_to_an_unpinned_scope` (crates/ikigai-core/tests/opacity.rs)
-    pin: `opacity::a_corridors_name_claims_its_clock_so_one_name_is_one_key` (crates/ikigai-core/tests/opacity.rs)
+    pin: `opacity::one_name_with_and_without_a_clock_is_two_keys` (crates/ikigai-core/tests/opacity.rs)
     pin: `scope_hypothesis::an_endpoint_reaches_a_corridors_door_only_through_its_floor` (crates/ikigai-core/tests/scope_hypothesis.rs)
     doctest: `Invocation::scope`
     doctest: `Scope::spaces`

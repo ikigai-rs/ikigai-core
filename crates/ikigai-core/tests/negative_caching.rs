@@ -326,6 +326,9 @@ fn a_denial_a_miss_a_depth_refusal_or_a_clock_free_kernel_caches_no_failure() {
     for error in [
         Error::Denied("no".into()),
         Error::NotFound("gone".into()),
+        // An endpoint's OWN `Unresolved` with a stated expiry, beside the kernel's
+        // (ledger #3869): excluded since negative caching began, pinned here.
+        Error::Unresolved(iri("urn:feed:elsewhere")),
         Error::DepthExceeded {
             depth: 3,
             target: iri("urn:deep"),
@@ -393,7 +396,8 @@ fn an_answer_supersedes_a_cached_failure_under_the_same_key() {
             Box::pin(async move {
                 if flag.load(Ordering::SeqCst) == 0 {
                     inv.failure_expires_in(Duration::from_secs(60));
-                    Err(Error::Timeout("slow".into()))
+                    // Not a `Timeout`: a run-context refusal is never cached (ledger #3869).
+                    Err(Error::Unavailable("down".into()))
                 } else {
                     Ok(text("back").cacheable())
                 }
