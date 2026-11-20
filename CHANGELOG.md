@@ -9,6 +9,14 @@ capability-floor refusal (ledger #3840), two corrections pinned with three other
 
 ### Added
 
+- **A layer declares its kind** (ledger #3881). `ikigai-vocab` adds the property
+  `ik:layerKind` (range `skos:Concept`, no domain) and the concept scheme `ik:LayerKinds`
+  with five concepts: `ik:TalkKind`, `ik:TaskKind`, `ik:FeedKind`, `ik:InquiryKind` and
+  `ik:JoinKind`. Each carries `skos:prefLabel` (the tab a UI groups the layer under: Talk,
+  Tasks, Feed, Inquiries, Join), `skos:definition`, `skos:notation` (the key a layer's
+  configuration names it by: `talk`, `task`, `feed`, `inquiry`, `join`) and `skos:inScheme`.
+  The JSON-LD context coerces `layerKind` to `@id`: `context.gen.py` now reads a
+  `skos:Concept` range as IRI-valued.
 - **A declared-floor refusal carries the scopes the caller lacked** (ledger #3840).
   `Error::lacking()` returns every scope an endpoint declares for the verb that the
   capability does not satisfy, in declaration order and spelled as declared (a family keeps

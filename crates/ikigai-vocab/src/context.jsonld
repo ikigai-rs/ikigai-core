@@ -353,6 +353,10 @@
       "@id": "ik:layer",
       "@type": "@id"
     },
+    "layerKind": {
+      "@id": "ik:layerKind",
+      "@type": "@id"
+    },
     "layerModel": "ik:layerModel",
     "layers": "ik:layers",
     "listSeparator": "ik:listSeparator",

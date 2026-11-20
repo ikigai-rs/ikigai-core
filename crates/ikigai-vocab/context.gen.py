@@ -4,7 +4,7 @@
 The JSON-LD @context is a projection of the vocabulary: every ns# term mapped to
 its short name, with datatype / @id coercions inferred from each property's
 declared rdfs:range — and ONLY from the range: an IRI-valued property declares
-`rdfs:range rdfs:Resource` (or an ik: class) in the vocabulary rather than being
+`rdfs:range rdfs:Resource` (or skos:Concept, or an ik: class) in the vocabulary rather than being
 special-cased here. Run this whenever vocabulary.ttl changes — two tests fail if
 the two drift apart (`context_covers_every_vocabulary_term` compares the term
 names, `context_generator_sees_no_drift` runs `--check`, which also catches a
@@ -31,7 +31,7 @@ XSD = "http://www.w3.org/2001/XMLSchema#"
 def coercion(name: str, rng: str | None):
     """One property's JSON-LD term entry, from its declared rdfs:range and nothing else.
 
-    An IRI-valued range (rdfs:Resource, or an ik: class) coerces to @id. Every other
+    An IRI-valued range (rdfs:Resource, skos:Concept, or an ik: class) coerces to @id. Every other
     xsd datatype coerces to ITSELF rather than being enumerated here, so a range this
     file has never seen (xsd:nonNegativeInteger, xsd:positiveInteger, xsd:anyURI …)
     is carried the day the vocabulary declares it — the point of driving the context
@@ -40,7 +40,7 @@ def coercion(name: str, rng: str | None):
     xsd:string, rdfs:Literal and an undeclared range stay plain terms: a JSON string
     is already what they mean, and a coercion would only add noise.
     """
-    if rng == "rdfs:Resource" or (rng and rng.startswith("ik:")):
+    if rng in ("rdfs:Resource", "skos:Concept") or (rng and rng.startswith("ik:")):
         return {"@id": f"ik:{name}", "@type": "@id"}
     if rng and rng.startswith("xsd:") and rng != "xsd:string":
         return {"@id": f"ik:{name}", "@type": rng}
