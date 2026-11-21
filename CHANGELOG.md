@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased: a patch (0.4.1)
+## 0.4.1 (2026-11-21)
 
 ### Changed (behavior)
 
