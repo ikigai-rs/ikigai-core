@@ -1,12 +1,12 @@
 # Triage: the scope-hypothesis audit's ten unclear findings (C1 to C10)
 
 **Status:** proposed, for the maintainers' design decision. Written 2026-11-10 against
-ikigai-core 0.3.5 (`dc6d0ac`), ledger [#3156](http://localhost:1060/l/default/item/3156). It
+ikigai-core 0.3.5 (`dc6d0ac`), ledger [#3156](http://localhost:1062/l/default/item/3156). It
 changes no behavior and no code. **Sources:** the
 [audit](scope-hypothesis-audit.md#findings-c) (ledger
-[#3149](http://localhost:1060/l/default/item/3149)), which has the inventory, the reasoning and the
+[#3149](http://localhost:1062/l/default/item/3149)), which has the inventory, the reasoning and the
 cost to callers, and which this note does not repeat; the certificate it cites into (ledger
-[#2385](http://localhost:1060/l/default/item/2385)).
+[#2385](http://localhost:1062/l/default/item/2385)).
 
 ## Each claim still holds
 
@@ -30,7 +30,7 @@ touches these APIs.
 | | API | Kind | Why |
 |---|---|---|---|
 | C1 | `Invocation::with_issuer` | Exception (i), and decision 7 | In process it needs a `Kernel` or an `Issuer`, which is condition (i) and resolves with B4. Across a wire, the empty chain is the hole `resolution-scope.md` decision 7 already names: a mount is a named exception endpoint (Prop. 4). The reset depth and fresh run add nothing a held kernel's `issue` does not already allow |
-| C2 | `Kernel::new` inside an endpoint | Exception (i), (ii) | It reaches only a space value the endpoint already holds, so condition (ii) covers it, including a door whose floor is its gatekeeper. Condition (i) should say "holds **or builds** a `Kernel`". Inside core, its source was B3, closed by [#3866](http://localhost:1060/l/default/item/3866) |
+| C2 | `Kernel::new` inside an endpoint | Exception (i), (ii) | It reaches only a space value the endpoint already holds, so condition (ii) covers it, including a door whose floor is its gatekeeper. Condition (i) should say "holds **or builds** a `Kernel`". Inside core, its source was B3, closed by [#3866](http://localhost:1062/l/default/item/3866) |
 | C3 | Direct dispatch (`Space::resolve`, `Endpoint::invoke`) | Declared as a decorator; exception (ii) otherwise | A decorator wrapping one endpoint is that endpoint's door: the kernel ran the door's floor before the decorator was called, and the inner endpoint runs in the chain the door was found in. An overlay that resolves in a space it holds is condition (ii) |
 | C4 | `Resolved::within` | Exception (iii) | An opaque space renders `ik:OpaqueSpace` and the walk answers "unknown", which is correct. A space that renders a structure and still reports a level outside it is a false report, which is C9. The one call site in core is `Level` itself |
 | C5 | `Rewrite` closure | Exception (iii) | An honest stop: the walk treats it as one, `build` refuses it, and it changes a name, not a scope |
@@ -76,4 +76,4 @@ The worker that wrote this note may not file items, so these are left to the dis
    defect, and update the audit's C7 row to match.
 
 The certificate's wording (C1, C2, C4, C8, C9, C10) belongs to
-[#2385](http://localhost:1060/l/default/item/2385) and needs no item of its own.
+[#2385](http://localhost:1062/l/default/item/2385) and needs no item of its own.

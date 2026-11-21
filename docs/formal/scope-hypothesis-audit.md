@@ -1,16 +1,16 @@
 # Audit: does ikigai-core enforce that scope changes only at declared boundaries?
 
 **Status:** audit of ikigai-core 0.3.0 at `fd35136`, 2026-11-05, ledger
-[#3149](http://localhost:1060/l/default/item/3149), under the continuous formal assurance epic
-[#2383](http://localhost:1060/l/default/item/2383). It changes no behavior: it adds this document,
+[#3149](http://localhost:1062/l/default/item/3149), under the continuous formal assurance epic
+[#2383](http://localhost:1062/l/default/item/2383). It changes no behavior: it adds this document,
 tests that hold today's behavior, and compile-only doctests.
-**Cites into:** the gatekeeper certificate ([#2385](http://localhost:1060/l/default/item/2385)),
+**Cites into:** the gatekeeper certificate ([#2385](http://localhost:1062/l/default/item/2385)),
 the formalism's Theorem 4(b) (`docs/formalism/README.md` §1.1, R7.3, R7.5). The ambient gate
-([#2384](http://localhost:1060/l/default/item/2384)) owns the certificate's other hypothesis, H.
+([#2384](http://localhost:1062/l/default/item/2384)) owns the certificate's other hypothesis, H.
 **Gate:** every `pin:` and `doctest:` below is resolved by `crates/ikigai-core/tests/formalism_pins.rs`.
 A test whose name starts `finding_` holds a defect as it stands: fixing the finding turns it red,
 and that pull request rewrites the row here.
-**Since:** B3 is closed by [#3866](http://localhost:1060/l/default/item/3866): an endpoint uses its
+**Since:** B3 is closed by [#3866](http://localhost:1062/l/default/item/3866): an endpoint uses its
 scope only by issuing requests into it (opacity, `docs/formalism/README.md` R7.14), and the B3 rows
 below are rewritten.
 
@@ -69,8 +69,8 @@ host code from endpoint code, and that is the root of finding B4.
 | `Invocation::{issue, source, issue_body, source_body, issue_attenuated, source_attenuated, fan_out}(…Request or &Iri…)`, `transrept`, `content_body` | (a) | The chain is the kernel's: root, corridors and the found path | None takes a scope. All route through private `issue_under`, or carry `self.scope` across the spawn. The target IRI is free, so a checker must assume any name is asked, which the walk already does |
 | `Invocation::scope_sync`, `SyncIssuer::{issue, source}` | (a) | As above | Each call is served by the minting invocation's `issue`. No chain parameter exists |
 | `Invocation::confine(&self, name: Iri, space: Arc<dyn Space>) -> Invocation` | **(b)** | Nowhere | B1, B2 |
-| `Invocation::scope(&self) -> &Scope` | (a) | `pub(crate)` since [#3866](http://localhost:1060/l/default/item/3866) | B3, closed. An endpoint never receives a `Scope`; a `compile_fail` doctest pins E0624 |
-| `Scope::spaces(&self) -> &[Arc<dyn Space>]`, `Scope::levels` | (a) | `pub(crate)` since [#3866](http://localhost:1060/l/default/item/3866) | B3, closed. Tests read them through the `testkit` feature, which is not API |
+| `Invocation::scope(&self) -> &Scope` | (a) | `pub(crate)` since [#3866](http://localhost:1062/l/default/item/3866) | B3, closed. An endpoint never receives a `Scope`; a `compile_fail` doctest pins E0624 |
+| `Scope::spaces(&self) -> &[Arc<dyn Space>]`, `Scope::levels` | (a) | `pub(crate)` since [#3866](http://localhost:1062/l/default/item/3866) | B3, closed. Tests read them through the `testkit` feature, which is not API |
 | `Invocation::{now, clock_pinned}` | (a) | Read-only | The time, and whether it is a temporal corridor's: covered by the key through the corridor's name (R7.10, R7.14) |
 | `Scope::{is_severed, is_empty, fingerprint, clock, now}`, `LevelPath::{names, len, is_empty}` | (a) | Read-only, host side | No endpoint holds a `Scope` to call them on. A `Space` still receives the request chain in `resolve` and can read these (see R7.14) |
 | `Scope::{empty, with, with_named, with_named_at, sever, confined, stack}`, `Confine::chain_from` | (a) | Inert values | A `Scope` takes effect only when issued in, and that takes a kernel (B4) |
@@ -169,7 +169,7 @@ event of its own. It added no reach by name, since the chain already held these 
 contradicted R7.4 (the floor runs against whichever corridor answered) for any corridor on the
 chain.
 
-**Now** ([#3866](http://localhost:1060/l/default/item/3866)): `Invocation::scope` and
+**Now** ([#3866](http://localhost:1062/l/default/item/3866)): `Invocation::scope` and
 `Scope::spaces` are crate-private, so an endpoint reaches a corridor's door only by issuing a
 request, which meets the floor of the corridor door that answers, however it is phrased (a
 source, a whole request, a confinement of its own, which goes behind the host's corridors). This
@@ -217,7 +217,7 @@ files where an endpoint and a held kernel merely sit together, with no call trac
 
 **To make it declared**, in increasing order of cost:
 
-1. Add a rule to the ambient gate ([#2384](http://localhost:1060/l/default/item/2384)): a type that
+1. Add a rule to the ambient gate ([#2384](http://localhost:1062/l/default/item/2384)): a type that
    implements `Endpoint`, or a closure bound as one, holds no `Kernel`, `Weak<Kernel>` or
    `dyn Issuer`, except at an allow-listed door. **Cost:** at least the four sites above, as
    allow-list entries or rewrites to `inv.issue`; the total needs the measurement above. Whether a
@@ -249,7 +249,7 @@ Elsewhere it appears in test code of `ikigai-conformance`, `ikigai-encrypt`, `ik
 and issue in it under `Capability::root()`. That is reach only into what it already holds, but it
 dispatches past every floor, and it uses a cache and a chain no one else sees. Example:
 `Kernel::new(Arc::clone(&space)).issue(req, &Capability::root())`. Inside core its source was B3,
-`inv.scope().spaces()`, which [#3866](http://localhost:1060/l/default/item/3866) closed; a space held by capture is H's question. No test pins this one: it
+`inv.scope().spaces()`, which [#3866](http://localhost:1062/l/default/item/3866) closed; a space held by capture is H's question. No test pins this one: it
 follows from B3 and the public constructors.
 
 **C3. Direct dispatch.** An overlay holding a space or endpoint can call `resolve` and `invoke`
@@ -282,7 +282,7 @@ it, but `ik:resolveAt "root"` reads as the opposite, and a checker taking the ke
 wrong. **Suggested:** decide, and either document it on `ResolveAt::Root` and in the vocabulary, or
 resolve past the level stack. The second changes answers only for a view inside a level.
 `Meta` of such a view now describes the same target the invocation reaches, resolved in the
-view's resolved scope ([#3867](http://localhost:1060/l/default/item/3867)); before, it resolved
+view's resolved scope ([#3867](http://localhost:1062/l/default/item/3867)); before, it resolved
 the target in the request's chain and described the root's binding.
 
     pin: `scope_hypothesis::finding_a_view_declared_at_the_root_resolves_from_its_level_when_it_is_inside_one` (crates/ikigai-core/tests/scope_hypothesis.rs)

@@ -1,7 +1,7 @@
 # Principals as capability scopes: `urn:cap:principal:<iri>`
 
-**Status:** built in 0.1.93 (ledger [#1077](http://localhost:1060/l/default/item/1077), which
-also answers [#76](http://localhost:1060/l/default/item/76)). Brian decided the shape on
+**Status:** built in 0.1.93 (ledger [#1077](http://localhost:1062/l/default/item/1077), which
+also answers [#76](http://localhost:1062/l/default/item/76)). Brian decided the shape on
 2026-10-10: identity travels as a CAPABILITY scope minted by the authenticating door, not as
 a field on `Invocation` (a public struct field is a flag day).
 

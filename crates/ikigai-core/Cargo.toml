@@ -6,7 +6,6 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
@@ -35,7 +34,6 @@ futures-core = { version = "0.3", default-features = false }
 # `compose` can fork its `$a{}` sub-resolutions and join them. Spawns nothing;
 # the executor is still chosen at the edge.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
-futures-channel = { version = "0.3", default-features = false, features = ["alloc", "std"] }
 oxiri = "0.2"
 serde = { version = "1", features = ["derive"] }
 # The JSON body of a redirect answer (ledger #3150): `Representation::as_redirect` reads what a
@@ -67,6 +65,12 @@ declare = ["dep:oxttl", "dep:oxrdf", "dep:getrandom"]
 # own tests turn it on through the self dev-dependency below, so `cargo test` sees it and
 # `cargo build` never does. No host or module enables it.
 testkit = []
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+# The channel behind `Invocation::scope_sync` and `SyncIssuer`, which need real threads and so
+# exist only off wasm. A target dependency for that reason: as a plain one, every wasm build
+# compiled a crate it never names, and `unused_crate_dependencies` said so (ledger #3872).
+futures-channel = { version = "0.3", default-features = false, features = ["alloc", "std"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 # Only under `declare`, only in the browser: see oxttl/oxrdf above.
