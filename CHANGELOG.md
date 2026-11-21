@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Pinned (no behavior change)
+
+- **A result built on an admission refusal is never cached, at any depth** (ledger #3917).
+  A composite that catches a sub-request's `DepthExceeded`, `OverBudget` or `Timeout` and
+  returns a cacheable fallback is not stored, and neither is any frame above it. Three tests
+  in `tests/admission_refusal.rs` hold this: a self-requesting counting endpoint read at
+  depth 0 and at depth 1, a byte budget run out on a sub-request, and a deadline run out on a
+  sub-request. The guarantee is stated beside the admission-only rule (#3869) in
+  `docs/formalism/README.md`. No API change.
+
 ## 0.4.1 (2026-11-21)
 
 ### Changed (behavior)

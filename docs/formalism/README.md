@@ -798,6 +798,23 @@ with its state, the time it is served until and its error's kind, and its trace 
     pin: `admission_only::a_run_context_refusal_is_never_cached_even_with_a_stated_expiry` (crates/ikigai-core/tests/admission_only.rs)
     pin: `admission_only::a_later_run_with_a_longer_deadline_is_not_served_an_earlier_runs_timeout` (crates/ikigai-core/tests/admission_only.rs)
     doctest: `Invocation::failure_expires_at`
+
+**A result built on an admission refusal is never cached, at any depth** (a guarantee, pinned
+by ledger [#3917](http://localhost:1062/l/default/item/3917)). Two rules above combine into it:
+a refusal the run context or the nesting budget decided (`DepthExceeded`, `OverBudget`,
+`Timeout`, `GaveUp`) is never cached itself, and an invocation that catches it, as with any
+failure but a miss, records `Always` (the `failed <iri>` clause of the uncached note). Every
+frame above inherits that volatility through its dependency record. So a computation in which
+any request was refused for admission is not kept at all, which is stricter than reused only
+at its own depth and run context. A self-requesting endpoint that catches `DepthExceeded` one
+level too deep and answers a cacheable count is computed afresh at every depth, and answers
+each depth its own count. A composite that catches a sub-request's `OverBudget` or `Timeout`
+and returns a cacheable fallback is recomputed on every read, and `urn:kernel:uncached` names
+the failed sub-request.
+
+    pin: `admission_refusal::a_counting_endpoint_that_caught_a_depth_refusal_is_never_cached_at_any_depth` (crates/ikigai-core/tests/admission_refusal.rs)
+    pin: `admission_refusal::a_composite_that_caught_an_over_budget_sub_request_is_not_cached` (crates/ikigai-core/tests/admission_refusal.rs)
+    pin: `admission_refusal::a_composite_that_caught_a_timed_out_sub_request_is_not_cached` (crates/ikigai-core/tests/admission_refusal.rs)
     pin: `depends_on::a_fallback_over_a_declared_absence_is_cut_by_the_publish` (crates/ikigai-core/tests/depends_on.rs)
     pin: `depends_on::every_other_error_stays_uncached_whatever_thread_is_attached` (crates/ikigai-core/tests/depends_on.rs)
     doctest: `Invocation::depends_on`
