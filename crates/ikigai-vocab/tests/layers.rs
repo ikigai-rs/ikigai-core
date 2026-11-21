@@ -13,7 +13,7 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use common::{axiom, block, declared, fixture, ik, named, parse, Schema, PROV, RDFS, RDF_TYPE};
 use ikigai_vocab::{CONTEXT, VOCABULARY};
@@ -36,9 +36,11 @@ const CLASSES: [&str; 12] = [
     "Brief",
 ];
 
-/// The properties arc 1 names. Only `layerModel` declares a domain.
-const PROPERTIES: [&str; 12] = [
+/// The properties arc 1 names, and a layer's kind since (ledger #3881). Only `layerModel`
+/// declares a domain.
+const PROPERTIES: [&str; 13] = [
     "layerModel",
+    "layerKind",
     "body",
     "brief",
     "note",
@@ -58,11 +60,24 @@ fn example() -> Vec<Triple> {
     fixture("layers-example.ttl")
 }
 
+const SKOS: &str = "http://www.w3.org/2004/02/skos/core#";
+
+/// The kinds of layer a UI groups layers by (ledger #3881): each concept of
+/// `ik:LayerKinds` by its IRI's local name, with the notation a layer's configuration
+/// names it by and the tab name it gives.
+const KINDS: [(&str, &str, &str); 5] = [
+    ("TalkKind", "talk", "Talk"),
+    ("TaskKind", "task", "Tasks"),
+    ("FeedKind", "feed", "Feed"),
+    ("InquiryKind", "inquiry", "Inquiries"),
+    ("JoinKind", "join", "Join"),
+];
+
 #[test]
 fn the_layer_family_is_defined() {
     // Over PARSED subjects, as every family test in src/lib.rs asks it.
     let subjects = declared();
-    for term in CLASSES.iter().chain(&PROPERTIES[..11]) {
+    for term in CLASSES.iter().chain(&PROPERTIES[..12]) {
         assert!(
             subjects.contains(&ik(term)),
             "ik:{term} is a layer term (ledger #1182) and is not declared"
@@ -78,7 +93,7 @@ fn the_layer_family_is_defined() {
     // Only an ik:Layer has an access model. Every other property is carried by more
     // than one kind of entry now or by design, so it declares no domain: checked on a
     // DECLARATION line, since the comments argue about domains in prose.
-    for property in &PROPERTIES[..11] {
+    for property in &PROPERTIES[..12] {
         let b = block(property, "rdf:Property");
         let domain = axiom(b, "domain");
         let expected = (*property == "layerModel").then_some("ik:Layer ;");
@@ -149,7 +164,7 @@ fn the_example_types_every_node_the_family_describes() {
         .filter_map(|t| named(&t.subject))
         .collect();
     let used: BTreeSet<&str> = triples.iter().map(|t| t.predicate.as_str()).collect();
-    for property in &PROPERTIES[..11] {
+    for property in &PROPERTIES[..12] {
         assert!(
             used.contains(ik(property).as_str()),
             "the example uses ik:{property}, so its domain and range are checked"
@@ -322,4 +337,194 @@ fn the_layer_contexts_agree_with_the_vocabulary() {
             "{name} is an allowlist, not core's CONTEXT"
         );
     }
+}
+
+#[test]
+fn the_layer_kinds_are_a_scheme_of_concepts_each_named_once() {
+    let triples = parse(VOCABULARY);
+    let values = |subject: &str, predicate: &str| -> Vec<Term> {
+        triples
+            .iter()
+            .filter(|t| named(&t.subject) == Some(subject) && t.predicate.as_str() == predicate)
+            .map(|t| t.object.clone())
+            .collect()
+    };
+    let iri = |s: &str| Term::from(oxrdf::NamedNode::new(s).unwrap());
+    let scheme = ik("LayerKinds");
+    assert_eq!(
+        values(&scheme, RDF_TYPE),
+        [iri(&format!("{SKOS}ConceptScheme"))],
+        "ik:LayerKinds is a skos:ConceptScheme"
+    );
+    assert_eq!(
+        block("layerKind", "rdf:Property")
+            .lines()
+            .find_map(|l| l.trim_start().strip_prefix("rdfs:range ")),
+        Some("skos:Concept ;"),
+        "ik:layerKind ranges over concepts"
+    );
+
+    // Every concept in the scheme, found from the graph rather than from KINDS, so a
+    // sixth concept added without the four properties fails here too.
+    let in_scheme: BTreeSet<String> = triples
+        .iter()
+        .filter(|t| t.predicate.as_str() == format!("{SKOS}inScheme") && t.object == iri(&scheme))
+        .filter_map(|t| named(&t.subject).map(String::from))
+        .collect();
+    let expected: BTreeSet<String> = KINDS.iter().map(|(local, ..)| ik(local)).collect();
+    assert_eq!(
+        in_scheme, expected,
+        "the scheme's concepts are the five kinds"
+    );
+
+    let mut notations: BTreeMap<String, String> = BTreeMap::new();
+    for concept in &in_scheme {
+        assert_eq!(
+            values(concept, RDF_TYPE),
+            [iri(&format!("{SKOS}Concept"))],
+            "{concept} is a skos:Concept"
+        );
+        for property in ["prefLabel", "definition", "notation", "inScheme"] {
+            let found = values(concept, &format!("{SKOS}{property}"));
+            assert_eq!(
+                found.len(),
+                1,
+                "{concept} has exactly one skos:{property}: {found:?}"
+            );
+            if let Term::Literal(l) = &found[0] {
+                assert!(
+                    !l.value().trim().is_empty(),
+                    "{concept}'s skos:{property} is empty"
+                );
+            }
+        }
+        let Term::Literal(notation) = &values(concept, &format!("{SKOS}notation"))[0] else {
+            panic!("{concept}'s skos:notation is a literal")
+        };
+        if let Some(other) = notations.insert(notation.value().to_string(), concept.clone()) {
+            panic!(
+                "{concept} and {other} share the notation {}",
+                notation.value()
+            );
+        }
+    }
+    for (local, notation, label) in KINDS {
+        let concept = ik(local);
+        assert_eq!(
+            notations.get(notation),
+            Some(&concept),
+            "ik:{local} is named `{notation}`"
+        );
+        let Term::Literal(pref) = &values(&concept, &format!("{SKOS}prefLabel"))[0] else {
+            panic!("ik:{local}'s skos:prefLabel is a literal")
+        };
+        assert_eq!(pref.value(), label, "ik:{local}'s tab is named {label}");
+    }
+
+    // Every layer of the example declares a kind of the scheme, and its range check sees
+    // the concept typed as the vocabulary types it.
+    let example = example();
+    let layers: BTreeSet<&str> = example
+        .iter()
+        .filter(|t| t.predicate.as_str() == RDF_TYPE && t.object == iri(&ik("Layer")))
+        .filter_map(|t| named(&t.subject))
+        .collect();
+    assert!(!layers.is_empty());
+    for layer in &layers {
+        let kinds: Vec<&Term> = example
+            .iter()
+            .filter(|t| named(&t.subject) == Some(layer) && t.predicate.as_str() == ik("layerKind"))
+            .map(|t| &t.object)
+            .collect();
+        assert!(
+            kinds.len() == 1
+                && matches!(kinds[0], Term::NamedNode(n) if in_scheme.contains(n.as_str())),
+            "{layer} declares one kind of ik:LayerKinds: {kinds:?}"
+        );
+    }
+    let mut with_concepts = example.clone();
+    with_concepts.extend(
+        triples
+            .iter()
+            .filter(|t| named(&t.subject).is_some_and(|s| in_scheme.contains(s)))
+            .cloned(),
+    );
+    let traps = Schema::load().traps(&with_concepts);
+    assert!(traps.is_empty(), "family traps:\n{}", traps.join("\n"));
+}
+
+#[test]
+fn the_layer_kind_order_names_every_kind_once_in_tab_order() {
+    // A scheme is a set; `ik:LayerKindOrder` is the order a UI shows its tabs in, so a
+    // reader never hard-codes kind names (ledger #3881, round 2).
+    const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+    let triples = parse(VOCABULARY);
+    let iri = |s: &str| Term::from(oxrdf::NamedNode::new(s).unwrap());
+    let one = |subject: &str, predicate: &str| -> Term {
+        let found: Vec<&Term> = triples
+            .iter()
+            .filter(|t| named(&t.subject) == Some(subject) && t.predicate.as_str() == predicate)
+            .map(|t| &t.object)
+            .collect();
+        assert_eq!(found.len(), 1, "{subject} has one <{predicate}>: {found:?}");
+        found[0].clone()
+    };
+    let order = ik("LayerKindOrder");
+    assert_eq!(
+        one(&order, RDF_TYPE),
+        iri(&format!("{SKOS}OrderedCollection")),
+        "ik:LayerKindOrder is a skos:OrderedCollection"
+    );
+    for (prefix, property) in [(RDFS, "label"), (RDFS, "comment"), (SKOS, "prefLabel")] {
+        let Term::Literal(l) = one(&order, &format!("{prefix}{property}")) else {
+            panic!("ik:LayerKindOrder's {property} is a literal")
+        };
+        assert!(
+            !l.value().trim().is_empty(),
+            "ik:LayerKindOrder's {property} is empty"
+        );
+    }
+
+    // Walk the list cell by cell. Each cell is named under the collection, one-based, as
+    // ik:layers writes its cells: the house rule is no blank nodes.
+    let mut members = Vec::new();
+    let mut cell = one(&order, &format!("{SKOS}memberList"));
+    while cell != iri(&format!("{RDF}nil")) {
+        let Term::NamedNode(n) = &cell else {
+            panic!("a cell of ik:LayerKindOrder is not named: {cell:?}")
+        };
+        assert_eq!(
+            n.as_str(),
+            format!("{order}:member:{}", members.len() + 1),
+            "cell {} of ik:LayerKindOrder",
+            members.len() + 1
+        );
+        assert!(members.len() < 64, "ik:LayerKindOrder's list does not end");
+        let Term::NamedNode(member) = one(n.as_str(), &format!("{RDF}first")) else {
+            panic!("{n}'s member is a named concept")
+        };
+        members.push(member.as_str().to_string());
+        cell = one(n.as_str(), &format!("{RDF}rest"));
+    }
+
+    // In tab order, and every concept of the scheme exactly once.
+    let expected: Vec<String> = KINDS.iter().map(|(local, ..)| ik(local)).collect();
+    assert_eq!(members, expected, "Talk, Tasks, Feed, Inquiries, Join");
+    let in_scheme: BTreeSet<String> = triples
+        .iter()
+        .filter(|t| {
+            t.predicate.as_str() == format!("{SKOS}inScheme") && t.object == iri(&ik("LayerKinds"))
+        })
+        .filter_map(|t| named(&t.subject).map(String::from))
+        .collect();
+    let listed: BTreeSet<String> = members.iter().cloned().collect();
+    assert_eq!(
+        listed.len(),
+        members.len(),
+        "no kind is listed twice: {members:?}"
+    );
+    assert_eq!(
+        listed, in_scheme,
+        "the order lists every concept of ik:LayerKinds"
+    );
 }

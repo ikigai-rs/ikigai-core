@@ -1,7 +1,7 @@
 # The layer family as a layer host would emit it (design: ikigai-devtools
 # claude/research/collab-layer-v1-2026-10-10.md, sections 2, 4 and 5): the participants
-# graph, two layers and the manifest mounting them, a thread in the message layer
-# `talk`, and one offer in the task layer `tasks-bobby` with each kind of report on it.
+# graph, three layers (each with its kind) and the manifest mounting them, a thread in
+# the message layer `talk`, and one offer in the task layer `tasks-bobby` with each kind of report on it.
 # Every node asserts the types it really has, so tests/layers.rs can judge each
 # rdfs:domain and rdfs:range the vocabulary declares against them: a property that
 # would type a node into a family it is not in fails there. Skolemized, no blank nodes.
@@ -28,9 +28,9 @@
 
 # ---- layers (urn:layer:{layer}) and a manifest (urn:collab:{name}) -------------
 
-<urn:layer:talk>        a ik:Layer ; ik:layerModel "channel" .
-<urn:layer:tasks-bobby> a ik:Layer ; ik:layerModel "tuplespace" .
-<urn:layer:releases>    a ik:Layer , ik:Feed ; ik:layerModel "channel" .
+<urn:layer:talk>        a ik:Layer ; ik:layerModel "channel" ; ik:layerKind ik:TalkKind .
+<urn:layer:tasks-bobby> a ik:Layer ; ik:layerModel "tuplespace" ; ik:layerKind ik:TaskKind .
+<urn:layer:releases>    a ik:Layer , ik:Feed ; ik:layerModel "channel" ; ik:layerKind ik:FeedKind .
 <urn:collab:bobby>      a ik:Collaboration ; rdfs:label "bobby" .
 
 # ---- the message layer: a question, its answer, and a correction ---------------

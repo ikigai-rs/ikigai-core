@@ -23,7 +23,7 @@
 # release bump until this line is bumped with it.
 #
 # Conventions: `rdfs:Class` / `rdf:Property`; every term carries rdfs:label + rdfs:comment;
-# rdfs:range drives the JSON-LD coercion (rdfs:Resource or an ik: class -> @id, an xsd
+# rdfs:range drives the JSON-LD coercion (rdfs:Resource, skos:Concept or an ik: class -> @id, an xsd
 # datatype -> typed), so an IRI-valued property DECLARES its range rather than being
 # special-cased in the generator. rdfs:domain only where a term is genuinely single-domain:
 # under RDFS entailment a domain is an assertion about every subject, and a domain that is
@@ -1423,7 +1423,9 @@ ik:draftWarning a rdf:Property ;
 # ik:Release and ik:Handback, each ik:addressedTo the offerer and naming its
 # ik:offer. A message layer's shapes may also admit an ik:Brief, and a channel may be
 # an ik:Feed, written only by its publishers, whose entries are ik:Announcement nodes
-# (ledger #3284, #3287, #3300). The host stamps prov:wasAttributedTo, dcterms:created
+# (ledger #3284, #3287, #3300). A layer also declares its KIND, what it is for
+# (ik:layerKind, a concept of the scheme ik:LayerKinds), which a reader groups layers
+# by, in the order ik:LayerKindOrder lists them (ledger #3881). The host stamps prov:wasAttributedTo, dcterms:created
 # and (in a channel) ik:seq, and refuses an entry that sends any of them. Participants are PROV agents
 # (a person, an LLM agent as a prov:SoftwareAgent, a host as an ik:Machine), linked
 # to whom they act for by prov:actedOnBehalfOf. Design: ikigai-devtools
@@ -1505,6 +1507,69 @@ ik:layerModel a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "layerModel" ;
     rdfs:comment "The access model an ik:Layer's definition chooses, one word from the closed set the layer host's code defines: \"channel\" (append-only entries, one graph per author), \"tuplespace\" (out, read and an atomic take) or \"graph\" (each author replaces its own graph). A model is code and a layer is configuration. The one property of this family with a domain: only a layer has an access model." .
+
+ik:layerKind a rdf:Property ;
+    rdfs:range skos:Concept ;
+    rdfs:label "layerKind" ;
+    rdfs:comment "What a layer is FOR, as one concept of ik:LayerKinds (talk, task, feed, inquiry, join), so that a reader can group layers by purpose, for example into a UI's tabs. Declared by the layer's definition and never inferred from its access model, its shapes or its flags: two layers with the same model may serve different purposes. A layer's configuration names the kind by the concept's skos:notation. No domain, the position this family takes: only ik:layerModel declares one. The range is skos:Concept, so whatever this names is a concept (ledger #3881)." .
+
+ik:LayerKinds a skos:ConceptScheme ;
+    rdfs:label "LayerKinds" ;
+    rdfs:comment "The kinds of layer, what each is for: the values of ik:layerKind. A layer's configuration names one by its skos:notation, and a UI's tabs take their names from each concept's skos:prefLabel (ledger #3881)." ;
+    skos:prefLabel "Layer kinds"@en ;
+    skos:hasTopConcept ik:TalkKind , ik:TaskKind , ik:FeedKind , ik:InquiryKind , ik:JoinKind .
+
+ik:TalkKind a skos:Concept ;
+    skos:inScheme ik:LayerKinds ;
+    skos:topConceptOf ik:LayerKinds ;
+    skos:notation "talk" ;
+    skos:prefLabel "Talk"@en ;
+    skos:definition "A layer for conversation: append-only messages, questions and their replies."@en .
+
+ik:TaskKind a skos:Concept ;
+    skos:inScheme ik:LayerKinds ;
+    skos:topConceptOf ik:LayerKinds ;
+    skos:notation "task" ;
+    skos:prefLabel "Tasks"@en ;
+    skos:definition "A layer for work addressed to someone: briefs, issues, files, offers and the reports that hand them back."@en .
+
+ik:FeedKind a skos:Concept ;
+    skos:inScheme ik:LayerKinds ;
+    skos:topConceptOf ik:LayerKinds ;
+    skos:notation "feed" ;
+    skos:prefLabel "Feed"@en ;
+    skos:definition "A layer for announcements, written only by its publishers."@en .
+
+ik:InquiryKind a skos:Concept ;
+    skos:inScheme ik:LayerKinds ;
+    skos:topConceptOf ik:LayerKinds ;
+    skos:notation "inquiry" ;
+    skos:prefLabel "Inquiries"@en ;
+    skos:definition "A layer for inquiries sent through a contact form, and the layers that route them."@en .
+
+ik:JoinKind a skos:Concept ;
+    skos:inScheme ik:LayerKinds ;
+    skos:topConceptOf ik:LayerKinds ;
+    skos:notation "join" ;
+    skos:prefLabel "Join"@en ;
+    skos:definition "A layer for requests to join."@en .
+
+# A concept scheme is a SET; a UI orders its tabs by this collection instead of
+# hard-coding kind names. skos:memberList is an rdf:List by SKOS's definition, so the
+# list is written as the vocabulary writes every list (ik:layers), as addressable
+# cells {node}:member:{n}, one-based, never as a blank-node `( … )` collection.
+
+ik:LayerKindOrder a skos:OrderedCollection ;
+    rdfs:label "LayerKindOrder" ;
+    rdfs:comment "The kinds of ik:LayerKinds in the order a reader shows them: Talk, Tasks, Feed, Inquiries, Join. A reader orders kinds by this collection's skos:memberList, never by hard-coded kind names: it names every concept of the scheme exactly once. Its list is written as named cells (ik:LayerKindOrder:member:{n}, one-based) rather than blank nodes, as ik:layers is, since SKOS defines skos:memberList as an rdf:List (ledger #3881)." ;
+    skos:prefLabel "Layer kind order"@en ;
+    skos:memberList ik:LayerKindOrder:member:1 .
+
+ik:LayerKindOrder:member:1 rdf:first ik:TalkKind ; rdf:rest ik:LayerKindOrder:member:2 .
+ik:LayerKindOrder:member:2 rdf:first ik:TaskKind ; rdf:rest ik:LayerKindOrder:member:3 .
+ik:LayerKindOrder:member:3 rdf:first ik:FeedKind ; rdf:rest ik:LayerKindOrder:member:4 .
+ik:LayerKindOrder:member:4 rdf:first ik:InquiryKind ; rdf:rest ik:LayerKindOrder:member:5 .
+ik:LayerKindOrder:member:5 rdf:first ik:JoinKind ; rdf:rest rdf:nil .
 
 ik:body a rdf:Property ;
     rdfs:range xsd:string ;
