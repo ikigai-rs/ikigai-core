@@ -126,6 +126,7 @@ mod explain;
 mod exposure;
 mod forward;
 mod grammar;
+mod grant;
 pub(crate) mod hashing;
 mod inspect_graph;
 mod iri;
@@ -198,14 +199,15 @@ pub use error::{Denial, Error, FailureClass, Result};
 pub use exposure::{check_exposure, ExposedDoor, Exposes, ExposureReport};
 pub use forward::Forward;
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
+pub use grant::GrantError;
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, TraceState,
     Tracer, ALIAS_MISS_NOTE, ALIAS_NOTE, ANSWERED_NOTE, BINDINGS_THREAD, COLLECTED_NOTE,
     DEFAULTED_NOTE, DEFAULT_FAILURE_CEILING, DEFAULT_MAX_DEPTH, DENIED_NOTE, DEPTH_NOTE,
-    FAILED_NOTE, FAILURE_CACHED_NOTE, LEVEL_NOTE, LIMITED_NOTE, META_LOSSY_ARG, REVALIDATED_NOTE,
-    SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE, SEALED_NOTE, UNCACHED_NOTE,
-    UNDECLARED_FAILURE_NOTE,
+    FAILED_NOTE, FAILURE_CACHED_NOTE, GRANTED_FOR_NOTE, GRANTED_NOTE, LEVEL_NOTE, LIMITED_NOTE,
+    META_LOSSY_ARG, REVALIDATED_NOTE, SCOPE_CLOCK_NOTE, SCOPE_MISS_NOTE, SCOPE_NOTE, SEALED_NOTE,
+    UNCACHED_NOTE, UNDECLARED_FAILURE_NOTE,
 };
 pub use listen::{
     CutBatch, CutEvent, CutListener, ListenSpec, CAP_LISTEN, INVALIDATED_NAMED, LISTEN_CAPACITY,

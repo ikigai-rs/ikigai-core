@@ -735,6 +735,32 @@ impl Scope {
         self.resolve_observed(request, root, seals, |_, _| {})
     }
 
+    /// [`resolve_in`](Self::resolve_in), and whether the hit came from a corridor an
+    /// ENDPOINT confined itself to (ledger #3769): such an endpoint gets no host grant,
+    /// whatever its name, so a module cannot bind a name under another module's granted
+    /// prefix in its own corridor and borrow that grant.
+    pub(crate) fn resolve_noting_confined(
+        &self,
+        request: &Request,
+        root: &Arc<dyn Space>,
+        seals: &Seals,
+    ) -> (std::result::Result<Resolution, SealBreach>, bool) {
+        let confined = match self.chain.as_ref() {
+            None => 0..0,
+            Some(chain) => {
+                let start = (chain.injected.len() - chain.confined) + chain.levels.0.len();
+                start..start + chain.confined
+            }
+        };
+        let mut hit_at = None;
+        let resolution = self.resolve_observed(request, root, seals, |at, consulted| {
+            if matches!(consulted, Consulted::Hit) {
+                hit_at = Some(at);
+            }
+        });
+        (resolution, hit_at.is_some_and(|at| confined.contains(&at)))
+    }
+
     /// [`resolve_in`](Self::resolve_in), telling `observe` what the walk did with
     /// each member it reached: its position in [`consulted`](Self::consulted) order
     /// and whether it hit, missed, or was skipped (a sealed name the member's frame
