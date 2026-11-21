@@ -4678,6 +4678,14 @@ impl Kernel {
                     alias.as_ref(),
                     &scope,
                 );
+                // ★ A TOTAL MISS rests on every dynamic space the walk reached binding
+                // nothing here: the threads it recorded ride the failure to whatever
+                // catches it, so a composite caching a fallback over this `Unresolved`
+                // hangs from them and the swap that binds the name drops it (ledger
+                // #3916, round 2). A thread only: the catcher stays cacheable.
+                if let Some(failed) = failed.as_deref_mut() {
+                    failed.threads.extend(missed);
+                }
                 return Err(Error::Unresolved(request.target.clone()));
             }
         };

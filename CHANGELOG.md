@@ -13,6 +13,21 @@
   thread too, so a swap drops every cached entry whose resolution reached the space, hit or
   miss. The answer stays cacheable: a read through an unchanged dynamic space is still served
   from the cache, and only a successful swap drops it. No API change.
+- **…and the answers resolved inside a frame it built, and a fallback over a total miss**
+  (ledger #3916, round 2). Three more cases of the same gap:
+  - A level that a declaration mounts keeps its name across a swap that changes its doors.
+    Resolution inside a level consults the level's own space directly, never the dynamic
+    space around it, and a sub-request resolved there is keyed by the level's name. So the
+    old door's answer was served after the swap. A confinement's corridor had the same gap.
+    Now every level and corridor a dynamic space builds carries the space's thread, so what
+    is resolved inside it, hit or miss, is dropped by the next swap. A level or corridor
+    built anywhere else is unchanged.
+  - A composite that caught a sub-request's `Unresolved` and cached a fallback did not hang
+    from the dynamic spaces the miss had reached. A swap that bound the name left the
+    fallback in the cache. Now the recorded threads ride the `Unresolved` to the composite
+    that catches it. The composite stays cacheable.
+
+  No API change.
 
 ## Unreleased: needs a minor bump (0.4.0)
 
