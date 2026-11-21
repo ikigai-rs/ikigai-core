@@ -10,6 +10,8 @@
 //! 1. A refusal the run context decided (`OverBudget`, `Timeout`, `GaveUp`) is never
 //!    cached, even when its endpoint stated an expiry, and neither is an endpoint's own
 //!    `Unresolved` (that one is pinned in `negative_caching.rs`).
+//!    Nor is a result built on such a refusal, at any depth: that guarantee is pinned in
+//!    `admission_refusal.rs` (ledger #3917).
 //! 2. A deadline an endpoint states after a pinned FUTURE instant is served at most its
 //!    window on the kernel's clock, a success's and a failure's alike.
 //! 3. A temporal corridor's identity is its name and its instant: two instants under one
