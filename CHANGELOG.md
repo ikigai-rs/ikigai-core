@@ -17,6 +17,10 @@ capability-floor refusal (ledger #3840), two corrections pinned with three other
   configuration names it by: `talk`, `task`, `feed`, `inquiry`, `join`) and `skos:inScheme`.
   The JSON-LD context coerces `layerKind` to `@id`: `context.gen.py` now reads a
   `skos:Concept` range as IRI-valued.
+  The collection `ik:LayerKindOrder` (a `skos:OrderedCollection`) lists the five kinds in the
+  order a UI shows its tabs, so a reader orders kinds by its `skos:memberList` instead of
+  hard-coding kind names. Its list is written as named cells (`ik:LayerKindOrder:member:{n}`,
+  one-based), as `ik:layers` writes its cells, never as blank nodes.
 - **A declared-floor refusal carries the scopes the caller lacked** (ledger #3840).
   `Error::lacking()` returns every scope an endpoint declares for the verb that the
   capability does not satisfy, in declaration order and spelled as declared (a family keeps

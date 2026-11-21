@@ -452,3 +452,79 @@ fn the_layer_kinds_are_a_scheme_of_concepts_each_named_once() {
     let traps = Schema::load().traps(&with_concepts);
     assert!(traps.is_empty(), "family traps:\n{}", traps.join("\n"));
 }
+
+#[test]
+fn the_layer_kind_order_names_every_kind_once_in_tab_order() {
+    // A scheme is a set; `ik:LayerKindOrder` is the order a UI shows its tabs in, so a
+    // reader never hard-codes kind names (ledger #3881, round 2).
+    const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+    let triples = parse(VOCABULARY);
+    let iri = |s: &str| Term::from(oxrdf::NamedNode::new(s).unwrap());
+    let one = |subject: &str, predicate: &str| -> Term {
+        let found: Vec<&Term> = triples
+            .iter()
+            .filter(|t| named(&t.subject) == Some(subject) && t.predicate.as_str() == predicate)
+            .map(|t| &t.object)
+            .collect();
+        assert_eq!(found.len(), 1, "{subject} has one <{predicate}>: {found:?}");
+        found[0].clone()
+    };
+    let order = ik("LayerKindOrder");
+    assert_eq!(
+        one(&order, RDF_TYPE),
+        iri(&format!("{SKOS}OrderedCollection")),
+        "ik:LayerKindOrder is a skos:OrderedCollection"
+    );
+    for (prefix, property) in [(RDFS, "label"), (RDFS, "comment"), (SKOS, "prefLabel")] {
+        let Term::Literal(l) = one(&order, &format!("{prefix}{property}")) else {
+            panic!("ik:LayerKindOrder's {property} is a literal")
+        };
+        assert!(
+            !l.value().trim().is_empty(),
+            "ik:LayerKindOrder's {property} is empty"
+        );
+    }
+
+    // Walk the list cell by cell. Each cell is named under the collection, one-based, as
+    // ik:layers writes its cells: the house rule is no blank nodes.
+    let mut members = Vec::new();
+    let mut cell = one(&order, &format!("{SKOS}memberList"));
+    while cell != iri(&format!("{RDF}nil")) {
+        let Term::NamedNode(n) = &cell else {
+            panic!("a cell of ik:LayerKindOrder is not named: {cell:?}")
+        };
+        assert_eq!(
+            n.as_str(),
+            format!("{order}:member:{}", members.len() + 1),
+            "cell {} of ik:LayerKindOrder",
+            members.len() + 1
+        );
+        assert!(members.len() < 64, "ik:LayerKindOrder's list does not end");
+        let Term::NamedNode(member) = one(n.as_str(), &format!("{RDF}first")) else {
+            panic!("{n}'s member is a named concept")
+        };
+        members.push(member.as_str().to_string());
+        cell = one(n.as_str(), &format!("{RDF}rest"));
+    }
+
+    // In tab order, and every concept of the scheme exactly once.
+    let expected: Vec<String> = KINDS.iter().map(|(local, ..)| ik(local)).collect();
+    assert_eq!(members, expected, "Talk, Tasks, Feed, Inquiries, Join");
+    let in_scheme: BTreeSet<String> = triples
+        .iter()
+        .filter(|t| {
+            t.predicate.as_str() == format!("{SKOS}inScheme") && t.object == iri(&ik("LayerKinds"))
+        })
+        .filter_map(|t| named(&t.subject).map(String::from))
+        .collect();
+    let listed: BTreeSet<String> = members.iter().cloned().collect();
+    assert_eq!(
+        listed.len(),
+        members.len(),
+        "no kind is listed twice: {members:?}"
+    );
+    assert_eq!(
+        listed, in_scheme,
+        "the order lists every concept of ik:LayerKinds"
+    );
+}

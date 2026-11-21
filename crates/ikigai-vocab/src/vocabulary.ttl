@@ -1425,7 +1425,7 @@ ik:draftWarning a rdf:Property ;
 # an ik:Feed, written only by its publishers, whose entries are ik:Announcement nodes
 # (ledger #3284, #3287, #3300). A layer also declares its KIND, what it is for
 # (ik:layerKind, a concept of the scheme ik:LayerKinds), which a reader groups layers
-# by (ledger #3881). The host stamps prov:wasAttributedTo, dcterms:created
+# by, in the order ik:LayerKindOrder lists them (ledger #3881). The host stamps prov:wasAttributedTo, dcterms:created
 # and (in a channel) ik:seq, and refuses an entry that sends any of them. Participants are PROV agents
 # (a person, an LLM agent as a prov:SoftwareAgent, a host as an ik:Machine), linked
 # to whom they act for by prov:actedOnBehalfOf. Design: ikigai-devtools
@@ -1553,6 +1553,23 @@ ik:JoinKind a skos:Concept ;
     skos:notation "join" ;
     skos:prefLabel "Join"@en ;
     skos:definition "A layer for requests to join."@en .
+
+# A concept scheme is a SET; a UI orders its tabs by this collection instead of
+# hard-coding kind names. skos:memberList is an rdf:List by SKOS's definition, so the
+# list is written as the vocabulary writes every list (ik:layers), as addressable
+# cells {node}:member:{n}, one-based, never as a blank-node `( … )` collection.
+
+ik:LayerKindOrder a skos:OrderedCollection ;
+    rdfs:label "LayerKindOrder" ;
+    rdfs:comment "The kinds of ik:LayerKinds in the order a reader shows them: Talk, Tasks, Feed, Inquiries, Join. A reader orders kinds by this collection's skos:memberList, never by hard-coded kind names: it names every concept of the scheme exactly once. Its list is written as named cells (ik:LayerKindOrder:member:{n}, one-based) rather than blank nodes, as ik:layers is, since SKOS defines skos:memberList as an rdf:List (ledger #3881)." ;
+    skos:prefLabel "Layer kind order"@en ;
+    skos:memberList ik:LayerKindOrder:member:1 .
+
+ik:LayerKindOrder:member:1 rdf:first ik:TalkKind ; rdf:rest ik:LayerKindOrder:member:2 .
+ik:LayerKindOrder:member:2 rdf:first ik:TaskKind ; rdf:rest ik:LayerKindOrder:member:3 .
+ik:LayerKindOrder:member:3 rdf:first ik:FeedKind ; rdf:rest ik:LayerKindOrder:member:4 .
+ik:LayerKindOrder:member:4 rdf:first ik:InquiryKind ; rdf:rest ik:LayerKindOrder:member:5 .
+ik:LayerKindOrder:member:5 rdf:first ik:JoinKind ; rdf:rest rdf:nil .
 
 ik:body a rdf:Property ;
     rdfs:range xsd:string ;
