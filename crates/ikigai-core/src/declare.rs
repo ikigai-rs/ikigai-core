@@ -57,6 +57,7 @@ use crate::endpoint::Endpoint;
 use crate::grammar::{Exact, UriTemplate};
 use crate::iri::Iri;
 use crate::kernel::Kernel;
+use crate::repr::Thread;
 use crate::seal::SealError;
 use crate::space::{EndpointSpace, Fallback, Level, Limit, Mount, Space};
 use crate::topology::{Door, MatchKind, SpaceKind, Topology, TopologyRule, SKOLEM_PREFIX};
@@ -640,12 +641,25 @@ pub fn build(
     declaration: &Topology,
     registry: &Registry,
 ) -> Result<Arc<dyn Space>, DeclarationError> {
+    build_threaded(declaration, registry, None)
+}
+
+/// [`build`], with every level's enclosed space and every confinement's corridor
+/// carrying `frames` (ledger #3916, round 2): what a [`DynamicSpace`](crate::DynamicSpace)
+/// builds its doors with, so an answer resolved inside a frame it built hangs from its
+/// thread and its next swap cuts it. `None` is [`build`]: nothing wrapped, no cost.
+pub(crate) fn build_threaded(
+    declaration: &Topology,
+    registry: &Registry,
+    frames: Option<Thread>,
+) -> Result<Arc<dyn Space>, DeclarationError> {
     measure(declaration)?;
     claims(declaration)?;
     let mut builder = Builder {
         registry,
         skolem: 0,
         named: BTreeMap::new(),
+        frames,
     };
     let space = builder.space(declaration, None)?;
     Kernel::check_sealing(space.as_ref(), registry.sealed()).map_err(DeclarationError::Sealing)?;
@@ -662,6 +676,9 @@ struct Builder<'r> {
     /// `Arc`, as a shared space is in code), and a name met again over a different
     /// arrangement is refused rather than built twice as two things.
     named: BTreeMap<String, (Topology, Arc<dyn Space>)>,
+    /// The thread every frame built here carries (a level's enclosed space, a
+    /// confinement's corridor), when a dynamic space is building ([`build_threaded`]).
+    frames: Option<Thread>,
 }
 
 impl Builder<'_> {
@@ -897,7 +914,7 @@ impl Builder<'_> {
                     let endpoint: Arc<dyn Endpoint> =
                         match (corridor, door.confined.as_ref().and_then(|c| c.id.clone())) {
                             (Some(corridor), Some(name)) => {
-                                Arc::new(Confine::new(name, corridor, endpoint))
+                                Arc::new(Confine::new(name, self.frame(corridor), endpoint))
                             }
                             _ => endpoint,
                         };
@@ -949,7 +966,7 @@ impl Builder<'_> {
                 let Some(name) = id else {
                     return Err(not_built(me));
                 };
-                let mut level = Level::new(name, only());
+                let mut level = Level::new(name, self.frame(only()));
                 if !seals.is_empty() {
                     level = level.sealing(seals.iter().cloned());
                 }
@@ -961,6 +978,15 @@ impl Builder<'_> {
             // Refused by `check`, before anything was built.
             _ => return Err(not_built(me)),
         })
+    }
+
+    /// `space` as a frame: carrying [`frames`](Self::frames) when a dynamic space is
+    /// building, else unchanged.
+    fn frame(&self, space: Arc<dyn Space>) -> Arc<dyn Space> {
+        match &self.frames {
+            Some(thread) => crate::dynamic::Framed::around(space, thread.clone()),
+            None => space,
+        }
     }
 
     /// The registered endpoint a door binds (checked present by

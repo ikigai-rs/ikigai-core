@@ -4611,13 +4611,27 @@ impl Kernel {
         // that does not exist, so there is no decision here to misconfigure.
         // The stream builtins are the kernel's own: answered from its space whatever the
         // chain, as `urn:kernel:*` is answered ahead of every chain (ledger #2239).
-        let resolution = if crate::stream::is_stream(request.target.as_str()) {
-            Ok(self.streams.resolve(&request, &Scope::empty()))
+        //
+        // ★ A dynamic space the walk reached and MISSED is a dependency of whatever
+        // answered further out: a swap that adds a door there shadows it. The space
+        // reports its miss to the record around the walk, and the answer is hung from
+        // its thread like an answer it served (ledger #3916; `dynamic::MissRecord`).
+        let (resolution, missed) = if crate::stream::is_stream(request.target.as_str()) {
+            (
+                Ok(self.streams.resolve(&request, &Scope::empty())),
+                Vec::new(),
+            )
         } else {
-            scope.resolve_in(&request, &self.root, &self.seals)
+            let record = crate::dynamic::MissRecord::begin();
+            let resolution = scope.resolve_in(&request, &self.root, &self.seals);
+            (resolution, record.finish())
         };
         let mut resolved = match resolution {
-            Ok(Resolution::Hit(resolved)) => resolved,
+            Ok(Resolution::Hit(resolved)) if missed.is_empty() => resolved,
+            Ok(Resolution::Hit(resolved)) => {
+                let endpoint = crate::dynamic::hang_from(Arc::clone(&resolved.endpoint), missed);
+                resolved.with_endpoint(endpoint)
+            }
             // A sealed name answered where its owner is not — through something the
             // build-time check could not see. Refused, and said so on the trace.
             Err(breach) => {
@@ -4664,6 +4678,14 @@ impl Kernel {
                     alias.as_ref(),
                     &scope,
                 );
+                // ★ A TOTAL MISS rests on every dynamic space the walk reached binding
+                // nothing here: the threads it recorded ride the failure to whatever
+                // catches it, so a composite caching a fallback over this `Unresolved`
+                // hangs from them and the swap that binds the name drops it (ledger
+                // #3916, round 2). A thread only: the catcher stays cacheable.
+                if let Some(failed) = failed.as_deref_mut() {
+                    failed.threads.extend(missed);
+                }
                 return Err(Error::Unresolved(request.target.clone()));
             }
         };

@@ -12,6 +12,12 @@
 //! 6. no cached answer from before a successful swap survives it (the coarse cut);
 //! 7. no declaration, or an invalid one, at start: an EMPTY space, and a status why;
 //! 8. the topology renders `ik:DynamicSpace` with `ik:declaration` and the inner tree.
+//! 9. an answer that FELL THROUGH the space (and a composite over one) is dropped by the
+//!    swap, so an added door shadows it; it stays cached until a swap (ledger #3916).
+//! 10. an answer resolved inside a FRAME the space built (a level, a confinement's
+//!     corridor) is dropped by the swap even when the frame keeps its name, and a
+//!     composite that caught a total miss is dropped by the swap that binds the name
+//!     (ledger #3916, round 2); both stay cached until a swap.
 //!
 //! Plus the rebuild loop itself ([`DynamicSpace::drive`]) hearing a write.
 #![cfg(feature = "declare")]
@@ -24,10 +30,10 @@ use std::task::{Context, Poll};
 
 use futures::executor::block_on;
 use ikigai_core::{
-    ArgRef, Capability, DeclarationError, Description, DynamicRefusal, DynamicSpace, EndpointSpace,
-    Error, Exact, Fallback, FnEndpoint, Iri, Kernel, Level, MetaRenderer, Mount, Registry,
-    ReprType, Representation, Request, Scope, Space, SpaceCheck, Threaded, Topology, Verb,
-    CAP_LISTEN,
+    ArgRef, AsyncFnEndpoint, Capability, Confine, DeclarationError, Description, DynamicRefusal,
+    DynamicSpace, EndpointSpace, Error, Exact, Fallback, FnEndpoint, Iri, Kernel, Level,
+    MetaRenderer, Mount, Registry, ReprType, Representation, Request, Scope, Space, SpaceCheck,
+    Threaded, Topology, Verb, CAP_LISTEN,
 };
 
 const DECL: &str = "urn:test:decl";
@@ -617,5 +623,328 @@ fn the_rebuild_loop_needs_the_listen_grant() {
     assert!(
         matches!(error, Error::Denied(ref m) if m.contains(CAP_LISTEN)),
         "{error}"
+    );
+}
+
+// An added door shadows a cached answer from further out (ledger #3916) ───────────
+
+/// A root `Fallback [declaration, dynamic, outer]` where `outer` binds `urn:test:x`
+/// to a cacheable "outer", counting its runs; the dynamic space may bind it to
+/// "inner".
+struct Shadowing {
+    world: World,
+    inner: Arc<FnEndpoint>,
+    runs_outer: Arc<AtomicU32>,
+}
+
+fn shadowing() -> Shadowing {
+    let runs_outer = Arc::new(AtomicU32::new(0));
+    let outer = door("outer", Arc::clone(&runs_outer));
+    let inner = door("inner", Arc::new(AtomicU32::new(0)));
+    let mut registry = Registry::new();
+    registry.register(inner.clone()).unwrap();
+    let dynamic = Arc::new(DynamicSpace::new("test", iri(DECL), registry));
+    let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(declaration_space(None)),
+        dynamic.clone(),
+        Arc::new(EndpointSpace::new().bind_arc(Exact::new("urn:test:x"), outer as _)),
+    ]));
+    let unused = door("unused", Arc::new(AtomicU32::new(0)));
+    Shadowing {
+        world: World {
+            kernel: Arc::new(Kernel::new(root)),
+            dynamic,
+            a: unused.clone(),
+            b: unused,
+            runs_a: Arc::new(AtomicU32::new(0)),
+        },
+        inner,
+        runs_outer,
+    }
+}
+
+#[test]
+fn an_added_door_shadows_a_cached_answer_that_fell_through_the_space() {
+    let s = shadowing();
+    let w = &s.world;
+    w.edit(&declare(&[])).unwrap();
+    assert_eq!(w.get("urn:test:x").unwrap(), b"outer");
+    assert!(
+        w.cached("urn:test:x"),
+        "a miss must not make the answer uncacheable"
+    );
+
+    w.edit(&declare(&[("urn:test:x", &s.inner)])).unwrap();
+    assert!(
+        !w.cached("urn:test:x"),
+        "the answer that fell through the space survived its swap"
+    );
+    assert_eq!(w.get("urn:test:x").unwrap(), b"inner");
+}
+
+#[test]
+fn a_read_through_an_unchanged_dynamic_space_stays_cached_until_a_swap() {
+    let s = shadowing();
+    let w = &s.world;
+    w.edit(&declare(&[])).unwrap();
+    for _ in 0..3 {
+        assert_eq!(w.get("urn:test:x").unwrap(), b"outer");
+    }
+    assert_eq!(
+        s.runs_outer.load(Ordering::SeqCst),
+        1,
+        "served from the cache"
+    );
+
+    // A refused edit binds nothing, so it cuts nothing.
+    assert!(w.edit("not turtle").is_err());
+    assert!(w.cached("urn:test:x"));
+    assert_eq!(w.get("urn:test:x").unwrap(), b"outer");
+    assert_eq!(s.runs_outer.load(Ordering::SeqCst), 1);
+
+    // A successful swap drops it, even one that does not bind the name (the coarse cut).
+    w.edit(&declare(&[])).unwrap();
+    assert!(!w.cached("urn:test:x"));
+    assert_eq!(w.get("urn:test:x").unwrap(), b"outer");
+    assert_eq!(s.runs_outer.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_composite_over_an_answer_that_fell_through_is_cut_by_the_swap() {
+    // The composite's own door sits AHEAD of the dynamic space, so its resolution never
+    // reaches it; only its sub-request for `urn:test:x` falls through it.
+    let runs_outer = Arc::new(AtomicU32::new(0));
+    let outer = door("outer", Arc::clone(&runs_outer));
+    let inner = door("inner", Arc::new(AtomicU32::new(0)));
+    let composite = AsyncFnEndpoint::new("composite", |inv| {
+        Box::pin(async move {
+            let x = inv.source(&iri("urn:test:x")).await?;
+            Ok(Representation::new(ReprType::new("text/plain"), x.bytes).cacheable())
+        })
+    });
+    let mut registry = Registry::new();
+    registry.register(inner.clone()).unwrap();
+    let dynamic = Arc::new(DynamicSpace::new("test", iri(DECL), registry));
+    let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(declaration_space(None).bind(Exact::new("urn:test:y"), composite)),
+        dynamic.clone(),
+        Arc::new(EndpointSpace::new().bind_arc(Exact::new("urn:test:x"), outer as _)),
+    ]));
+    let unused = door("unused", Arc::new(AtomicU32::new(0)));
+    let w = World {
+        kernel: Arc::new(Kernel::new(root)),
+        dynamic,
+        a: unused.clone(),
+        b: unused,
+        runs_a: Arc::new(AtomicU32::new(0)),
+    };
+    w.edit(&declare(&[])).unwrap();
+    assert_eq!(w.get("urn:test:y").unwrap(), b"outer");
+    assert!(w.cached("urn:test:y"));
+
+    w.edit(&declare(&[("urn:test:x", &inner)])).unwrap();
+    assert!(
+        !w.cached("urn:test:y"),
+        "the composite over an answer that fell through the space survived its swap"
+    );
+    assert_eq!(w.get("urn:test:y").unwrap(), b"inner");
+}
+
+// A frame the space built, and a caught total miss (ledger #3916, round 2) ────────
+
+/// A cacheable composite: sources `urn:internal:helper` and answers its bytes,
+/// counting its runs.
+fn helper_composite(runs: Arc<AtomicU32>) -> Arc<dyn ikigai_core::Endpoint> {
+    Arc::new(AsyncFnEndpoint::new("composite", move |inv| {
+        let runs = Arc::clone(&runs);
+        Box::pin(async move {
+            runs.fetch_add(1, Ordering::SeqCst);
+            let x = inv.source(&iri("urn:internal:helper")).await?;
+            Ok(Representation::new(ReprType::new("text/plain"), x.bytes).cacheable())
+        })
+    }))
+}
+
+/// A dynamic space whose registry holds `endpoints`, and nothing outside it but the
+/// declaration.
+fn framed_world(endpoints: &[Arc<dyn ikigai_core::Endpoint>]) -> World {
+    let mut registry = Registry::new();
+    for endpoint in endpoints {
+        registry.register(Arc::clone(endpoint)).unwrap();
+    }
+    let dynamic = Arc::new(DynamicSpace::new("test", iri(DECL), registry));
+    let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(declaration_space(None)),
+        dynamic.clone(),
+    ]));
+    let unused = door("unused", Arc::new(AtomicU32::new(0)));
+    World {
+        kernel: Arc::new(Kernel::new(root)),
+        dynamic,
+        a: unused.clone(),
+        b: unused,
+        runs_a: Arc::new(AtomicU32::new(0)),
+    }
+}
+
+/// `Mount("urn:mod:", Level(level, { public → composite, helper → helper }))`.
+fn level_decl(
+    level: &str,
+    composite: &Arc<dyn ikigai_core::Endpoint>,
+    helper: &Arc<FnEndpoint>,
+) -> String {
+    let module = EndpointSpace::new()
+        .bind_arc(Exact::new("urn:mod:public"), Arc::clone(composite))
+        .bind_arc(Exact::new("urn:internal:helper"), Arc::clone(helper) as _);
+    Mount::new(
+        "urn:mod:",
+        Arc::new(Level::new(iri(level), Arc::new(module))),
+    )
+    .topology()
+    .to_turtle()
+}
+
+/// `{ public → Confine(corridor, composite) }`, the corridor binding the helper.
+fn confined_decl(composite: &Arc<dyn ikigai_core::Endpoint>, helper: &Arc<FnEndpoint>) -> String {
+    let corridor = EndpointSpace::new()
+        .bind_arc(Exact::new("urn:internal:helper"), Arc::clone(helper) as _)
+        .named(iri("urn:test:corridor:c"));
+    let confined = Confine::new(
+        iri("urn:test:corridor:c"),
+        Arc::new(corridor),
+        Arc::clone(composite),
+    );
+    EndpointSpace::new()
+        .bind(Exact::new("urn:mod:public"), confined)
+        .topology()
+        .to_turtle()
+}
+
+#[test]
+fn a_swap_that_keeps_a_level_name_but_changes_its_door_drops_the_inner_answer() {
+    let runs = Arc::new(AtomicU32::new(0));
+    let h1 = door("helper-v1", Arc::new(AtomicU32::new(0)));
+    let h2 = door("helper-v2", Arc::new(AtomicU32::new(0)));
+    let c = helper_composite(Arc::clone(&runs));
+    let w = framed_world(&[Arc::clone(&c), h1.clone(), h2.clone()]);
+
+    w.edit(&level_decl("urn:test:level:mod", &c, &h1)).unwrap();
+    assert_eq!(w.get("urn:mod:public").unwrap(), b"helper-v1");
+
+    // The same level name, its helper door now bound to v2.
+    w.edit(&level_decl("urn:test:level:mod", &c, &h2)).unwrap();
+    assert_eq!(
+        w.get("urn:mod:public").unwrap(),
+        b"helper-v2",
+        "a stale answer from the old level's door survived the swap"
+    );
+}
+
+#[test]
+fn a_swap_that_keeps_a_confinement_name_but_changes_its_door_drops_the_inner_answer() {
+    let h1 = door("helper-v1", Arc::new(AtomicU32::new(0)));
+    let h2 = door("helper-v2", Arc::new(AtomicU32::new(0)));
+    let c = helper_composite(Arc::new(AtomicU32::new(0)));
+    let w = framed_world(&[Arc::clone(&c), h1.clone(), h2.clone()]);
+
+    w.edit(&confined_decl(&c, &h1)).unwrap();
+    assert_eq!(w.get("urn:mod:public").unwrap(), b"helper-v1");
+    w.edit(&confined_decl(&c, &h2)).unwrap();
+    assert_eq!(
+        w.get("urn:mod:public").unwrap(),
+        b"helper-v2",
+        "a stale answer from the old corridor's door survived the swap"
+    );
+}
+
+/// Control: renaming the level on the swap always served the new door, so what was
+/// stale above is the sub-request keyed by the level's name, not the composite.
+#[test]
+fn renaming_the_level_on_the_swap_serves_the_new_door() {
+    let h1 = door("helper-v1", Arc::new(AtomicU32::new(0)));
+    let h2 = door("helper-v2", Arc::new(AtomicU32::new(0)));
+    let c = helper_composite(Arc::new(AtomicU32::new(0)));
+    let w = framed_world(&[Arc::clone(&c), h1.clone(), h2.clone()]);
+    w.edit(&level_decl("urn:test:level:mod", &c, &h1)).unwrap();
+    assert_eq!(w.get("urn:mod:public").unwrap(), b"helper-v1");
+    w.edit(&level_decl("urn:test:level:mod-2", &c, &h2))
+        .unwrap();
+    assert_eq!(w.get("urn:mod:public").unwrap(), b"helper-v2");
+}
+
+/// The cost: inside an unchanged level, the composite and the helper it reads stay
+/// cached across reads; only a swap drops them.
+#[test]
+fn reads_inside_an_unchanged_level_stay_cached_until_a_swap() {
+    let runs_c = Arc::new(AtomicU32::new(0));
+    let runs_h = Arc::new(AtomicU32::new(0));
+    let h = door("helper", Arc::clone(&runs_h));
+    let c = helper_composite(Arc::clone(&runs_c));
+    let w = framed_world(&[Arc::clone(&c), h.clone()]);
+    w.edit(&level_decl("urn:test:level:mod", &c, &h)).unwrap();
+    for _ in 0..3 {
+        assert_eq!(w.get("urn:mod:public").unwrap(), b"helper");
+    }
+    assert_eq!(runs_c.load(Ordering::SeqCst), 1, "the composite is cached");
+    assert_eq!(runs_h.load(Ordering::SeqCst), 1, "the helper is cached");
+
+    w.edit(&level_decl("urn:test:level:mod", &c, &h)).unwrap();
+    assert_eq!(w.get("urn:mod:public").unwrap(), b"helper");
+    assert_eq!(runs_c.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        runs_h.load(Ordering::SeqCst),
+        2,
+        "the helper resolved inside the level was dropped by the swap"
+    );
+}
+
+/// A composite AHEAD of the dynamic space catches its sub-request's `Unresolved` (the
+/// name is bound nowhere yet) and answers a cacheable default. The swap that binds the
+/// name drops the default; until then it stays cached.
+#[test]
+fn a_cached_fallback_over_an_unresolved_name_is_dropped_by_the_swap_that_binds_it() {
+    let x = door("x-bound", Arc::new(AtomicU32::new(0)));
+    let runs = Arc::new(AtomicU32::new(0));
+    let counted = Arc::clone(&runs);
+    let mut registry = Registry::new();
+    registry.register(x.clone()).unwrap();
+    let dynamic = Arc::new(DynamicSpace::new("test", iri(DECL), registry));
+    let composite = AsyncFnEndpoint::new("composite", move |inv| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            let text =
+                |b: &[u8]| Representation::new(ReprType::new("text/plain"), b.to_vec()).cacheable();
+            match inv.source(&iri("urn:test:x")).await {
+                Ok(r) => Ok(text(&r.bytes)),
+                Err(Error::Unresolved(_)) => Ok(text(b"default")),
+                Err(e) => Err(e),
+            }
+        })
+    });
+    let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(declaration_space(None).bind(Exact::new("urn:test:y"), composite)),
+        dynamic.clone(),
+    ]));
+    let unused = door("unused", Arc::new(AtomicU32::new(0)));
+    let w = World {
+        kernel: Arc::new(Kernel::new(root)),
+        dynamic,
+        a: unused.clone(),
+        b: unused,
+        runs_a: Arc::new(AtomicU32::new(0)),
+    };
+    w.edit(&declare(&[])).unwrap();
+    for _ in 0..3 {
+        assert_eq!(w.get("urn:test:y").unwrap(), b"default");
+    }
+    assert!(w.cached("urn:test:y"), "a caught miss stays cacheable");
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "served from the cache");
+
+    w.edit(&declare(&[("urn:test:x", &x)])).unwrap();
+    assert_eq!(w.get("urn:test:x").unwrap(), b"x-bound");
+    assert_eq!(
+        w.get("urn:test:y").unwrap(),
+        b"x-bound",
+        "the composite's cached default survived the swap that bound the name"
     );
 }

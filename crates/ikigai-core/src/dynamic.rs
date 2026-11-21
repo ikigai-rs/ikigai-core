@@ -36,6 +36,24 @@
 //! is version one: any change cuts every answer the space served (the finer cut, per
 //! door, is ledger #2034).
 //!
+//! **An answer that fell THROUGH the space is cut too** (ledger #3916). A resolution
+//! that reached the space and missed it, and was answered by a space consulted after
+//! it, depends on the space binding nothing for that name: a swap that adds a door
+//! there shadows it. So the space reports its miss to the kernel's resolution record
+//! and the kernel hangs the answer from the space's thread, exactly as if the space had
+//! served it. A TOTAL miss carries the threads on its `Unresolved` to the composite
+//! that catches it, so a fallback cached over the absence hangs from them too.
+//!
+//! **And so is an answer resolved inside a FRAME the space built.** A level or a
+//! confinement's corridor in the declaration is consulted directly by resolution
+//! inside it, never through the dynamic space. A sub-request resolved there is also
+//! keyed by the frame's name, which a swap may keep while it changes the frame's
+//! doors. So every frame the space builds carries its thread (`Framed`).
+//!
+//! The rule: **an arrangement change drops every cached entry whose resolution reached
+//! the changed space: a hit, a miss, or a frame the space built.** A miss adds a thread
+//! and nothing else: the answer is as cacheable as before, and stays cached until a swap.
+//!
 //! # Authority
 //!
 //! There is no capability for changing a dynamic space. The authority to change it is
@@ -50,7 +68,7 @@ use async_trait::async_trait;
 #[cfg(feature = "declare")]
 use crate::capability::Capability;
 use crate::content::ContentId;
-use crate::declare::{build, DeclarationError, Registry};
+use crate::declare::{build_threaded, DeclarationError, Registry};
 use crate::describe::{ArgSpec, Description};
 use crate::endpoint::{BoxFuture, Endpoint, Invocation};
 use crate::error::{Error, Result};
@@ -188,6 +206,124 @@ impl Space for Threaded {
     }
 }
 
+/// Wrap `endpoint` so its answer also hangs from each of `threads`: what the kernel
+/// does with the threads of the dynamic spaces a resolution MISSED on its way to the
+/// space that answered ([`MissRecord`]).
+pub(crate) fn hang_from(endpoint: Arc<dyn Endpoint>, threads: Vec<Thread>) -> Arc<dyn Endpoint> {
+    threads.into_iter().fold(endpoint, |inner, thread| {
+        Arc::new(ThreadedEndpoint { inner, thread }) as Arc<dyn Endpoint>
+    })
+}
+
+thread_local! {
+    /// The threads of the dynamic spaces the resolution in progress on this OS thread
+    /// reached and missed; `None` when no kernel is recording. Resolution is
+    /// synchronous ([`Space::resolve`] cannot await), so one resolution never
+    /// interleaves with another on the same thread.
+    static MISSED: std::cell::RefCell<Option<Vec<Thread>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// **The kernel's record of which changeable spaces a resolution consulted and
+/// missed** (ledger #3916). A dynamic space hangs every answer it SERVES from its
+/// thread; an answer that fell THROUGH it, to a space consulted later, depends on it
+/// just as much — on its NOT binding the name — so a swap that adds a door shadowing
+/// that name must drop the answer too. Nothing in a [`Resolution::Miss`] can carry
+/// that, so the space reports its miss here and the kernel hangs the answer that was
+/// eventually found from each thread reported ([`hang_from`]). The answer stays as
+/// cacheable as it was: a miss only adds a thread.
+///
+/// Begun around one resolution; [`finish`](Self::finish) hands back what was
+/// recorded. Nested records (a resolution run from inside another's) save and restore
+/// the outer one, on unwind too.
+pub(crate) struct MissRecord {
+    previous: Option<Vec<Thread>>,
+}
+
+impl MissRecord {
+    pub(crate) fn begin() -> Self {
+        MissRecord {
+            previous: MISSED.with(|missed| missed.replace(Some(Vec::new()))),
+        }
+    }
+
+    /// The threads recorded since [`begin`](Self::begin), each once, in the order
+    /// they were consulted.
+    pub(crate) fn finish(self) -> Vec<Thread> {
+        MISSED.with(|missed| {
+            missed
+                .borrow_mut()
+                .as_mut()
+                .map(std::mem::take)
+                .unwrap_or_default()
+        })
+    }
+}
+
+impl Drop for MissRecord {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        MISSED.with(|missed| *missed.borrow_mut() = previous);
+    }
+}
+
+/// Report that the resolution in progress reached a space hanging from `thread` and
+/// missed it; a no-op when no kernel is recording.
+fn record_miss(thread: &Thread) {
+    MISSED.with(|missed| {
+        if let Some(threads) = missed.borrow_mut().as_mut() {
+            if !threads.contains(thread) {
+                threads.push(thread.clone());
+            }
+        }
+    });
+}
+
+/// **A frame a dynamic space built** (ledger #3916, round 2): the enclosed space of a
+/// [`Level`](crate::Level), or the corridor of a [`Confine`](crate::Confine), in a
+/// declaration the space bound. Resolution inside a frame consults the frame's space
+/// DIRECTLY ([`Scope::consulted`]), never the dynamic space around it, and a sub-request
+/// resolved there is keyed by the frame's NAME, which a swap may keep while it changes
+/// the frame's doors. So the frame carries the space's thread itself: every answer
+/// resolved inside it hangs from that thread, hit or miss, exactly as one served by
+/// the space does, and a swap cuts it. Everything else is the frame's own space —
+/// identity, entries, structure — so the declaration builds and renders as before.
+///
+/// Only a dynamic space's build wraps (`declare::build_threaded`); a level or corridor built
+/// anywhere else is unchanged and carries no thread.
+pub(crate) struct Framed {
+    inner: Arc<dyn Space>,
+    thread: Thread,
+}
+
+impl Framed {
+    pub(crate) fn around(inner: Arc<dyn Space>, thread: Thread) -> Arc<dyn Space> {
+        Arc::new(Framed { inner, thread })
+    }
+}
+
+impl Space for Framed {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        let resolution = self.inner.resolve(request, scope);
+        if matches!(resolution, Resolution::Miss) {
+            record_miss(&self.thread);
+        }
+        thread_hit(resolution, &self.thread)
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        self.inner.entries()
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.inner.id()
+    }
+
+    fn topology(&self) -> Topology {
+        self.inner.topology()
+    }
+}
+
 /// Wrap a hit so its answer hangs from `thread`.
 fn thread_hit(resolution: Resolution, thread: &Thread) -> Resolution {
     resolution.map_endpoint(|endpoint| {
@@ -254,7 +390,7 @@ pub enum DynamicRefusal {
         /// What went wrong, as the read reported it.
         reason: String,
     },
-    /// The declaration is not one [`build`] accepts: it names the node and why.
+    /// The declaration is not one [`build`](crate::build) accepts: it names the node and why.
     Declaration(DeclarationError),
     /// The declaration holds a level that seals names. A running kernel's seal table is
     /// fixed when it is built, so a level that arrived later could not have its seals
@@ -351,7 +487,9 @@ struct State {
 /// runs** (ledger #2006). It delegates resolution, [`entries`](Space::entries) and
 /// [`topology`](Space::topology) to its CURRENT inner space and threads every answer
 /// it serves from [`thread`](Self::thread), so a successful swap cuts everything the
-/// old doors served: the COARSE cut of version one, where any change invalidates every
+/// old doors served, and every answer a resolution found further out after it reached
+/// this space and missed (the new doors might shadow it), and every answer resolved
+/// inside a level or corridor its declaration built: the COARSE cut of version one, where any change invalidates every
 /// answer the space served and a refused change invalidates nothing (the finer cut, per
 /// door, is ledger #2034). The mechanism is NetKernel's DynamicSpaceAccessor: the
 /// dynamic part is a space inside a fixed host space, so the kernel's root never
@@ -378,7 +516,7 @@ struct State {
 ///
 /// # Validate before bind; fail closed
 ///
-/// A candidate binds only when [`build`] accepts it (unknown endpoint names, opaque
+/// A candidate binds only when [`build`](crate::build) accepts it (unknown endpoint names, opaque
 /// spaces, closures, the host's seals — [`Registry::sealing`] — each refused naming the
 /// node), it holds no level that seals names ([`DynamicRefusal::SealingLevel`]), and
 /// the host's [`SpaceCheck`] passes it. Anything refused keeps the current inner space
@@ -503,7 +641,8 @@ impl DynamicSpace {
     }
 
     /// The thread every answer this space serves hangs from — named like the space,
-    /// cut by every successful bind.
+    /// cut by every successful bind. An answer found by a space consulted after this
+    /// one, by a resolution that reached this space and missed it, hangs from it too.
     pub fn thread(&self) -> &Thread {
         &self.thread
     }
@@ -665,10 +804,13 @@ impl DynamicSpace {
         Ok(())
     }
 
-    /// Core's refusals, in order: [`build`]'s (which runs the host's seals), then a
+    /// Core's refusals, in order: [`build`](crate::build)'s (which runs the host's seals), then a
     /// level that seals names.
     fn prepare(&self, topology: &Topology) -> std::result::Result<Arc<dyn Space>, DynamicRefusal> {
-        let inner = build(topology, &self.registry).map_err(DynamicRefusal::Declaration)?;
+        // Every level and corridor the declaration builds carries this space's thread, so
+        // what is resolved inside one is cut by the next swap (ledger #3916, round 2).
+        let inner = build_threaded(topology, &self.registry, Some(self.thread.clone()))
+            .map_err(DynamicRefusal::Declaration)?;
         if let Some(node) = sealing_level(topology) {
             return Err(DynamicRefusal::SealingLevel { node });
         }
@@ -692,7 +834,7 @@ impl DynamicSpace {
 }
 
 /// The first level in `topology` that seals a prefix, by name. Walks with a stack;
-/// [`build`] has already bounded the tree.
+/// [`build`](crate::build) has already bounded the tree.
 fn sealing_level(topology: &Topology) -> Option<String> {
     let mut stack = vec![topology];
     while let Some(node) = stack.pop() {
@@ -721,7 +863,13 @@ impl Space for DynamicSpace {
                     .with_answered_by(self.id.clone()),
             );
         }
-        let resolution = thread_hit(self.inner().resolve(request, scope), &self.thread);
+        let resolution = self.inner().resolve(request, scope);
+        if matches!(resolution, Resolution::Miss) {
+            // What is found further out depends on this space binding nothing here:
+            // the next swap may add a door that shadows it (ledger #3916).
+            record_miss(&self.thread);
+        }
+        let resolution = thread_hit(resolution, &self.thread);
         answered(resolution, &Some(self.id.clone()))
     }
 

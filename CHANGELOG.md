@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased: a patch (0.4.1)
+
+### Changed (behavior)
+
+- **A dynamic space's swap drops the answers that fell through it** (ledger #3916). Through
+  0.4.0 a successful swap cut only the answers the space SERVED. A read that missed the space
+  and was answered by a space consulted after it was cached without the space's thread, so an
+  edit that added a door for that name left the outer answer in the cache: the next read was
+  served the outer answer although an uncached resolution reaches the new door. Now a
+  resolution that reaches a dynamic space and misses it hangs its answer from the space's
+  thread too, so a swap drops every cached entry whose resolution reached the space, hit or
+  miss. The answer stays cacheable: a read through an unchanged dynamic space is still served
+  from the cache, and only a successful swap drops it. No API change.
+- **…and the answers resolved inside a frame it built, and a fallback over a total miss**
+  (ledger #3916, round 2). Three more cases of the same gap:
+  - A level that a declaration mounts keeps its name across a swap that changes its doors.
+    Resolution inside a level consults the level's own space directly, never the dynamic
+    space around it, and a sub-request resolved there is keyed by the level's name. So the
+    old door's answer was served after the swap. A confinement's corridor had the same gap.
+    Now every level and corridor a dynamic space builds carries the space's thread, so what
+    is resolved inside it, hit or miss, is dropped by the next swap. A level or corridor
+    built anywhere else is unchanged.
+  - A composite that caught a sub-request's `Unresolved` and cached a fallback did not hang
+    from the dynamic spaces the miss had reached. A swap that bound the name left the
+    fallback in the cache. Now the recorded threads ride the `Unresolved` to the composite
+    that catches it. The composite stays cacheable.
+
+  No API change.
+
 ## Unreleased: needs a minor bump (0.4.0)
 
 This minor release carries the nested confinement below (ledger #3825), the missing scopes on a
