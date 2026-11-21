@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased: a patch (0.4.1)
+
+### Changed (behavior)
+
+- **A dynamic space's swap drops the answers that fell through it** (ledger #3916). Through
+  0.4.0 a successful swap cut only the answers the space SERVED. A read that missed the space
+  and was answered by a space consulted after it was cached without the space's thread, so an
+  edit that added a door for that name left the outer answer in the cache: the next read was
+  served the outer answer although an uncached resolution reaches the new door. Now a
+  resolution that reaches a dynamic space and misses it hangs its answer from the space's
+  thread too, so a swap drops every cached entry whose resolution reached the space, hit or
+  miss. The answer stays cacheable: a read through an unchanged dynamic space is still served
+  from the cache, and only a successful swap drops it. No API change.
+
 ## Unreleased: needs a minor bump (0.4.0)
 
 This minor release carries the nested confinement below (ledger #3825), the missing scopes on a

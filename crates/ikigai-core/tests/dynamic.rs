@@ -12,6 +12,8 @@
 //! 6. no cached answer from before a successful swap survives it (the coarse cut);
 //! 7. no declaration, or an invalid one, at start: an EMPTY space, and a status why;
 //! 8. the topology renders `ik:DynamicSpace` with `ik:declaration` and the inner tree.
+//! 9. an answer that FELL THROUGH the space (and a composite over one) is dropped by the
+//!    swap, so an added door shadows it; it stays cached until a swap (ledger #3916).
 //!
 //! Plus the rebuild loop itself ([`DynamicSpace::drive`]) hearing a write.
 #![cfg(feature = "declare")]
@@ -24,10 +26,10 @@ use std::task::{Context, Poll};
 
 use futures::executor::block_on;
 use ikigai_core::{
-    ArgRef, Capability, DeclarationError, Description, DynamicRefusal, DynamicSpace, EndpointSpace,
-    Error, Exact, Fallback, FnEndpoint, Iri, Kernel, Level, MetaRenderer, Mount, Registry,
-    ReprType, Representation, Request, Scope, Space, SpaceCheck, Threaded, Topology, Verb,
-    CAP_LISTEN,
+    ArgRef, AsyncFnEndpoint, Capability, DeclarationError, Description, DynamicRefusal,
+    DynamicSpace, EndpointSpace, Error, Exact, Fallback, FnEndpoint, Iri, Kernel, Level,
+    MetaRenderer, Mount, Registry, ReprType, Representation, Request, Scope, Space, SpaceCheck,
+    Threaded, Topology, Verb, CAP_LISTEN,
 };
 
 const DECL: &str = "urn:test:decl";
@@ -618,4 +620,128 @@ fn the_rebuild_loop_needs_the_listen_grant() {
         matches!(error, Error::Denied(ref m) if m.contains(CAP_LISTEN)),
         "{error}"
     );
+}
+
+// An added door shadows a cached answer from further out (ledger #3916) ───────────
+
+/// A root `Fallback [declaration, dynamic, outer]` where `outer` binds `urn:test:x`
+/// to a cacheable "outer", counting its runs; the dynamic space may bind it to
+/// "inner".
+struct Shadowing {
+    world: World,
+    inner: Arc<FnEndpoint>,
+    runs_outer: Arc<AtomicU32>,
+}
+
+fn shadowing() -> Shadowing {
+    let runs_outer = Arc::new(AtomicU32::new(0));
+    let outer = door("outer", Arc::clone(&runs_outer));
+    let inner = door("inner", Arc::new(AtomicU32::new(0)));
+    let mut registry = Registry::new();
+    registry.register(inner.clone()).unwrap();
+    let dynamic = Arc::new(DynamicSpace::new("test", iri(DECL), registry));
+    let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(declaration_space(None)),
+        dynamic.clone(),
+        Arc::new(EndpointSpace::new().bind_arc(Exact::new("urn:test:x"), outer as _)),
+    ]));
+    let unused = door("unused", Arc::new(AtomicU32::new(0)));
+    Shadowing {
+        world: World {
+            kernel: Arc::new(Kernel::new(root)),
+            dynamic,
+            a: unused.clone(),
+            b: unused,
+            runs_a: Arc::new(AtomicU32::new(0)),
+        },
+        inner,
+        runs_outer,
+    }
+}
+
+#[test]
+fn an_added_door_shadows_a_cached_answer_that_fell_through_the_space() {
+    let s = shadowing();
+    let w = &s.world;
+    w.edit(&declare(&[])).unwrap();
+    assert_eq!(w.get("urn:test:x").unwrap(), b"outer");
+    assert!(
+        w.cached("urn:test:x"),
+        "a miss must not make the answer uncacheable"
+    );
+
+    w.edit(&declare(&[("urn:test:x", &s.inner)])).unwrap();
+    assert!(
+        !w.cached("urn:test:x"),
+        "the answer that fell through the space survived its swap"
+    );
+    assert_eq!(w.get("urn:test:x").unwrap(), b"inner");
+}
+
+#[test]
+fn a_read_through_an_unchanged_dynamic_space_stays_cached_until_a_swap() {
+    let s = shadowing();
+    let w = &s.world;
+    w.edit(&declare(&[])).unwrap();
+    for _ in 0..3 {
+        assert_eq!(w.get("urn:test:x").unwrap(), b"outer");
+    }
+    assert_eq!(
+        s.runs_outer.load(Ordering::SeqCst),
+        1,
+        "served from the cache"
+    );
+
+    // A refused edit binds nothing, so it cuts nothing.
+    assert!(w.edit("not turtle").is_err());
+    assert!(w.cached("urn:test:x"));
+    assert_eq!(w.get("urn:test:x").unwrap(), b"outer");
+    assert_eq!(s.runs_outer.load(Ordering::SeqCst), 1);
+
+    // A successful swap drops it, even one that does not bind the name (the coarse cut).
+    w.edit(&declare(&[])).unwrap();
+    assert!(!w.cached("urn:test:x"));
+    assert_eq!(w.get("urn:test:x").unwrap(), b"outer");
+    assert_eq!(s.runs_outer.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_composite_over_an_answer_that_fell_through_is_cut_by_the_swap() {
+    // The composite's own door sits AHEAD of the dynamic space, so its resolution never
+    // reaches it; only its sub-request for `urn:test:x` falls through it.
+    let runs_outer = Arc::new(AtomicU32::new(0));
+    let outer = door("outer", Arc::clone(&runs_outer));
+    let inner = door("inner", Arc::new(AtomicU32::new(0)));
+    let composite = AsyncFnEndpoint::new("composite", |inv| {
+        Box::pin(async move {
+            let x = inv.source(&iri("urn:test:x")).await?;
+            Ok(Representation::new(ReprType::new("text/plain"), x.bytes).cacheable())
+        })
+    });
+    let mut registry = Registry::new();
+    registry.register(inner.clone()).unwrap();
+    let dynamic = Arc::new(DynamicSpace::new("test", iri(DECL), registry));
+    let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+        Arc::new(declaration_space(None).bind(Exact::new("urn:test:y"), composite)),
+        dynamic.clone(),
+        Arc::new(EndpointSpace::new().bind_arc(Exact::new("urn:test:x"), outer as _)),
+    ]));
+    let unused = door("unused", Arc::new(AtomicU32::new(0)));
+    let w = World {
+        kernel: Arc::new(Kernel::new(root)),
+        dynamic,
+        a: unused.clone(),
+        b: unused,
+        runs_a: Arc::new(AtomicU32::new(0)),
+    };
+    w.edit(&declare(&[])).unwrap();
+    assert_eq!(w.get("urn:test:y").unwrap(), b"outer");
+    assert!(w.cached("urn:test:y"));
+
+    w.edit(&declare(&[("urn:test:x", &inner)])).unwrap();
+    assert!(
+        !w.cached("urn:test:y"),
+        "the composite over an answer that fell through the space survived its swap"
+    );
+    assert_eq!(w.get("urn:test:y").unwrap(), b"inner");
 }
