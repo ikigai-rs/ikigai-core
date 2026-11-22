@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Added
+
+- **An idempotency-key toolkit for `Sink` endpoints** (ledger #4056, from the research note
+  `docs/research/sink-idempotency.md`, section 5.5). A new public module
+  `ikigai_core::idempotency`:
+  - `IdempotencyKey` (also at the crate root): the `idempotency-key=` token, parsed with the
+    ledger key's alphabet (ASCII letters, digits, `-._~:`, 1 to 256 characters), with
+    `from_request`, `mismatch` (an `InvalidArgument` saying the key "was used for a different
+    request") and `in_flight` (a `RetryAfter`).
+  - `Request::fingerprint_without(arg)`: the request's id with one argument left out, equal to
+    the id of the same request without it, and independent of argument order.
+  - `Replay`, `ReplayScope` and `ReplayOutcome`: the record an endpoint stores in the same store
+    update as its write (scope per endpoint, principal and token; fingerprint; media type;
+    bytes; outcome; recorded at), with a stable, versioned byte encoding (`to_bytes` /
+    `from_bytes`) that a test pins. Only a success and a post-decision `Conflict`, `NotFound`
+    or `Gone` are recorded.
+  - `ActionSpec::resend_window(Duration)` and the field `resend_window_secs` (JSON
+    `resend_window`), projected on the catalog's contract node as `ik:resendWindow`, an
+    `xsd:duration`. Validation refuses a window without `Resend::Key` or under 24 hours. Fed
+    into the contract digest only when declared (tail byte `6`), so every existing contract
+    keeps its IRI.
+  - The vocabulary term `ik:resendWindow`, and the JSON-LD context regenerated. `/ns` needs a
+    redeploy after the vocabulary release.
+
+  Core stores nothing, and no default behavior changes.
+
 ### Pinned (no behavior change)
 
 - **A result built on an admission refusal is never cached, at any depth** (ledger #3917).
