@@ -127,6 +127,7 @@ mod exposure;
 mod forward;
 mod grammar;
 pub(crate) mod hashing;
+pub mod idempotency;
 mod inspect_graph;
 mod iri;
 mod kernel;
@@ -198,6 +199,7 @@ pub use error::{Denial, Error, FailureClass, Result};
 pub use exposure::{check_exposure, ExposedDoor, Exposes, ExposureReport};
 pub use forward::Forward;
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
+pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, TraceState,
