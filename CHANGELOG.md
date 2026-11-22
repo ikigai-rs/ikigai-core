@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- Media type comparison now reads complete quoted parameter values, including escaped
+  characters, and checks every occurrence of shared parameter names in either order.
+  `ReprType` prints parameter values with quoting and escaping when needed, folds ASCII case
+  for the essence, parameter names, and charset, and replaces builder parameters by
+  case-insensitive name. Representation content IDs follow the corrected canonical spelling.
+
 ### Pinned (no behavior change)
 
 - **A result built on an admission refusal is never cached, at any depth** (ledger #3917).
