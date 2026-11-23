@@ -1,0 +1,29 @@
+# The measurement behind docs/design/constraint-history.md, NOT a workspace member: it builds
+# ikigai-core from this checkout by path, has its own workspace and lock file, and is never built
+# by the repository's `cargo test`.
+#
+#     cargo run --release --manifest-path docs/design/constraint-history/measure/Cargo.toml \
+#         --bin constraint-history-measure
+#     cargo run --release --manifest-path docs/design/constraint-history/measure/Cargo.toml \
+#         --bin check-query -- docs/design/constraint-history.md
+[package]
+name = "constraint-history-measure"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[[bin]]
+name = "constraint-history-measure"
+path = "src/main.rs"
+
+[[bin]]
+name = "check-query"
+path = "src/bin/check-query.rs"
+
+[dependencies]
+futures = "0.3"
+ikigai-core = { path = "../../../../crates/ikigai-core" }
+oxigraph = { version = "=0.5.13", default-features = false }
