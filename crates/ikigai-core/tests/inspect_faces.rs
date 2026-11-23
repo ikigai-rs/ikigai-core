@@ -248,8 +248,15 @@ fn check_constraint_faces(clock: bool) {
     let kernel = constraint_kernel(clock);
     let root = Capability::root();
     let text = ask(&kernel, "constraint", false, &root).unwrap();
+    // On a kernel with a clock, the header goes on to state the window's span (ledger
+    // #4095), on the same line, so the face keeps its shape.
     assert!(
-        text.starts_with("constraint  (last 6 resolutions)\n"),
+        text.starts_with("constraint  (last 6 resolutions)"),
+        "{text}"
+    );
+    assert_eq!(
+        text.lines().next().unwrap().contains(" · samples from "),
+        clock,
         "{text}"
     );
     let (rows, marked) = text_rows(&text);

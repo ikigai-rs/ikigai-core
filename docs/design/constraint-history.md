@@ -1,6 +1,8 @@
 # Constraint history: recording the kernel's bottleneck over time
 
-**Status:** design only, 2026-11-23 (ledger #4091). Nothing here is built. The measurement
+**Status:** design, 2026-11-23 (ledger #4091). The two changes to recording in section 4
+(count failures, stamp samples) are built (ledger #4095); section 1 describes the window
+before them. Nothing else here is built. The measurement
 behind section 2 lives beside this note in
 [`constraint-history/measure/`](constraint-history/measure/), outside the workspace, and
 changes no code in the crates. The code is the spec where the two differ.

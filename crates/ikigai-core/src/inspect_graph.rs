@@ -110,7 +110,21 @@ pub(crate) fn scheduler_turtle(rows: &[(String, String)]) -> String {
     out
 }
 
+/// The constraint window as a whole: how many resolutions it holds, and the first and
+/// last end stamps among them, in milliseconds by the kernel's clock (ledger #4095).
+/// The stamps are `None` on a clockless kernel or an empty window.
+pub(crate) struct ConstraintSpan {
+    pub(crate) resolutions: usize,
+    pub(crate) first_ms: Option<u64>,
+    pub(crate) last_ms: Option<u64>,
+}
+
 /// One target of the constraint window, aggregated over the window's samples.
+///
+/// A failed resolution (ledger #4095) is an uncached one: the endpoint ran and spent
+/// capacity. So `failed` is a part of the uncached count and `failed_ms` a part of
+/// `uncached_ms`, and a millisecond spent failing ranks exactly as one spent computing.
+#[derive(Default)]
 pub(crate) struct ConstraintRow {
     /// The target's name, as requested.
     pub(crate) target: String,
@@ -122,10 +136,15 @@ pub(crate) struct ConstraintRow {
     pub(crate) cached: usize,
     /// Whether any sample carried a time (the kernel has a clock).
     pub(crate) timed: bool,
+    /// How many of the uncached resolutions failed.
+    pub(crate) failed: usize,
+    /// How much of the uncached time they spent, in milliseconds (meaningful only
+    /// when `timed`).
+    pub(crate) failed_ms: u64,
 }
 
 impl ConstraintRow {
-    fn uncached(&self) -> usize {
+    pub(crate) fn uncached(&self) -> usize {
         self.calls - self.cached
     }
 
@@ -140,9 +159,18 @@ impl ConstraintRow {
 }
 
 /// The text face of `urn:kernel:constraint`. `rows` are ranked, heaviest first;
-/// `total` is how many resolutions the window holds.
-pub(crate) fn constraint_text(total: usize, rows: &[ConstraintRow]) -> String {
-    let mut body = format!("constraint  (last {total} resolutions)\n");
+/// `span` is what the window holds. The span goes on the header line, after what it
+/// always said, so the face keeps its shape (a header, then two lines per row) for a
+/// reader that splits it.
+pub(crate) fn constraint_text(span: &ConstraintSpan, rows: &[ConstraintRow]) -> String {
+    let mut body = format!("constraint  (last {} resolutions)", span.resolutions);
+    if let (Some(first), Some(last)) = (span.first_ms, span.last_ms) {
+        let _ = write!(
+            body,
+            " · samples from {first}ms to {last}ms on the kernel's clock"
+        );
+    }
+    body.push('\n');
     if rows.is_empty() {
         body.push_str("  (no resolutions yet)\n");
         return body;
@@ -159,8 +187,13 @@ pub(crate) fn constraint_text(total: usize, rows: &[ConstraintRow]) -> String {
         } else {
             format!("{} uncached", row.uncached())
         };
+        let failed = match (row.failed, row.timed) {
+            (0, _) => String::new(),
+            (count, true) => format!(" · {count} failed ({}ms)", row.failed_ms),
+            (count, false) => format!(" · {count} failed"),
+        };
         body.push_str(&format!(
-            "  {}{marker}\n    {cost} · {} calls · {}% cached\n",
+            "  {}{marker}\n    {cost} · {} calls · {}% cached{failed}\n",
             row.target,
             row.calls,
             row.cached_pct()
@@ -178,14 +211,22 @@ fn target_iri(target: &str) -> String {
 /// The Turtle face of `urn:kernel:constraint`, from the same ranked rows as the text
 /// face: the window, the targets it lists in rank order (`ik:order`, from 1), and the
 /// leader as `ik:currentConstraint` exactly when the text marks it.
-pub(crate) fn constraint_turtle(total: usize, rows: &[ConstraintRow]) -> String {
+pub(crate) fn constraint_turtle(span: &ConstraintSpan, rows: &[ConstraintRow]) -> String {
     let rows: Vec<&ConstraintRow> = rows.iter().take(CONSTRAINT_TOP).collect();
     let mut out = String::from(PREFIXES);
     let _ = write!(
         out,
         "\n<{CONSTRAINT}> a ik:ConstraintWindow ;\n    \
-         ik:windowResolutions \"{total}\"^^xsd:nonNegativeInteger"
+         ik:windowResolutions \"{}\"^^xsd:nonNegativeInteger",
+        span.resolutions
     );
+    if let (Some(first), Some(last)) = (span.first_ms, span.last_ms) {
+        let _ = write!(
+            out,
+            " ;\n    ik:windowFirstSampleMillis \"{first}\"^^xsd:nonNegativeInteger ;\n    \
+             ik:windowLastSampleMillis \"{last}\"^^xsd:nonNegativeInteger"
+        );
+    }
     if let Some(leader) = rows.first().filter(|row| row.consumed()) {
         let _ = write!(
             out,
@@ -205,7 +246,8 @@ pub(crate) fn constraint_turtle(total: usize, rows: &[ConstraintRow]) -> String 
              ik:callCount \"{}\"^^xsd:nonNegativeInteger ;\n    \
              ik:cachedCallCount \"{}\"^^xsd:nonNegativeInteger ;\n    \
              ik:uncachedCallCount \"{}\"^^xsd:nonNegativeInteger ;\n    \
-             ik:cachedPercent \"{}\"^^xsd:nonNegativeInteger",
+             ik:cachedPercent \"{}\"^^xsd:nonNegativeInteger ;\n    \
+             ik:failedCallCount \"{}\"^^xsd:nonNegativeInteger",
             target_iri(&row.target),
             escape_iri_fragment(&row.target),
             rank + 1,
@@ -213,12 +255,14 @@ pub(crate) fn constraint_turtle(total: usize, rows: &[ConstraintRow]) -> String 
             row.cached,
             row.uncached(),
             row.cached_pct(),
+            row.failed,
         );
         if row.timed {
             let _ = write!(
                 out,
-                " ;\n    ik:uncachedMillis \"{}\"^^xsd:nonNegativeInteger",
-                row.uncached_ms
+                " ;\n    ik:uncachedMillis \"{}\"^^xsd:nonNegativeInteger ;\n    \
+                 ik:failedMillis \"{}\"^^xsd:nonNegativeInteger",
+                row.uncached_ms, row.failed_ms
             );
         }
         out.push_str(" .\n");

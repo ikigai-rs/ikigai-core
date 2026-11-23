@@ -284,6 +284,14 @@
       "@type": "xsd:boolean"
     },
     "explanation": "ik:explanation",
+    "failedCallCount": {
+      "@id": "ik:failedCallCount",
+      "@type": "xsd:nonNegativeInteger"
+    },
+    "failedMillis": {
+      "@id": "ik:failedMillis",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "failureClass": {
       "@id": "ik:failureClass",
       "@type": "@id"
@@ -656,6 +664,14 @@
     "vendor": "ik:vendor",
     "verb": "ik:verb",
     "versionTag": "ik:versionTag",
+    "windowFirstSampleMillis": {
+      "@id": "ik:windowFirstSampleMillis",
+      "@type": "xsd:nonNegativeInteger"
+    },
+    "windowLastSampleMillis": {
+      "@id": "ik:windowLastSampleMillis",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "windowResolutions": {
       "@id": "ik:windowResolutions",
       "@type": "xsd:nonNegativeInteger"
