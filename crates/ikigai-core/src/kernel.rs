@@ -1077,6 +1077,13 @@ impl Endpoint for SettleReferences {
         self.inner.describe()
     }
 
+    /// Never asked on the issue path (this wrapper is built only for a verb that is not
+    /// `Meta`), forwarded so that the rule on [`Endpoint::meta_failure`] holds for every
+    /// wrapper of one endpoint.
+    fn meta_failure(&self) -> Option<Error> {
+        self.inner.meta_failure()
+    }
+
     fn confinement(&self) -> Option<crate::topology::Topology> {
         self.inner.confinement()
     }
@@ -3482,6 +3489,46 @@ impl Kernel {
         });
     }
 
+    /// Report a `Meta` the endpoint answered with [`Endpoint::meta_failure`] (ledger #4079)
+    /// into the resolution's [`TraceScope`]: an event tagged [`FAILED_NOTE`] with the
+    /// error's kind (no message: it may carry a path or a host), in the shape
+    /// [`trace_denial`](Self::trace_denial) established. Nothing ran and nothing is
+    /// stored, so `started`/`ended` stay `None` and `cache_hit` is `false`. Out of line,
+    /// so the resolution path's frame pays nothing for it.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn trace_meta_failure(
+        &self,
+        trace: &Option<TraceScope>,
+        request: &Request,
+        capability: &Capability,
+        span: Option<u64>,
+        parent: Option<u64>,
+        error: &Error,
+        alias: Option<&AliasHop>,
+        answered: Option<&Iri>,
+        levels: &LevelPath,
+        scope: &Scope,
+    ) {
+        let Some(trace_scope) = trace else {
+            return;
+        };
+        let mut notes = vec![(FAILED_NOTE.to_string(), error.kind().to_string())];
+        notes.extend(provenance_notes(trace, alias, answered, levels, &[], &[]));
+        notes.extend(scope_notes(scope));
+        trace_scope.record(TraceEvent {
+            target: request.target.as_str().to_string(),
+            thread: thread_label(),
+            started: None,
+            ended: None,
+            cache_hit: false,
+            span: span.unwrap_or(0),
+            parent,
+            capability: capability.scopes().map(|s| s.iter().cloned().collect()),
+            notes,
+        });
+    }
+
     /// Report a NESTING-BUDGET refusal into the resolution's [`TraceScope`] — the
     /// refusal itself, as an event, tagged [`DEPTH_NOTE`] with the depth the
     /// request would have run at. The shape [`trace_denial`](Self::trace_denial)
@@ -4883,6 +4930,24 @@ impl Kernel {
             );
             let message = self.denial_message(first, &request, capability, alias);
             return Err(Error::Denied(Denial::lacking(message, lacking)));
+        }
+
+        // ★ A META THE ENDPOINT CANNOT ANSWER (ledger #4079): `Endpoint::meta_failure`. An
+        // endpoint that knows it cannot state its contract (a mount whose peer is down)
+        // answers the error instead of a placeholder description. AFTER the floor, so a
+        // caller an existence-sensitive endpoint hides from is answered as a miss (above)
+        // and learns nothing about its state (the floor gates no `Meta` otherwise, so no
+        // `Meta` is ever `Denied`); BEFORE the cache lookup, so a description cached while
+        // the endpoint could state it is not served while it cannot, and before the Meta arm.
+        // Nothing is stored: the error states no expiry, and the next Meta asks again.
+        if request.verb == Verb::Meta {
+            if let Some(error) = resolved.endpoint.meta_failure() {
+                self.trace_meta_failure(
+                    &trace, &request, capability, span, parent, &error, alias, answered, levels,
+                    &scope,
+                );
+                return Err(error);
+            }
         }
 
         // ★ AN ATTACHED BODY REACHES ONLY A DECLARED BODY READER (ledger #2402). A body a
@@ -7087,6 +7152,10 @@ impl Endpoint for Revalidate {
 
     fn forwards(&self) -> Option<crate::Forward> {
         self.inner.forwards()
+    }
+
+    fn meta_failure(&self) -> Option<Error> {
+        self.inner.meta_failure()
     }
 }
 
@@ -14032,5 +14101,55 @@ mod tests {
         clock.set(1_005_000);
         let _ = kernel.is_cached(&mounted_read(), &root);
         assert_eq!(space.metas(), 1, "read again once the bound runs out");
+    }
+
+    /// Every crate-private wrapper of one endpoint passes `Endpoint::meta_failure` through
+    /// (ledger #4079), one per wrapper kind; the public ones (`Confine`, `Threaded` and a
+    /// dynamic space's) are pinned end to end in `tests/meta_failure.rs`.
+    #[test]
+    fn crate_private_wrappers_pass_meta_failure_through() {
+        struct Down;
+        #[async_trait::async_trait]
+        impl Endpoint for Down {
+            async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+                Err(Error::Unavailable("down".into()))
+            }
+            fn meta_failure(&self) -> Option<Error> {
+                Some(Error::Unavailable("down".into()))
+            }
+        }
+        let inner: Arc<dyn Endpoint> = Arc::new(Down);
+        let projected = crate::forward::Projected {
+            inner: Arc::clone(&inner),
+            description: Description::new("projected"),
+        };
+        let settling = SettleReferences {
+            inner: Arc::clone(&inner),
+            pending: Vec::new(),
+        };
+        let stored = Representation::new(ReprType::new("text/plain"), b"old".to_vec()).into_body();
+        let revalidating = Revalidate {
+            inner: Arc::clone(&inner),
+            offer: Arc::new(crate::cache::Offer::for_test(stored)),
+        };
+        let wrappers: [(&str, &dyn Endpoint); 3] = [
+            ("Projected", &projected),
+            ("SettleReferences", &settling),
+            ("Revalidate", &revalidating),
+        ];
+        for (kind, wrapper) in wrappers {
+            assert!(
+                matches!(wrapper.meta_failure(), Some(Error::Unavailable(_))),
+                "{kind} hides the inner endpoint's Meta failure"
+            );
+        }
+        // And over an endpoint that can describe itself, each answers `None`.
+        let fine: Arc<dyn Endpoint> = Arc::new(crate::builtins::echo());
+        assert!(SettleReferences {
+            inner: fine,
+            pending: Vec::new()
+        }
+        .meta_failure()
+        .is_none());
     }
 }

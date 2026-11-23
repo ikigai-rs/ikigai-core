@@ -143,6 +143,10 @@ impl Endpoint for Confine {
         self.inner.forwards()
     }
 
+    fn meta_failure(&self) -> Option<crate::Error> {
+        self.inner.meta_failure()
+    }
+
     /// The corridor, named by the confinement: what a door bound to this endpoint
     /// reports as `ik:confinedTo`.
     fn confinement(&self) -> Option<Topology> {
