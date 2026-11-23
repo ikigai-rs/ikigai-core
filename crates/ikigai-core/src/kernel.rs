@@ -10233,6 +10233,83 @@ mod tests {
         );
     }
 
+    /// ★ A FAILURE SPENDS CAPACITY TOO (ledger #4095). An endpoint that spends 30 s
+    /// timing out and then fails is the constraint, as surely as one that spends 30 s
+    /// computing: the window records it from the invocation's error arm, ranks its
+    /// time with computed time, and says how much of it failed. Each sample is stamped
+    /// with its end time, so both faces state the window's span.
+    #[test]
+    fn kernel_constraint_records_a_failed_resolution_and_states_its_span() {
+        let clock = TestClock::at(1_000);
+        let ticking = clock.clone();
+        let timeout = FnEndpoint::new("timeout", move |_inv: &Invocation<'_>| {
+            ticking.set(ticking.now().as_millis() + 30_000);
+            Err(Error::Endpoint("upstream timed out".to_string()))
+        });
+        let stepping = clock.clone();
+        let quick = FnEndpoint::new("quick", move |_inv: &Invocation<'_>| {
+            stepping.set(stepping.now().as_millis() + 5);
+            Ok(Representation::new(ReprType::new("text/plain"), b"q".to_vec()))
+        });
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:test:timeout"), timeout)
+            .bind(Exact::new("urn:test:quick"), quick);
+        let kernel = Kernel::new(Arc::new(space)).with_clock(Arc::new(clock.clone()));
+        let cap = Capability::root();
+
+        block_on(kernel.issue(Request::new(Verb::Source, iri("urn:test:quick")), &cap)).unwrap();
+        let failed =
+            block_on(kernel.issue(Request::new(Verb::Source, iri("urn:test:timeout")), &cap));
+        assert!(failed.is_err());
+
+        let text = String::from_utf8_lossy(
+            &block_on(kernel.issue(
+                Request::new(Verb::Source, iri("urn:kernel:constraint")),
+                &cap,
+            ))
+            .unwrap()
+            .bytes,
+        )
+        .into_owned();
+        // The failure is in the window, and leads it: 30 s spent failing beats 5 ms.
+        assert!(text.contains("last 2 resolutions"), "{text}");
+        let timeout_at = text.find("urn:test:timeout").expect("failure listed");
+        let quick_at = text.find("urn:test:quick").expect("success listed");
+        assert!(timeout_at < quick_at, "failed time ranks with computed:\n{text}");
+        assert!(text.contains("urn:test:timeout   ← constraint"), "{text}");
+        assert!(
+            text.contains("30000ms uncached · 1 calls · 0% cached · 1 failed (30000ms)"),
+            "{text}"
+        );
+        // The span: the first sample ended at 1005, the last at 31005.
+        assert!(text.contains("samples 1005ms to 31005ms"), "{text}");
+
+        let face = Request::new(Verb::Source, iri("urn:kernel:constraint"))
+            .with_arg("as", ArgRef::Inline(b"text/turtle".to_vec()));
+        let turtle = String::from_utf8_lossy(&block_on(kernel.issue(face, &cap)).unwrap().bytes)
+            .into_owned();
+        assert!(
+            turtle.contains("ik:windowFirstSampleMillis \"1005\"^^xsd:nonNegativeInteger"),
+            "{turtle}"
+        );
+        assert!(
+            turtle.contains("ik:windowLastSampleMillis \"31005\"^^xsd:nonNegativeInteger"),
+            "{turtle}"
+        );
+        assert!(
+            turtle.contains("ik:failedCallCount \"1\"^^xsd:nonNegativeInteger"),
+            "{turtle}"
+        );
+        assert!(
+            turtle.contains("ik:failedMillis \"30000\"^^xsd:nonNegativeInteger"),
+            "{turtle}"
+        );
+        assert!(
+            turtle.contains("ik:currentConstraint <urn:ikigai:constraint:target:urn:test:timeout>"),
+            "{turtle}"
+        );
+    }
+
     // --- Time-based expiry (Expiry::At + an injected Clock) ------------------
 
     #[test]
