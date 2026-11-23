@@ -263,6 +263,10 @@ impl Endpoint for Projected {
         self.inner.forwards()
     }
 
+    fn meta_failure(&self) -> Option<crate::Error> {
+        self.inner.meta_failure()
+    }
+
     fn confinement(&self) -> Option<Topology> {
         self.inner.confinement()
     }

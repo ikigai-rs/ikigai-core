@@ -2607,6 +2607,74 @@ pub trait Endpoint: Send + Sync {
         None
     }
 
+    /// The error a `Meta` of this endpoint answers instead of its description, when the
+    /// endpoint knows at resolve time that it cannot state its contract (ledger #4079): a
+    /// mount whose peer is unreachable, say, whose own [`describe`](Self::describe) can
+    /// only be a placeholder that "declares no arguments". `None`, the default, for every
+    /// endpoint that can describe itself, which is every endpoint that does not override
+    /// this.
+    ///
+    /// The kernel asks this for a `Meta` request only, after resolution, the limiter and
+    /// the capability floor, and BEFORE the representation cache and the `Meta` arm. The
+    /// floor never gates a `Meta` itself (self-description stays readable wherever the
+    /// catalog offers it), so the one refusal that comes first is the existence-sensitive
+    /// one: a caller an endpoint hides from gets the miss, never this failure, and learns
+    /// nothing about the endpoint's state. `Some(error)` is
+    /// the answer, as it is: it is never cached, and while it is answered no description
+    /// is served from the cache either, so the next `Meta` asks again and succeeds once
+    /// this answers `None`. It is asked on every such `Meta`, so it answers from state
+    /// the endpoint already holds, without blocking or I/O, as
+    /// [`Space::resolve`](crate::Space::resolve) does. Every other verb is unaffected.
+    ///
+    /// Only the `Meta` request changes. [`Kernel::describe`](crate::Kernel::describe), the
+    /// catalog, `urn:kernel:actions` and `urn:kernel:validate` keep reading
+    /// [`describe`](Self::describe), so a placeholder row stays where a list of names is
+    /// what is asked for. Defaulted, like [`is_limiter`](Self::is_limiter) and
+    /// [`forwards`](Self::forwards), so no implementor changes a line. A view or named
+    /// request onto such a name forwards by name rather than wrapping it, and its `Meta`
+    /// still projects the target's `describe()`.
+    ///
+    /// ⚠ An overlay that wraps one endpoint (a governor, a retry) must forward this as it
+    /// forwards [`describe`](Self::describe); one that does not hides the failure again,
+    /// and its `Meta` answers the inner endpoint's placeholder. Core's own wrappers do.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use async_trait::async_trait;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     Capability, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, Iri,
+    ///     Kernel, Representation, Request, Result, Verb,
+    /// };
+    ///
+    /// /// A mounted name whose peer is down: it cannot say what the peer's door takes.
+    /// struct Pending;
+    /// #[async_trait]
+    /// impl Endpoint for Pending {
+    ///     async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+    ///         Err(Error::Unavailable("the peer is down".into()))
+    ///     }
+    ///     fn describe(&self) -> Description {
+    ///         Description::new("pending")
+    ///     }
+    ///     fn meta_failure(&self) -> Option<Error> {
+    ///         Some(Error::Unavailable("the peer is down, so its contract is unknown".into()))
+    ///     }
+    /// }
+    ///
+    /// let space = EndpointSpace::new().bind(Exact::new("urn:peer:door"), Pending);
+    /// let kernel = Kernel::new(Arc::new(space));
+    /// let name = Iri::parse("urn:peer:door").unwrap();
+    /// let meta = Request::new(Verb::Meta, name.clone());
+    /// let error = block_on(kernel.issue(meta, &Capability::root())).unwrap_err();
+    /// assert_eq!(error.to_string(), "unavailable: the peer is down, so its contract is unknown");
+    /// // The typed description, which the catalog's walks read, is still the placeholder.
+    /// assert_eq!(kernel.describe(&name).unwrap().id, "pending");
+    /// ```
+    fn meta_failure(&self) -> Option<crate::Error> {
+        None
+    }
+
     /// The corridor this endpoint confines its sub-requests to, when it is a
     /// [`Confine`](crate::Confine): the confined space's structure, named by the
     /// confinement's name. `None` — the default — for every endpoint that runs in

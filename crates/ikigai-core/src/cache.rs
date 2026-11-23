@@ -366,6 +366,26 @@ impl Offer {
     }
 }
 
+#[cfg(test)]
+impl Offer {
+    /// An offer of `stored` with no cache behind it, for a unit test that needs a
+    /// `Revalidate` to hold one.
+    pub(crate) fn for_test(stored: Representation<Body>) -> Self {
+        Offer {
+            stale: Arc::new(Stale {
+                validator: crate::repr::OriginValidator {
+                    etag: Some("\"t\"".to_string()),
+                    last_modified: None,
+                },
+                repr_type: stored.repr_type.clone(),
+            }),
+            stored: Mutex::new(stored),
+            stored_tick: 0,
+            consumed: 0,
+        }
+    }
+}
+
 /// [`ReprCache::serve_or_offer`]'s three outcomes.
 enum Served<T> {
     Hit(T),

@@ -27,6 +27,22 @@
     redeploy after the vocabulary release.
 
   Core stores nothing, and no default behavior changes.
+- **`Endpoint::meta_failure`, so a `Meta` can answer an error instead of its description**
+  (ledger #4079, the core half of #4050). Through 0.4.1 the kernel answered every `Meta` from
+  `Endpoint::describe()`, which cannot fail, so a mount whose peer was unreachable could only
+  describe itself as a placeholder that declares no arguments, as a success, and nothing could
+  retry it. A defaulted method, `fn meta_failure(&self) -> Option<Error> { None }`: an endpoint
+  that knows at resolve time it cannot state its contract answers `Some(error)` (typically
+  `Unavailable`), and that is the `Meta`'s answer. The kernel asks it after the limiter and the
+  capability floor (so an existence-sensitive endpoint still answers a caller it hides from as a
+  miss) and before the representation cache, so the failure is never cached and a description
+  cached earlier is not served while it is answered. It is traced like a failed invocation
+  (`FAILED_NOTE` with the error's kind). `Kernel::describe`, the catalog, `urn:kernel:actions`
+  and `urn:kernel:validate` keep reading `describe()`, so the placeholder row stays in those
+  lists. Core's wrappers of one endpoint (`Confine`, a `Threaded` or dynamic space's hit, and
+  the kernel's internal reference-settling, revalidation and projection wrappers) forward it;
+  an overlay outside core must forward it too, as it forwards `describe`. Tests in
+  `tests/meta_failure.rs`. No endpoint that leaves the method alone changes behavior.
 
 ### Pinned (no behavior change)
 
