@@ -6,7 +6,9 @@
 //! into totals, the only way a host can keep totals today. Part 2 times the window's own bookkeeping in isolation: a copy of
 //! `record_resolution` (one lock, one `String` of the target, one push and pop on a
 //! `VecDeque`) beside a copy-free stand-in for the proposed bounded top-K totals, alone and
-//! under 16-thread contention. Part 3 times a read of `urn:kernel:constraint` itself.
+//! under 16-thread contention, and the record as ledger #4096 built it (window and totals
+//! under one lock). Part 1c times whole resolutions from 16 threads on one kernel. Part 3
+//! times a read of `urn:kernel:constraint` itself, and of its `over=start` totals.
 //!
 //! Numbers vary by machine; the design note quotes the run it was written from.
 
@@ -143,6 +145,82 @@ fn record_window(window: &Mutex<VecDeque<Sample>>, target: &str, ms: u64, hit: b
     });
 }
 
+/// The record as ledger #4096 built it: the stamped window and, under the SAME lock, the
+/// totals row the floor memo already found for the endpoint (an index, not a name), with
+/// its counters and a per-reason-kind count. Copied from `record_resolution` and
+/// `ConstraintTotals::record`.
+#[derive(Default, Clone)]
+#[allow(dead_code)]
+#[repr(C, align(64))]
+struct RowCounters {
+    computed: u64,
+    stored: u64,
+    failed: u64,
+    hits: u64,
+    uncached_ms: u64,
+    failed_ms: u64,
+    not_stored: [u64; 12],
+}
+
+struct WindowAndTotals {
+    window: VecDeque<StampedSample>,
+    resolutions: u64,
+    rows: Vec<RowCounters>,
+}
+
+fn record_built(
+    state: &Mutex<WindowAndTotals>,
+    target: &str,
+    now: u64,
+    ms: u64,
+    outcome: u8,
+    row: u32,
+    reasons: u16,
+) {
+    let target = target.to_string();
+    let mut state = state.lock().unwrap();
+    if state.window.len() >= WINDOW {
+        state.window.pop_front();
+    }
+    state.window.push_back(StampedSample {
+        target,
+        timing: Some((now, ms)),
+        outcome,
+    });
+    state.resolutions += 1;
+    let Some(c) = state.rows.get_mut(row as usize) else {
+        return;
+    };
+    if outcome == 1 {
+        c.hits += 1;
+        return;
+    }
+    c.computed += 1;
+    c.uncached_ms += ms;
+    if outcome == 2 {
+        c.failed += 1;
+        c.failed_ms += ms;
+    } else if reasons == 0 {
+        c.stored += 1;
+    }
+    let mut reasons = reasons;
+    while reasons != 0 {
+        let kind = reasons.trailing_zeros() as usize;
+        if let Some(n) = c.not_stored.get_mut(kind) {
+            *n += 1;
+        }
+        reasons &= reasons - 1;
+    }
+}
+
+fn built_state() -> WindowAndTotals {
+    WindowAndTotals {
+        window: VecDeque::with_capacity(WINDOW),
+        resolutions: 0,
+        rows: vec![RowCounters::default(); 32],
+    }
+}
+
 /// A stand-in for option (b): per-target cumulative (uncached ms, uncached count, cached
 /// count), bounded to `TOP_K` names with a Space-Saving replacement of the lightest entry
 /// when a new name arrives at a full table. A name already present costs a hash lookup and
@@ -265,6 +343,23 @@ fn main() {
         },
     );
 
+    println!("part 1c: whole resolutions, 16 threads on one Kernel (wall time per op)");
+    let shared = Arc::new(kernel());
+    {
+        let (k, r) = (Arc::clone(&shared), volatile.clone());
+        let root = root.clone();
+        contended("issue, volatile endpoint", 16, 50_000, move |_| {
+            black_box(block_on(k.issue(r.clone(), &root)).unwrap());
+        });
+    }
+    {
+        let (k, r) = (Arc::clone(&shared), kept.clone());
+        let root = root.clone();
+        contended("issue, cacheable endpoint (cache hit)", 16, 50_000, move |_| {
+            black_box(block_on(k.issue(r.clone(), &root)).unwrap());
+        });
+    }
+
     println!("part 2: the bookkeeping alone, one thread");
     let names: Vec<String> = (0..1024).map(|i| format!("urn:measure:item:{i}")).collect();
     let few: Vec<String> = (0..32).map(|i| format!("urn:measure:item:{i}")).collect();
@@ -275,6 +370,18 @@ fn main() {
     let stamped = Mutex::new(VecDeque::with_capacity(WINDOW));
     per_op("window: stamped sample with outcome (#4095)", n, |i| {
         record_stamped(&stamped, &few[(i % 32) as usize], i, i % 7, (i % 3) as u8)
+    });
+    let built = Mutex::new(built_state());
+    per_op("window + totals as built (#4096), one lock", n, |i| {
+        record_built(
+            &built,
+            &few[(i % 32) as usize],
+            i,
+            i % 7,
+            (i % 3) as u8,
+            (i % 32) as u32,
+            if i % 5 == 0 { 1 } else { 0 },
+        )
     });
     let totals = Mutex::new(Totals::default());
     per_op("totals (b): 32 names, all resident", n, |i| {
@@ -309,6 +416,26 @@ fn main() {
             move |i| record_stamped(&stamped, &f[(i % 32) as usize], i, i % 7, (i % 3) as u8),
         );
     }
+    {
+        let built = Arc::new(Mutex::new(built_state()));
+        let f = Arc::clone(&few);
+        contended(
+            "window + totals as built (#4096), one lock",
+            16,
+            50_000,
+            move |i| {
+                record_built(
+                    &built,
+                    &f[(i % 32) as usize],
+                    i,
+                    i % 7,
+                    (i % 3) as u8,
+                    (i % 32) as u32,
+                    if i % 5 == 0 { 1 } else { 0 },
+                )
+            },
+        );
+    }
     let totals = Arc::new(Mutex::new(Totals::default()));
     {
         let (t, f) = (Arc::clone(&totals), Arc::clone(&few));
@@ -328,6 +455,14 @@ fn main() {
     per_op("issue urn:kernel:constraint, text face", 20_000, |_| {
         black_box(block_on(k.issue(read.clone(), &root)).unwrap());
     });
+    let start = read
+        .clone()
+        .with_arg("over", ikigai_core::ArgRef::Inline(b"start".to_vec()));
+    per_op("issue urn:kernel:constraint over=start, text face", 20_000, |_| {
+        black_box(block_on(k.issue(start.clone(), &root)).unwrap());
+    });
     let text = block_on(k.issue(read.clone(), &root)).unwrap();
     println!("\n{}", String::from_utf8_lossy(&text.bytes));
+    let totals = block_on(k.issue(start, &root)).unwrap();
+    println!("{}", String::from_utf8_lossy(&totals.bytes));
 }

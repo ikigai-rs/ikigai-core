@@ -2,7 +2,9 @@
 
 **Status:** design, 2026-11-23 (ledger #4091). The two changes to recording in section 4
 (count failures, stamp samples) are built (ledger #4095); section 1 describes the window
-before them. Nothing else here is built. The measurement
+before them. The totals of option (b) and the `over=start` face are built (ledger #4096,
+`crates/ikigai-core/src/constraint.rs`), and the measurement crate now times them too.
+The host sampler (steps 1 and 4 of section 9) is not built here. The measurement
 behind section 2 lives beside this note in
 [`constraint-history/measure/`](constraint-history/measure/), outside the workspace, and
 changes no code in the crates. The code is the spec where the two differ.
@@ -459,7 +461,12 @@ dependency outside the organization is written up in the owning ikigai-rs reposi
 - **Whether `over=start` or a separate operation.** An argument keeps one description and
   one capability, and adds one value to document. A separate `urn:kernel:throughput` would
   keep `constraint` exactly as it is. This note prefers the argument, and the first
-  implementation item decides.
+  implementation item decides. *Decided (ledger #4096): the argument.* That item also
+  found that an endpoint's `Arc` address alone does not identify it: a dynamic space and
+  a throttle governor wrap the endpoint in a fresh `Arc` on every resolution, which would
+  make one row per request and fill K within 256 requests. So an address the kernel has
+  not seen is matched to a row by its name (id and shape) before a row is made, and the
+  rows are bounded by distinct names, not allocations.
 - **Retention** of samples is ikigai-log's policy. A pass needs one week. A trend across
   releases needs months, and a sample is small.
 - **Self time.** Recording a composite's time minus its children's would remove step 1 of the

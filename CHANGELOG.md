@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Added
+
+- **`urn:kernel:constraint over=start`: the totals since the kernel started** (ledger
+  #4096; `docs/design/constraint-history.md`, build step 3). One row per endpoint and target
+  shape: computed count, of which stored and of which failed, cache hits, uncached and
+  failed milliseconds (inclusive of sub-requests), and a count per reason an answer was not
+  stored, in the kinds `urn:kernel:uncached` names (`declared`, `dependency`, `policy`, …).
+  Per kernel, the start time on its clock and the total resolutions recorded. Every count
+  only grows, so a host's sampler subtracts two readings and loses nothing; a different
+  start time is a restart. A row is found by the endpoint that computed the answer and named
+  once by its `describe().id` and the target's shape, the IRI with each captured template
+  value replaced by `{name}` (`urn:file:{path}`): no argument or template value is
+  recorded. A cache hit credits the row that computed the entry, which each entry now
+  carries (one `u32`). At most 256 rows; past that, new endpoints are counted in one
+  `(other)` row, and nothing is evicted. Updated under the window's lock, with no second
+  lock. Same capability (`urn:cap:kernel:inspect`), both faces, every row listed,
+  uncacheable. `over=window` is the default, and the window's answer is unchanged.
+  Vocabulary: `ik:ConstraintTotals`, `ik:totalResolutions`, `ik:kernelStartedMillis`,
+  `ik:totalsRow`, `ik:endpointId`, `ik:targetShape`, `ik:storedCallCount`, `ik:notStored`,
+  `ik:reasonKind`, `ik:count`, `ik:foldedEndpointCount`, and for the samples a host writes,
+  `ik:ConstraintSample`, `ik:sampledHost`, `ik:sampleSource`, `ik:kernelStarted`,
+  `ik:sampleSince`, `ik:sampleUntil`, `ik:sampleResolutions`, `ik:sampleRow` and
+  `ik:meanUncachedMillis`; `context.jsonld` regenerated.
+
 ### Fixed
 
 - `urn:kernel:constraint` now records a resolution that failed (ledger #4095). The

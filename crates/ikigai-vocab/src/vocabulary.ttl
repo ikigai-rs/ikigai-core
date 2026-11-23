@@ -858,7 +858,7 @@ ik:currentConstraint a rdf:Property ;
 
 ik:ConstraintTarget a rdfs:Class ;
     rdfs:label "ConstraintTarget" ;
-    rdfs:comment "One target of an ik:ConstraintWindow: the resource requested (ik:constraintResource), its rank (ik:order, from 1), how often it was resolved in the window and how often the cache served it (ik:callCount, ik:cachedCallCount, ik:uncachedCallCount, ik:cachedPercent), how many of its resolutions failed (ik:failedCallCount), and its uncached time (ik:uncachedMillis) and the part of it spent failing (ik:failedMillis) when the kernel has a clock." .
+    rdfs:comment "One target of an ik:ConstraintWindow: the resource requested (ik:constraintResource), its rank (ik:order, from 1), how often it was resolved in the window and how often the cache served it (ik:callCount, ik:cachedCallCount, ik:uncachedCallCount, ik:cachedPercent), how many of its resolutions failed (ik:failedCallCount), and its uncached time (ik:uncachedMillis) and the part of it spent failing (ik:failedMillis) when the kernel has a clock. Also one row of an ik:ConstraintTotals or an ik:ConstraintSample: there it counts an endpoint at a target shape (ik:endpointId, ik:targetShape) rather than a resource, over the kernel's life or a sample's interval, and the counts are read over that span instead of the window." .
 
 ik:constraintResource a rdf:Property ;
     rdfs:domain ik:ConstraintTarget ;
@@ -907,6 +907,125 @@ ik:failedMillis a rdf:Property ;
     rdfs:range xsd:nonNegativeInteger ;
     rdfs:label "failedMillis" ;
     rdfs:comment "How much of the target's uncached time over the window was spent on resolutions that failed, in milliseconds, by the kernel's clock. A part of ik:uncachedMillis. Absent on a kernel with no clock." .
+
+# ---- the constraint's totals and samples of them (ledger #4096) ---------------
+# docs/design/constraint-history.md, section 4: `urn:kernel:constraint over=start`
+# answers an ik:ConstraintTotals; a host's sampler writes the difference of two
+# readings as an ik:ConstraintSample. The rows of both are ik:ConstraintTarget.
+
+ik:ConstraintTotals a rdfs:Class ;
+    rdfs:label "ConstraintTotals" ;
+    rdfs:comment "The answer of urn:kernel:constraint over=start: counters since the kernel started, one row per endpoint and target shape (ik:totalsRow, each an ik:ConstraintTarget ranked by ik:order), with how many resolutions the kernel recorded (ik:totalResolutions) and when it started (ik:kernelStartedMillis). Every counter only grows, so the difference of two readings with the same start is exactly what happened between them; a different start is a restart. Every row is listed. The rows stop at 256; past that, new endpoints are counted in one row named (other)." .
+
+ik:totalResolutions a rdf:Property ;
+    rdfs:domain ik:ConstraintTotals ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "totalResolutions" ;
+    rdfs:comment "How many resolutions the kernel has recorded since it started, cached, computed or failed: the count urn:kernel:constraint over=start's rows divide." .
+
+ik:kernelStartedMillis a rdf:Property ;
+    rdfs:domain ik:ConstraintTotals ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "kernelStartedMillis" ;
+    rdfs:comment "When the kernel started, in milliseconds by its clock: what tells a restart from a quiet interval, since a restarted kernel's totals begin again from zero. Absent on a kernel with no clock." .
+
+ik:totalsRow a rdf:Property ;
+    rdfs:domain ik:ConstraintTotals ;
+    rdfs:range ik:ConstraintTarget ;
+    rdfs:label "totalsRow" ;
+    rdfs:comment "A row of an ik:ConstraintTotals: one endpoint at one target shape. Multi-valued; every row is listed, not only the heaviest, because a reader subtracting two readings needs them all." .
+
+ik:endpointId a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range xsd:string ;
+    rdfs:label "endpointId" ;
+    rdfs:comment "The id of the endpoint a totals or sample row counts, as its description states it (ik:id): a name the module's author wrote, which names code, not people. The row that counts the endpoints past the bound is named (other)." .
+
+ik:targetShape a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range xsd:string ;
+    rdfs:label "targetShape" ;
+    rdfs:comment "The name a totals or sample row's endpoint was first resolved under, with each value its template captured replaced by the variable's name in braces: urn:file:{path}, never the path. A name bound exactly captures nothing and is given as it is bound. No argument or template value is recorded. Given as (unshaped) when a captured value does not appear in the name as it was written." .
+
+ik:storedCallCount a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "storedCallCount" ;
+    rdfs:comment "How many of a row's computed answers (ik:uncachedCallCount) the cache then stored. Computed answers that were stored point at cuts, eviction or short expiry; ones that were not stored point at the reasons in ik:notStored." .
+
+ik:notStored a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range rdfs:Resource ;
+    rdfs:label "notStored" ;
+    rdfs:comment "One reason a row's computed answers were not stored, with how many (a node with ik:reasonKind and ik:count). Multi-valued, one per reason kind that occurred; an answer with two reasons counts under both." .
+
+ik:reasonKind a rdf:Property ;
+    rdfs:range xsd:string ;
+    rdfs:label "reasonKind" ;
+    rdfs:comment "The kind of reason an answer was not stored, in the words urn:kernel:uncached uses without the names it attaches: declared, mounted, dependency, denied, failed, one-shot content, upstream, one-shot body, no-clock, expired, cut-in-flight or policy." .
+
+ik:count a rdf:Property ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "count" ;
+    rdfs:comment "How many times something was counted. On an ik:notStored reason: how many of the row's computed answers were not stored for that reason." .
+
+ik:foldedEndpointCount a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "foldedEndpointCount" ;
+    rdfs:comment "On the (other) row of an ik:ConstraintTotals: how many distinct endpoint and shape names it counts, because they arrived after the rows were full. Exact up to 4096, and stays at 4096 past it." .
+
+ik:ConstraintSample a rdfs:Class ;
+    rdfs:label "ConstraintSample" ;
+    rdfs:comment "One recorded interval of a host's constraint: the difference of two readings of urn:kernel:constraint on the same kernel (ik:sampleSource totals), or one reading of its window (ik:sampleSource window), written by the host's sampler. Names the host (ik:sampledHost), the kernel's start (ik:kernelStarted), the interval (ik:sampleSince, ik:sampleUntil), the resolutions in it (ik:sampleResolutions) and the rows whose counts rose (ik:sampleRow, ranked by ik:order by uncached time in the interval). Counts endpoints and shapes, never arguments or principals." .
+
+ik:sampledHost a rdf:Property ;
+    rdfs:domain ik:ConstraintSample ;
+    rdfs:range xsd:string ;
+    rdfs:label "sampledHost" ;
+    rdfs:comment "The host's own configured name, never a machine's user or a person." .
+
+ik:sampleSource a rdf:Property ;
+    rdfs:domain ik:ConstraintSample ;
+    rdfs:range xsd:string ;
+    rdfs:label "sampleSource" ;
+    rdfs:comment "What the sample was read from: totals (the difference of two readings of the totals, which loses nothing) or window (one reading of the rolling window, which sees only its last resolutions and its heaviest few targets)." .
+
+ik:kernelStarted a rdf:Property ;
+    rdfs:domain ik:ConstraintSample ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "kernelStarted" ;
+    rdfs:comment "When the sampled kernel started: with ik:sampledHost, what names the series of samples one kernel's counters make. For a window sample, when the sampler first read it." .
+
+ik:sampleSince a rdf:Property ;
+    rdfs:domain ik:ConstraintSample ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "sampleSince" ;
+    rdfs:comment "When the sample's interval began: the time of the previous reading." .
+
+ik:sampleUntil a rdf:Property ;
+    rdfs:domain ik:ConstraintSample ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "sampleUntil" ;
+    rdfs:comment "When the sample's interval ended: the time of this reading." .
+
+ik:sampleResolutions a rdf:Property ;
+    rdfs:domain ik:ConstraintSample ;
+    rdfs:range xsd:nonNegativeInteger ;
+    rdfs:label "sampleResolutions" ;
+    rdfs:comment "How many resolutions the kernel recorded in the interval: the difference of ik:totalResolutions between the two readings." .
+
+ik:sampleRow a rdf:Property ;
+    rdfs:domain ik:ConstraintSample ;
+    rdfs:range ik:ConstraintTarget ;
+    rdfs:label "sampleRow" ;
+    rdfs:comment "A row of a sample: one endpoint at one target shape whose computed or failed count rose in the interval, with the differences of its counts. Multi-valued." .
+
+ik:meanUncachedMillis a rdf:Property ;
+    rdfs:domain ik:ConstraintTarget ;
+    rdfs:range xsd:decimal ;
+    rdfs:label "meanUncachedMillis" ;
+    rdfs:comment "A sample row's uncached time divided by its computed count (ik:uncachedMillis over ik:uncachedCallCount), written for readers that do not divide. A mean hides a bimodal endpoint; compare it across intervals." .
 
 # ---- events (the calendar/agenda event graph) --------------------------------
 # Events themselves are typed with the iCalendar vocabulary
