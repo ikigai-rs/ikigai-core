@@ -1094,6 +1094,18 @@ pub struct ActionSpec {
     /// contract IRI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resend: Option<Resend>,
+    /// How long, in seconds, a keyed resend is remembered (ledger #4056): a repeat under the
+    /// same [`Resend::Key`] within this window answers the first answer, and one after it is
+    /// a new request. At least 24 hours (86400). Set with
+    /// [`resend_window`](Self::resend_window); meaningful only beside [`Resend::Key`].
+    /// `ik:resendWindow`. Omitted from serialized output when absent, and an action that
+    /// declares none keeps its contract IRI.
+    #[serde(
+        default,
+        rename = "resend_window",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub resend_window_secs: Option<u64>,
 }
 
 impl ActionSpec {
@@ -1111,7 +1123,31 @@ impl ActionSpec {
             failures: Failures::Unstated,
             existence_sensitive: false,
             resend: None,
+            resend_window_secs: None,
         }
+    }
+
+    /// Publish how long a keyed resend is remembered (builder, ledger #4056): a repeat under
+    /// the same idempotency key within `window` answers the first answer, and one after it
+    /// is a new request. Whole seconds (a fraction is dropped). Declare it beside
+    /// [`resend_safe_with_key`](Self::resend_safe_with_key); validation refuses a window
+    /// without a key, or one shorter than 24 hours
+    /// ([`MIN_WINDOW`](crate::idempotency::MIN_WINDOW)).
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use ikigai_core::{ActionSpec, ArgSpec, Verb};
+    ///
+    /// let append = ActionSpec::new(Verb::Sink)
+    ///     .input(ArgSpec::new("idempotency-key").optional())
+    ///     .resend_safe_with_key("idempotency-key")
+    ///     .resend_window(Duration::from_secs(48 * 3600));
+    /// assert_eq!(serde_json::to_value(&append).unwrap()["resend_window"], 172800);
+    /// assert_eq!(append.resend_window_secs, Some(172800));
+    /// ```
+    pub fn resend_window(mut self, window: std::time::Duration) -> Self {
+        self.resend_window_secs = Some(window.as_secs());
+        self
     }
 
     /// Declare a resend of this verb safe whatever the call carries (builder):
@@ -1897,6 +1933,7 @@ impl Description {
                         failures: self.failures.clone(),
                         existence_sensitive: self.existence_sensitive,
                         resend: None,
+                        resend_window_secs: None,
                     })
             })
             .collect()
@@ -2335,6 +2372,25 @@ fn validate_relations(id: &str, verb: Option<Verb>, spec: &ActionSpec) -> crate:
             return refuse(
                 "resend",
                 format!("a resend is safe under the key `{key}`, which is not a declared input"),
+            );
+        }
+    }
+    if let Some(secs) = spec.resend_window_secs {
+        if !matches!(spec.resend, Some(Resend::Key(_))) {
+            return refuse(
+                "resend_window",
+                format!(
+                    "a resend window of {secs} seconds needs an idempotency key: declare one with resend_safe_with_key"
+                ),
+            );
+        }
+        let min = crate::idempotency::MIN_WINDOW.as_secs();
+        if secs < min {
+            return refuse(
+                "resend_window",
+                format!(
+                    "a resend window is at least {min} seconds (24 hours), and this one is {secs}"
+                ),
             );
         }
     }

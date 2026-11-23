@@ -21,7 +21,8 @@ template](https://github.com/mgifford/ACCESSIBILITY.md) (MIT).
   `as`: …``, `no endpoint resolved for urn:…`, `denied: …`, `not found: …`, `gone: …`, `gave up after 9 attempts over 120000 ms: …`; and the
   `Display` of the smaller error types (`AliasRefusal` and `AliasParseError` in `alias.rs`,
   `DeclarationError` in `declare.rs`, `TemplateError` in `grammar.rs`, `CacheConfigError`,
-  `ContentIdError`, `PrincipalError`, `DynamicRefusal`).
+  `ContentIdError`, `PrincipalError`, `DynamicRefusal`, and `IdempotencyKeyError` and
+  `ReplayDecodeError` in `idempotency.rs`).
 - **Validation messages**: each `Violation` of `urn:kernel:validate` (`src/check.rs`) carries a
   message that names the inputs it is about (for example, which of a group is required, and what
   was given).

@@ -10,6 +10,50 @@
   for the essence, parameter names, and charset, and replaces builder parameters by
   case-insensitive name. Representation content IDs follow the corrected canonical spelling.
 
+## 0.4.2 (2026-11-22)
+
+### Added
+
+- **An idempotency-key toolkit for `Sink` endpoints** (ledger #4056, from the research note
+  `docs/research/sink-idempotency.md`, section 5.5). A new public module
+  `ikigai_core::idempotency`:
+  - `IdempotencyKey` (also at the crate root): the `idempotency-key=` token, parsed with the
+    ledger key's alphabet (ASCII letters, digits, `-._~:`, 1 to 256 characters), with
+    `from_request`, `mismatch` (an `InvalidArgument` saying the key "was used for a different
+    request") and `in_flight` (a `RetryAfter`).
+  - `Request::fingerprint_without(arg)`: the request's id with one argument left out, equal to
+    the id of the same request without it, and independent of argument order.
+  - `Replay`, `ReplayScope` and `ReplayOutcome`: the record an endpoint stores in the same store
+    update as its write (scope per endpoint, principal and token; fingerprint; media type;
+    bytes; outcome; recorded at), with a stable, versioned byte encoding (`to_bytes` /
+    `from_bytes`) that a test pins. Only a success and a post-decision `Conflict`, `NotFound`
+    or `Gone` are recorded.
+  - `ActionSpec::resend_window(Duration)` and the field `resend_window_secs` (JSON
+    `resend_window`), projected on the catalog's contract node as `ik:resendWindow`, an
+    `xsd:duration`. Validation refuses a window without `Resend::Key` or under 24 hours. Fed
+    into the contract digest only when declared (tail byte `6`), so every existing contract
+    keeps its IRI.
+  - The vocabulary term `ik:resendWindow`, and the JSON-LD context regenerated. `/ns` needs a
+    redeploy after the vocabulary release.
+
+  Core stores nothing, and no default behavior changes.
+- **`Endpoint::meta_failure`, so a `Meta` can answer an error instead of its description**
+  (ledger #4079, the core half of #4050). Through 0.4.1 the kernel answered every `Meta` from
+  `Endpoint::describe()`, which cannot fail, so a mount whose peer was unreachable could only
+  describe itself as a placeholder that declares no arguments, as a success, and nothing could
+  retry it. A defaulted method, `fn meta_failure(&self) -> Option<Error> { None }`: an endpoint
+  that knows at resolve time it cannot state its contract answers `Some(error)` (typically
+  `Unavailable`), and that is the `Meta`'s answer. The kernel asks it after the limiter and the
+  capability floor (so an existence-sensitive endpoint still answers a caller it hides from as a
+  miss) and before the representation cache, so the failure is never cached and a description
+  cached earlier is not served while it is answered. It is traced like a failed invocation
+  (`FAILED_NOTE` with the error's kind). `Kernel::describe`, the catalog, `urn:kernel:actions`
+  and `urn:kernel:validate` keep reading `describe()`, so the placeholder row stays in those
+  lists. Core's wrappers of one endpoint (`Confine`, a `Threaded` or dynamic space's hit, and
+  the kernel's internal reference-settling, revalidation and projection wrappers) forward it;
+  an overlay outside core must forward it too, as it forwards `describe`. Tests in
+  `tests/meta_failure.rs`. No endpoint that leaves the method alone changes behavior.
+
 ### Pinned (no behavior change)
 
 - **A result built on an admission refusal is never cached, at any depth** (ledger #3917).

@@ -307,6 +307,11 @@ ik:resendKey a rdf:Property ;
     rdfs:label "resendKey" ;
     rdfs:comment "On an ik:Action node (or an ik:ActionMatch in urn:kernel:actions): a RESEND of this action is safe ONLY when the call gives this input, its idempotency key, with a non-blank value (a keyed ledger append answers existing on a replay and writes nothing); without it a resend is not safe. The value is the key's input node. At most one, and never beside ik:resendSafe (ledger #3381)." .
 
+ik:resendWindow a rdf:Property ;
+    rdfs:range xsd:duration ;
+    rdfs:label "resendWindow" ;
+    rdfs:comment "On an ik:Action node that says ik:resendKey: how long the endpoint remembers a call under its idempotency key. A repeat within the window, with the same request apart from the key, answers the first answer byte for byte and writes nothing; one with a different request is refused as an invalid argument; one after the window is a new request. At least 24 hours (PT86400S). Written only when declared; absent, the endpoint does not say how long, so a client must not rely on a late resend. Part of the contract: a declared window is a different content-addressed contract, and one that declares none keeps its IRI (ledger #4056)." .
+
 ik:FailureClass a rdfs:Class ;
     rdfs:label "FailureClass" ;
     rdfs:comment "Who may repeat a failure, and when: one of seven closed classes, each a retry rule. An error's class is a pure function of its kind (ikigai_core::Error::class). The value of ik:mayFail." .

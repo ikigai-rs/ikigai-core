@@ -498,6 +498,10 @@
       "@id": "ik:resendSafe",
       "@type": "xsd:boolean"
     },
+    "resendWindow": {
+      "@id": "ik:resendWindow",
+      "@type": "xsd:duration"
+    },
     "resolveAt": "ik:resolveAt",
     "resolvedAs": {
       "@id": "ik:resolvedAs",

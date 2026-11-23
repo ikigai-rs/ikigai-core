@@ -660,6 +660,13 @@ pub fn to_turtle(description: &Description) -> String {
             )),
             Some(_) => {}
         }
+        // How long a keyed resend is remembered (ledger #4056), as an xsd:duration in whole
+        // seconds. Nothing when undeclared.
+        if let Some(secs) = action.resend_window_secs {
+            preds.push(format!(
+                "ik:resendWindow \"PT{secs}S\"^^<http://www.w3.org/2001/XMLSchema#duration>"
+            ));
+        }
         for input in &action.inputs {
             let name = name_fragment(&input.name);
             let node_iri = format!("{action_iri}:input:{name}");
@@ -1064,6 +1071,35 @@ mod tests {
         };
         assert_eq!((count("resendSafe"), count("resendKey")), (1, 1));
         assert!(!to_turtle(&sample()).contains("ik:resend"));
+    }
+
+    /// Ledger #4056: a declared resend window says `ik:resendWindow` on the keyed action's
+    /// node, an `xsd:duration` in whole seconds, and nothing when undeclared.
+    #[test]
+    fn projects_the_resend_window_on_the_keyed_action_node() {
+        use ikigai_core::{ActionSpec, ArgSpec};
+        let d = Description::new("ledger").action(
+            ActionSpec::new(Verb::Sink)
+                .input(ArgSpec::new("idempotency-key").optional())
+                .resend_safe_with_key("idempotency-key")
+                .resend_window(std::time::Duration::from_secs(86_400)),
+        );
+        assert!(d.validate().is_ok());
+        let ttl = to_turtle(&d);
+        let triples: Vec<_> = oxttl::TurtleParser::new()
+            .for_reader(ttl.as_bytes())
+            .map(|t| t.expect("parses"))
+            .collect();
+        let window: Vec<_> = triples
+            .iter()
+            .filter(|t| t.predicate.as_str() == format!("{NS}resendWindow"))
+            .collect();
+        assert_eq!(window.len(), 1, "{ttl}");
+        assert_eq!(
+            window[0].object.to_string(),
+            "\"PT86400S\"^^<http://www.w3.org/2001/XMLSchema#duration>"
+        );
+        assert!(!to_turtle(&sample()).contains("resendWindow"));
     }
 
     /// Ledger #2512: an input a named request fixes says `ik:fixed "…"` on the endpoint's

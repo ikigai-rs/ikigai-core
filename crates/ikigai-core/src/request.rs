@@ -117,12 +117,37 @@ impl Request {
     /// assert_eq!((key.request, key.capability, key.scope), (a.id(), 7, 0));
     /// ```
     pub fn id(&self) -> RequestId {
+        self.id_skipping(None)
+    }
+
+    /// This request's identity with the argument `arg` left out: exactly the
+    /// [`id`](Self::id) of the same request without that argument (ledger #4056). The
+    /// fingerprint an idempotency record stores, so a retry under the same token matches it
+    /// and a different request under that token does not. Like `id`, it does not depend on
+    /// the order the arguments were given in; the principal is not part of it.
+    ///
+    /// ```
+    /// use ikigai_core::{ArgRef, Iri, Request, Verb};
+    ///
+    /// let base = Request::new(Verb::Sink, Iri::parse("urn:ledger:main").unwrap())
+    ///     .with_arg("title", ArgRef::Inline(b"a bug".to_vec()));
+    /// let keyed = base.clone().with_arg("idempotency-key", ArgRef::Inline(b"k1".to_vec()));
+    /// assert_eq!(keyed.fingerprint_without("idempotency-key"), base.id());
+    /// assert_ne!(keyed.id(), base.id());
+    /// ```
+    pub fn fingerprint_without(&self, arg: &str) -> RequestId {
+        self.id_skipping(Some(arg))
+    }
+
+    fn id_skipping(&self, skip: Option<&str>) -> RequestId {
         let mut h = blake3::Hasher::new();
         feed_str(&mut h, "ikigai.request.v0");
         feed_u8(&mut h, self.verb.code());
         feed_str(&mut h, self.target.as_str());
-        h.update(&(self.args.len() as u64).to_le_bytes());
-        for (name, arg) in &self.args {
+        let kept = |name: &str| skip != Some(name);
+        let count = self.args.keys().filter(|n| kept(n)).count();
+        h.update(&(count as u64).to_le_bytes());
+        for (name, arg) in self.args.iter().filter(|(n, _)| kept(n)) {
             feed_str(&mut h, name);
             match arg {
                 ArgRef::Reference(iri) => {
@@ -149,6 +174,11 @@ impl Request {
 pub struct RequestId(ContentId);
 
 impl RequestId {
+    /// A request id from its content address (decoding a stored record).
+    pub(crate) fn from_content_id(id: ContentId) -> Self {
+        RequestId(id)
+    }
+
     /// The underlying content address.
     pub fn content_id(&self) -> ContentId {
         self.0
