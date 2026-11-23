@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Media type comparison now reads complete quoted parameter values, including escaped
+  characters, and checks every occurrence of shared parameter names in either order.
+  `ReprType` prints parameter values with quoting and escaping when needed, folds ASCII case
+  for the essence, parameter names, and charset, and replaces builder parameters by
+  case-insensitive name. Representation content IDs follow the corrected canonical spelling.
+
 ## 0.4.2 (2026-11-22)
 
 ### Added

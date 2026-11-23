@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::body::Body;
 use crate::content::ContentId;
 use crate::hashing::{feed_bytes, feed_str};
+use crate::media::{media_type_essence, push_parameter_value};
 
 /// A **golden thread**: a named validity token a cached representation can depend
 /// on.
@@ -78,20 +79,39 @@ impl ReprType {
         }
     }
 
-    /// Add or replace a parameter (builder style).
+    /// Add or replace a parameter by case-insensitive name (builder style).
     pub fn with_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.params.insert(key.into(), value.into());
+        let mut key = key.into();
+        key.make_ascii_lowercase();
+        self.params
+            .retain(|name, _| !name.eq_ignore_ascii_case(&key));
+        self.params.insert(key, value.into());
         self
     }
 
-    /// The canonical string form: `media/type;k=v;...` with sorted params.
+    /// The canonical string form with sorted parameters and quoted values where needed.
+    /// The essence and the names and charset value from `params` are ASCII-lowercased.
     pub fn canonical(&self) -> String {
-        let mut s = self.media_type.clone();
-        for (k, v) in &self.params {
+        let mut s = media_type_essence(&self.media_type);
+        // Preserve any parameters already included in the media_type field.
+        if let Some(start) = self.media_type.find(';') {
+            s.push_str(&self.media_type[start..]);
+        }
+        let mut params: Vec<_> = self
+            .params
+            .iter()
+            .map(|(name, value)| (name.to_ascii_lowercase(), value))
+            .collect();
+        params.sort_unstable();
+        for (name, value) in params {
             s.push(';');
-            s.push_str(k);
+            s.push_str(&name);
             s.push('=');
-            s.push_str(v);
+            if name == "charset" {
+                push_parameter_value(&mut s, &value.to_ascii_lowercase());
+            } else {
+                push_parameter_value(&mut s, value);
+            }
         }
         s
     }
@@ -698,6 +718,40 @@ mod tests {
             .with_param("charset", "utf-8")
             .with_param("boundary", "x");
         assert_eq!(t.canonical(), "text/plain;boundary=x;charset=utf-8");
+    }
+
+    #[test]
+    fn canonical_quotes_and_escapes_parameter_values() {
+        let media = ReprType::new("text/example")
+            .with_param("empty", "")
+            .with_param("label", "Red; Blue")
+            .with_param("marker", "A\"B\\C");
+        let expected = r#"text/example;empty="";label="Red; Blue";marker="A\"B\\C""#;
+        assert_eq!(media.to_string(), expected);
+        assert!(crate::media_types_agree(
+            &media.to_string(),
+            r#"Text/Example; MARKER="A\"B\\\C"; LABEL="Red; Blue"; EMPTY="""#,
+        ));
+    }
+
+    #[test]
+    fn canonical_media_type_and_parameter_names_are_case_insensitive() {
+        let mixed = ReprType::new("Text/Example")
+            .with_param("CHARSET", "UTF-8")
+            .with_param("LABEL", "Red");
+        let lower = ReprType::new("text/example")
+            .with_param("charset", "utf-8")
+            .with_param("label", "Red");
+        assert_eq!(mixed.canonical(), lower.canonical());
+    }
+
+    #[test]
+    fn with_param_replaces_the_same_name_across_case() {
+        let media = ReprType::new("text/example")
+            .with_param("LEVEL", "one")
+            .with_param("level", "two");
+        assert_eq!(media.canonical(), "text/example;level=two");
+        assert_eq!(media.params.len(), 1);
     }
 
     #[test]
