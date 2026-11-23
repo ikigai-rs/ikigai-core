@@ -513,12 +513,24 @@ fn constraint() -> Description {
              ranks with computed time, and is shown as failed. Both faces state the \
              window's span on the kernel's clock. The Turtle face states the \
              ik:ConstraintWindow and each listed target as an ik:ConstraintTarget in rank \
-             order.",
+             order. With `over=start`, the totals since the kernel started instead: every \
+             row, one per endpoint and target shape (each captured template value replaced \
+             by its variable's name, never the value), with computed, stored, failed and \
+             cached counts, uncached and failed milliseconds, and a count per reason an \
+             answer was not stored; the kernel's start time and total resolutions; at most \
+             256 rows, then one (other) row. Every count only grows, so two readings \
+             subtract. The Turtle face states an ik:ConstraintTotals.",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)
         .requires(CAP_INSPECT)
         .input(face())
+        .input(
+            ArgSpec::new("over")
+                .summary("span: the recent window, or since the kernel started")
+                .one_of(["window", "start"])
+                .default_value("window"),
+        )
         .output(TEXT_PLAIN_UTF8)
         .output(TEXT_TURTLE)
 }

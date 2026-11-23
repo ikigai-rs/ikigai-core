@@ -780,7 +780,9 @@ pub struct Kernel {
     /// for `urn:kernel:constraint` — the kernel's throughput readout. Always-on like
     /// the cache; bounded to [`CONSTRAINT_WINDOW`]. `urn:kernel:*` introspection
     /// requests are not recorded (they short-circuit before the resolution body).
-    constraint: Mutex<VecDeque<ResolutionSample>>,
+    /// Beside it, under the same lock, the totals since the kernel started that
+    /// `urn:kernel:constraint over=start` reads (ledger #4096; `crate::constraint`).
+    constraint: Mutex<ConstraintState>,
     /// The installed logical-rewrite table, if any. The kernel holds it (rather than
     /// only wrapping the root space in an [`Alias`]) because canonicalization must
     /// happen BEFORE the cache key and the auto-cut are computed from the target —
@@ -1439,6 +1441,9 @@ struct Admission {
     readers: Readers,
     /// How this verb settles a by-reference argument ([`Floor::references`], ledger #2511).
     references: Option<Arc<References>>,
+    /// The endpoint's constraint-totals row (ledger #4096), kept beside its floor;
+    /// [`NO_ROW`](crate::constraint::NO_ROW) when the memo was not asked to assign one.
+    row: u32,
 }
 
 /// How long a contract read from a description may be kept, from its
@@ -1551,6 +1556,12 @@ struct FloorEntry {
     /// When the description's [`ContractCaching`] bound runs out, on the kernel's
     /// clock; `None` for a static contract, kept until the bindings change.
     until: Option<Time>,
+    /// The endpoint's constraint-totals row (ledger #4096), so a stably bound endpoint
+    /// finds its row with its floor; [`NO_ROW`](crate::constraint::NO_ROW) until a
+    /// resolution assigns one (the cache-status probe describes without assigning).
+    row: std::sync::atomic::AtomicU32,
+    /// The description's id, which names the row when it is assigned after the entry.
+    id: Box<str>,
 }
 
 impl FloorMemo {
@@ -1571,7 +1582,7 @@ impl FloorMemo {
         capability: &Capability,
         now: Option<Time>,
     ) -> Option<String> {
-        self.admit(endpoint, request, &Bindings::new(), capability, now)
+        self.admit(endpoint, request, &Bindings::new(), capability, now, None)
             .lacking
             .into_iter()
             .next()
@@ -1581,6 +1592,10 @@ impl FloorMemo {
     /// (`Floor::defaults`), which the kernel injects before the request's identity is
     /// taken (ledger #19), and the declared binding defaults the resolution's `bindings`
     /// lack (`Floor::binding_defaults`, ledger #1547). One memo read for all three.
+    ///
+    /// And the endpoint's constraint-totals row (ledger #4096): `assign` gives it from
+    /// the description's id the first time, and the memo keeps it beside the floor.
+    /// `None` assigns nothing (the cache-status probe, which resolves no request).
     fn admit(
         &self,
         endpoint: &Arc<dyn Endpoint>,
@@ -1588,9 +1603,11 @@ impl FloorMemo {
         bindings: &Bindings,
         capability: &Capability,
         now: Option<Time>,
+        assign: Option<&dyn Fn(&str) -> u32>,
     ) -> Admission {
-        let admission = |floor: &Floor, keep: Keep| -> Admission {
+        let admission = |floor: &Floor, keep: Keep, row: u32| -> Admission {
             Admission {
+                row,
                 declared: floor.declared_defaults(request.verb).cloned(),
                 readers: floor.body_readers(request.verb),
                 references: floor.references(request.verb),
@@ -1629,7 +1646,14 @@ impl FloorMemo {
                 };
                 if fresh {
                     let keep = entry.until.map_or(Keep::UntilRebind, Keep::Until);
-                    return admission(&entry.floor, keep);
+                    let mut row = entry.row.load(Ordering::Relaxed);
+                    if row == crate::constraint::NO_ROW {
+                        if let Some(assign) = assign {
+                            row = assign(&entry.id);
+                            entry.row.store(row, Ordering::Relaxed);
+                        }
+                    }
+                    return admission(&entry.floor, keep, row);
                 }
                 stale = true;
             }
@@ -1637,7 +1661,8 @@ impl FloorMemo {
         let description = endpoint.describe();
         let floor = Floor::of(&description);
         let keep = Keep::of(description.contract_caching, now);
-        let lacking = admission(&floor, keep);
+        let row = assign.map_or(crate::constraint::NO_ROW, |assign| assign(&description.id));
+        let lacking = admission(&floor, keep, row);
         let until = match keep {
             Keep::UntilRebind => None,
             Keep::Until(deadline) => Some(deadline),
@@ -1671,6 +1696,8 @@ impl FloorMemo {
                 endpoint: Arc::downgrade(endpoint),
                 floor,
                 until,
+                row: std::sync::atomic::AtomicU32::new(row),
+                id: description.id.into_boxed_str(),
             },
         );
         lacking
@@ -1861,6 +1888,14 @@ impl ProbeMemo {
 /// How many recent resolutions `urn:kernel:constraint` aggregates over.
 const CONSTRAINT_WINDOW: usize = 512;
 
+/// What the one constraint lock guards: the rolling window (`over=window`) and the
+/// totals since the kernel started (`over=start`, ledger #4096). One lock, so the
+/// totals add no second lock to a resolution: the design's bar.
+struct ConstraintState {
+    window: VecDeque<ResolutionSample>,
+    totals: crate::constraint::ConstraintTotals,
+}
+
 /// One sampled resolution behind `urn:kernel:constraint`: which resource, when it
 /// ended and how long it took (per the injected [`Clock`]; `None` if the kernel has
 /// none), and how it ended (a hit consumes no constraint capacity; a failure does).
@@ -2008,7 +2043,10 @@ impl Kernel {
             tracing: AtomicBool::new(false),
             span_counter: Arc::new(AtomicU64::new(0)),
             scheduler: None,
-            constraint: Mutex::new(VecDeque::new()),
+            constraint: Mutex::new(ConstraintState {
+                window: VecDeque::new(),
+                totals: crate::constraint::ConstraintTotals::new(),
+            }),
             aliases: None,
             subclass_closure: BTreeMap::new(),
             max_depth: DEFAULT_MAX_DEPTH,
@@ -2636,6 +2674,13 @@ impl Kernel {
     /// and `Never` caching are unaffected — so a kernel only consults a clock when a
     /// host opts into time-bounded freshness (e.g. mounting the HTTP client module).
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        // The totals' start time (ledger #4096): a kernel starts when it can tell the
+        // time, so a reading with a different start than the last one is a restart.
+        self.constraint
+            .get_mut()
+            .expect("constraint lock")
+            .totals
+            .started = Some(clock.now());
         self.clock = Some(clock);
         self
     }
@@ -3102,8 +3147,19 @@ impl Kernel {
             parent,
             started,
             scope,
+            row,
             ..
         } = hit;
+        // A hit credits the row that computed the entry; one the host stored through the
+        // public `store` names none, and the endpoint that would have computed it is
+        // credited instead.
+        let credited = |stored: u32| {
+            crate::constraint::Tally::row(if stored == crate::constraint::NO_ROW {
+                row
+            } else {
+                stored
+            })
+        };
         if self.cache.has_failures() {
             if let Some(cached) = self.cache.get_failure(&key, started, incoming, room) {
                 if trace.is_some() {
@@ -3119,7 +3175,7 @@ impl Kernel {
                         trace, request, capability, span, parent, started, true, notes, scope,
                     );
                 }
-                self.record_resolution(request, started, Outcome::Cached);
+                self.record_resolution(request, started, Outcome::Cached, credited(cached.row));
                 if let Some(failed) = failed {
                     *failed = Dependencies {
                         expiry: Expiry::At(cached.until),
@@ -3131,7 +3187,7 @@ impl Kernel {
                 return Some(Err(cached.error));
             }
         }
-        let (cached, consumed) = self
+        let (cached, consumed, stored_row) = self
             .cache
             .get_or_offer(&key, started, buffer, incoming, offer, room)?;
         // A hit at depth `d` for an entry that consumed δ reaches `d + δ`: what the
@@ -3158,7 +3214,7 @@ impl Kernel {
             hit.provenance(),
             scope,
         );
-        self.record_resolution(request, started, Outcome::Cached);
+        self.record_resolution(request, started, Outcome::Cached, credited(stored_row));
         Some(Ok(cached))
     }
 
@@ -3169,14 +3225,14 @@ impl Kernel {
     fn failed_dependencies(
         &self,
         invocation: &Invocation<'_>,
-        key: Option<CacheKey>,
+        key: Option<(CacheKey, u32)>,
         error: &Error,
         taken: crate::cache::CutSnapshot,
         incoming: Option<&Provenance>,
     ) -> Dependencies {
         let request = invocation.request;
         let mut depended = invocation.failure_dependencies(&request.target);
-        if let Some(key) = key {
+        if let Some((key, row)) = key {
             let stated = invocation
                 .stated_failure_expiry()
                 .map(|until| self.on_kernel_clock(until, invocation.scope().now()));
@@ -3189,6 +3245,7 @@ impl Kernel {
                 taken,
                 incoming,
                 depended.reach.saturating_sub(invocation.depth()),
+                row,
             );
         }
         if let Some(until) = depended.failure_until {
@@ -3214,6 +3271,7 @@ impl Kernel {
         taken: crate::cache::CutSnapshot,
         incoming: Option<&Provenance>,
         consumed: u32,
+        row: u32,
     ) -> Option<Time> {
         let stated = stated?;
         // A denial has no thread to cut; a miss already hangs one; a depth refusal is
@@ -3266,6 +3324,7 @@ impl Kernel {
                 taken,
                 incoming,
                 consumed,
+                row,
             )
             .ok()?;
         Some(until)
@@ -3361,7 +3420,17 @@ impl Kernel {
     /// time is `now − started`, and `now` is kept as the sample's end stamp (only when
     /// the kernel has a clock). A cache hit is logged but its elapsed is left out of
     /// the constraint total; a failure's is counted in it (ledger #4095).
-    fn record_resolution(&self, request: &Request, started: Option<Time>, outcome: Outcome) {
+    ///
+    /// The same lock adds the resolution to the totals since the kernel started
+    /// (ledger #4096): `tally` names the row it credits and, for a computed answer,
+    /// whether it was stored and why not.
+    fn record_resolution(
+        &self,
+        request: &Request,
+        started: Option<Time>,
+        outcome: Outcome,
+        tally: crate::constraint::Tally,
+    ) {
         let timing = match (started, self.clock.as_ref()) {
             (Some(start), Some(clock)) => {
                 let ended = clock.now();
@@ -3372,15 +3441,52 @@ impl Kernel {
             }
             _ => None,
         };
-        let mut window = self.constraint.lock().expect("constraint lock");
+        let ended = match outcome {
+            Outcome::Computed => crate::constraint::Ended::Computed,
+            Outcome::Cached => crate::constraint::Ended::Cached,
+            Outcome::Failed => crate::constraint::Ended::Failed,
+        };
+        let target = request.target.as_str().to_string();
+        let mut state = self.constraint.lock().expect("constraint lock");
+        let window = &mut state.window;
         if window.len() >= CONSTRAINT_WINDOW {
             window.pop_front();
         }
         window.push_back(ResolutionSample {
-            target: request.target.as_str().to_string(),
+            target,
             timing,
             outcome,
         });
+        state
+            .totals
+            .record(ended, timing.map(|timing| timing.elapsed_ms), tally);
+    }
+
+    /// The totals row of `endpoint` (ledger #4096; `crate::constraint`), named by
+    /// `endpoint_id` and the shape of `target` under `bindings` if it is new. The shape
+    /// is computed outside the lock: only an endpoint the index has not seen pays for it.
+    fn constraint_row(
+        &self,
+        endpoint: &Arc<dyn Endpoint>,
+        endpoint_id: &str,
+        target: &Iri,
+        bindings: &Bindings,
+    ) -> u32 {
+        if let Some(row) = self
+            .constraint
+            .lock()
+            .expect("constraint lock")
+            .totals
+            .row_at(endpoint)
+        {
+            return row;
+        }
+        let shape = crate::constraint::target_shape(target.as_str(), bindings);
+        self.constraint
+            .lock()
+            .expect("constraint lock")
+            .totals
+            .row_for(endpoint, endpoint_id, shape)
     }
 
     /// The recording scope for the kernel's globally-installed tracer, if one is
@@ -4532,6 +4638,8 @@ impl Kernel {
                 incoming.as_ref(),
                 // A kernel operation issues no sub-request: it consumes no depth.
                 0,
+                // Nor is it a constraint: introspection, not throughput.
+                crate::constraint::NO_ROW,
             ) {
                 // A chain-keyed entry names its chain in the readout, as a scoped
                 // resolution's does; every other kernel operation is keyed with
@@ -4884,12 +4992,16 @@ impl Kernel {
             keep,
             readers,
             references,
+            row,
         } = self.floors.admit(
             &resolved.endpoint,
             &request,
             &resolved.bindings,
             capability,
             started,
+            Some(&|id: &str| {
+                self.constraint_row(&resolved.endpoint, id, &request.target, &resolved.bindings)
+            }),
         );
         // ★ EXISTENCE-SENSITIVE: a refusal that must not say the name is bound (ledger
         // #2176, UX record D28). The endpoint declared its existence sensitive for this
@@ -5035,6 +5147,7 @@ impl Kernel {
                 levels,
                 defaulted: &defaulted,
                 collected: &collected,
+                row,
             };
             let lookup = (key, buffer, incoming.as_ref(), &mut offer, &run, depth);
             if let Some(served) = self.served_from_cache(lookup, failed.as_deref_mut(), hit) {
@@ -5132,7 +5245,7 @@ impl Kernel {
                 Err(error) => {
                     let depended = self.failed_dependencies(
                         &invocation,
-                        cacheable_verb.then_some(key),
+                        cacheable_verb.then_some((key, row)),
                         &error,
                         taken,
                         incoming.as_ref(),
@@ -5190,7 +5303,12 @@ impl Kernel {
                     // spends 30 s computing, and the trace above already records it:
                     // the window records it too, as failed. One lock, on a path that
                     // has already failed.
-                    self.record_resolution(&request, started, Outcome::Failed);
+                    self.record_resolution(
+                        &request,
+                        started,
+                        Outcome::Failed,
+                        crate::constraint::Tally::row(row),
+                    );
                     return Err(error);
                 }
             };
@@ -5311,6 +5429,9 @@ impl Kernel {
         // only where `depth + consumed <= max_depth`. An answer of "still valid" to an
         // offer serves the offered computation's body, so it keeps that one's δ too.
         let consumed = (reach - depth).max(offer.as_ref().map_or(0, |offer| offer.consumed));
+        // What this computation adds to its totals row (ledger #4096): set below once
+        // the store has said whether it kept the answer, and why not.
+        let mut tally = crate::constraint::Tally::row(row);
         if cacheable_verb {
             match representation.expiry {
                 Expiry::Always => {
@@ -5353,15 +5474,20 @@ impl Kernel {
                     self.elapsed_since(started),
                     incoming.as_ref(),
                     consumed,
+                    row,
                 ) {
                     // Remember what the fingerprint meant, for the readout. Off the
                     // empty-chain path entirely: a plain `issue` never takes this lock.
-                    Ok(()) if !scope.is_empty() => self.remember_scope(key.scope, &scope),
-                    Ok(()) => {}
+                    Ok(()) if !scope.is_empty() => {
+                        tally.stored = true;
+                        self.remember_scope(key.scope, &scope);
+                    }
+                    Ok(()) => tally.stored = true,
                     Err(declined) => why.declined = Some(declined),
                 }
             }
             if !why.is_empty() {
+                tally.reasons = why.kinds();
                 if trace.is_some() {
                     trace_notes.push((UNCACHED_NOTE.to_string(), why.to_string()));
                 }
@@ -5392,7 +5518,7 @@ impl Kernel {
             trace_notes,
             &scope,
         );
-        self.record_resolution(&request, started, Outcome::Computed);
+        self.record_resolution(&request, started, Outcome::Computed, tally);
 
         // A successful mutating verb invalidates its target: cut the thread named
         // after it, so cached `Source`s of that resource — and composites over
@@ -6049,9 +6175,25 @@ impl Kernel {
             // window. Cache hits are excluded from the total (they cost nothing); the
             // heaviest target is the bottleneck (Goldratt step 1). Both faces rank the
             // same rows; live state, uncacheable on both.
+            //
+            // `over=start` (ledger #4096): the totals since the kernel started, every row,
+            // per endpoint and target shape (`crate::constraint`). `over=window`, the
+            // default, is the window, unchanged. Same capability, same faces.
             ("constraint", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
                 let turtle = kernel_face(request)?;
+                if constraint_over_start(request)? {
+                    let reading = self
+                        .constraint
+                        .lock()
+                        .expect("constraint lock")
+                        .totals
+                        .reading(self.clock.is_some());
+                    if turtle {
+                        return Ok(kernel_turtle(crate::inspect_graph::totals_turtle(&reading)));
+                    }
+                    return Ok(kernel_text(crate::inspect_graph::totals_text(&reading)));
+                }
                 let (span, rows) = self.constraint_rows();
                 if turtle {
                     return Ok(kernel_turtle(crate::inspect_graph::constraint_turtle(
@@ -6397,7 +6539,8 @@ impl Kernel {
         crate::inspect_graph::ConstraintSpan,
         Vec<crate::inspect_graph::ConstraintRow>,
     ) {
-        let window = self.constraint.lock().expect("constraint lock");
+        let state = self.constraint.lock().expect("constraint lock");
+        let window = &state.window;
         // The span: the window is in recording order, but concurrent resolutions can
         // record out of end order, so take the least and greatest stamp, not the ends.
         let mut stamps = window
@@ -6567,6 +6710,7 @@ impl Kernel {
                                     &resolved.bindings,
                                     capability,
                                     now,
+                                    None,
                                 )
                                 .defaults;
                             prefill(&mut probed, &defaults);
@@ -6806,6 +6950,9 @@ struct Hit<'x> {
     levels: &'x LevelPath,
     defaulted: &'x [String],
     collected: &'x [String],
+    /// The resolved endpoint's constraint-totals row (ledger #4096): what a hit on an
+    /// entry that names no computing row (one the host stored itself) credits.
+    row: u32,
 }
 
 impl Hit<'_> {
@@ -7089,6 +7236,23 @@ fn kernel_arg<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
     match request.args.get(name) {
         Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes).ok(),
         _ => None,
+    }
+}
+
+/// Which span `urn:kernel:constraint` is asked over (ledger #4096): `true` for
+/// `over=start`, the totals since the kernel started; `false` for `over=window`, the
+/// default. Anything else is refused, naming the values it takes.
+fn constraint_over_start(request: &Request) -> Result<bool> {
+    match kernel_arg(request, "over").map(str::trim) {
+        None | Some("window") => Ok(false),
+        Some("start") => Ok(true),
+        Some(other) => Err(Error::InvalidArgument {
+            name: "over".to_string(),
+            detail: format!(
+                "`{other}` is not a span of `{}` (window, start)",
+                request.target.as_str()
+            ),
+        }),
     }
 }
 

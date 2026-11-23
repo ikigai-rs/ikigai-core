@@ -114,6 +114,7 @@ mod capability;
 mod check;
 pub mod config;
 mod confine;
+mod constraint;
 mod content;
 mod content_store;
 mod contract;
