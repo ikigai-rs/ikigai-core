@@ -67,6 +67,12 @@ fn kernel() -> Kernel {
             FnEndpoint::new("kept", |_| Ok(body("k").cacheable())),
         )
         .bind(
+            Exact::new("urn:measure:failing"),
+            FnEndpoint::new("failing", |_| {
+                Err(ikigai_core::Error::Endpoint("measured failure".to_string()))
+            }),
+        )
+        .bind(
             UriTemplate::parse("urn:measure:item:{n}").unwrap(),
             FnEndpoint::new("item", |_| Ok(body("i"))),
         );
@@ -97,6 +103,33 @@ struct Sample {
 }
 
 const WINDOW: usize = 512;
+
+/// The sample as ledger #4095 records it: the end stamp beside the elapsed time, from the
+/// same clock read, and an outcome in place of the hit flag.
+#[allow(dead_code)]
+struct StampedSample {
+    target: String,
+    timing: Option<(u64, u64)>,
+    outcome: u8,
+}
+
+fn record_stamped(
+    window: &Mutex<VecDeque<StampedSample>>,
+    target: &str,
+    now: u64,
+    ms: u64,
+    outcome: u8,
+) {
+    let mut window = window.lock().unwrap();
+    if window.len() >= WINDOW {
+        window.pop_front();
+    }
+    window.push_back(StampedSample {
+        target: target.to_string(),
+        timing: Some((now, ms)),
+        outcome,
+    });
+}
 
 fn record_window(window: &Mutex<VecDeque<Sample>>, target: &str, ms: u64, hit: bool) {
     let mut window = window.lock().unwrap();
@@ -197,6 +230,10 @@ fn main() {
     per_op("issue, cacheable endpoint (cache hit)", n, |_| {
         black_box(block_on(k.issue(kept.clone(), &root)).unwrap());
     });
+    let failing = Request::new(Verb::Source, Iri::parse("urn:measure:failing").unwrap());
+    per_op("issue, failing endpoint (fails every time)", n, |_| {
+        black_box(block_on(k.issue(failing.clone(), &root)).unwrap_err());
+    });
     let items: Vec<Request> = (0..1024)
         .map(|i| {
             Request::new(
@@ -235,6 +272,10 @@ fn main() {
     per_op("window: record_resolution copy (today)", n, |i| {
         record_window(&window, &few[(i % 32) as usize], i % 7, i % 3 == 0)
     });
+    let stamped = Mutex::new(VecDeque::with_capacity(WINDOW));
+    per_op("window: stamped sample with outcome (#4095)", n, |i| {
+        record_stamped(&stamped, &few[(i % 32) as usize], i, i % 7, (i % 3) as u8)
+    });
     let totals = Mutex::new(Totals::default());
     per_op("totals (b): 32 names, all resident", n, |i| {
         record_totals(&totals, &few[(i % 32) as usize], i % 7, i % 3 == 0)
@@ -256,6 +297,16 @@ fn main() {
             16,
             50_000,
             move |i| record_window(&w, &f[(i % 32) as usize], i % 7, i % 3 == 0),
+        );
+    }
+    {
+        let stamped = Arc::new(Mutex::new(VecDeque::with_capacity(WINDOW)));
+        let f = Arc::clone(&few);
+        contended(
+            "window: stamped sample with outcome (#4095)",
+            16,
+            50_000,
+            move |i| record_stamped(&stamped, &f[(i % 32) as usize], i, i % 7, (i % 3) as u8),
         );
     }
     let totals = Arc::new(Mutex::new(Totals::default()));

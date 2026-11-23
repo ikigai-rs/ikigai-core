@@ -1861,13 +1861,34 @@ impl ProbeMemo {
 /// How many recent resolutions `urn:kernel:constraint` aggregates over.
 const CONSTRAINT_WINDOW: usize = 512;
 
-/// One sampled resolution behind `urn:kernel:constraint`: which resource, how long
-/// it took to compute (per the injected [`Clock`]; `None` if the kernel has none),
-/// and whether the cache served it (a hit consumes no constraint capacity).
+/// One sampled resolution behind `urn:kernel:constraint`: which resource, when it
+/// ended and how long it took (per the injected [`Clock`]; `None` if the kernel has
+/// none), and how it ended (a hit consumes no constraint capacity; a failure does).
 struct ResolutionSample {
     target: String,
-    elapsed_ms: Option<u64>,
-    cache_hit: bool,
+    timing: Option<SampleTiming>,
+    outcome: Outcome,
+}
+
+/// When a sampled resolution ended and how long it took, both from the one clock read
+/// `elapsed_since` already made (ledger #4095): the end stamp is what lets the window
+/// state its span, and it adds 8 bytes to a sample and no clock read.
+#[derive(Clone, Copy)]
+struct SampleTiming {
+    ended: Time,
+    elapsed_ms: u64,
+}
+
+/// How a sampled resolution ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// An endpoint computed an answer.
+    Computed,
+    /// The cache served it; no capacity spent.
+    Cached,
+    /// An endpoint ran and failed (ledger #4095). Its time is capacity spent, exactly
+    /// as a computed answer's is, so it ranks with computed time.
+    Failed,
 }
 
 /// Where one request sits in a resolution, beyond the request and its capability:
@@ -3098,7 +3119,7 @@ impl Kernel {
                         trace, request, capability, span, parent, started, true, notes, scope,
                     );
                 }
-                self.record_resolution(request, started, true);
+                self.record_resolution(request, started, Outcome::Cached);
                 if let Some(failed) = failed {
                     *failed = Dependencies {
                         expiry: Expiry::At(cached.until),
@@ -3137,7 +3158,7 @@ impl Kernel {
             hit.provenance(),
             scope,
         );
-        self.record_resolution(request, started, true);
+        self.record_resolution(request, started, Outcome::Cached);
         Some(Ok(cached))
     }
 
@@ -3337,18 +3358,28 @@ impl Kernel {
 
     /// Record one resolution into the rolling constraint window (always-on, bounded
     /// to [`CONSTRAINT_WINDOW`]). `started` is the pre-resolution stamp; the elapsed
-    /// compute time is `now − started` (only when the kernel has a clock). A cache
-    /// hit is logged but its elapsed is left out of the constraint total.
-    fn record_resolution(&self, request: &Request, started: Option<Time>, cache_hit: bool) {
-        let elapsed_ms = self.elapsed_since(started);
+    /// time is `now − started`, and `now` is kept as the sample's end stamp (only when
+    /// the kernel has a clock). A cache hit is logged but its elapsed is left out of
+    /// the constraint total; a failure's is counted in it (ledger #4095).
+    fn record_resolution(&self, request: &Request, started: Option<Time>, outcome: Outcome) {
+        let timing = match (started, self.clock.as_ref()) {
+            (Some(start), Some(clock)) => {
+                let ended = clock.now();
+                Some(SampleTiming {
+                    ended,
+                    elapsed_ms: ended.as_millis().saturating_sub(start.as_millis()),
+                })
+            }
+            _ => None,
+        };
         let mut window = self.constraint.lock().expect("constraint lock");
         if window.len() >= CONSTRAINT_WINDOW {
             window.pop_front();
         }
         window.push_back(ResolutionSample {
             target: request.target.as_str().to_string(),
-            elapsed_ms,
-            cache_hit,
+            timing,
+            outcome,
         });
     }
 
@@ -5154,6 +5185,12 @@ impl Kernel {
                     // A failed revalidation forgets the stale entry, as the lookup did
                     // before revalidation existed.
                     self.cache.discard(&key, &offer);
+                    // ★ A FAILURE SPENDS CAPACITY (ledger #4095). An endpoint that
+                    // spends 30 s timing out is the constraint as surely as one that
+                    // spends 30 s computing, and the trace above already records it:
+                    // the window records it too, as failed. One lock, on a path that
+                    // has already failed.
+                    self.record_resolution(&request, started, Outcome::Failed);
                     return Err(error);
                 }
             };
@@ -5355,7 +5392,7 @@ impl Kernel {
             trace_notes,
             &scope,
         );
-        self.record_resolution(&request, started, false);
+        self.record_resolution(&request, started, Outcome::Computed);
 
         // A successful mutating verb invalidates its target: cut the thread named
         // after it, so cached `Source`s of that resource — and composites over
@@ -6015,14 +6052,14 @@ impl Kernel {
             ("constraint", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
                 let turtle = kernel_face(request)?;
-                let (total, rows) = self.constraint_rows();
+                let (span, rows) = self.constraint_rows();
                 if turtle {
                     return Ok(kernel_turtle(crate::inspect_graph::constraint_turtle(
-                        total, &rows,
+                        &span, &rows,
                     )));
                 }
                 Ok(kernel_text(crate::inspect_graph::constraint_text(
-                    total, &rows,
+                    &span, &rows,
                 )))
             }
             // The kernel's own catalog: every bound endpoint's `describe()` as one RDF
@@ -6350,54 +6387,70 @@ impl Kernel {
         }
     }
 
-    /// Aggregate the constraint window by target, heaviest first, with how many
-    /// resolutions the window holds. Ranks by uncached compute time when the kernel
-    /// has a clock, else by uncached call count — so the readout is meaningful even on
-    /// a clockless kernel.
-    fn constraint_rows(&self) -> (usize, Vec<crate::inspect_graph::ConstraintRow>) {
+    /// Aggregate the constraint window by target, heaviest first, with what the window
+    /// holds as a whole. Ranks by uncached time (computed and failed alike: both spent
+    /// capacity, ledger #4095) when the kernel has a clock, else by uncached call count —
+    /// so the readout is meaningful even on a clockless kernel.
+    fn constraint_rows(
+        &self,
+    ) -> (
+        crate::inspect_graph::ConstraintSpan,
+        Vec<crate::inspect_graph::ConstraintRow>,
+    ) {
         let window = self.constraint.lock().expect("constraint lock");
-        let total = window.len();
-        // Per target: (uncached_ms, calls, cached, any_timed).
-        let mut by_target: HashMap<&str, (u64, usize, usize, bool)> = HashMap::new();
+        // The span: the window is in recording order, but concurrent resolutions can
+        // record out of end order, so take the least and greatest stamp, not the ends.
+        let mut stamps = window
+            .iter()
+            .filter_map(|sample| sample.timing.map(|timing| timing.ended.as_millis()));
+        let first = stamps.next().map(|stamp| {
+            stamps.fold((stamp, stamp), |(lo, hi), stamp| {
+                (lo.min(stamp), hi.max(stamp))
+            })
+        });
+        let span = crate::inspect_graph::ConstraintSpan {
+            resolutions: window.len(),
+            first_ms: first.map(|(lo, _)| lo),
+            last_ms: first.map(|(_, hi)| hi),
+        };
+        let mut by_target: HashMap<&str, crate::inspect_graph::ConstraintRow> = HashMap::new();
         for sample in window.iter() {
-            let row = by_target.entry(&sample.target).or_default();
-            row.1 += 1;
-            if sample.cache_hit {
-                row.2 += 1;
+            let row = by_target.entry(&sample.target).or_insert_with(|| {
+                crate::inspect_graph::ConstraintRow {
+                    target: sample.target.clone(),
+                    ..Default::default()
+                }
+            });
+            row.calls += 1;
+            match sample.outcome {
+                Outcome::Cached => row.cached += 1,
+                Outcome::Failed => row.failed += 1,
+                Outcome::Computed => {}
             }
-            if let Some(ms) = sample.elapsed_ms {
-                row.3 = true;
-                if !sample.cache_hit {
-                    row.0 += ms;
+            if let Some(timing) = sample.timing {
+                row.timed = true;
+                match sample.outcome {
+                    Outcome::Cached => {}
+                    Outcome::Computed => row.uncached_ms += timing.elapsed_ms,
+                    Outcome::Failed => {
+                        row.uncached_ms += timing.elapsed_ms;
+                        row.failed_ms += timing.elapsed_ms;
+                    }
                 }
             }
         }
-        let mut rows: Vec<_> = by_target.into_iter().collect();
+        let mut rows: Vec<_> = by_target.into_values().collect();
         // Heaviest uncached time first; break ties by uncached call count, then by
         // name. The window is a `HashMap`, reseeded per kernel, so without the last
         // key two equal targets came out in a different order per process (the text
         // face reordered, the Turtle face a different `ik:order`).
         rows.sort_by(|a, b| {
-            let a_uncached = a.1 .1 - a.1 .2;
-            let b_uncached = b.1 .1 - b.1 .2;
-            b.1 .0
-                .cmp(&a.1 .0)
-                .then(b_uncached.cmp(&a_uncached))
-                .then(a.0.cmp(b.0))
+            b.uncached_ms
+                .cmp(&a.uncached_ms)
+                .then(b.uncached().cmp(&a.uncached()))
+                .then(a.target.cmp(&b.target))
         });
-        let rows = rows
-            .into_iter()
-            .map(|(target, (uncached_ms, calls, cached, timed))| {
-                crate::inspect_graph::ConstraintRow {
-                    target: target.to_string(),
-                    uncached_ms,
-                    calls,
-                    cached,
-                    timed,
-                }
-            })
-            .collect();
-        (total, rows)
+        (span, rows)
     }
 
     /// The number of representations currently cached (diagnostics/tests).
@@ -10249,7 +10302,10 @@ mod tests {
         let stepping = clock.clone();
         let quick = FnEndpoint::new("quick", move |_inv: &Invocation<'_>| {
             stepping.set(stepping.now().as_millis() + 5);
-            Ok(Representation::new(ReprType::new("text/plain"), b"q".to_vec()))
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                b"q".to_vec(),
+            ))
         });
         let space = EndpointSpace::new()
             .bind(Exact::new("urn:test:timeout"), timeout)
@@ -10275,14 +10331,23 @@ mod tests {
         assert!(text.contains("last 2 resolutions"), "{text}");
         let timeout_at = text.find("urn:test:timeout").expect("failure listed");
         let quick_at = text.find("urn:test:quick").expect("success listed");
-        assert!(timeout_at < quick_at, "failed time ranks with computed:\n{text}");
+        assert!(
+            timeout_at < quick_at,
+            "failed time ranks with computed:\n{text}"
+        );
         assert!(text.contains("urn:test:timeout   ← constraint"), "{text}");
         assert!(
             text.contains("30000ms uncached · 1 calls · 0% cached · 1 failed (30000ms)"),
             "{text}"
         );
         // The span: the first sample ended at 1005, the last at 31005.
-        assert!(text.contains("samples 1005ms to 31005ms"), "{text}");
+        assert!(
+            text.starts_with(
+                "constraint  (last 2 resolutions) · samples from 1005ms to 31005ms on the \
+                 kernel's clock\n"
+            ),
+            "{text}"
+        );
 
         let face = Request::new(Verb::Source, iri("urn:kernel:constraint"))
             .with_arg("as", ArgRef::Inline(b"text/turtle".to_vec()));

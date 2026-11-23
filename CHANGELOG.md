@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- `urn:kernel:constraint` now records a resolution that failed (ledger #4095). The
+  invocation's error arm returned before the window recorded anything, so an endpoint that
+  spent 30 s timing out was invisible to the constraint while the trace showed it. A failed
+  resolution now counts as uncached, and its time ranks with computed time, since both
+  spent capacity. `ik:uncachedCallCount` and `ik:uncachedMillis` include failures, and
+  each row states the failed part: `ik:failedCallCount`, and `ik:failedMillis` on a
+  kernel with a clock. The text face appends `· N failed (Mms)` to a row with failures.
+  Each sample now keeps the end time `elapsed_since` already read (8 bytes, no extra clock
+  read), and both faces state the window's span: `· samples from …ms to …ms on the
+  kernel's clock` after the text face's header, on the same line, and `ik:windowFirstSampleMillis` and `ik:windowLastSampleMillis` in the
+  Turtle face. Every existing line and term is unchanged in form. Vocabulary: four new
+  terms in `vocabulary.ttl`, with `context.jsonld` regenerated.
+
 - Media type comparison now reads complete quoted parameter values, including escaped
   characters, and checks every occurrence of shared parameter names in either order.
   `ReprType` prints parameter values with quoting and escaping when needed, folds ASCII case

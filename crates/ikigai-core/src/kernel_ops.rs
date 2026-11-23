@@ -509,8 +509,11 @@ fn constraint() -> Description {
             "Where the constraint is right now: the resources that consumed the most \
              *uncached* compute over the recent window, heaviest first. Cache hits are \
              excluded — they cost nothing — so the leader is the bottleneck (Goldratt step \
-             one). The Turtle face states the ik:ConstraintWindow and each listed target as \
-             an ik:ConstraintTarget in rank order.",
+             one). A resolution that failed spent capacity too: it counts as uncached, \
+             ranks with computed time, and is shown as failed. Both faces state the \
+             window's span on the kernel's clock. The Turtle face states the \
+             ik:ConstraintWindow and each listed target as an ik:ConstraintTarget in rank \
+             order.",
         )
         .verb(Verb::Source)
         .verb(Verb::Meta)
