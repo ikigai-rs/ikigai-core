@@ -54,6 +54,28 @@ The wire deadline reconstruction claim has not been independently verified here:
 referenced wire source was not available at a public `ikigai-wire` repository. The
 follow-up must inspect the actual door and its protocol before changing it.
 
+**Inspected in #1916.** The door is the `ikigai-wire` crate inside `ikigai-rs/ikigai-cli`
+(wire v9, cli PR 556), read at cli
+[`7086789`](https://github.com/ikigai-rs/ikigai-cli/tree/70867899ec6545bed7b84b0faf3dcd5fff526011).
+The protocol already carries a remaining duration, never an instant: `IssueWith`'s
+`time_left_ms` is the caller's `Invocation::time_left`, rounded up to whole milliseconds
+([`lib.rs` L325-L363](https://github.com/ikigai-rs/ikigai-cli/blob/70867899ec6545bed7b84b0faf3dcd5fff526011/crates/ikigai-wire/src/lib.rs#L325-L363)).
+The claim holds on both ends. Every server rebuilds the deadline as
+`IssueWith::issue_context(SystemClock.now())`
+([ipc](https://github.com/ikigai-rs/ikigai-cli/blob/70867899ec6545bed7b84b0faf3dcd5fff526011/crates/ikigai-ipc/src/lib.rs#L2187),
+[ipc stream](https://github.com/ikigai-rs/ikigai-cli/blob/70867899ec6545bed7b84b0faf3dcd5fff526011/crates/ikigai-ipc/src/stream.rs#L62),
+[quic](https://github.com/ikigai-rs/ikigai-cli/blob/70867899ec6545bed7b84b0faf3dcd5fff526011/crates/ikigai-quic/src/lib.rs#L1374),
+[quic stream](https://github.com/ikigai-rs/ikigai-cli/blob/70867899ec6545bed7b84b0faf3dcd5fff526011/crates/ikigai-quic/src/stream.rs#L143)),
+so under a kernel on another clock the deadline lands on the wrong epoch, and on a
+clockless kernel it is set but cannot be measured. The client sends `time_left`, which was
+corridor-sensitive and is `None` on a clockless kernel, so a bounded run there crossed as
+an unbounded one. Core now gives the door what it needs: `Kernel::deadline_in(left)` (the
+receiving kernel's clock, `Unsupported { verb: None, .. }` without one) on the server, and
+`Invocation::time_left_checked()` (refuses a deadline with no clock) on the client.
+Transit time is not subtracted, since the protocol cannot measure it, so it extends the
+budget by the one-way latency; `IssueContext::with_not_after` only shortens, so any local
+deadline is kept. The cli change belongs to its own pull request.
+
 ## Proposed contract
 
 Expose `Kernel::now() -> Option<Time>` and, if sharing the source is needed,
