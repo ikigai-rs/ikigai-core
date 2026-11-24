@@ -650,10 +650,12 @@ pub fn to_turtle(description: &Description) -> String {
             preds.push("ik:existenceSensitive true".to_string());
         }
         // Resend safety (ledger #3381): unconditional, or under the key, which is one of
-        // this contract's input nodes. Nothing when undeclared: not safe.
+        // this contract's input nodes, or never. Nothing when undeclared: the verb's default.
         match &action.resend {
             None => {}
             Some(ikigai_core::Resend::Safe) => preds.push("ik:resendSafe true".to_string()),
+            // Never safe (ledger #4063): a write, a Delete above all, that is not idempotent.
+            Some(ikigai_core::Resend::Unsafe) => preds.push("ik:resendSafe false".to_string()),
             Some(ikigai_core::Resend::Key(key)) => preds.push(format!(
                 "ik:resendKey <{action_iri}:input:{}>",
                 name_fragment(key)
@@ -1071,6 +1073,38 @@ mod tests {
         };
         assert_eq!((count("resendSafe"), count("resendKey")), (1, 1));
         assert!(!to_turtle(&sample()).contains("ik:resend"));
+    }
+
+    /// Ledger #4063: a Delete that is not idempotent says `ik:resendSafe false` on its
+    /// action node, a boolean literal that parses.
+    #[test]
+    fn projects_an_unsafe_delete_as_resend_safe_false() {
+        use ikigai_core::ActionSpec;
+        let d = Description::new("space")
+            .verb(Verb::Source)
+            .action(ActionSpec::new(Verb::Delete).resend_unsafe());
+        let ttl = to_turtle(&d);
+        let take = d
+            .action_specs()
+            .into_iter()
+            .find(|a| a.verb == Verb::Delete)
+            .unwrap()
+            .contract_iri(&d.id);
+        let triples: Vec<_> = oxttl::TurtleParser::new()
+            .for_reader(ttl.as_bytes())
+            .map(|t| t.expect("parses"))
+            .collect();
+        let said: Vec<String> = triples
+            .iter()
+            .filter(|t| t.predicate.as_str() == format!("{NS}resendSafe"))
+            .map(|t| format!("{} {}", t.subject, t.object))
+            .collect();
+        assert_eq!(
+            said,
+            [format!(
+                "<{take}> \"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+            )]
+        );
     }
 
     /// Ledger #4056: a declared resend window says `ik:resendWindow` on the keyed action's

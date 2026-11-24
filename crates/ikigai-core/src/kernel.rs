@@ -6382,6 +6382,10 @@ impl Kernel {
                                     crate::contract::encode_name(key)
                                 ));
                             }
+                            // Never safe (ledger #4063): a Delete that is not idempotent.
+                            Some(crate::describe::Resend::Unsafe) => {
+                                body.push_str(" ;\n    ik:resendSafe false");
+                            }
                         }
                         body.push_str(" .\n");
                     }
