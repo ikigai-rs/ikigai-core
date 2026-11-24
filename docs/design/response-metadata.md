@@ -1,6 +1,6 @@
 # Response metadata at the transport boundary
 
-**Status: proposal, not an implemented contract.** This note studies core at
+**Status: recommendation accepted by Brian, 2026-11-24 (an answer wrapper with typed stable facts and separately typed exchange effects, no general header map in core); not yet implemented.** Previously: proposal, not an implemented contract. This note studies core at
 [`1d11151`](https://github.com/ikigai-rs/ikigai-core/blob/1d111516aa7e390110a8ad1007e96576966eb90a/crates/ikigai-core/src/repr.rs#L251-L307)
 and the public CLI repository at
 [`ca3a50b`](https://github.com/ikigai-rs/ikigai-cli/blob/ca3a50b00943fc45990b131a10ca24f57ebaa963/crates/ikigai-web/src/entity.rs#L1-L32).
