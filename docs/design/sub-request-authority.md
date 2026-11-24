@@ -367,6 +367,33 @@ in that case is request-derived. What shipped, against the design above:
   host itself presents. Prefixes must be non-empty and disjoint (`GrantError::Overlaps`); a
   grant with no scopes is refused. Nothing is a pattern: a grant's scopes are exact tokens, held
   as any scoped capability holds them.
+- ★ **Given to the endpoints the host enumerated, not to a name prefix.** (Round 3 of the
+  review: the grant had followed `target.starts_with(prefix)`, so any endpoint the host tree
+  answered under the prefix received it.) When the table is built, the prefix selects the
+  root's own exact bindings under it (`Space::entries`: not a pattern, and not a binding a
+  mounted remote surfaced), and the kernel resolves each one then. A grant records each name
+  and the endpoint that answered it, and holds that `Arc`, so its address cannot be reused. At
+  dispatch the grant applies only when the endpoint the space answered with, before the
+  kernel wraps it, is that same endpoint, at that same canonical name. Everything else that
+  answers under the prefix gets no grant, and its delegated hop is `Denied`: a template or
+  fallback binding, a mounted peer, a door a dynamic space's sink swaps in later. A binding
+  whose identity cannot be established is refused when the table is built, so it is never
+  granted at dispatch. That covers a hit that captured template variables, one that reported
+  a rewrite, and a space that answers with a new endpoint each time it is asked (a mount's
+  forwarder, a dynamic space's threaded wrapper). The prefix is how the host writes the
+  table. Who acts under the grant is fixed by identity.
+- **On a segment boundary.** A prefix covers a name equal to it, or continuing it after a
+  `:` or `/` (the prefix's last character or the name's next one). `urn:dash` and `urn:dash:`
+  cover `urn:dash:prices` and `urn:dash/raw`. Neither covers `urn:dashboard-other:x`.
+  Disjointness uses the same rule, so `urn:dash` and `urn:dashboard` may both be granted.
+- **A scope is an exact token in core, and a subtree to the door that reads it.** Core
+  compares grant scopes as exact strings (`Capability::allows`), but the door decides what a
+  scope means. ikigai-fs reads `urn:cap:fs:read:<dir>` as the whole subtree under `<dir>`, so
+  a grant of one directory reaches every file under it. What keeps a delegation narrow is
+  therefore what the module passes INTO the delegated sub-request. Pass typed arguments the
+  module controls (a fixed file name, a parsed date), never a caller's string interpolated
+  into a path or a target, or the caller chooses which file under the granted subtree the
+  module reads with the host's authority.
 - **Keyed on the canonical target**, after every rewrite, at dispatch. ★ **And only for an
   endpoint the root space or a host corridor answered.** An endpoint a *confinement* answered
   gets no grant, whatever its name. Without that rule a module could confine itself to a
@@ -504,7 +531,7 @@ grants. Getting delegation wrong costs 31 crates a mechanism they cannot remove.
 Part B's static form is additive public API too (`Kernel::with_grants`, `try_with_grants`,
 `grants`, `grant_for`; `Invocation::issue_granted`, `source_granted`, `grant`; `GrantError`;
 `GRANTED_NOTE`, `GRANTED_FOR_NOTE`), with no wire or cache-key change and no behavior change for a
-kernel with no grants: a **minor** bump in this workspace's 0.x scheme.
+kernel with no grants: a **minor** bump in this workspace's 0.x scheme, released as **0.5.0**.
 
 Part A is additive public API on `Invocation` — a **minor** bump. It carries no format,
 wire, or cache change, and it can and should ship ahead of any decision about Part B;

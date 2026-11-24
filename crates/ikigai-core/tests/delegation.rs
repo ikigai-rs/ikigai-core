@@ -441,3 +441,141 @@ fn the_hosts_own_routes_into_a_granted_prefix_keep_the_grant() {
     let got = block_on(aliased.issue(source("urn:pretty:prices"), &caller())).unwrap();
     assert_eq!(got.bytes, format!("prices [{PRICES_READ}]").into_bytes());
 }
+
+/// A root space answering ONE exact name with whatever endpoint it currently holds: the
+/// shape of a door a dynamic space's sink swaps in after the kernel was built, and (with
+/// `fresh`) of a space that builds a new endpoint per resolution, as a mount's forwarder or
+/// a dynamic space's threaded wrapper does.
+struct Swappable {
+    name: &'static str,
+    door: Mutex<Arc<dyn ikigai_core::Endpoint>>,
+    fresh: Option<fn() -> AsyncFnEndpoint>,
+}
+
+impl ikigai_core::Space for Swappable {
+    fn resolve(&self, request: &Request, _scope: &ikigai_core::Scope) -> ikigai_core::Resolution {
+        if request.target.as_str() != self.name {
+            return ikigai_core::Resolution::Miss;
+        }
+        let endpoint: Arc<dyn ikigai_core::Endpoint> = match self.fresh {
+            Some(build) => Arc::new(build()),
+            None => Arc::clone(&self.door.lock().unwrap()),
+        };
+        ikigai_core::Resolution::Hit(ikigai_core::Resolved::new(
+            endpoint,
+            ikigai_core::Bindings::new(),
+        ))
+    }
+
+    fn entries(&self) -> Option<Vec<ikigai_core::SpaceEntry>> {
+        Some(vec![ikigai_core::SpaceEntry::new(self.name, "door")])
+    }
+}
+
+fn reads_under_grant() -> AsyncFnEndpoint {
+    AsyncFnEndpoint::new("reader", |inv| {
+        Box::pin(async move { inv.source_granted(&iri("urn:file:prices")).await })
+    })
+}
+
+fn swappable_kernel(space: Arc<Swappable>) -> Kernel {
+    Kernel::new(Arc::new(ikigai_core::Fallback::new(vec![
+        space as Arc<dyn ikigai_core::Space>,
+        Arc::new(EndpointSpace::new().bind(
+            Exact::new("urn:file:prices"),
+            file_door(PRICES_READ, "prices"),
+        )),
+    ])))
+    .with_grants(&host(), [("urn:dash:", [PRICES_READ])])
+}
+
+#[test]
+fn a_door_swapped_in_after_construction_gets_no_grant() {
+    // Round 3 of the review: the grant belongs to the endpoint the root answered with when
+    // the table was built, not to the name. The same name answered later by another
+    // endpoint is refused; the original endpoint, swapped back, reads again.
+    let original: Arc<dyn ikigai_core::Endpoint> = Arc::new(reads_under_grant());
+    let space = Arc::new(Swappable {
+        name: "urn:dash:prices",
+        door: Mutex::new(Arc::clone(&original)),
+        fresh: None,
+    });
+    let kernel = swappable_kernel(Arc::clone(&space));
+    // A distinct caller per step, so the cache (which a real swap would cut) serves none.
+    let step = |n: &str| {
+        Capability::root().attenuate([DASH_READ.to_string(), format!("urn:cap:step:{n}")])
+    };
+    let got = block_on(kernel.issue(source("urn:dash:prices"), &step("1"))).unwrap();
+    assert_eq!(got.bytes, format!("prices [{PRICES_READ}]").into_bytes());
+
+    *space.door.lock().unwrap() = Arc::new(reads_under_grant());
+    let err = block_on(kernel.issue(source("urn:dash:prices"), &step("2"))).unwrap_err();
+    assert!(
+        matches!(&err, Error::Denied(d) if d.to_string().contains("no grant is bound")),
+        "{err:?}"
+    );
+
+    *space.door.lock().unwrap() = original;
+    assert!(block_on(kernel.issue(source("urn:dash:prices"), &step("3"))).is_ok());
+}
+
+#[test]
+fn a_binding_without_a_stable_endpoint_identity_is_never_granted() {
+    // A space that answers with a fresh endpoint per resolution has no identity to give a
+    // grant to, so the binding is refused when the table is built, and its hop fails closed.
+    let space = Arc::new(Swappable {
+        name: "urn:dash:prices",
+        door: Mutex::new(Arc::new(reads_under_grant())),
+        fresh: Some(reads_under_grant),
+    });
+    let kernel = swappable_kernel(space);
+    assert_eq!(kernel.grant_for(&iri("urn:dash:prices")), None);
+    let err = block_on(kernel.issue(source("urn:dash:prices"), &caller())).unwrap_err();
+    assert!(matches!(err, Error::Denied(_)), "{err:?}");
+}
+
+#[test]
+fn grant_prefixes_match_and_overlap_only_on_a_segment_boundary() {
+    // `urn:dash` and `urn:dashboard` name sibling namespaces, so both may be granted…
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new()
+            .bind(Exact::new("urn:dash:prices"), dashboard(true))
+            .bind(Exact::new("urn:dash/raw"), dashboard(true))
+            .bind(Exact::new("urn:dashboard:x"), dashboard(true)),
+    ))
+    .with_grants(
+        &host(),
+        [
+            ("urn:dash", vec![PRICES_READ]),
+            ("urn:dashboard", vec![TRANSCRIPTS_READ]),
+        ],
+    );
+    // …and each covers only its own subtree, after a `:` or a `/`.
+    assert_eq!(
+        kernel.grant_for(&iri("urn:dash:prices")),
+        Some(vec![PRICES_READ.to_string()])
+    );
+    assert_eq!(
+        kernel.grant_for(&iri("urn:dash/raw")),
+        Some(vec![PRICES_READ.to_string()])
+    );
+    assert_eq!(
+        kernel.grant_for(&iri("urn:dashboard:x")),
+        Some(vec![TRANSCRIPTS_READ.to_string()])
+    );
+    // A prefix that does cover another on a boundary still overlaps it.
+    let refused = Kernel::new(Arc::new(EndpointSpace::new()))
+        .try_with_grants(
+            &host(),
+            [
+                ("urn:dash", vec![PRICES_READ]),
+                ("urn:dash:x", vec![PRICES_READ]),
+            ],
+        )
+        .err()
+        .unwrap();
+    assert!(
+        matches!(refused, GrantError::Overlaps { .. }),
+        "{refused:?}"
+    );
+}

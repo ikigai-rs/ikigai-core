@@ -2242,9 +2242,10 @@ impl Kernel {
 
     /// **Delegate fixed authority to the endpoints bound under each prefix** (ledger
     /// #3769; `docs/design/sub-request-authority.md`, Part B). Each entry is a CANONICAL
-    /// target prefix and the scopes an endpoint resolved there may issue sub-requests
-    /// under, through [`Invocation::issue_granted`](crate::Invocation::issue_granted),
-    /// instead of under its caller's capability.
+    /// target prefix and the scopes the root's endpoints bound under it may issue
+    /// sub-requests under, through
+    /// [`Invocation::issue_granted`](crate::Invocation::issue_granted), instead of under
+    /// their caller's capability.
     ///
     /// The rules, each enforced here or at dispatch:
     ///
@@ -2252,8 +2253,19 @@ impl Kernel {
     ///   scope `host` does not hold is refused, not dropped.
     /// - **Static.** The table is fixed when the kernel is built. A request cannot name a
     ///   grant, select one or enlarge one; no scope is a pattern or a template.
-    /// - **Disjoint.** No prefix may be a prefix of another, so at most one grant applies to
-    ///   any target and there is no precedence to misread.
+    /// - **Given to enumerated endpoints, not to names.** When the table is built, each
+    ///   prefix selects the root's own EXACT bindings under it (`Space::entries`), and each
+    ///   is resolved then. The grant is given to that name and the endpoint that answered it,
+    ///   and applies at dispatch only when that same endpoint answers that name. Anything
+    ///   else answering under the prefix gets no grant: a template or fallback pattern, a
+    ///   binding a mounted remote surfaced, a space that answers with a fresh endpoint per
+    ///   resolution (no identity to give a grant to, so refused here), or a door swapped in
+    ///   after construction.
+    /// - **On a segment boundary.** A prefix covers a name equal to it, or continuing it after
+    ///   a `:` or `/`: `urn:dash` and `urn:dash:` cover `urn:dash:prices`, and neither covers
+    ///   `urn:dashboard-other:x`.
+    /// - **Disjoint.** No prefix may cover another, so at most one grant applies to any
+    ///   target and there is no precedence to misread.
     /// - **Keyed on the canonical target**, after every rewrite, and only for an endpoint
     ///   the host's tree answered: the root, a level in it, or a corridor the host
     ///   injected. An endpoint a confinement bound gets no grant, nor does one found in a
@@ -2363,7 +2375,7 @@ impl Kernel {
         S: IntoIterator<Item = T>,
         T: Into<String>,
     {
-        self.grants = self.grants.extend(host, grants)?;
+        self.grants = self.grants.extend(&self.root, host, grants)?;
         Ok(self)
     }
 
@@ -2385,11 +2397,13 @@ impl Kernel {
             .collect()
     }
 
-    /// The scopes delegated to the endpoints bound at `target` (canonical), if a grant
-    /// covers it: what a host or a description renderer shows beside the endpoint's own
-    /// `requires`, so the delegation is declared where it is enforced.
+    /// The scopes delegated to the endpoint the host's root bound at the exact `target`
+    /// (canonical), if a grant was given to it at construction: what a host or a description
+    /// renderer shows beside the endpoint's own `requires`, so the delegation is declared
+    /// where it is enforced. `None` for any other name under a grant's prefix: a template or
+    /// fallback binding, a mounted peer, or a door added after the table was built.
     pub fn grant_for(&self, target: &Iri) -> Option<Vec<String>> {
-        self.grants.for_target(target.as_str()).map(|grant| {
+        self.grants.at_door(target.as_str()).map(|grant| {
             grant
                 .capability()
                 .scopes()
@@ -2411,8 +2425,17 @@ impl Kernel {
     /// the same grant. A host that wants an alias into a granted prefix uses the kernel's
     /// own alias table, which rewrites before resolution, so the asked name is already the
     /// granted one.
-    fn grant_at(&self, target: &Iri, asked: Option<&Iri>) -> Option<Arc<crate::grant::Grant>> {
-        let grant = self.grants.for_target(target.as_str())?;
+    ///
+    /// ★ And only for the endpoint the grant was GIVEN to (round 3): `answered` must be the
+    /// very endpoint the host's root bound at `target` when the table was built
+    /// (`Grants::given`). Whatever else answers under the prefix gets none.
+    fn grant_at(
+        &self,
+        target: &Iri,
+        asked: Option<&Iri>,
+        answered: Option<&Arc<dyn Endpoint>>,
+    ) -> Option<Arc<crate::grant::Grant>> {
+        let grant = self.grants.given(target.as_str(), answered?)?;
         match asked {
             None => Some(grant),
             Some(asked) => self
@@ -5055,6 +5078,12 @@ impl Kernel {
             };
             (resolution, record.finish())
         };
+        // The endpoint the space answered with, before the kernel wraps it: the identity a
+        // grant is checked against (ledger #3769, round 3). Only when grants exist.
+        let answering = match &resolution {
+            Ok(Resolution::Hit(hit)) if !self.grants.is_empty() => Some(Arc::clone(&hit.endpoint)),
+            _ => None,
+        };
         let mut resolved = match resolution {
             Ok(Resolution::Hit(resolved)) if missed.is_empty() => resolved,
             Ok(Resolution::Hit(resolved)) => {
@@ -5462,7 +5491,7 @@ impl Kernel {
                 .with_grant(if confined_hit || self.grants.is_empty() {
                     None
                 } else {
-                    self.grant_at(&request.target, probed_as.as_ref())
+                    self.grant_at(&request.target, probed_as.as_ref(), answering.as_ref())
                 });
             invocation.offer(offer.as_deref());
             // A body attached under a NONCE id (ledger #2239, #2402) makes this request one

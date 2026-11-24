@@ -1,24 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (unreleased)
+
+A minor release: the delegation API below is additive public API on `Kernel` and
+`Invocation`. No wire, cache-key or behavior change for a kernel with no grants.
 
 ### Added
 
 - **Sub-request delegation for statically enumerated grants** (ledger #3769;
-  `docs/design/sub-request-authority.md`, Part B). A host declares at construction which
-  canonical target prefixes may act under which fixed scopes: `Kernel::with_grants(&host,
-  [(prefix, scopes)])` (or `try_with_grants`, returning a `GrantError`). An endpoint resolved
-  under a granted prefix issues a sub-request under exactly that grant with
-  `Invocation::issue_granted` / `source_granted`, instead of its caller's capability; `grant()`
-  shows it. Each grant is the host's capability attenuated, so none exceeds what the host
-  holds; prefixes are disjoint; no scope is request-derived; an endpoint a confinement answered
-  gets no grant, nor does one found in a level on a confined chain; a rewrite a space reports
-  cannot move an endpoint into a grant (the asked and the reported name must fall under the
-  same one; the kernel's own alias table still routes into a grant); the grant replaces the caller's for one hop and is never inherited; the floor
-  stays the caller's; with no grant bound it is `Denied`, never a fallback. The delegated hop's
-  trace event carries the grant as its capability with `GRANTED_NOTE` and `GRANTED_FOR_NOTE`,
-  and its cache entry is keyed under the grant's fingerprint. `Kernel::grants` and `grant_for`
-  read the table. Additive: a kernel with no grants behaves exactly as before. Minor.
+  `docs/design/sub-request-authority.md`, Part B). A host declares at construction which of its
+  endpoints may act under which fixed scopes: `Kernel::with_grants(&host, [(prefix, scopes)])`
+  (or `try_with_grants`, returning a `GrantError`). The prefix only selects, when the table is
+  built, the root's exact bindings under it; each is resolved then, and the grant is given to
+  that name and the endpoint that answered it. At dispatch the grant applies only when the
+  answering endpoint is that same endpoint at that name. A template or fallback binding under
+  the prefix, a mounted peer, a space that builds a fresh endpoint per resolution, and a door
+  swapped in after construction get no grant, and their delegated hop is `Denied`. A prefix
+  covers a name only on a segment boundary (`urn:dash` covers `urn:dash:prices` and
+  `urn:dash/raw`, never `urn:dashboard-other:x`), and two prefixes overlap on the same rule.
+  Such an endpoint issues a sub-request under exactly its grant with `Invocation::issue_granted`
+  / `source_granted`, instead of its caller's capability; `grant()` shows it. Each grant is the
+  host's capability attenuated, so none exceeds what the host holds; prefixes are disjoint; no
+  scope is request-derived; an endpoint a confinement answered gets no grant, nor does one found
+  in a level on a confined chain; a rewrite a space reports cannot move an endpoint into a grant
+  (the asked and the reported name must fall under the same one; the kernel's own alias table
+  still routes into a grant); the grant replaces the caller's for one hop and is never
+  inherited; the floor stays the caller's; with no grant bound it is `Denied`, never a fallback.
+  The delegated hop's trace event carries the grant as its capability with `GRANTED_NOTE` and
+  `GRANTED_FOR_NOTE`, and its cache entry is keyed under the grant's fingerprint.
+  `Kernel::grants` lists the table and `grant_for` gives the grant beside an enumerated door.
+  Additive: a kernel with no grants behaves exactly as before.
 - **`urn:kernel:constraint over=start`: the totals since the kernel started** (ledger
   #4096; `docs/design/constraint-history.md`, build step 3). One row per endpoint and target
   shape: computed count, of which stored and of which failed, cache hits, uncached and

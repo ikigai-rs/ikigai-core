@@ -1,5 +1,9 @@
 //! Review reproductions for PR 333 (ledger #3769): a grant follows a NAME prefix, not an
 //! enumerated endpoint.
+//!
+//! Added unchanged first, where both passed (the defects); their final assertions are now
+//! flipped: a grant is given to the endpoint the host enumerated, and a prefix covers a name
+//! only on a segment boundary, so each delegated hop below is refused.
 
 use std::sync::Arc;
 
@@ -20,7 +24,10 @@ fn file_door() -> FnEndpoint {
         if !inv.capability.allows(PRICES_READ) {
             return Err(Error::Denied("no grant".into()));
         }
-        Ok(Representation::new(ReprType::new("text/plain"), b"secret prices".to_vec()))
+        Ok(Representation::new(
+            ReprType::new("text/plain"),
+            b"secret prices".to_vec(),
+        ))
     })
 }
 
@@ -29,7 +36,8 @@ fn file_door() -> FnEndpoint {
 fn generic() -> AsyncFnEndpoint {
     AsyncFnEndpoint::new("generic", |inv| {
         Box::pin(async move {
-            let corridor = Arc::new(EndpointSpace::new().bind(Exact::new("urn:file:prices"), file_door()));
+            let corridor =
+                Arc::new(EndpointSpace::new().bind(Exact::new("urn:file:prices"), file_door()));
             inv.confine(iri("urn:ctx:generic"), corridor)
                 .source_granted(&iri("urn:file:prices"))
                 .await
@@ -40,19 +48,34 @@ fn generic() -> AsyncFnEndpoint {
 #[test]
 fn a_template_binding_under_the_prefix_gets_the_dashboards_grant() {
     let dashboard = FnEndpoint::new("dashboard", |_| {
-        Ok(Representation::new(ReprType::new("text/plain"), b"aggregate".to_vec()))
+        Ok(Representation::new(
+            ReprType::new("text/plain"),
+            b"aggregate".to_vec(),
+        ))
     });
     let kernel = Kernel::new(Arc::new(
         EndpointSpace::new()
             .bind(Exact::new("urn:dash:prices"), dashboard)
             // A second module whose pattern happens to cover names under the prefix.
-            .bind(UriTemplate::parse("urn:dash:{anything}").unwrap(), generic()),
+            .bind(
+                UriTemplate::parse("urn:dash:{anything}").unwrap(),
+                generic(),
+            ),
     ))
     .with_grants(&Capability::root(), [("urn:dash:", [PRICES_READ])]);
     let nobody = Capability::root().attenuate(["urn:cap:unrelated"]);
-    let got = block_on(kernel.issue(Request::new(Verb::Source, iri("urn:dash:whatever")), &nobody))
-        .expect("the generic endpoint acted under the dashboard's grant");
-    assert_eq!(got.bytes, b"secret prices");
+    let err = block_on(kernel.issue(
+        Request::new(Verb::Source, iri("urn:dash:whatever")),
+        &nobody,
+    ))
+    .expect_err("the generic endpoint must not act under the dashboard's grant");
+    assert!(matches!(err, Error::Denied(_)), "{err:?}");
+    assert_eq!(kernel.grant_for(&iri("urn:dash:whatever")), None);
+    assert_eq!(
+        kernel.grant_for(&iri("urn:dash:prices")),
+        Some(vec![PRICES_READ.to_string()]),
+        "the door the host enumerated keeps its grant"
+    );
 }
 
 #[test]
@@ -62,7 +85,11 @@ fn a_prefix_without_a_segment_boundary_covers_a_sibling_namespace() {
     ))
     .with_grants(&Capability::root(), [("urn:dash", [PRICES_READ])]);
     let nobody = Capability::root().attenuate(["urn:cap:unrelated"]);
-    let got = block_on(kernel.issue(Request::new(Verb::Source, iri("urn:dashboard-other:x")), &nobody))
-        .expect("`urn:dash` granted `urn:dashboard-other:`");
-    assert_eq!(got.bytes, b"secret prices");
+    let err = block_on(kernel.issue(
+        Request::new(Verb::Source, iri("urn:dashboard-other:x")),
+        &nobody,
+    ))
+    .expect_err("`urn:dash` must not grant `urn:dashboard-other:`");
+    assert!(matches!(err, Error::Denied(_)), "{err:?}");
+    assert_eq!(kernel.grant_for(&iri("urn:dashboard-other:x")), None);
 }
