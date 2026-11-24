@@ -11,8 +11,9 @@
 //! and another on `Scope::spaces`); these tests pin what is left:
 //!
 //! 1. two scopes that share a key are indistinguishable to an endpoint, even recomputed;
-//! 2. the one scope fact an endpoint may still read, `Invocation::clock_pinned`, is covered by
-//!    the key: a pinned-clock answer is not served to an unpinned scope;
+//! 2. the scope facts an endpoint may still read, `Invocation::clock_pinned` and
+//!    `Invocation::pinned_now`, are covered by the key: a pinned-clock answer is not served to
+//!    an unpinned scope;
 //! 3. and that coverage holds under one name: the chain's identity is a temporal corridor's
 //!    name AND its instant (ledger #3869), so the same name injected with and without a clock
 //!    is two keys, as `Scope::with_named_at` documents.
@@ -48,8 +49,9 @@ fn observer(runs: &Arc<AtomicU32>) -> AsyncFnEndpoint {
         Box::pin(async move {
             let asked = inv.source(&iri("urn:ctx:door")).await?;
             let seen = format!(
-                "pinned={} now={:?} asked={} depth={}",
+                "pinned={} at={:?} now={:?} asked={} depth={}",
                 inv.clock_pinned(),
+                inv.pinned_now().map(|t| t.as_millis()),
                 inv.now().map(|t| t.as_millis()),
                 String::from_utf8_lossy(&asked.bytes),
                 inv.depth(),
@@ -100,7 +102,7 @@ fn two_scopes_that_share_a_key_are_indistinguishable_to_an_endpoint() {
     assert_eq!(in_a.bytes, in_b.bytes);
     assert_eq!(
         String::from_utf8_lossy(&in_a.bytes),
-        "pinned=false now=Some(2000) asked=same depth=0"
+        "pinned=false at=None now=Some(2000) asked=same depth=0"
     );
 }
 
@@ -124,7 +126,7 @@ fn a_pinned_clock_answer_is_not_served_to_an_unpinned_scope() {
         String::from_utf8_lossy(&answer.bytes).into_owned()
     };
 
-    let then = "pinned=true now=Some(1000) asked=then depth=0";
+    let then = "pinned=true at=Some(1000) now=Some(1000) asked=then depth=0";
     assert_eq!(read(pinned()), then);
     assert_eq!(read(pinned()), then);
     assert_eq!(
@@ -137,11 +139,11 @@ fn a_pinned_clock_answer_is_not_served_to_an_unpinned_scope() {
     // neither is served the pinned answer.
     assert_eq!(
         read(Scope::empty()),
-        "pinned=false now=Some(2000) asked=root's depth=0"
+        "pinned=false at=None now=Some(2000) asked=root's depth=0"
     );
     assert_eq!(
         read(Scope::empty().with_named(iri("urn:ctx:plain"), doors())),
-        "pinned=false now=Some(2000) asked=then depth=0"
+        "pinned=false at=None now=Some(2000) asked=then depth=0"
     );
     assert_eq!(runs.load(Ordering::SeqCst), 3);
 }
@@ -165,11 +167,11 @@ fn one_name_with_and_without_a_clock_is_two_keys() {
     let second = block_on(kernel.issue_in(source("urn:observer"), &cap, without)).unwrap();
     assert_eq!(
         String::from_utf8_lossy(&first.bytes),
-        "pinned=true now=Some(1000) asked=then depth=0"
+        "pinned=true at=Some(1000) now=Some(1000) asked=then depth=0"
     );
     assert_eq!(
         String::from_utf8_lossy(&second.bytes),
-        "pinned=false now=Some(2000) asked=then depth=0"
+        "pinned=false at=None now=Some(2000) asked=then depth=0"
     );
     assert_eq!(runs.load(Ordering::SeqCst), 2);
 }
