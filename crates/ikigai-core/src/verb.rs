@@ -52,6 +52,15 @@ impl Verb {
     /// overlay re-issues a failed request only for a verb this answers `true`, and a
     /// `Sink` only with an idempotency key of its own.
     ///
+    /// This is the verb's DEFAULT, and a contract may say otherwise (ledger #4063). Not
+    /// every published `Delete` is idempotent: an intray take with no selector pops the
+    /// NEXT tuple on a repeat, and a take by id answers `NotFound` for the take that
+    /// succeeded. Such a Delete declares
+    /// [`ActionSpec::resend_unsafe`](crate::ActionSpec::resend_unsafe), and an overlay that
+    /// can read the endpoint's contract asks
+    /// [`Description::may_resend`](crate::Description::may_resend), which answers the
+    /// declaration when there is one and this when there is not.
+    ///
     /// ⚠ **The transports' replay rule is STRICTER, and stays theirs.** A client whose
     /// connection failed after the request may have reached the server (a read-phase
     /// failure) replays only a verb that is not [mutating](Self::is_mutating): a replayed

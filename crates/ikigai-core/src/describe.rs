@@ -433,8 +433,17 @@ pub enum OutputFrom {
 /// Whether a RESEND of an action is safe (ledger #3381): what a client may do when it sent
 /// a request and does not know whether it landed (a timeout, a dropped connection). A
 /// [`Source`](crate::Verb::Source) is a read and always safe; for a write the contract has
-/// to say, or a client could only guess from the verb's name. An action that declares
+/// to say, or a client could only guess from the verb's name. A `Sink` that declares
 /// nothing is NOT safe to resend ([`ActionSpec::resend`] is `None`).
+///
+/// A `Delete` that declares nothing is safe by its verb ([`Verb::is_idempotent`]), and one
+/// that is not, because a repeat does different work, says so with [`Resend::Unsafe`]
+/// (ledger #4063): an intray take with no selector pops the NEXT tuple on a repeat, and a
+/// take by id answers `NotFound` for the take that succeeded. [`ActionSpec::may_resend`]
+/// is the one question a retrying overlay asks: the declaration when there is one, the
+/// verb's default when there is not.
+///
+/// [`Verb::is_idempotent`]: crate::Verb::is_idempotent
 ///
 /// ```
 /// use ikigai_core::{ActionSpec, ArgSpec, Resend, Verb};
@@ -459,6 +468,13 @@ pub enum OutputFrom {
 /// let post = ActionSpec::new(Verb::Sink);
 /// assert!(!post.resend_is_safe(|_| true));
 /// assert!(serde_json::to_value(&post).unwrap().get("resend").is_none());
+///
+/// // A take that pops whatever is next: a Delete that is NOT idempotent.
+/// let take = ActionSpec::new(Verb::Delete).resend_unsafe();
+/// assert_eq!(serde_json::to_value(&take).unwrap()["resend"], serde_json::json!("unsafe"));
+/// assert!(!take.may_resend(|_| true));
+/// // An undeclared Delete keeps its verb's default.
+/// assert!(ActionSpec::new(Verb::Delete).may_resend(|_| false));
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -471,6 +487,13 @@ pub enum Resend {
     /// value: a replay under the same key does not act twice. Without it a resend is NOT
     /// safe. `ik:resendKey`, the key's input node.
     Key(String),
+    /// Never safe, whatever the call carries: a repeat does different work from the first
+    /// call (a take that pops the next tuple, a move that answers `NotFound` once the
+    /// first one moved it). For a `Delete`, which is otherwise resent by its verb
+    /// ([`Verb::is_idempotent`](crate::Verb::is_idempotent)), this is how its contract says
+    /// it is not idempotent (ledger #4063). Not for a read, which is always safe.
+    /// `ik:resendSafe false`.
+    Unsafe,
 }
 
 impl Resend {
@@ -480,13 +503,14 @@ impl Resend {
         match self {
             Resend::Safe => true,
             Resend::Key(name) => given(name),
+            Resend::Unsafe => false,
         }
     }
 
     /// The idempotency key's argument name, when safety depends on one.
     pub fn key(&self) -> Option<&str> {
         match self {
-            Resend::Safe => None,
+            Resend::Safe | Resend::Unsafe => None,
             Resend::Key(name) => Some(name),
         }
     }
@@ -1164,11 +1188,55 @@ impl ActionSpec {
         self
     }
 
+    /// Declare a resend of this verb NEVER safe (builder): [`Resend::Unsafe`]. This is how
+    /// a `Delete` that does different work on a repeat says it is not idempotent (ledger
+    /// #4063): a take that pops whatever tuple is next, or one that answers `NotFound`
+    /// for the take that succeeded. Validation refuses it on a read.
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, Verb};
+    ///
+    /// let pop = ActionSpec::new(Verb::Delete).resend_unsafe();
+    /// assert!(!pop.may_resend(|_| true));
+    /// assert!(Verb::Delete.is_idempotent(), "the verb's default is unchanged");
+    /// ```
+    pub fn resend_unsafe(mut self) -> Self {
+        self.resend = Some(Resend::Unsafe);
+        self
+    }
+
     /// Whether resending a call to this verb is safe: the declared [`Resend`] admits it
     /// for the arguments `given` says the call carries. Not safe when nothing is
-    /// declared.
+    /// declared, whatever the verb: the contract's own word only. A retrying overlay asks
+    /// [`may_resend`](Self::may_resend), which falls back to the verb.
     pub fn resend_is_safe(&self, given: impl Fn(&str) -> bool) -> bool {
         self.resend.as_ref().is_some_and(|r| r.is_safe(given))
+    }
+
+    /// Whether a call to this verb may be sent again when the caller cannot tell whether it
+    /// landed (ledger #4063): the declared [`Resend`] when there is one, for the arguments
+    /// `given` says the call carries; otherwise the verb's default,
+    /// [`Verb::is_idempotent`](crate::Verb::is_idempotent). So an undeclared `Delete` may,
+    /// one declared [`resend_unsafe`](Self::resend_unsafe) may not, and a `Sink` may only
+    /// when it declares so. This is the rule `ikigai-throttle`'s `Retry` applies.
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, ArgSpec, Verb};
+    ///
+    /// assert!(ActionSpec::new(Verb::Delete).may_resend(|_| false));
+    /// assert!(!ActionSpec::new(Verb::Delete).resend_unsafe().may_resend(|_| true));
+    /// assert!(!ActionSpec::new(Verb::Sink).may_resend(|_| true));
+    /// let keyed = ActionSpec::new(Verb::Delete)
+    ///     .input(ArgSpec::new("key").optional())
+    ///     .resend_safe_with_key("key");
+    /// assert!(keyed.may_resend(|name| name == "key"));
+    /// assert!(!keyed.may_resend(|_| false));
+    /// ```
+    pub fn may_resend(&self, given: impl Fn(&str) -> bool) -> bool {
+        match &self.resend {
+            Some(resend) => resend.is_safe(given),
+            None => self.verb.is_idempotent(),
+        }
     }
 
     /// Mark this verb's refusals as hiding the resource's existence (builder): a caller
@@ -1893,6 +1961,33 @@ impl Description {
         self.existence_sensitive || self.actions.iter().any(|a| a.existence_sensitive)
     }
 
+    /// Whether a call with `verb` may be sent again when the caller cannot tell whether it
+    /// landed (ledger #4063): that verb's declared action's
+    /// [`may_resend`](ActionSpec::may_resend), or, with no action declared for it, the
+    /// verb's default ([`Verb::is_idempotent`]). `given(name)` is true when the call carries
+    /// the input `name` with a non-blank value. A retrying or failing-over overlay asks
+    /// this rather than the verb alone, so a `Delete` that declares
+    /// [`resend_unsafe`](ActionSpec::resend_unsafe) is not sent twice.
+    ///
+    /// ```
+    /// use ikigai_core::{ActionSpec, Description, Verb};
+    ///
+    /// let intray = Description::new("space")
+    ///     .verb(Verb::Source)
+    ///     .action(ActionSpec::new(Verb::Delete).resend_unsafe());
+    /// assert!(!intray.may_resend(Verb::Delete, |_| true));
+    /// assert!(intray.may_resend(Verb::Source, |_| false));
+    /// assert!(!intray.may_resend(Verb::Sink, |_| true));
+    /// // An endpoint that declares no action for its Delete keeps the verb's default.
+    /// assert!(Description::new("file").verb(Verb::Delete).may_resend(Verb::Delete, |_| false));
+    /// ```
+    pub fn may_resend(&self, verb: Verb, given: impl Fn(&str) -> bool) -> bool {
+        match self.actions.iter().find(|a| a.verb == verb) {
+            Some(action) => action.may_resend(given),
+            None => verb.is_idempotent(),
+        }
+    }
+
     /// Declare a per-verb contract (builder). The verb is added to
     /// [`verbs`](Self::verbs) if not already declared.
     ///
@@ -2366,6 +2461,15 @@ fn validate_relations(id: &str, verb: Option<Verb>, spec: &ActionSpec) -> crate:
                 )
             }
         }
+    }
+    if spec.resend == Some(Resend::Unsafe) && !spec.verb.is_mutating() {
+        return refuse(
+            "resend",
+            format!(
+                "a {:?} is a read, which is always safe to send again: only a write can declare a resend unsafe",
+                spec.verb
+            ),
+        );
     }
     if let Some(Resend::Key(key)) = &spec.resend {
         if input(key).is_none() {

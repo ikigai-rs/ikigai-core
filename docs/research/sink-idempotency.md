@@ -151,6 +151,48 @@ Several others (ledger item delete, `label` Delete, bayes `untrain`) answer `Not
 repeat, which reports a success as a failure. This was read from source, not run, and it is
 outside this note's question, so it is listed as a follow-up.
 
+The intray case has since been run (ledger #4063).
+[`sink-idempotency/repro-delete/`](sink-idempotency/repro-delete/) builds the published
+`ikigai-intray` 0.7.1 behind `ikigai-throttle` 0.6.2's `Retry`, over a fault that lets the
+take land and then loses its answer:
+
+```text
+cargo run --manifest-path docs/research/sink-idempotency/repro-delete/Cargo.toml
+```
+
+Output from 2026-11-24 (which tuple the first take pops may vary between runs; everything else is fixed):
+
+```text
+- intray take, its contract
+    Verb::Delete.is_idempotent() = true; the take declares resend: None
+    so throttle Retry treats every take as safe to send again
+- intray take with no selector, behind throttle Retry
+    attempts: 2
+    lost answer:  job 1
+    retry answer: job 0
+    tuples pending now: 0 (one take was intended, which would leave one)
+    the lost tuple is gone from the space and was handed to nobody
+- intray take match=, behind throttle Retry
+    attempts: 2
+    lost answer:  <urn:a> a <urn:Person> .
+    retry answer: <urn:b> a <urn:Person> .
+    tuples pending now: 0 (one take intended)
+- intray take tuple=<id>, behind throttle Retry
+    attempts: 2
+    lost answer:  only
+    retry answer: not found: no tuple `3bf2bad95f75f3f8f212d5a59d92423554fe45cbcbad5e9217dccb218bc7fc29` to take in space `q`
+    the take succeeded and the caller is told it found nothing
+
+4 findings reproduced.
+```
+
+Core now lets such a Delete say so: `ActionSpec::resend_unsafe()` (`Resend::Unsafe`,
+`ik:resendSafe false`), read through `Description::may_resend(verb, given)`, which answers
+the declaration when there is one and `Verb::is_idempotent` when there is not. When intray
+declares it on its take and throttle's `Retry` asks `may_resend` instead of the verb, the
+no-selector case flips from "two tuples taken" to "one attempt, the caller sees the
+timeout, and the second tuple is still there".
+
 ## 4. Prior art
 
 - **IETF `Idempotency-Key`** ([draft-ietf-httpapi-idempotency-key-header-09](https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/),
@@ -323,7 +365,10 @@ the retry's bytes equal the lost answer's".
 8. **core: say which Deletes are not idempotent.** An intray take with no selector takes a
    different tuple on a repeat, and a tuplespace `take` answers its own retry with
    `Conflict`. Yet `Verb::is_idempotent` says every `Delete` is, and throttle re-sends them.
-   Let a Delete declare `resend` too, and reproduce the intray case first.
+   Let a Delete declare `resend` too, and reproduce the intray case first. *Done in core
+   (ledger #4063): `ActionSpec::resend_unsafe` and `Description::may_resend`; intray and
+   layers declaring it on their takes, and throttle's `Retry` and `Failover` asking
+   `may_resend`, remain.*
 9. **core: let an endpoint say a dispatched write wrote nothing.** Then a replay stops
    cutting the target's cached reads.
 10. **embedded/resolve: confirm `resend` survives a remote mount's Meta.** If it does not,

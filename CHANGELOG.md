@@ -4,6 +4,19 @@
 
 ### Added
 
+- **A `Delete` can say it is not idempotent** (ledger #4063). `Verb::is_idempotent` says
+  every `Delete` is, and `ikigai-throttle`'s `Retry` sends one again on a transient
+  failure, but an intray take with no selector pops the NEXT tuple on a repeat: one call
+  behind `Retry` consumed two tuples and handed the first to nobody
+  (`docs/research/sink-idempotency/repro-delete/` reproduces it against the published
+  `ikigai-intray` 0.7.1 and `ikigai-throttle` 0.6.2). New: `Resend::Unsafe` (JSON
+  `"resend": "unsafe"`, `ik:resendSafe false`, fed into the contract digest as the byte `5`
+  then `2`), the builder `ActionSpec::resend_unsafe`, and `ActionSpec::may_resend` /
+  `Description::may_resend`, the one question a retrying overlay asks: the declaration when
+  there is one, the verb's default when there is not. A `Delete` that declares nothing, and
+  every existing contract, is unchanged; validation refuses `resend_unsafe` on a read.
+  `Resend` is `#[non_exhaustive]`, so the new variant breaks no match outside core. Throttle
+  still asks the verb alone until it adopts `may_resend`.
 - **`urn:kernel:constraint over=start`: the totals since the kernel started** (ledger
   #4096; `docs/design/constraint-history.md`, build step 3). One row per endpoint and target
   shape: computed count, of which stored and of which failed, cache hits, uncached and

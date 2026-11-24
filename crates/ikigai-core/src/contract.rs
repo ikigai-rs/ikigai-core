@@ -556,8 +556,8 @@ impl ActionSpec {
     ///
     /// **Resend safety** (ledger #3381, [`Resend`](crate::Resend)) puts a contract in the v2
     /// form too, and is appended after the fixed inputs, only when declared, as the byte `5`
-    /// and then `0` (safe) or `1` and the key's name. A contract that declares nothing keeps
-    /// its digest:
+    /// and then `0` (safe), `1` and the key's name, or `2` (unsafe, ledger #4063). A
+    /// contract that declares nothing keeps its digest:
     ///
     /// ```
     /// use ikigai_core::{ActionSpec, ArgSpec, Verb};
@@ -567,6 +567,8 @@ impl ActionSpec {
     /// let safe = append.clone().resend_safe();
     /// assert_ne!(append.contract_id("ledger"), keyed.contract_id("ledger"));
     /// assert_ne!(keyed.contract_id("ledger"), safe.contract_id("ledger"));
+    /// let take = ActionSpec::new(Verb::Delete);
+    /// assert_ne!(take.contract_id("space"), take.clone().resend_unsafe().contract_id("space"));
     /// ```
     ///
     /// The endpoint id is part of the contract: two endpoints with different ids and
@@ -693,7 +695,8 @@ impl ActionSpec {
             feed_set(&mut h, &fixed);
         }
         // Resend safety (ledger #3381) is fed ONLY when declared, after the fixed inputs, as
-        // the byte `5`, then `0` for unconditionally safe or `1` and the key's name: an
+        // the byte `5`, then `0` for unconditionally safe, `1` and the key's name, or `2`
+        // for never safe (ledger #4063): an
         // action that declares nothing keeps its digest, and `5` is no earlier tail's byte.
         match &self.resend {
             None => {}
@@ -705,6 +708,11 @@ impl ActionSpec {
                 feed_u8(&mut h, 5);
                 feed_u8(&mut h, 1);
                 feed_str(&mut h, key);
+            }
+            // Never safe (ledger #4063): the byte `2`, after the same `5`.
+            Some(crate::describe::Resend::Unsafe) => {
+                feed_u8(&mut h, 5);
+                feed_u8(&mut h, 2);
             }
         }
         // The resend window (ledger #4056) is fed ONLY when declared, after resend safety,
