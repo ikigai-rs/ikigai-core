@@ -252,6 +252,10 @@ struct Slot {
     last_used_tick: u64,
     /// The depth its computation consumed, δ (above).
     consumed: u32,
+    /// The constraint-totals row of the endpoint that computed it, which a hit on it
+    /// credits (`crate::constraint`); [`NO_ROW`](crate::constraint::NO_ROW) when it was
+    /// stored through the public [`store`](ReprCache::store).
+    row: u32,
 }
 
 /// One failure the cache holds until a stated time (ledger #2657).
@@ -266,6 +270,8 @@ struct FailedSlot {
     /// The depth the failed computation consumed, δ, as for an entry ([`Slot`]): a
     /// failure is served only where a fresh evaluation would get as far.
     consumed: u32,
+    /// The constraint-totals row of the endpoint that failed, as for an entry.
+    row: u32,
 }
 
 /// A failure served from the cache (ledger #2657): the error as the endpoint answered
@@ -277,6 +283,7 @@ pub(crate) struct CachedFailure {
     pub(crate) until: Time,
     pub(crate) threads: BTreeSet<Thread>,
     pub(crate) consumed: u32,
+    pub(crate) row: u32,
 }
 
 /// One cached failure for the readouts (`urn:kernel:cache`, `urn:kernel:uncached`):
@@ -330,8 +337,9 @@ impl Answer {
 /// What the kernel's lookup found (ledger #2534): an answer to serve, a stale answer to
 /// offer the endpoint for revalidation, or nothing.
 enum Lookup {
-    /// A live entry, answered in the face asked for, with the depth it consumed.
-    Hit((Answer, u32)),
+    /// A live entry, answered in the face asked for, with the depth it consumed and the
+    /// constraint-totals row that computed it.
+    Hit((Answer, u32, u32)),
     /// An entry expired by time only, carrying an origin validator: kept, and offered.
     /// Shared: the kernel's resolution path and its `Revalidate` wrapper each hold one
     /// pointer to it.
@@ -363,6 +371,26 @@ impl Offer {
     /// endpoint answers "still valid".
     pub(crate) fn stored(&self) -> Option<Representation<Body>> {
         self.stored.lock().expect("offer lock").share()
+    }
+}
+
+#[cfg(test)]
+impl Offer {
+    /// An offer of `stored` with no cache behind it, for a unit test that needs a
+    /// `Revalidate` to hold one.
+    pub(crate) fn for_test(stored: Representation<Body>) -> Self {
+        Offer {
+            stale: Arc::new(Stale {
+                validator: crate::repr::OriginValidator {
+                    etag: Some("\"t\"".to_string()),
+                    last_modified: None,
+                },
+                repr_type: stored.repr_type.clone(),
+            }),
+            stored: Mutex::new(stored),
+            stored_tick: 0,
+            consumed: 0,
+        }
     }
 }
 
@@ -1277,7 +1305,7 @@ impl ReprCache {
         incoming: Option<&Provenance>,
     ) -> Option<Answer> {
         match self.lookup(key, now, buffer, incoming, false, u32::MAX) {
-            Lookup::Hit((answer, _)) => Some(answer),
+            Lookup::Hit((answer, _, _)) => Some(answer),
             Lookup::Offer(_) | Lookup::Miss => None,
         }
     }
@@ -1292,7 +1320,7 @@ impl ReprCache {
     /// `room` is the nesting budget left at the lookup's depth (`max_depth - depth`): an
     /// entry whose computation consumed more ([`Slot`]'s δ) is neither served nor offered
     /// nor evicted, so the request evaluates afresh (ledger #3792). A hit answers with the
-    /// entry's δ.
+    /// entry's δ and the constraint-totals row that computed it.
     pub(crate) fn get_or_offer(
         &self,
         key: &CacheKey,
@@ -1301,7 +1329,7 @@ impl ReprCache {
         incoming: Option<&Provenance>,
         offer: &mut Option<Arc<Offer>>,
         room: u32,
-    ) -> Option<(Answer, u32)> {
+    ) -> Option<(Answer, u32, u32)> {
         match self.lookup(key, now, buffer, incoming, true, room) {
             Lookup::Hit(answer) => Some(answer),
             Lookup::Offer(stale) => {
@@ -1334,12 +1362,12 @@ impl ReprCache {
                 let stored = &entry.representation;
                 if buffer {
                     if let Some(copy) = stored.copied() {
-                        return Some((Answer::Buffer(copy), entry.consumed));
+                        return Some((Answer::Buffer(copy), entry.consumed, entry.row));
                     }
                 }
                 stored
                     .share()
-                    .map(|body| (Answer::Body(body), entry.consumed))
+                    .map(|body| (Answer::Body(body), entry.consumed, entry.row))
             },
             |entry| {
                 // An offer is an answer too: only under the upstream it was stored under,
@@ -1483,8 +1511,17 @@ impl ReprCache {
         taken: CutSnapshot,
         cost_millis: Option<u64>,
     ) -> bool {
-        self.store_outcome(key, target, &representation, taken, cost_millis, None, 0)
-            .is_ok()
+        self.store_outcome(
+            key,
+            target,
+            &representation,
+            taken,
+            cost_millis,
+            None,
+            0,
+            crate::constraint::NO_ROW,
+        )
+        .is_ok()
     }
 
     /// [`store`](Self::store), saying WHICH of the two declines it was — the
@@ -1497,7 +1534,9 @@ impl ReprCache {
     /// over the byte budget was cloned in full and then thrown away, so it cost twice its
     /// size (ledger #1734, measured 832 MB against 509 MB on a store dump).
     ///
-    /// `consumed` is the depth the computation consumed, δ ([`Slot`], ledger #3792).
+    /// `consumed` is the depth the computation consumed, δ ([`Slot`], ledger #3792), and
+    /// `row` the constraint-totals row of the endpoint that computed it, which a hit
+    /// credits.
     #[allow(clippy::too_many_arguments)] // the key, the answer, its facts, its race check
     pub(crate) fn store_outcome(
         &self,
@@ -1508,6 +1547,7 @@ impl ReprCache {
         cost_millis: Option<u64>,
         incoming: Option<&Provenance>,
         consumed: u32,
+        row: u32,
     ) -> Result<(), Declined> {
         // A one-shot body cannot be read again, so there is nothing to keep. The kernel
         // never offers one (it names the cause itself, `one-shot body`); this is the
@@ -1576,6 +1616,7 @@ impl ReprCache {
             stored_tick: state.tick,
             last_used_tick: state.tick,
             consumed,
+            row,
         };
         let bytes = entry.bytes();
         // An answer supersedes a failure cached under the same key (ledger #2657).
@@ -1605,6 +1646,7 @@ impl ReprCache {
         taken: CutSnapshot,
         incoming: Option<&Provenance>,
         consumed: u32,
+        row: u32,
     ) -> Result<(), Declined> {
         let mut state = self.state.lock().expect("cache lock");
         if state.cut_since(threads, taken) {
@@ -1635,6 +1677,7 @@ impl ReprCache {
                 threads: threads.clone(),
                 edges,
                 consumed,
+                row,
             },
         );
         Ok(())
@@ -1666,6 +1709,7 @@ impl ReprCache {
                     until: slot.until,
                     threads: slot.threads.clone(),
                     consumed: slot.consumed,
+                    row: slot.row,
                 })
             }
             EntryState::Live => None,
@@ -2107,6 +2151,7 @@ mod tests {
                 None,
                 Some(&up),
                 0,
+                crate::constraint::NO_ROW,
             )
             .unwrap();
         for buffer in [false, true] {

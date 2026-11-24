@@ -23,6 +23,11 @@ impl ContentId {
         ContentId(*hasher.finalize().as_bytes())
     }
 
+    /// A content address from its raw 32-byte digest (decoding a stored record).
+    pub(crate) fn from_digest(digest: [u8; 32]) -> Self {
+        ContentId(digest)
+    }
+
     /// The raw 32-byte digest.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0

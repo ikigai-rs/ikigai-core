@@ -120,6 +120,7 @@ fn uses_v2(spec: &ActionSpec) -> bool {
     !spec.failures.is_unstated()
         || spec.existence_sensitive
         || spec.resend.is_some()
+        || spec.resend_window_secs.is_some()
         || !spec.groups.is_empty()
         || !spec.arguments.is_closed()
         || spec.output_from.is_some()
@@ -705,6 +706,13 @@ impl ActionSpec {
                 feed_u8(&mut h, 1);
                 feed_str(&mut h, key);
             }
+        }
+        // The resend window (ledger #4056) is fed ONLY when declared, after resend safety,
+        // as the byte `6` and the window's seconds as a fixed-width `u64`: an action that
+        // declares none keeps its digest, and `6` is no earlier tail's byte.
+        if let Some(secs) = self.resend_window_secs {
+            feed_u8(&mut h, 6);
+            feed_u64(&mut h, secs);
         }
         ContentId::from_hasher(h)
     }

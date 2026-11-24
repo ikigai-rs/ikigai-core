@@ -114,6 +114,7 @@ mod capability;
 mod check;
 pub mod config;
 mod confine;
+mod constraint;
 mod content;
 mod content_store;
 mod contract;
@@ -128,6 +129,7 @@ mod forward;
 mod grammar;
 mod grant;
 pub(crate) mod hashing;
+pub mod idempotency;
 mod inspect_graph;
 mod iri;
 mod kernel;
@@ -200,6 +202,7 @@ pub use exposure::{check_exposure, ExposedDoor, Exposes, ExposureReport};
 pub use forward::Forward;
 pub use grammar::{Bindings, Exact, Grammar, TemplateError, UriTemplate};
 pub use grant::GrantError;
+pub use idempotency::{IdempotencyKey, IdempotencyKeyError};
 pub use iri::{escape_iri_fragment, is_iri_safe, Iri, IriError};
 pub use kernel::{
     Clock, FixedClock, Kernel, SchedulerReporter, SystemClock, TraceEvent, TraceScope, TraceState,

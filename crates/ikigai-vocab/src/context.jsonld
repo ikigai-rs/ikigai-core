@@ -15,7 +15,9 @@
     "Chain": "ik:Chain",
     "Collaboration": "ik:Collaboration",
     "Confine": "ik:Confine",
+    "ConstraintSample": "ik:ConstraintSample",
     "ConstraintTarget": "ik:ConstraintTarget",
+    "ConstraintTotals": "ik:ConstraintTotals",
     "ConstraintWindow": "ik:ConstraintWindow",
     "Consultation": "ik:Consultation",
     "CorsPolicy": "ik:CorsPolicy",
@@ -218,6 +220,10 @@
     "corsMethod": "ik:corsMethod",
     "corsOrigin": "ik:corsOrigin",
     "cost": "ik:cost",
+    "count": {
+      "@id": "ik:count",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "csp": "ik:csp",
     "currentConstraint": {
       "@id": "ik:currentConstraint",
@@ -256,6 +262,7 @@
       "@id": "ik:endpoint",
       "@type": "@id"
     },
+    "endpointId": "ik:endpointId",
     "endpointName": "ik:endpointName",
     "entry": {
       "@id": "ik:entry",
@@ -284,6 +291,14 @@
       "@type": "xsd:boolean"
     },
     "explanation": "ik:explanation",
+    "failedCallCount": {
+      "@id": "ik:failedCallCount",
+      "@type": "xsd:nonNegativeInteger"
+    },
+    "failedMillis": {
+      "@id": "ik:failedMillis",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "failureClass": {
       "@id": "ik:failureClass",
       "@type": "@id"
@@ -300,6 +315,10 @@
     "fixes": {
       "@id": "ik:fixes",
       "@type": "@id"
+    },
+    "foldedEndpointCount": {
+      "@id": "ik:foldedEndpointCount",
+      "@type": "xsd:nonNegativeInteger"
     },
     "forkOf": {
       "@id": "ik:forkOf",
@@ -345,6 +364,14 @@
       "@id": "ik:jsonMode",
       "@type": "xsd:boolean"
     },
+    "kernelStarted": {
+      "@id": "ik:kernelStarted",
+      "@type": "xsd:dateTime"
+    },
+    "kernelStartedMillis": {
+      "@id": "ik:kernelStartedMillis",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "lacks": {
       "@id": "ik:lacks",
       "@type": "@id"
@@ -379,6 +406,10 @@
       "@id": "ik:mayFail",
       "@type": "@id"
     },
+    "meanUncachedMillis": {
+      "@id": "ik:meanUncachedMillis",
+      "@type": "xsd:decimal"
+    },
     "mediaType": "ik:mediaType",
     "member": {
       "@id": "ik:member",
@@ -398,6 +429,10 @@
     "notAfter": {
       "@id": "ik:notAfter",
       "@type": "xsd:dateTime"
+    },
+    "notStored": {
+      "@id": "ik:notStored",
+      "@type": "@id"
     },
     "note": "ik:note",
     "offer": {
@@ -467,6 +502,7 @@
       "@id": "ik:reanchored",
       "@type": "xsd:boolean"
     },
+    "reasonKind": "ik:reasonKind",
     "reduceMotion": {
       "@id": "ik:reduceMotion",
       "@type": "xsd:boolean"
@@ -497,6 +533,10 @@
     "resendSafe": {
       "@id": "ik:resendSafe",
       "@type": "xsd:boolean"
+    },
+    "resendWindow": {
+      "@id": "ik:resendWindow",
+      "@type": "xsd:duration"
     },
     "resolveAt": "ik:resolveAt",
     "resolvedAs": {
@@ -536,7 +576,25 @@
       "@type": "@id"
     },
     "ruleKind": "ik:ruleKind",
+    "sampleResolutions": {
+      "@id": "ik:sampleResolutions",
+      "@type": "xsd:nonNegativeInteger"
+    },
+    "sampleRow": {
+      "@id": "ik:sampleRow",
+      "@type": "@id"
+    },
+    "sampleSince": {
+      "@id": "ik:sampleSince",
+      "@type": "xsd:dateTime"
+    },
+    "sampleSource": "ik:sampleSource",
     "sampleTriple": "ik:sampleTriple",
+    "sampleUntil": {
+      "@id": "ik:sampleUntil",
+      "@type": "xsd:dateTime"
+    },
+    "sampledHost": "ik:sampledHost",
     "schedulerBackend": "ik:schedulerBackend",
     "scope": {
       "@id": "ik:scope",
@@ -596,6 +654,10 @@
       "@id": "ik:step",
       "@type": "@id"
     },
+    "storedCallCount": {
+      "@id": "ik:storedCallCount",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "summary": "ik:summary",
     "supersedes": {
       "@id": "ik:supersedes",
@@ -607,6 +669,7 @@
     },
     "tag": "ik:tag",
     "target": "ik:target",
+    "targetShape": "ik:targetShape",
     "template": "ik:template",
     "textScale": {
       "@id": "ik:textScale",
@@ -623,6 +686,14 @@
     "totalBytes": {
       "@id": "ik:totalBytes",
       "@type": "xsd:nonNegativeInteger"
+    },
+    "totalResolutions": {
+      "@id": "ik:totalResolutions",
+      "@type": "xsd:nonNegativeInteger"
+    },
+    "totalsRow": {
+      "@id": "ik:totalsRow",
+      "@type": "@id"
     },
     "traceState": "ik:traceState",
     "transreptsFrom": "ik:transreptsFrom",
@@ -652,6 +723,14 @@
     "vendor": "ik:vendor",
     "verb": "ik:verb",
     "versionTag": "ik:versionTag",
+    "windowFirstSampleMillis": {
+      "@id": "ik:windowFirstSampleMillis",
+      "@type": "xsd:nonNegativeInteger"
+    },
+    "windowLastSampleMillis": {
+      "@id": "ik:windowLastSampleMillis",
+      "@type": "xsd:nonNegativeInteger"
+    },
     "windowResolutions": {
       "@id": "ik:windowResolutions",
       "@type": "xsd:nonNegativeInteger"

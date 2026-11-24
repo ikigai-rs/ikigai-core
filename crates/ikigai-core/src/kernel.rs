@@ -826,7 +826,9 @@ pub struct Kernel {
     /// for `urn:kernel:constraint` — the kernel's throughput readout. Always-on like
     /// the cache; bounded to [`CONSTRAINT_WINDOW`]. `urn:kernel:*` introspection
     /// requests are not recorded (they short-circuit before the resolution body).
-    constraint: Mutex<VecDeque<ResolutionSample>>,
+    /// Beside it, under the same lock, the totals since the kernel started that
+    /// `urn:kernel:constraint over=start` reads (ledger #4096; `crate::constraint`).
+    constraint: Mutex<ConstraintState>,
     /// The installed logical-rewrite table, if any. The kernel holds it (rather than
     /// only wrapping the root space in an [`Alias`]) because canonicalization must
     /// happen BEFORE the cache key and the auto-cut are computed from the target —
@@ -1124,6 +1126,13 @@ impl Endpoint for SettleReferences {
 
     fn describe(&self) -> Description {
         self.inner.describe()
+    }
+
+    /// Never asked on the issue path (this wrapper is built only for a verb that is not
+    /// `Meta`), forwarded so that the rule on [`Endpoint::meta_failure`] holds for every
+    /// wrapper of one endpoint.
+    fn meta_failure(&self) -> Option<Error> {
+        self.inner.meta_failure()
     }
 
     fn confinement(&self) -> Option<crate::topology::Topology> {
@@ -1481,6 +1490,9 @@ struct Admission {
     readers: Readers,
     /// How this verb settles a by-reference argument ([`Floor::references`], ledger #2511).
     references: Option<Arc<References>>,
+    /// The endpoint's constraint-totals row (ledger #4096), kept beside its floor;
+    /// [`NO_ROW`](crate::constraint::NO_ROW) when the memo was not asked to assign one.
+    row: u32,
 }
 
 /// How long a contract read from a description may be kept, from its
@@ -1593,6 +1605,12 @@ struct FloorEntry {
     /// When the description's [`ContractCaching`] bound runs out, on the kernel's
     /// clock; `None` for a static contract, kept until the bindings change.
     until: Option<Time>,
+    /// The endpoint's constraint-totals row (ledger #4096), so a stably bound endpoint
+    /// finds its row with its floor; [`NO_ROW`](crate::constraint::NO_ROW) until a
+    /// resolution assigns one (the cache-status probe describes without assigning).
+    row: std::sync::atomic::AtomicU32,
+    /// The description's id, which names the row when it is assigned after the entry.
+    id: Box<str>,
 }
 
 impl FloorMemo {
@@ -1613,7 +1631,7 @@ impl FloorMemo {
         capability: &Capability,
         now: Option<Time>,
     ) -> Option<String> {
-        self.admit(endpoint, request, &Bindings::new(), capability, now)
+        self.admit(endpoint, request, &Bindings::new(), capability, now, None)
             .lacking
             .into_iter()
             .next()
@@ -1623,6 +1641,10 @@ impl FloorMemo {
     /// (`Floor::defaults`), which the kernel injects before the request's identity is
     /// taken (ledger #19), and the declared binding defaults the resolution's `bindings`
     /// lack (`Floor::binding_defaults`, ledger #1547). One memo read for all three.
+    ///
+    /// And the endpoint's constraint-totals row (ledger #4096): `assign` gives it from
+    /// the description's id the first time, and the memo keeps it beside the floor.
+    /// `None` assigns nothing (the cache-status probe, which resolves no request).
     fn admit(
         &self,
         endpoint: &Arc<dyn Endpoint>,
@@ -1630,9 +1652,11 @@ impl FloorMemo {
         bindings: &Bindings,
         capability: &Capability,
         now: Option<Time>,
+        assign: Option<&dyn Fn(&str) -> u32>,
     ) -> Admission {
-        let admission = |floor: &Floor, keep: Keep| -> Admission {
+        let admission = |floor: &Floor, keep: Keep, row: u32| -> Admission {
             Admission {
+                row,
                 declared: floor.declared_defaults(request.verb).cloned(),
                 readers: floor.body_readers(request.verb),
                 references: floor.references(request.verb),
@@ -1671,7 +1695,14 @@ impl FloorMemo {
                 };
                 if fresh {
                     let keep = entry.until.map_or(Keep::UntilRebind, Keep::Until);
-                    return admission(&entry.floor, keep);
+                    let mut row = entry.row.load(Ordering::Relaxed);
+                    if row == crate::constraint::NO_ROW {
+                        if let Some(assign) = assign {
+                            row = assign(&entry.id);
+                            entry.row.store(row, Ordering::Relaxed);
+                        }
+                    }
+                    return admission(&entry.floor, keep, row);
                 }
                 stale = true;
             }
@@ -1679,7 +1710,8 @@ impl FloorMemo {
         let description = endpoint.describe();
         let floor = Floor::of(&description);
         let keep = Keep::of(description.contract_caching, now);
-        let lacking = admission(&floor, keep);
+        let row = assign.map_or(crate::constraint::NO_ROW, |assign| assign(&description.id));
+        let lacking = admission(&floor, keep, row);
         let until = match keep {
             Keep::UntilRebind => None,
             Keep::Until(deadline) => Some(deadline),
@@ -1713,6 +1745,8 @@ impl FloorMemo {
                 endpoint: Arc::downgrade(endpoint),
                 floor,
                 until,
+                row: std::sync::atomic::AtomicU32::new(row),
+                id: description.id.into_boxed_str(),
             },
         );
         lacking
@@ -1903,13 +1937,42 @@ impl ProbeMemo {
 /// How many recent resolutions `urn:kernel:constraint` aggregates over.
 const CONSTRAINT_WINDOW: usize = 512;
 
-/// One sampled resolution behind `urn:kernel:constraint`: which resource, how long
-/// it took to compute (per the injected [`Clock`]; `None` if the kernel has none),
-/// and whether the cache served it (a hit consumes no constraint capacity).
+/// What the one constraint lock guards: the rolling window (`over=window`) and the
+/// totals since the kernel started (`over=start`, ledger #4096). One lock, so the
+/// totals add no second lock to a resolution: the design's bar.
+struct ConstraintState {
+    window: VecDeque<ResolutionSample>,
+    totals: crate::constraint::ConstraintTotals,
+}
+
+/// One sampled resolution behind `urn:kernel:constraint`: which resource, when it
+/// ended and how long it took (per the injected [`Clock`]; `None` if the kernel has
+/// none), and how it ended (a hit consumes no constraint capacity; a failure does).
 struct ResolutionSample {
     target: String,
-    elapsed_ms: Option<u64>,
-    cache_hit: bool,
+    timing: Option<SampleTiming>,
+    outcome: Outcome,
+}
+
+/// When a sampled resolution ended and how long it took, both from the one clock read
+/// `elapsed_since` already made (ledger #4095): the end stamp is what lets the window
+/// state its span, and it adds 8 bytes to a sample and no clock read.
+#[derive(Clone, Copy)]
+struct SampleTiming {
+    ended: Time,
+    elapsed_ms: u64,
+}
+
+/// How a sampled resolution ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// An endpoint computed an answer.
+    Computed,
+    /// The cache served it; no capacity spent.
+    Cached,
+    /// An endpoint ran and failed (ledger #4095). Its time is capacity spent, exactly
+    /// as a computed answer's is, so it ranks with computed time.
+    Failed,
 }
 
 /// Where one request sits in a resolution, beyond the request and its capability:
@@ -2029,7 +2092,10 @@ impl Kernel {
             tracing: AtomicBool::new(false),
             span_counter: Arc::new(AtomicU64::new(0)),
             scheduler: None,
-            constraint: Mutex::new(VecDeque::new()),
+            constraint: Mutex::new(ConstraintState {
+                window: VecDeque::new(),
+                totals: crate::constraint::ConstraintTotals::new(),
+            }),
             aliases: None,
             subclass_closure: BTreeMap::new(),
             max_depth: DEFAULT_MAX_DEPTH,
@@ -2809,6 +2875,13 @@ impl Kernel {
     /// and `Never` caching are unaffected — so a kernel only consults a clock when a
     /// host opts into time-bounded freshness (e.g. mounting the HTTP client module).
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        // The totals' start time (ledger #4096): a kernel starts when it can tell the
+        // time, so a reading with a different start than the last one is a restart.
+        self.constraint
+            .get_mut()
+            .expect("constraint lock")
+            .totals
+            .started = Some(clock.now());
         self.clock = Some(clock);
         self
     }
@@ -3275,8 +3348,19 @@ impl Kernel {
             parent,
             started,
             scope,
+            row,
             ..
         } = hit;
+        // A hit credits the row that computed the entry; one the host stored through the
+        // public `store` names none, and the endpoint that would have computed it is
+        // credited instead.
+        let credited = |stored: u32| {
+            crate::constraint::Tally::row(if stored == crate::constraint::NO_ROW {
+                row
+            } else {
+                stored
+            })
+        };
         if self.cache.has_failures() {
             if let Some(cached) = self.cache.get_failure(&key, started, incoming, room) {
                 if trace.is_some() {
@@ -3292,7 +3376,7 @@ impl Kernel {
                         trace, request, capability, span, parent, started, true, notes, scope,
                     );
                 }
-                self.record_resolution(request, started, true);
+                self.record_resolution(request, started, Outcome::Cached, credited(cached.row));
                 if let Some(failed) = failed {
                     *failed = Dependencies {
                         expiry: Expiry::At(cached.until),
@@ -3304,7 +3388,7 @@ impl Kernel {
                 return Some(Err(cached.error));
             }
         }
-        let (cached, consumed) = self
+        let (cached, consumed, stored_row) = self
             .cache
             .get_or_offer(&key, started, buffer, incoming, offer, room)?;
         // A hit at depth `d` for an entry that consumed δ reaches `d + δ`: what the
@@ -3331,7 +3415,7 @@ impl Kernel {
             hit.provenance(),
             scope,
         );
-        self.record_resolution(request, started, true);
+        self.record_resolution(request, started, Outcome::Cached, credited(stored_row));
         Some(Ok(cached))
     }
 
@@ -3342,14 +3426,14 @@ impl Kernel {
     fn failed_dependencies(
         &self,
         invocation: &Invocation<'_>,
-        key: Option<CacheKey>,
+        key: Option<(CacheKey, u32)>,
         error: &Error,
         taken: crate::cache::CutSnapshot,
         incoming: Option<&Provenance>,
     ) -> Dependencies {
         let request = invocation.request;
         let mut depended = invocation.failure_dependencies(&request.target);
-        if let Some(key) = key {
+        if let Some((key, row)) = key {
             let stated = invocation
                 .stated_failure_expiry()
                 .map(|until| self.on_kernel_clock(until, invocation.scope().now()));
@@ -3362,6 +3446,7 @@ impl Kernel {
                 taken,
                 incoming,
                 depended.reach.saturating_sub(invocation.depth()),
+                row,
             );
         }
         if let Some(until) = depended.failure_until {
@@ -3387,6 +3472,7 @@ impl Kernel {
         taken: crate::cache::CutSnapshot,
         incoming: Option<&Provenance>,
         consumed: u32,
+        row: u32,
     ) -> Option<Time> {
         let stated = stated?;
         // A denial has no thread to cut; a miss already hangs one; a depth refusal is
@@ -3439,6 +3525,7 @@ impl Kernel {
                 taken,
                 incoming,
                 consumed,
+                row,
             )
             .ok()?;
         Some(until)
@@ -3531,19 +3618,76 @@ impl Kernel {
 
     /// Record one resolution into the rolling constraint window (always-on, bounded
     /// to [`CONSTRAINT_WINDOW`]). `started` is the pre-resolution stamp; the elapsed
-    /// compute time is `now − started` (only when the kernel has a clock). A cache
-    /// hit is logged but its elapsed is left out of the constraint total.
-    fn record_resolution(&self, request: &Request, started: Option<Time>, cache_hit: bool) {
-        let elapsed_ms = self.elapsed_since(started);
-        let mut window = self.constraint.lock().expect("constraint lock");
+    /// time is `now − started`, and `now` is kept as the sample's end stamp (only when
+    /// the kernel has a clock). A cache hit is logged but its elapsed is left out of
+    /// the constraint total; a failure's is counted in it (ledger #4095).
+    ///
+    /// The same lock adds the resolution to the totals since the kernel started
+    /// (ledger #4096): `tally` names the row it credits and, for a computed answer,
+    /// whether it was stored and why not.
+    fn record_resolution(
+        &self,
+        request: &Request,
+        started: Option<Time>,
+        outcome: Outcome,
+        tally: crate::constraint::Tally,
+    ) {
+        let timing = match (started, self.clock.as_ref()) {
+            (Some(start), Some(clock)) => {
+                let ended = clock.now();
+                Some(SampleTiming {
+                    ended,
+                    elapsed_ms: ended.as_millis().saturating_sub(start.as_millis()),
+                })
+            }
+            _ => None,
+        };
+        let ended = match outcome {
+            Outcome::Computed => crate::constraint::Ended::Computed,
+            Outcome::Cached => crate::constraint::Ended::Cached,
+            Outcome::Failed => crate::constraint::Ended::Failed,
+        };
+        let target = request.target.as_str().to_string();
+        let mut state = self.constraint.lock().expect("constraint lock");
+        let window = &mut state.window;
         if window.len() >= CONSTRAINT_WINDOW {
             window.pop_front();
         }
         window.push_back(ResolutionSample {
-            target: request.target.as_str().to_string(),
-            elapsed_ms,
-            cache_hit,
+            target,
+            timing,
+            outcome,
         });
+        state
+            .totals
+            .record(ended, timing.map(|timing| timing.elapsed_ms), tally);
+    }
+
+    /// The totals row of `endpoint` (ledger #4096; `crate::constraint`), named by
+    /// `endpoint_id` and the shape of `target` under `bindings` if it is new. The shape
+    /// is computed outside the lock: only an endpoint the index has not seen pays for it.
+    fn constraint_row(
+        &self,
+        endpoint: &Arc<dyn Endpoint>,
+        endpoint_id: &str,
+        target: &Iri,
+        bindings: &Bindings,
+    ) -> u32 {
+        if let Some(row) = self
+            .constraint
+            .lock()
+            .expect("constraint lock")
+            .totals
+            .row_at(endpoint)
+        {
+            return row;
+        }
+        let shape = crate::constraint::target_shape(target.as_str(), bindings);
+        self.constraint
+            .lock()
+            .expect("constraint lock")
+            .totals
+            .row_for(endpoint, endpoint_id, shape)
     }
 
     /// The recording scope for the kernel's globally-installed tracer, if one is
@@ -3678,6 +3822,46 @@ impl Kernel {
             parent,
             // The authority that was NOT enough — the other half of the fact,
             // beside the scope named in the note.
+            capability: capability.scopes().map(|s| s.iter().cloned().collect()),
+            notes,
+        });
+    }
+
+    /// Report a `Meta` the endpoint answered with [`Endpoint::meta_failure`] (ledger #4079)
+    /// into the resolution's [`TraceScope`]: an event tagged [`FAILED_NOTE`] with the
+    /// error's kind (no message: it may carry a path or a host), in the shape
+    /// [`trace_denial`](Self::trace_denial) established. Nothing ran and nothing is
+    /// stored, so `started`/`ended` stay `None` and `cache_hit` is `false`. Out of line,
+    /// so the resolution path's frame pays nothing for it.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn trace_meta_failure(
+        &self,
+        trace: &Option<TraceScope>,
+        request: &Request,
+        capability: &Capability,
+        span: Option<u64>,
+        parent: Option<u64>,
+        error: &Error,
+        alias: Option<&AliasHop>,
+        answered: Option<&Iri>,
+        levels: &LevelPath,
+        scope: &Scope,
+    ) {
+        let Some(trace_scope) = trace else {
+            return;
+        };
+        let mut notes = vec![(FAILED_NOTE.to_string(), error.kind().to_string())];
+        notes.extend(provenance_notes(trace, alias, answered, levels, &[], &[]));
+        notes.extend(scope_notes(scope));
+        trace_scope.record(TraceEvent {
+            target: request.target.as_str().to_string(),
+            thread: thread_label(),
+            started: None,
+            ended: None,
+            cache_hit: false,
+            span: span.unwrap_or(0),
+            parent,
             capability: capability.scopes().map(|s| s.iter().cloned().collect()),
             notes,
         });
@@ -4655,6 +4839,8 @@ impl Kernel {
                 incoming.as_ref(),
                 // A kernel operation issues no sub-request: it consumes no depth.
                 0,
+                // Nor is it a constraint: introspection, not throughput.
+                crate::constraint::NO_ROW,
             ) {
                 // A chain-keyed entry names its chain in the readout, as a scoped
                 // resolution's does; every other kernel operation is keyed with
@@ -5018,12 +5204,16 @@ impl Kernel {
             keep,
             readers,
             references,
+            row,
         } = self.floors.admit(
             &resolved.endpoint,
             &request,
             &resolved.bindings,
             capability,
             started,
+            Some(&|id: &str| {
+                self.constraint_row(&resolved.endpoint, id, &request.target, &resolved.bindings)
+            }),
         );
         // ★ EXISTENCE-SENSITIVE: a refusal that must not say the name is bound (ledger
         // #2176, UX record D28). The endpoint declared its existence sensitive for this
@@ -5097,6 +5287,24 @@ impl Kernel {
             return Err(Error::Denied(Denial::lacking(message, lacking)));
         }
 
+        // ★ A META THE ENDPOINT CANNOT ANSWER (ledger #4079): `Endpoint::meta_failure`. An
+        // endpoint that knows it cannot state its contract (a mount whose peer is down)
+        // answers the error instead of a placeholder description. AFTER the floor, so a
+        // caller an existence-sensitive endpoint hides from is answered as a miss (above)
+        // and learns nothing about its state (the floor gates no `Meta` otherwise, so no
+        // `Meta` is ever `Denied`); BEFORE the cache lookup, so a description cached while
+        // the endpoint could state it is not served while it cannot, and before the Meta arm.
+        // Nothing is stored: the error states no expiry, and the next Meta asks again.
+        if request.verb == Verb::Meta {
+            if let Some(error) = resolved.endpoint.meta_failure() {
+                self.trace_meta_failure(
+                    &trace, &request, capability, span, parent, &error, alias, answered, levels,
+                    &scope,
+                );
+                return Err(error);
+            }
+        }
+
         // ★ AN ATTACHED BODY REACHES ONLY A DECLARED BODY READER (ledger #2402). A body a
         // host attached to an argument this endpoint does not declare `reads_body` is
         // collected HERE, under the run's byte budget, and handed over inline: what a
@@ -5151,6 +5359,7 @@ impl Kernel {
                 levels,
                 defaulted: &defaulted,
                 collected: &collected,
+                row,
             };
             let lookup = (key, buffer, incoming.as_ref(), &mut offer, &run, depth);
             if let Some(served) = self.served_from_cache(lookup, failed.as_deref_mut(), hit) {
@@ -5255,7 +5464,7 @@ impl Kernel {
                 Err(error) => {
                     let depended = self.failed_dependencies(
                         &invocation,
-                        cacheable_verb.then_some(key),
+                        cacheable_verb.then_some((key, row)),
                         &error,
                         taken,
                         incoming.as_ref(),
@@ -5308,6 +5517,17 @@ impl Kernel {
                     // A failed revalidation forgets the stale entry, as the lookup did
                     // before revalidation existed.
                     self.cache.discard(&key, &offer);
+                    // ★ A FAILURE SPENDS CAPACITY (ledger #4095). An endpoint that
+                    // spends 30 s timing out is the constraint as surely as one that
+                    // spends 30 s computing, and the trace above already records it:
+                    // the window records it too, as failed. One lock, on a path that
+                    // has already failed.
+                    self.record_resolution(
+                        &request,
+                        started,
+                        Outcome::Failed,
+                        crate::constraint::Tally::row(row),
+                    );
                     return Err(error);
                 }
             };
@@ -5428,6 +5648,9 @@ impl Kernel {
         // only where `depth + consumed <= max_depth`. An answer of "still valid" to an
         // offer serves the offered computation's body, so it keeps that one's δ too.
         let consumed = (reach - depth).max(offer.as_ref().map_or(0, |offer| offer.consumed));
+        // What this computation adds to its totals row (ledger #4096): set below once
+        // the store has said whether it kept the answer, and why not.
+        let mut tally = crate::constraint::Tally::row(row);
         if cacheable_verb {
             match representation.expiry {
                 Expiry::Always => {
@@ -5470,15 +5693,20 @@ impl Kernel {
                     self.elapsed_since(started),
                     incoming.as_ref(),
                     consumed,
+                    row,
                 ) {
                     // Remember what the fingerprint meant, for the readout. Off the
                     // empty-chain path entirely: a plain `issue` never takes this lock.
-                    Ok(()) if !scope.is_empty() => self.remember_scope(key.scope, &scope),
-                    Ok(()) => {}
+                    Ok(()) if !scope.is_empty() => {
+                        tally.stored = true;
+                        self.remember_scope(key.scope, &scope);
+                    }
+                    Ok(()) => tally.stored = true,
                     Err(declined) => why.declined = Some(declined),
                 }
             }
             if !why.is_empty() {
+                tally.reasons = why.kinds();
                 if trace.is_some() {
                     trace_notes.push((UNCACHED_NOTE.to_string(), why.to_string()));
                 }
@@ -5509,7 +5737,7 @@ impl Kernel {
             trace_notes,
             &scope,
         );
-        self.record_resolution(&request, started, false);
+        self.record_resolution(&request, started, Outcome::Computed, tally);
 
         // A successful mutating verb invalidates its target: cut the thread named
         // after it, so cached `Source`s of that resource — and composites over
@@ -6166,17 +6394,33 @@ impl Kernel {
             // window. Cache hits are excluded from the total (they cost nothing); the
             // heaviest target is the bottleneck (Goldratt step 1). Both faces rank the
             // same rows; live state, uncacheable on both.
+            //
+            // `over=start` (ledger #4096): the totals since the kernel started, every row,
+            // per endpoint and target shape (`crate::constraint`). `over=window`, the
+            // default, is the window, unchanged. Same capability, same faces.
             ("constraint", Verb::Source) => {
                 require_cap("urn:cap:kernel:inspect")?;
                 let turtle = kernel_face(request)?;
-                let (total, rows) = self.constraint_rows();
+                if constraint_over_start(request)? {
+                    let reading = self
+                        .constraint
+                        .lock()
+                        .expect("constraint lock")
+                        .totals
+                        .reading(self.clock.is_some());
+                    if turtle {
+                        return Ok(kernel_turtle(crate::inspect_graph::totals_turtle(&reading)));
+                    }
+                    return Ok(kernel_text(crate::inspect_graph::totals_text(&reading)));
+                }
+                let (span, rows) = self.constraint_rows();
                 if turtle {
                     return Ok(kernel_turtle(crate::inspect_graph::constraint_turtle(
-                        total, &rows,
+                        &span, &rows,
                     )));
                 }
                 Ok(kernel_text(crate::inspect_graph::constraint_text(
-                    total, &rows,
+                    &span, &rows,
                 )))
             }
             // The kernel's own catalog: every bound endpoint's `describe()` as one RDF
@@ -6504,54 +6748,71 @@ impl Kernel {
         }
     }
 
-    /// Aggregate the constraint window by target, heaviest first, with how many
-    /// resolutions the window holds. Ranks by uncached compute time when the kernel
-    /// has a clock, else by uncached call count — so the readout is meaningful even on
-    /// a clockless kernel.
-    fn constraint_rows(&self) -> (usize, Vec<crate::inspect_graph::ConstraintRow>) {
-        let window = self.constraint.lock().expect("constraint lock");
-        let total = window.len();
-        // Per target: (uncached_ms, calls, cached, any_timed).
-        let mut by_target: HashMap<&str, (u64, usize, usize, bool)> = HashMap::new();
+    /// Aggregate the constraint window by target, heaviest first, with what the window
+    /// holds as a whole. Ranks by uncached time (computed and failed alike: both spent
+    /// capacity, ledger #4095) when the kernel has a clock, else by uncached call count —
+    /// so the readout is meaningful even on a clockless kernel.
+    fn constraint_rows(
+        &self,
+    ) -> (
+        crate::inspect_graph::ConstraintSpan,
+        Vec<crate::inspect_graph::ConstraintRow>,
+    ) {
+        let state = self.constraint.lock().expect("constraint lock");
+        let window = &state.window;
+        // The span: the window is in recording order, but concurrent resolutions can
+        // record out of end order, so take the least and greatest stamp, not the ends.
+        let mut stamps = window
+            .iter()
+            .filter_map(|sample| sample.timing.map(|timing| timing.ended.as_millis()));
+        let first = stamps.next().map(|stamp| {
+            stamps.fold((stamp, stamp), |(lo, hi), stamp| {
+                (lo.min(stamp), hi.max(stamp))
+            })
+        });
+        let span = crate::inspect_graph::ConstraintSpan {
+            resolutions: window.len(),
+            first_ms: first.map(|(lo, _)| lo),
+            last_ms: first.map(|(_, hi)| hi),
+        };
+        let mut by_target: HashMap<&str, crate::inspect_graph::ConstraintRow> = HashMap::new();
         for sample in window.iter() {
-            let row = by_target.entry(&sample.target).or_default();
-            row.1 += 1;
-            if sample.cache_hit {
-                row.2 += 1;
+            let row = by_target.entry(&sample.target).or_insert_with(|| {
+                crate::inspect_graph::ConstraintRow {
+                    target: sample.target.clone(),
+                    ..Default::default()
+                }
+            });
+            row.calls += 1;
+            match sample.outcome {
+                Outcome::Cached => row.cached += 1,
+                Outcome::Failed => row.failed += 1,
+                Outcome::Computed => {}
             }
-            if let Some(ms) = sample.elapsed_ms {
-                row.3 = true;
-                if !sample.cache_hit {
-                    row.0 += ms;
+            if let Some(timing) = sample.timing {
+                row.timed = true;
+                match sample.outcome {
+                    Outcome::Cached => {}
+                    Outcome::Computed => row.uncached_ms += timing.elapsed_ms,
+                    Outcome::Failed => {
+                        row.uncached_ms += timing.elapsed_ms;
+                        row.failed_ms += timing.elapsed_ms;
+                    }
                 }
             }
         }
-        let mut rows: Vec<_> = by_target.into_iter().collect();
+        let mut rows: Vec<_> = by_target.into_values().collect();
         // Heaviest uncached time first; break ties by uncached call count, then by
         // name. The window is a `HashMap`, reseeded per kernel, so without the last
         // key two equal targets came out in a different order per process (the text
         // face reordered, the Turtle face a different `ik:order`).
         rows.sort_by(|a, b| {
-            let a_uncached = a.1 .1 - a.1 .2;
-            let b_uncached = b.1 .1 - b.1 .2;
-            b.1 .0
-                .cmp(&a.1 .0)
-                .then(b_uncached.cmp(&a_uncached))
-                .then(a.0.cmp(b.0))
+            b.uncached_ms
+                .cmp(&a.uncached_ms)
+                .then(b.uncached().cmp(&a.uncached()))
+                .then(a.target.cmp(&b.target))
         });
-        let rows = rows
-            .into_iter()
-            .map(|(target, (uncached_ms, calls, cached, timed))| {
-                crate::inspect_graph::ConstraintRow {
-                    target: target.to_string(),
-                    uncached_ms,
-                    calls,
-                    cached,
-                    timed,
-                }
-            })
-            .collect();
-        (total, rows)
+        (span, rows)
     }
 
     /// The number of representations currently cached (diagnostics/tests).
@@ -6668,6 +6929,7 @@ impl Kernel {
                                     &resolved.bindings,
                                     capability,
                                     now,
+                                    None,
                                 )
                                 .defaults;
                             prefill(&mut probed, &defaults);
@@ -6907,6 +7169,9 @@ struct Hit<'x> {
     levels: &'x LevelPath,
     defaulted: &'x [String],
     collected: &'x [String],
+    /// The resolved endpoint's constraint-totals row (ledger #4096): what a hit on an
+    /// entry that names no computing row (one the host stored itself) credits.
+    row: u32,
 }
 
 impl Hit<'_> {
@@ -7193,6 +7458,23 @@ fn kernel_arg<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
     }
 }
 
+/// Which span `urn:kernel:constraint` is asked over (ledger #4096): `true` for
+/// `over=start`, the totals since the kernel started; `false` for `over=window`, the
+/// default. Anything else is refused, naming the values it takes.
+fn constraint_over_start(request: &Request) -> Result<bool> {
+    match kernel_arg(request, "over").map(str::trim) {
+        None | Some("window") => Ok(false),
+        Some("start") => Ok(true),
+        Some(other) => Err(Error::InvalidArgument {
+            name: "over".to_string(),
+            detail: format!(
+                "`{other}` is not a span of `{}` (window, start)",
+                request.target.as_str()
+            ),
+        }),
+    }
+}
+
 /// Validate the requested face before a single-face operation runs (especially
 /// before `cut` mutates state). Omission selects its only face.
 fn kernel_single_face(request: &Request, face: &str) -> Result<()> {
@@ -7306,6 +7588,10 @@ impl Endpoint for Revalidate {
 
     fn forwards(&self) -> Option<crate::Forward> {
         self.inner.forwards()
+    }
+
+    fn meta_failure(&self) -> Option<Error> {
+        self.inner.meta_failure()
     }
 }
 
@@ -10380,6 +10666,95 @@ mod tests {
         assert!(
             text[heavy_pos..heavy_line_end].contains("← constraint"),
             "leader flagged:\n{text}"
+        );
+    }
+
+    /// ★ A FAILURE SPENDS CAPACITY TOO (ledger #4095). An endpoint that spends 30 s
+    /// timing out and then fails is the constraint, as surely as one that spends 30 s
+    /// computing: the window records it from the invocation's error arm, ranks its
+    /// time with computed time, and says how much of it failed. Each sample is stamped
+    /// with its end time, so both faces state the window's span.
+    #[test]
+    fn kernel_constraint_records_a_failed_resolution_and_states_its_span() {
+        let clock = TestClock::at(1_000);
+        let ticking = clock.clone();
+        let timeout = FnEndpoint::new("timeout", move |_inv: &Invocation<'_>| {
+            ticking.set(ticking.now().as_millis() + 30_000);
+            Err(Error::Endpoint("upstream timed out".to_string()))
+        });
+        let stepping = clock.clone();
+        let quick = FnEndpoint::new("quick", move |_inv: &Invocation<'_>| {
+            stepping.set(stepping.now().as_millis() + 5);
+            Ok(Representation::new(
+                ReprType::new("text/plain"),
+                b"q".to_vec(),
+            ))
+        });
+        let space = EndpointSpace::new()
+            .bind(Exact::new("urn:test:timeout"), timeout)
+            .bind(Exact::new("urn:test:quick"), quick);
+        let kernel = Kernel::new(Arc::new(space)).with_clock(Arc::new(clock.clone()));
+        let cap = Capability::root();
+
+        block_on(kernel.issue(Request::new(Verb::Source, iri("urn:test:quick")), &cap)).unwrap();
+        let failed =
+            block_on(kernel.issue(Request::new(Verb::Source, iri("urn:test:timeout")), &cap));
+        assert!(failed.is_err());
+
+        let text = String::from_utf8_lossy(
+            &block_on(kernel.issue(
+                Request::new(Verb::Source, iri("urn:kernel:constraint")),
+                &cap,
+            ))
+            .unwrap()
+            .bytes,
+        )
+        .into_owned();
+        // The failure is in the window, and leads it: 30 s spent failing beats 5 ms.
+        assert!(text.contains("last 2 resolutions"), "{text}");
+        let timeout_at = text.find("urn:test:timeout").expect("failure listed");
+        let quick_at = text.find("urn:test:quick").expect("success listed");
+        assert!(
+            timeout_at < quick_at,
+            "failed time ranks with computed:\n{text}"
+        );
+        assert!(text.contains("urn:test:timeout   ← constraint"), "{text}");
+        assert!(
+            text.contains("30000ms uncached · 1 calls · 0% cached · 1 failed (30000ms)"),
+            "{text}"
+        );
+        // The span: the first sample ended at 1005, the last at 31005.
+        assert!(
+            text.starts_with(
+                "constraint  (last 2 resolutions) · samples from 1005ms to 31005ms on the \
+                 kernel's clock\n"
+            ),
+            "{text}"
+        );
+
+        let face = Request::new(Verb::Source, iri("urn:kernel:constraint"))
+            .with_arg("as", ArgRef::Inline(b"text/turtle".to_vec()));
+        let turtle = String::from_utf8_lossy(&block_on(kernel.issue(face, &cap)).unwrap().bytes)
+            .into_owned();
+        assert!(
+            turtle.contains("ik:windowFirstSampleMillis \"1005\"^^xsd:nonNegativeInteger"),
+            "{turtle}"
+        );
+        assert!(
+            turtle.contains("ik:windowLastSampleMillis \"31005\"^^xsd:nonNegativeInteger"),
+            "{turtle}"
+        );
+        assert!(
+            turtle.contains("ik:failedCallCount \"1\"^^xsd:nonNegativeInteger"),
+            "{turtle}"
+        );
+        assert!(
+            turtle.contains("ik:failedMillis \"30000\"^^xsd:nonNegativeInteger"),
+            "{turtle}"
+        );
+        assert!(
+            turtle.contains("ik:currentConstraint <urn:ikigai:constraint:target:urn:test:timeout>"),
+            "{turtle}"
         );
     }
 
@@ -14251,5 +14626,55 @@ mod tests {
         clock.set(1_005_000);
         let _ = kernel.is_cached(&mounted_read(), &root);
         assert_eq!(space.metas(), 1, "read again once the bound runs out");
+    }
+
+    /// Every crate-private wrapper of one endpoint passes `Endpoint::meta_failure` through
+    /// (ledger #4079), one per wrapper kind; the public ones (`Confine`, `Threaded` and a
+    /// dynamic space's) are pinned end to end in `tests/meta_failure.rs`.
+    #[test]
+    fn crate_private_wrappers_pass_meta_failure_through() {
+        struct Down;
+        #[async_trait::async_trait]
+        impl Endpoint for Down {
+            async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+                Err(Error::Unavailable("down".into()))
+            }
+            fn meta_failure(&self) -> Option<Error> {
+                Some(Error::Unavailable("down".into()))
+            }
+        }
+        let inner: Arc<dyn Endpoint> = Arc::new(Down);
+        let projected = crate::forward::Projected {
+            inner: Arc::clone(&inner),
+            description: Description::new("projected"),
+        };
+        let settling = SettleReferences {
+            inner: Arc::clone(&inner),
+            pending: Vec::new(),
+        };
+        let stored = Representation::new(ReprType::new("text/plain"), b"old".to_vec()).into_body();
+        let revalidating = Revalidate {
+            inner: Arc::clone(&inner),
+            offer: Arc::new(crate::cache::Offer::for_test(stored)),
+        };
+        let wrappers: [(&str, &dyn Endpoint); 3] = [
+            ("Projected", &projected),
+            ("SettleReferences", &settling),
+            ("Revalidate", &revalidating),
+        ];
+        for (kind, wrapper) in wrappers {
+            assert!(
+                matches!(wrapper.meta_failure(), Some(Error::Unavailable(_))),
+                "{kind} hides the inner endpoint's Meta failure"
+            );
+        }
+        // And over an endpoint that can describe itself, each answers `None`.
+        let fine: Arc<dyn Endpoint> = Arc::new(crate::builtins::echo());
+        assert!(SettleReferences {
+            inner: fine,
+            pending: Vec::new()
+        }
+        .meta_failure()
+        .is_none());
     }
 }

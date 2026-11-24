@@ -51,6 +51,16 @@ pub(crate) enum DepKind {
 }
 
 impl DepKind {
+    /// This kind's bit in an [`Uncached::kinds`] mask.
+    fn bit(self) -> u16 {
+        1 << match self {
+            DepKind::Volatile => 2,
+            DepKind::Denied => 3,
+            DepKind::Failed => 4,
+            DepKind::OneShot => 5,
+        }
+    }
+
     fn word(self) -> &'static str {
         match self {
             DepKind::Volatile => "dependency",
@@ -68,6 +78,9 @@ impl DepKind {
 pub(crate) struct VolatileDeps {
     names: Vec<(DepKind, Iri)>,
     more: usize,
+    /// The kinds of the ones only counted, as [`Uncached::kinds`] bits, so a kind that
+    /// first appears past the named ones is still counted as a kind.
+    more_kinds: u16,
 }
 
 impl VolatileDeps {
@@ -83,6 +96,7 @@ impl VolatileDeps {
             self.names.push((kind, requested.clone()));
         } else {
             self.more += 1;
+            self.more_kinds |= kind.bit();
         }
     }
 
@@ -133,6 +147,55 @@ impl Uncached {
             && !self.upstream
             && !self.one_shot
             && self.declined.is_none()
+    }
+}
+
+/// The kinds of reason a computed answer was not stored, in the order the rendering
+/// lists them: the words `urn:kernel:uncached` already uses, without the names and
+/// deadlines it attaches (`dependency urn:x:clock` is the kind `dependency`). The
+/// constraint totals (`urn:kernel:constraint over=start`) count each kind, never the text.
+pub(crate) const REASON_KINDS: [&str; 12] = [
+    "declared",
+    "mounted",
+    "dependency",
+    "denied",
+    "failed",
+    "one-shot content",
+    "upstream",
+    "one-shot body",
+    "no-clock",
+    "expired",
+    "cut-in-flight",
+    "policy",
+];
+
+impl Uncached {
+    /// Which [`REASON_KINDS`] this reason names, as a mask: bit `i` set for kind `i`.
+    /// Every cause, as the rendering lists every cause.
+    pub(crate) fn kinds(&self) -> u16 {
+        let mut mask = match self.reason {
+            Some(UncachedReason::Declared) => 1 << 0,
+            Some(UncachedReason::Mounted) => 1 << 1,
+            None => 0,
+        };
+        for (kind, _) in &self.deps.names {
+            mask |= kind.bit();
+        }
+        mask |= self.deps.more_kinds;
+        if self.upstream {
+            mask |= 1 << 6;
+        }
+        if self.one_shot {
+            mask |= 1 << 7;
+        }
+        mask |= match self.declined {
+            None => 0,
+            Some(Declined::NoClock) => 1 << 8,
+            Some(Declined::Expired(_)) => 1 << 9,
+            Some(Declined::CutInFlight) => 1 << 10,
+            Some(Declined::Policy) => 1 << 11,
+        };
+        mask
     }
 }
 
