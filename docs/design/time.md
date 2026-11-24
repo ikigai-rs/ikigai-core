@@ -112,6 +112,32 @@ explicit refusal for a bounded request, not silently an unbounded run. Absolute 
 deadlines across hosts require a stated clock-skew policy; local monotonic instants
 must never cross the wire.
 
+## Migrating a governor to elapsed time
+
+Core provides `MonotonicClock::native()` and `MonotonicClock::from_host(reader)`.
+Choose one explicitly and share clones with the governor's admission and observation
+paths. A host reader supplies a nondecreasing `Duration` from a fixed local origin,
+not a Unix timestamp. On wasm only the host adapter is available. Neither adapter
+installs a kernel clock or supplies waking.
+
+* For a sliding rate window, store `MonotonicInstant` per hit and evict a hit when
+  `now.checked_duration_since(&hit)? >= window`. Use the remaining duration from the
+  oldest hit for retry hints and state observation. Do not convert to integer
+  milliseconds until the external representation requires it.
+* For a breaker cooldown, keep the opening instant and compare its elapsed duration
+  to the cooldown, or compute an end once with `opened.checked_add(cooldown)?`.
+  In the latter case, the cooldown is over when
+  `end.saturating_duration_since(&now)?` returns zero. Propagate overflow rather
+  than treating an unrepresentable end as expired or unbounded.
+* Keep stored instants and their clock together. If a builder changes the clock
+  on a cloned governor, it must not reuse the previous source's live state.
+  Treat a source mismatch as an error, not an expired window or a zero delay.
+  Sample under the state lock when order of insertion must match the clock.
+  Keep cache expiry and wire timestamps in the operational domain.
+
+Throttle's admission and observation code lives in its own repository. Its rate
+window and breaker still use `Time` and need a downstream migration together.
+
 ## Proposed follow-up items
 
 1. **Expose operational time and repair deadline accounting** (#1916). Add the
