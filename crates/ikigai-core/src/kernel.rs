@@ -82,6 +82,8 @@ pub trait Clock: Send + Sync {
 /// A [`Clock`] reading the system wall clock — the default real clock. Replay and
 /// test harnesses inject a fixed clock instead. (A browser host injects a
 /// `Date.now()`-backed clock; `ikigai-core` itself stays runtime-agnostic.)
+/// Wall-clock corrections can move readings in either direction. Use
+/// [`MonotonicClock`](crate::MonotonicClock) for windows and cooldowns.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemClock;
 
