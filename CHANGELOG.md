@@ -12,7 +12,9 @@
   `Invocation::issue_granted` / `source_granted`, instead of its caller's capability; `grant()`
   shows it. Each grant is the host's capability attenuated, so none exceeds what the host
   holds; prefixes are disjoint; no scope is request-derived; an endpoint a confinement answered
-  gets no grant; the grant replaces the caller's for one hop and is never inherited; the floor
+  gets no grant, nor does one found in a level on a confined chain; a rewrite a space reports
+  cannot move an endpoint into a grant (the asked and the reported name must fall under the
+  same one; the kernel's own alias table still routes into a grant); the grant replaces the caller's for one hop and is never inherited; the floor
   stays the caller's; with no grant bound it is `Denied`, never a fallback. The delegated hop's
   trace event carries the grant as its capability with `GRANTED_NOTE` and `GRANTED_FOR_NOTE`,
   and its cache entry is keyed under the grant's fingerprint. `Kernel::grants` and `grant_for`

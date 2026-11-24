@@ -341,3 +341,103 @@ fn a_host_cannot_delegate_what_it_does_not_hold_and_grants_are_disjoint() {
         "{refused:?}"
     );
 }
+
+/// An endpoint that reads the price file under whatever grant it was given, and says
+/// whether it was given one. The thief in the two tests below.
+fn thief() -> AsyncFnEndpoint {
+    AsyncFnEndpoint::new("thief", |inv| {
+        Box::pin(async move { inv.source_granted(&iri("urn:file:prices")).await })
+    })
+}
+
+#[test]
+fn a_level_inside_a_modules_own_corridor_cannot_reach_another_modules_grant() {
+    // Round 2 (hub review of PR 333). Module B confines itself to a corridor of its own,
+    // and in that corridor is a LEVEL that binds both a relay and a name under the
+    // dashboard's granted prefix. The relay is found inside the level, so its
+    // sub-requests resolve through the level stack before the confined corridor. A hit
+    // from that stack was not counted as confined, so the thief got the dashboard's grant.
+    let relay = || {
+        AsyncFnEndpoint::new("relay", |inv| {
+            Box::pin(async move { inv.source(&iri("urn:dash:stolen")).await })
+        })
+    };
+    let squatter = AsyncFnEndpoint::new("squatter", move |inv| {
+        Box::pin(async move {
+            let level = ikigai_core::Level::new(
+                iri("urn:example:level:mod-b"),
+                Arc::new(
+                    EndpointSpace::new()
+                        .bind(Exact::new("urn:mod-b:relay"), relay())
+                        .bind(Exact::new("urn:dash:stolen"), thief()),
+                ),
+            );
+            let corridor = Arc::new(ikigai_core::Fallback::new(vec![
+                Arc::new(level) as Arc<dyn ikigai_core::Space>,
+                Arc::new(EndpointSpace::new().bind(
+                    Exact::new("urn:file:prices"),
+                    file_door(PRICES_READ, "prices"),
+                )),
+            ]));
+            inv.confine(iri("urn:ctx:squat"), corridor)
+                .source(&iri("urn:mod-b:relay"))
+                .await
+        })
+    });
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new()
+            .bind(Exact::new("urn:dash:prices"), dashboard(true))
+            .bind(Exact::new("urn:mod-b:read"), squatter),
+    ))
+    .with_grants(&host(), [("urn:dash:", [PRICES_READ])]);
+    let err = block_on(kernel.issue(source("urn:mod-b:read"), &Capability::root())).unwrap_err();
+    assert!(matches!(err, Error::Denied(_)), "{err:?}");
+}
+
+#[test]
+fn a_rewrite_a_space_reports_cannot_move_an_endpoint_into_a_grant() {
+    // Round 2 (hub review of PR 333). Module B is mounted at the root as a `Rewrite` over
+    // its own doors: it answers `urn:mod-b:read` with its OWN endpoint and reports the
+    // backing name as `urn:dash:prices`, under the dashboard's granted prefix. The grant
+    // was keyed on that reported name, so B's endpoint acted under the dashboard's grant
+    // while the real dashboard still answered `urn:dash:prices`.
+    let module_b: Arc<dyn ikigai_core::Space> = Arc::new(ikigai_core::Rewrite::new(
+        Arc::new(EndpointSpace::new().bind(Exact::new("urn:dash:prices"), thief())),
+        |target| (target.as_str() == "urn:mod-b:read").then(|| iri("urn:dash:prices")),
+    ));
+    let kernel = Kernel::new(Arc::new(ikigai_core::Fallback::new(vec![
+        module_b,
+        Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new("urn:dash:prices"), dashboard(true))
+                .bind(
+                    Exact::new("urn:file:prices"),
+                    file_door(PRICES_READ, "prices"),
+                ),
+        ),
+    ])))
+    .with_grants(&host(), [("urn:dash:", [PRICES_READ])]);
+    let err = block_on(kernel.issue(source("urn:mod-b:read"), &Capability::root())).unwrap_err();
+    assert!(matches!(err, Error::Denied(_)), "{err:?}");
+}
+
+#[test]
+fn the_hosts_own_routes_into_a_granted_prefix_keep_the_grant() {
+    // The two rules above narrow only what a MODULE chose. The host's own tree still
+    // delegates: a dashboard found inside a root-level `Level`, and a dashboard reached
+    // through the kernel's own alias table (which rewrites before resolution, so the name
+    // the kernel asks is already the granted one), both read under the grant.
+    let in_level = Kernel::new(Arc::new(ikigai_core::Level::new(
+        iri("urn:example:level:dash"),
+        Arc::new(EndpointSpace::new().bind(Exact::new("urn:dash:prices"), dashboard(true))),
+    )))
+    .with_grants(&host(), [("urn:dash:", [PRICES_READ])]);
+    let got = block_on(in_level.issue(source("urn:dash:prices"), &caller())).unwrap();
+    assert_eq!(got.bytes, format!("prices [{PRICES_READ}]").into_bytes());
+
+    let aliased = kernel(true).with_aliases(Arc::new(
+        ikigai_core::AliasTable::new().exact("urn:pretty:prices", "urn:dash:prices"),
+    ));
+    let got = block_on(aliased.issue(source("urn:pretty:prices"), &caller())).unwrap();
+    assert_eq!(got.bytes, format!("prices [{PRICES_READ}]").into_bytes());
+}

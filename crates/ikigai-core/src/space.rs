@@ -735,30 +735,43 @@ impl Scope {
         self.resolve_observed(request, root, seals, |_, _| {})
     }
 
-    /// [`resolve_in`](Self::resolve_in), and whether the hit came from a corridor an
-    /// ENDPOINT confined itself to (ledger #3769): such an endpoint gets no host grant,
-    /// whatever its name, so a module cannot bind a name under another module's granted
-    /// prefix in its own corridor and borrow that grant.
+    /// [`resolve_in`](Self::resolve_in), and whether the hit came from somewhere an
+    /// ENDPOINT chose rather than the host (ledger #3769): such an endpoint gets no host
+    /// grant, whatever its name, so a module cannot bind a name under another module's
+    /// granted prefix in a corridor of its own and borrow that grant.
+    ///
+    /// In a chain with a confinement on it, that is **every member but the host's
+    /// injected corridors**: the confined corridor itself, and also the level stack. A
+    /// confinement empties the level stack ([`confined`](Self::confined)), so every level
+    /// on such a chain was entered after it, and a level entered through the endpoint's
+    /// own corridor is that endpoint's choice too (hub review of PR 333, round 2: a level
+    /// inside a module's corridor was counted as the host's). The stack does not record
+    /// which member each level was entered from, so the rule fails closed: a level
+    /// entered from a host corridor of a confined chain gets no grant either. With no
+    /// confinement on the chain, the levels are the host's tree and the root is the root.
     pub(crate) fn resolve_noting_confined(
         &self,
         request: &Request,
         root: &Arc<dyn Space>,
         seals: &Seals,
     ) -> (std::result::Result<Resolution, SealBreach>, bool) {
-        let confined = match self.chain.as_ref() {
-            None => 0..0,
-            Some(chain) => {
-                let start = (chain.injected.len() - chain.confined) + chain.levels.0.len();
-                start..start + chain.confined
-            }
-        };
+        // The first position in `consulted` order that is not the host's, on a chain
+        // with a confinement; `None` when every member is the host's.
+        let endpoint_chosen_from = self
+            .chain
+            .as_ref()
+            .and_then(|chain| (chain.confined > 0).then(|| chain.injected.len() - chain.confined));
         let mut hit_at = None;
         let resolution = self.resolve_observed(request, root, seals, |at, consulted| {
             if matches!(consulted, Consulted::Hit) {
                 hit_at = Some(at);
             }
         });
-        (resolution, hit_at.is_some_and(|at| confined.contains(&at)))
+        let chosen = match (endpoint_chosen_from, hit_at) {
+            (Some(from), Some(at)) => at >= from,
+            _ => false,
+        };
+        (resolution, chosen)
     }
 
     /// [`resolve_in`](Self::resolve_in), telling `observe` what the walk did with

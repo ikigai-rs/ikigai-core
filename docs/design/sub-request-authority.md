@@ -372,7 +372,22 @@ in that case is request-derived. What shipped, against the design above:
   gets no grant, whatever its name. Without that rule a module could confine itself to a
   corridor binding a name under another module's granted prefix and borrow its grant; the
   kernel learns which member answered from the same walk resolution takes
-  (`Scope::resolve_noting_confined`), and only when the host declared grants.
+  (`Scope::resolve_noting_confined`), and only when the host declared grants. On a chain
+  with a confinement on it, the **level stack** counts as the endpoint's choice too: a
+  confinement empties the stack, so every level on such a chain was entered afterwards, and
+  one entered through the module's own corridor is the module's. The stack does not record
+  which member each level came from, so this fails closed: a level entered from a host
+  corridor of a confined chain gets no grant either. (Round 2 of the review: a level inside a
+  module's corridor had been counted as the host's, and its endpoint borrowed the grant.)
+- **Not moved into by a space's rewrite.** A space picks both the endpoint it answers with
+  and the canonical name it reports (`Resolved::canonical`). A module mounted at the root as
+  a `Rewrite` over its own doors could otherwise answer its own name with its own endpoint,
+  report a name under another module's prefix, and act under that grant while the real
+  module still answered its name. So where a space reported a rewrite, the name the kernel
+  asked and the name reported must fall under the **same** grant, or there is none. A host
+  that routes a name into a granted prefix uses the kernel's own alias table
+  (`Kernel::with_aliases`), which rewrites before resolution, so the asked name is the
+  granted one. (Also round 2.)
 - **`issue_granted` takes no capability**, errors with `Denied` where no grant is bound (never
   a fallback to the caller's), and runs the hop under exactly the grant: **replacement, never
   union**. The grant lives on the `Invocation` the kernel built, survives reborrows and

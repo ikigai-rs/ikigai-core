@@ -2240,8 +2240,6 @@ impl Kernel {
         Seals::from_topology(&root.topology(), &host).map(|_| ())
     }
 
-    /// Every sealed prefix and its owner, core's first, then the host's, then each
-    /// level's in the order the root's topology states them.
     /// **Delegate fixed authority to the endpoints bound under each prefix** (ledger
     /// #3769; `docs/design/sub-request-authority.md`, Part B). Each entry is a CANONICAL
     /// target prefix and the scopes an endpoint resolved there may issue sub-requests
@@ -2257,9 +2255,16 @@ impl Kernel {
     /// - **Disjoint.** No prefix may be a prefix of another, so at most one grant applies to
     ///   any target and there is no precedence to misread.
     /// - **Keyed on the canonical target**, after every rewrite, and only for an endpoint
-    ///   the ROOT space (or a corridor the host injected) answered: an endpoint a
-    ///   confinement bound gets no grant, so a module cannot borrow another's grant by
-    ///   binding a name under its prefix in a corridor of its own.
+    ///   the host's tree answered: the root, a level in it, or a corridor the host
+    ///   injected. An endpoint a confinement bound gets no grant, nor does one found in a
+    ///   level on a confined chain (a level entered through a module's own corridor is the
+    ///   module's choice), so a module cannot borrow another's grant by binding a name under
+    ///   its prefix in a corridor of its own.
+    /// - **Not moved into by a space's rewrite.** Where a space reported a rewrite
+    ///   (`Resolved::canonical`), the name the kernel asked and the name reported must fall
+    ///   under the same grant; otherwise there is none. A host routes a name into a granted
+    ///   prefix with the kernel's own alias table ([`with_aliases`](Self::with_aliases)),
+    ///   which rewrites before resolution.
     /// - **Replacement, never union.** A delegated sub-request runs under exactly the
     ///   grant; the endpoint it reaches gets its own grant (or none), never this one.
     /// - **The floor stays the caller's.** Whether the module runs at all is decided by
@@ -2393,6 +2398,32 @@ impl Kernel {
         })
     }
 
+    /// The grant an endpoint resolved at the canonical `target` runs with (ledger #3769).
+    /// `asked` is the name the kernel resolved when a SPACE reported a rewrite of it to
+    /// `target` (`Resolved::canonical`); `None` when no space rewrote it.
+    ///
+    /// ★ A reported rewrite cannot move an endpoint into a grant (hub review of PR 333,
+    /// round 2). A space chooses both the endpoint it answers with and the name it reports,
+    /// so a module mounted as a `Rewrite` over its own doors could answer its own name with
+    /// its own endpoint, report a name under another module's granted prefix, and act under
+    /// that grant while the real module still answered its name. The grant is therefore
+    /// given only when the name the kernel ASKED and the name the space reported fall under
+    /// the same grant. A host that wants an alias into a granted prefix uses the kernel's
+    /// own alias table, which rewrites before resolution, so the asked name is already the
+    /// granted one.
+    fn grant_at(&self, target: &Iri, asked: Option<&Iri>) -> Option<Arc<crate::grant::Grant>> {
+        let grant = self.grants.for_target(target.as_str())?;
+        match asked {
+            None => Some(grant),
+            Some(asked) => self
+                .grants
+                .for_target(asked.as_str())
+                .filter(|at_asked| Arc::ptr_eq(at_asked, &grant)),
+        }
+    }
+
+    /// Every sealed prefix and its owner, core's first, then the host's, then each
+    /// level's in the order the root's topology states them.
     pub fn sealed(&self) -> Vec<(String, SealOwner)> {
         self.seals.claims().to_vec()
     }
@@ -5426,11 +5457,12 @@ impl Kernel {
                 // to (minted here when nothing above minted one), and its deadline.
                 .with_run(admitted)
                 // The host's delegation for this CANONICAL target, if any (ledger #3769):
-                // never for an endpoint a confinement answered, never from the request.
+                // never for an endpoint a confinement answered, never from the request,
+                // and never moved into by a rewrite a space reported (`grant_at`).
                 .with_grant(if confined_hit || self.grants.is_empty() {
                     None
                 } else {
-                    self.grants.for_target(request.target.as_str())
+                    self.grant_at(&request.target, probed_as.as_ref())
                 });
             invocation.offer(offer.as_deref());
             // A body attached under a NONCE id (ledger #2239, #2402) makes this request one
