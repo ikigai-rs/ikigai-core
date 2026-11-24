@@ -1,6 +1,7 @@
 # Declaring action consistency
 
-Status: design spike. The tables are proposed per-verb declarations and rollout gates.
+Status: accepted by Brian, 2026-11-24, as proposed; the follow-up items at the end are filed in the
+ledger. The tables are proposed per-verb declarations and rollout gates.
 They describe the contracts to publish after verification. Existing declarations are
 identified where they already carry part of the promise.
 
