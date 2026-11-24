@@ -1,9 +1,35 @@
 # Changelog
 
-## Unreleased
+## Unreleased: needs a minor bump (0.5.0)
+
+`Invocation::time_left` changes what it measures (below), a deliberate behavior change, so the
+next release is a minor.
+
+### Changed (behavior)
+
+- **`Invocation::time_left` is measured on operational time** (ledger #1916,
+  `docs/design/time.md`). The run's deadline (`not_after`) is an instant on the kernel's
+  clock, but `time_left` subtracted `Invocation::now()`, which reads a temporal corridor's
+  pinned instant first: under a corridor pinned in the past a 500 ms deadline read as
+  10,499 ms left, and under one pinned in the future as 0 (`tests/operational_time.rs`
+  reproduces both). It now subtracts the new `Invocation::operational_now()`, so neither a
+  corridor nor a world clock attached with `Invocation::with_clock` moves it. A detached
+  test that measured `time_left` against a clock attached with `with_clock` now reads
+  `None`: attach it with `with_operational_clock` instead. `time_left` is still `None` with
+  no deadline and on a kernel with no clock; the docs now say so.
 
 ### Added
 
+- **Operational time, readable and enforceable** (ledger #1916). `Kernel::now()` and
+  `Kernel::clock()` report the clock installed with `with_clock`, and nothing else: `None`
+  on a clockless kernel, never the system's clock or a corridor's. `Invocation::operational_now()`
+  reads the issuer's clock; `Invocation::with_operational_clock` is a detached test seam,
+  read only when there is no issuer, so it cannot move a kernel-issued run's deadline.
+  `Invocation::time_left_checked()` tells no deadline (`Ok(None)`) from no clock to measure
+  one (`Unsupported { verb: None, .. }`), for code that must enforce the deadline.
+  `Kernel::deadline_in(left)` rebuilds a deadline from a remaining duration on the kernel's
+  own clock and refuses with `Unsupported { verb: None, .. }` without one: what a wire door
+  does with a peer's `time_left_ms`, instead of adding it to `SystemClock`.
 - **`Invocation::pinned_now`: the pinned instant on its own** (ledger #4285). `now()`
   merges a clock attached with `with_clock`, a temporal corridor's and the kernel's, and an
   endpoint holds no `Scope`, so it could not tell an as-of instant from a live one. New:
@@ -13,7 +39,7 @@
   fingerprint hashes, so an answer computed from it is covered by the cache key, as
   `clock_pinned` is. For the SPARQL `NOW()` rewrite in `ikigai-store`
   (`docs/design/sparql-now-clock.md` there), which may then cache under a pinned corridor.
-  Additive: a patch release.
+  Additive.
 - **A `Delete` can say it is not idempotent** (ledger #4063). `Verb::is_idempotent` says
   every `Delete` is, and `ikigai-throttle`'s `Retry` sends one again on a transient
   failure, but an intray take with no selector pops the NEXT tuple on a repeat: one call
