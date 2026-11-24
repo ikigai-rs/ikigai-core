@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased: needs a minor bump (0.5.0)
+## 0.5.0 (2026-11-24)
 
 `Invocation::time_left` changes what it measures (below), a deliberate behavior change, so the
 next release is a minor.

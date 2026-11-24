@@ -22,7 +22,7 @@ serde_json = "1"
 # 0.4.0: the core this vocabulary is released with (ledger #3866's opacity change makes 0.4.0
 # breaking). Under 0.x caret rules "0.3.4" means <0.4.0, so the old floor would put a second core
 # in every consumer's graph.
-ikigai-core = { path = "../ikigai-core", version = "0.4.0" }
+ikigai-core = { path = "../ikigai-core", version = "0.5.0" }
 
 # Under 0.x rules "0.1.108" means <0.2.0, so a vocab 0.2.0 pinned to the 0.1 line would put a second
 # core in every consumer's graph. Earlier floors, kept for the record: 0.1.108 =
