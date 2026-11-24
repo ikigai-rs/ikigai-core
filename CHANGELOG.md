@@ -30,7 +30,16 @@ next release is a minor.
   `Kernel::deadline_in(left)` rebuilds a deadline from a remaining duration on the kernel's
   own clock and refuses with `Unsupported { verb: None, .. }` without one: what a wire door
   does with a peer's `time_left_ms`, instead of adding it to `SystemClock`.
-
+- **`Invocation::pinned_now`: the pinned instant on its own** (ledger #4285). `now()`
+  merges a clock attached with `with_clock`, a temporal corridor's and the kernel's, and an
+  endpoint holds no `Scope`, so it could not tell an as-of instant from a live one. New:
+  `Invocation::pinned_now() -> Option<Time>`, the instant the chain's innermost temporal
+  corridor read at injection (`Scope::with_named_at`), and `None` when no corridor pinned
+  time, whatever clock the kernel or the caller has. It is the instant the chain's
+  fingerprint hashes, so an answer computed from it is covered by the cache key, as
+  `clock_pinned` is. For the SPARQL `NOW()` rewrite in `ikigai-store`
+  (`docs/design/sparql-now-clock.md` there), which may then cache under a pinned corridor.
+  Additive.
 - **A `Delete` can say it is not idempotent** (ledger #4063). `Verb::is_idempotent` says
   every `Delete` is, and `ikigai-throttle`'s `Retry` sends one again on a transient
   failure, but an intray take with no selector pops the NEXT tuple on a repeat: one call

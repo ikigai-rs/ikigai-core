@@ -1102,14 +1102,13 @@ impl<'a> Invocation<'a> {
     /// to the kernel's clock (or to a clock attached with [`with_clock`](Self::with_clock),
     /// which this does not report).
     ///
-    /// This is the one fact about its scope an endpoint may read besides the time, and it
-    /// is **covered by the cache key**: a clock reaches a chain only beside the corridor
-    /// it is derived from, and the chain's fingerprint hashes that corridor's name AND
-    /// the instant its clock read at injection (ledger #3869, see
-    /// [`Scope::with_named_at`]). So an answer cached under a pinned chain is never
-    /// served to a chain with no temporal corridor, with a different one, or with the
-    /// same name at another instant. An
-    /// endpoint uses it to declare an as-of answer [`cacheable`](Representation::cacheable)
+    /// This and [`pinned_now`](Self::pinned_now) are the facts about its scope an endpoint
+    /// may read besides the time, and both are **covered by the cache key**: a clock
+    /// reaches a chain only beside the corridor it is derived from, and the chain's
+    /// fingerprint hashes that corridor's name AND the instant its clock read at
+    /// injection (ledger #3869, see [`Scope::with_named_at`]). So an answer cached under
+    /// a pinned chain is never served to a chain with no temporal corridor, with a
+    /// different one, or with the same name at another instant. An endpoint uses it to declare an as-of answer [`cacheable`](Representation::cacheable)
     /// and a live one not:
     ///
     /// ```
@@ -1144,6 +1143,72 @@ impl<'a> Invocation<'a> {
     /// ```
     pub fn clock_pinned(&self) -> bool {
         self.scope.clock().is_some()
+    }
+
+    /// The **pinned instant** alone: the one the resolution chain's innermost temporal
+    /// corridor read when it was injected ([`Scope::with_named_at`]), or `None` when no
+    /// corridor in the chain pinned time. Unlike [`now`](Self::now) it never falls back:
+    /// not to a clock attached with [`with_clock`](Self::with_clock), not to the kernel's
+    /// clock. So an endpoint can tell "as of this instant" from "live" and use the time
+    /// accordingly: the SPARQL `NOW()` rewrite in `ikigai-store`, say, may cache an answer
+    /// computed at a pinned instant and must not cache one computed at the live time
+    /// (ledger #4285).
+    ///
+    /// Like [`clock_pinned`](Self::clock_pinned), it is **covered by the cache key**: this
+    /// is the instant the chain's fingerprint hashes beside the corridor's name (ledger
+    /// #3869), so an answer computed from it is never served to a chain that pins another
+    /// instant or none. Nested corridors pin the innermost one's instant. With a
+    /// [`FixedClock`](crate::FixedClock) it is the time `now` reads under the corridor; a
+    /// corridor's clock that moves keeps moving in `now`, while this stays at the instant
+    /// it read at injection.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     Capability, EndpointSpace, Exact, FixedClock, FnEndpoint, Iri, Kernel, ReprType,
+    ///     Representation, Request, Scope, Verb,
+    /// };
+    ///
+    /// let stamp = FnEndpoint::new("stamp", |inv| {
+    ///     let answer = |t: Option<u64>| {
+    ///         let text = t.map_or("none".to_string(), |t| t.to_string());
+    ///         Representation::new(ReprType::new("text/plain"), text.into_bytes())
+    ///     };
+    ///     Ok(match inv.pinned_now() {
+    ///         // As of an instant the key covers: cacheable.
+    ///         Some(then) => answer(Some(then.as_millis())).cacheable(),
+    ///         // Live time: answered, never cached.
+    ///         None => answer(inv.now().map(|t| t.as_millis())),
+    ///     })
+    /// });
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:stamp"), stamp)))
+    ///     .with_clock(Arc::new(FixedClock::at(2_000)));
+    /// let cap = Capability::root();
+    /// let stamp = || Request::new(Verb::Source, Iri::parse("urn:stamp").unwrap());
+    /// let corridor = |name: &str, at: u64| {
+    ///     Scope::empty().with_named_at(
+    ///         Iri::parse(name).unwrap(),
+    ///         Arc::new(EndpointSpace::new()),
+    ///         Arc::new(FixedClock::at(at)),
+    ///     )
+    /// };
+    ///
+    /// // No corridor: the kernel's clock is live time, not a pinned instant.
+    /// assert_eq!(block_on(kernel.issue(stamp(), &cap)).unwrap().bytes, b"2000");
+    /// assert!(!kernel.is_cached(&stamp(), &cap));
+    ///
+    /// // A corridor: its instant.
+    /// let then = corridor("urn:ctx:time:then", 1_000);
+    /// assert_eq!(block_on(kernel.issue_in(stamp(), &cap, then.clone())).unwrap().bytes, b"1000");
+    /// assert!(kernel.is_cached_in(&stamp(), &cap, &then));
+    ///
+    /// // Nested corridors: the innermost's.
+    /// let nested = then.stack(&corridor("urn:ctx:time:later", 3_000));
+    /// assert_eq!(block_on(kernel.issue_in(stamp(), &cap, nested)).unwrap().bytes, b"3000");
+    /// ```
+    pub fn pinned_now(&self) -> Option<Time> {
+        self.scope.instant()
     }
 
     /// Attach the resolution chain the request was resolved in (set by the
@@ -3293,6 +3358,46 @@ mod tests {
     /// because only the kernel can put a chain on an invocation, so the middle
     /// rung is reachable from here alone; the two ends are public and pinned by
     /// the integration tests (`temporal_corridor.rs`).
+    /// `pinned_now` reads the chain's instant and nothing else: not the clock a
+    /// caller attached, which `now` prefers, nor the issuer's. Crate-private for the
+    /// same reason as the test below: only the kernel can put a chain on an invocation.
+    #[test]
+    fn pinned_now_reads_only_the_chain() {
+        use crate::kernel::FixedClock;
+        use crate::space::Scope;
+        let kernel =
+            Kernel::new(Arc::new(EndpointSpace::new())).with_clock(Arc::new(FixedClock::at(3)));
+        let request = Request::new(Verb::Source, iri("urn:x"));
+        let bindings = Bindings::new();
+        let cap = Capability::root();
+        let doors: Arc<dyn Space> = Arc::new(EndpointSpace::new());
+        let chain =
+            Scope::empty().with_named_at(iri("urn:ctx:t"), doors, Arc::new(FixedClock::at(2)));
+
+        let issuer_only = Invocation::with_issuer(&request, &bindings, &cap, &kernel);
+        assert_eq!(issuer_only.pinned_now(), None, "the issuer's clock is live");
+        let attached_only = Invocation::with_issuer(&request, &bindings, &cap, &kernel)
+            .with_clock(Arc::new(FixedClock::at(1)));
+        assert_eq!(
+            attached_only.pinned_now(),
+            None,
+            "a stated clock is not a pin"
+        );
+        let attached = Invocation::with_issuer(&request, &bindings, &cap, &kernel)
+            .with_scope(chain)
+            .with_clock(Arc::new(FixedClock::at(1)));
+        assert_eq!(attached.now(), Some(Time::from_millis(1)));
+        assert_eq!(
+            attached.pinned_now(),
+            Some(Time::from_millis(2)),
+            "the chain's, whatever `now` prefers"
+        );
+        assert_eq!(
+            Invocation::detached(&request, &bindings, &cap).pinned_now(),
+            None
+        );
+    }
+
     #[test]
     fn now_prefers_an_attached_clock_then_the_chain_then_the_issuer() {
         use crate::kernel::FixedClock;

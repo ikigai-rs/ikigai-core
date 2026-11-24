@@ -71,7 +71,7 @@ host code from endpoint code, and that is the root of finding B4.
 | `Invocation::confine(&self, name: Iri, space: Arc<dyn Space>) -> Invocation` | **(b)** | Nowhere | B1, B2 |
 | `Invocation::scope(&self) -> &Scope` | (a) | `pub(crate)` since [#3866](http://localhost:1062/l/default/item/3866) | B3, closed. An endpoint never receives a `Scope`; a `compile_fail` doctest pins E0624 |
 | `Scope::spaces(&self) -> &[Arc<dyn Space>]`, `Scope::levels` | (a) | `pub(crate)` since [#3866](http://localhost:1062/l/default/item/3866) | B3, closed. Tests read them through the `testkit` feature, which is not API |
-| `Invocation::{now, clock_pinned}` | (a) | Read-only | The time, and whether it is a temporal corridor's: covered by the key through the corridor's name (R7.10, R7.14) |
+| `Invocation::{now, clock_pinned, pinned_now}` | (a) | Read-only | The time, whether it is a temporal corridor's, and that corridor's instant alone: covered by the key through the corridor's name and instant (R7.10, R7.14) |
 | `Scope::{is_severed, is_empty, fingerprint, clock, now}`, `LevelPath::{names, len, is_empty}` | (a) | Read-only, host side | No endpoint holds a `Scope` to call them on. A `Space` still receives the request chain in `resolve` and can read these (see R7.14) |
 | `Scope::{empty, with, with_named, with_named_at, sever, confined, stack}`, `Confine::chain_from` | (a) | Inert values | A `Scope` takes effect only when issued in, and that takes a kernel (B4) |
 | `Invocation::{with_bindings, with_retries, with_memory_limit, with_not_after, with_stale}` | (a) | No scope effect | Each reborrow keeps the chain |
