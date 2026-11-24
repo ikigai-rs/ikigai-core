@@ -240,8 +240,10 @@ pub trait Issuer: Send + Sync {
     }
 
     /// The current time per the issuer's injected [`Clock`](crate::Clock), or
-    /// `None` if it has none. An endpoint computing a time-based deadline (e.g.
-    /// `now + max-age`) reads it through [`Invocation::now`]. Default `None`.
+    /// `None` if it has none: the issuer's **operational** time. An endpoint computing a
+    /// time-based deadline (e.g. `now + max-age`) reads it through [`Invocation::now`]
+    /// (where a corridor's pinned instant comes first), and the run's time left through
+    /// [`Invocation::operational_now`] (where nothing else does). Default `None`.
     fn now(&self) -> Option<Time> {
         None
     }
@@ -485,6 +487,11 @@ pub struct Invocation<'a> {
     /// [`with_clock`](Invocation::with_clock) — the kernel never sets it, because a
     /// kernel-driven invocation already reads the kernel's clock through its issuer.
     clock: Option<Arc<dyn crate::Clock>>,
+    /// An explicitly attached **operational** clock (ledger #1916), the detached test seam
+    /// for [`operational_now`](Invocation::operational_now). Set only by
+    /// [`with_operational_clock`](Invocation::with_operational_clock), and read only when
+    /// there is no issuer: a kernel-issued run's time is always the kernel's.
+    operational_clock: Option<Arc<dyn crate::Clock>>,
     /// This invocation's trace span, when the kernel is recording — so a sub-request
     /// it issues is linked to this node as its parent. `None` off the trace path.
     span: Option<u64>,
@@ -824,6 +831,7 @@ impl<'a> Invocation<'a> {
             spawner: None,
             issuer_arc: None,
             clock: None,
+            operational_clock: None,
             span: None,
             trace: None,
             scope: Scope::empty(),
@@ -854,6 +862,7 @@ impl<'a> Invocation<'a> {
             spawner: None,
             issuer_arc: None,
             clock: None,
+            operational_clock: None,
             span: None,
             trace: None,
             scope: Scope::empty(),
@@ -922,6 +931,7 @@ impl<'a> Invocation<'a> {
             spawner: self.spawner.clone(),
             issuer_arc: self.issuer_arc.clone(),
             clock: self.clock.clone(),
+            operational_clock: self.operational_clock.clone(),
             span: self.span,
             trace: self.trace.clone(),
             scope: self.scope.clone(),
@@ -1032,6 +1042,7 @@ impl<'a> Invocation<'a> {
             spawner: self.spawner.clone(),
             issuer_arc: self.issuer_arc.clone(),
             clock: self.clock.clone(),
+            operational_clock: self.operational_clock.clone(),
             span: self.span,
             trace: self.trace.clone(),
             scope: self.scope.clone().confined(name, space),
@@ -1258,8 +1269,19 @@ impl<'a> Invocation<'a> {
     }
 
     /// How long the run has left: [`not_after`](Self::not_after) less
-    /// [`now`](Self::now), zero once it has passed. `None` without a deadline, or without a
-    /// clock to measure it against.
+    /// [`operational_now`](Self::operational_now), zero once it has passed. `None` without a
+    /// deadline, **and also** `None` on a kernel built without
+    /// [`with_clock`](crate::Kernel::with_clock), which has nothing to measure a deadline
+    /// against: an endpoint there sees `not_after()` but never `time_left()`. Code that must
+    /// enforce a deadline, and so must tell those two apart, asks
+    /// [`time_left_checked`](Self::time_left_checked).
+    ///
+    /// ★ **Measured on the operational clock, not on [`now`](Self::now)** (ledger #1916,
+    /// `docs/design/time.md`). The deadline is an instant on the kernel's clock, so it is
+    /// measured on that clock: a temporal corridor's pinned instant neither lengthens it (a
+    /// pinned past) nor exhausts it (a pinned future), and a clock attached with
+    /// [`with_clock`](Self::with_clock) (the world-time override) does not move it. Before
+    /// 0.5.0 it was measured on `now()`, which reads a corridor's instant first.
     ///
     /// ```
     /// # use std::sync::Arc;
@@ -1269,7 +1291,7 @@ impl<'a> Invocation<'a> {
     /// # let bindings = Bindings::new();
     /// # let capability = Capability::root();
     /// let inv = Invocation::detached(&request, &bindings, &capability)
-    ///     .with_clock(Arc::new(FixedClock::at(1_000)));
+    ///     .with_operational_clock(Arc::new(FixedClock::at(1_000)));
     /// assert_eq!(inv.time_left(), None, "no deadline");
     /// // An endpoint may shorten its run's deadline for what it issues, never extend it.
     /// let tight = inv.with_not_after(Time::from_millis(1_400));
@@ -1280,11 +1302,44 @@ impl<'a> Invocation<'a> {
     /// assert_eq!(past.time_left(), Some(Duration::ZERO));
     /// ```
     pub fn time_left(&self) -> Option<std::time::Duration> {
-        let deadline = self.not_after()?;
-        let now = self.now()?;
-        Some(std::time::Duration::from_millis(
+        self.time_left_checked().ok().flatten()
+    }
+
+    /// [`time_left`](Self::time_left) for code that must **enforce** the deadline: `Ok(None)`
+    /// when the run has no deadline, `Ok(Some(left))` when it has one and a clock to measure
+    /// it, and [`Error::Unsupported`]` { verb: None, .. }` when it has a deadline but no
+    /// operational clock, so a bounded piece of work refuses before it starts instead of
+    /// running unbounded. A missing clock is never replaced by the system's.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # use ikigai_core::{Bindings, Capability, Error, FixedClock, Invocation, Iri, Request, Time, Verb};
+    /// # let request = Request::new(Verb::Source, Iri::parse("urn:x").unwrap());
+    /// # let bindings = Bindings::new();
+    /// # let capability = Capability::root();
+    /// let clockless = Invocation::detached(&request, &bindings, &capability);
+    /// assert!(matches!(clockless.time_left_checked(), Ok(None)), "no deadline, nothing to enforce");
+    /// let bounded = clockless.with_not_after(Time::from_millis(1_400));
+    /// assert_eq!(bounded.time_left(), None);
+    /// assert!(matches!(bounded.time_left_checked(), Err(Error::Unsupported { verb: None, .. })));
+    /// let measured = bounded.with_operational_clock(Arc::new(FixedClock::at(1_000)));
+    /// assert_eq!(measured.time_left_checked().unwrap(), Some(Duration::from_millis(400)));
+    /// ```
+    pub fn time_left_checked(&self) -> Result<Option<std::time::Duration>> {
+        let Some(deadline) = self.not_after() else {
+            return Ok(None);
+        };
+        let now = self.operational_now().ok_or_else(|| Error::Unsupported {
+            verb: None,
+            detail: format!(
+                "the run has a deadline ({} ms) and the host configured no clock to measure it",
+                deadline.as_millis()
+            ),
+        })?;
+        Ok(Some(std::time::Duration::from_millis(
             deadline.as_millis().saturating_sub(now.as_millis()),
-        ))
+        )))
     }
 
     /// The run's whole context, for an endpoint that forwards a request to another kernel
@@ -1389,6 +1444,7 @@ impl<'a> Invocation<'a> {
             spawner: self.spawner.clone(),
             issuer_arc: self.issuer_arc.clone(),
             clock: self.clock.clone(),
+            operational_clock: self.operational_clock.clone(),
             span: self.span,
             trace: self.trace.clone(),
             scope: self.scope.clone(),
@@ -1436,6 +1492,34 @@ impl<'a> Invocation<'a> {
     /// is both unmockable and not wasm-clean.
     pub fn with_clock(mut self, clock: Arc<dyn crate::Clock>) -> Self {
         self.clock = Some(clock);
+        self
+    }
+
+    /// Attach an explicit **operational** clock, so
+    /// [`operational_now`](Self::operational_now) and [`time_left`](Self::time_left) answer
+    /// on an invocation with no issuer (ledger #1916).
+    ///
+    /// **A detached test seam, with its own precedence.** It is read only when the
+    /// invocation has no issuer: an issuer's clock (the kernel's) always wins, and an issuer
+    /// without a clock stays without one. So it cannot change a kernel-issued run's
+    /// deadline accounting, which [`with_clock`](Self::with_clock) (the world-time override,
+    /// which wins over the issuer for [`now`](Self::now)) must not do either and no longer
+    /// does. The two are independent: neither one answers for the other.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use ikigai_core::{Bindings, Capability, FixedClock, Invocation, Iri, Request, Time, Verb};
+    /// # let request = Request::new(Verb::Source, Iri::parse("urn:x").unwrap());
+    /// # let bindings = Bindings::new();
+    /// # let capability = Capability::root();
+    /// let inv = Invocation::detached(&request, &bindings, &capability)
+    ///     .with_clock(Arc::new(FixedClock::at(5)))
+    ///     .with_operational_clock(Arc::new(FixedClock::at(1_000)));
+    /// assert_eq!(inv.now(), Some(Time::from_millis(5)), "world time");
+    /// assert_eq!(inv.operational_now(), Some(Time::from_millis(1_000)), "operational time");
+    /// ```
+    pub fn with_operational_clock(mut self, clock: Arc<dyn crate::Clock>) -> Self {
+        self.operational_clock = Some(clock);
         self
     }
 
@@ -2260,6 +2344,23 @@ impl<'a> Invocation<'a> {
             .or_else(|| self.issuer.and_then(|issuer| issuer.now()))
     }
 
+    /// The **operational** time (ledger #1916, `docs/design/time.md`): the instant on the
+    /// clock the host gave the kernel ([`Kernel::with_clock`](crate::Kernel::with_clock)),
+    /// the one the run's [`not_after`](Self::not_after) and cache expiry are judged on.
+    /// `None` when there is no such clock: never the system's, and never a corridor's.
+    ///
+    /// The issuer's clock answers whenever there is an issuer, even when it has none; only
+    /// an invocation with no issuer reads a clock attached with
+    /// [`with_operational_clock`](Self::with_operational_clock). Neither a temporal
+    /// corridor's pinned instant nor [`with_clock`](Self::with_clock) reaches it: those are
+    /// the **world** time [`now`](Self::now) reads, the instant the world is read as of.
+    pub fn operational_now(&self) -> Option<Time> {
+        match self.issuer {
+            Some(issuer) => issuer.now(),
+            None => self.operational_clock.as_ref().map(|clock| clock.now()),
+        }
+    }
+
     /// **State how long a failure of this invocation may be cached** (negative
     /// caching, ledger #2657): if the endpoint then answers an error, the kernel
     /// stores that error until `until` and serves it unchanged to every repeat of the
@@ -2410,6 +2511,7 @@ impl<'a> Invocation<'a> {
             spawner: self.spawner.clone(),
             issuer_arc: self.issuer_arc.clone(),
             clock: self.clock.clone(),
+            operational_clock: self.operational_clock.clone(),
             span: self.span,
             trace: self.trace.clone(),
             scope: self.scope.clone(),

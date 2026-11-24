@@ -2685,6 +2685,71 @@ impl Kernel {
         self
     }
 
+    /// The kernel's **operational** time (ledger #1916, `docs/design/time.md`): what the
+    /// clock installed with [`with_clock`](Self::with_clock) reads now, the clock a run's
+    /// deadline ([`IssueContext::with_not_after`](crate::IssueContext::with_not_after)) and
+    /// cache expiry are judged on. `None` on a kernel with no clock: never the system's,
+    /// and never a temporal corridor's (that is world time,
+    /// [`Invocation::now`](crate::Invocation::now)).
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{EndpointSpace, FixedClock, Kernel, Time};
+    ///
+    /// let clockless = Kernel::new(Arc::new(EndpointSpace::new()));
+    /// assert_eq!(clockless.now(), None);
+    /// assert!(clockless.clock().is_none());
+    /// let kernel = clockless.with_clock(Arc::new(FixedClock::at(1_000)));
+    /// assert_eq!(kernel.now(), Some(Time::from_millis(1_000)));
+    /// ```
+    pub fn now(&self) -> Option<Time> {
+        self.now_stamp()
+    }
+
+    /// The operational clock itself, for a host component that must read the same source
+    /// as the kernel (a door rebuilding a peer's deadline, an overlay keeping its own
+    /// window): the one installed with [`with_clock`](Self::with_clock), or `None`.
+    pub fn clock(&self) -> Option<&Arc<dyn Clock>> {
+        self.clock.as_ref()
+    }
+
+    /// The deadline `left` from now **on this kernel's operational clock**: what a door
+    /// that received a run's remaining time (a wire peer's `time_left`, never an instant
+    /// on the peer's clock) passes to
+    /// [`IssueContext::with_not_after`](crate::IssueContext::with_not_after), which only
+    /// ever shortens a deadline already set. Refuses with
+    /// [`Error::Unsupported`]` { verb: None, .. }` on a kernel with no clock: a bounded
+    /// request must not silently run unbounded, nor be measured on a clock the kernel
+    /// does not use.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    /// use ikigai_core::{EndpointSpace, Error, FixedClock, IssueContext, Kernel, Time};
+    ///
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new()))
+    ///     .with_clock(Arc::new(FixedClock::at(1_000)));
+    /// let deadline = kernel.deadline_in(Duration::from_millis(250)).unwrap();
+    /// assert_eq!(deadline, Time::from_millis(1_250));
+    /// let run = IssueContext::new().with_not_after(deadline);
+    /// assert_eq!(run.not_after(), Some(Time::from_millis(1_250)));
+    ///
+    /// let clockless = Kernel::new(Arc::new(EndpointSpace::new()));
+    /// let refused = clockless.deadline_in(Duration::from_millis(250));
+    /// assert!(matches!(refused, Err(Error::Unsupported { verb: None, .. })));
+    /// ```
+    pub fn deadline_in(&self, left: std::time::Duration) -> Result<Time> {
+        let now = self.now().ok_or_else(|| Error::Unsupported {
+            verb: None,
+            detail: format!(
+                "a run with {} ms left needs a clock to measure it, and the host configured none",
+                left.as_millis()
+            ),
+        })?;
+        let left = u64::try_from(left.as_millis()).unwrap_or(u64::MAX);
+        Ok(now.plus_millis(left))
+    }
+
     /// Set the **nesting budget** (builder): the deepest sub-request this kernel
     /// will run. A request the host issues is at depth 0; a sub-request an endpoint
     /// issues — through `issue`, `source`, the attenuated forms, `fan_out`, or a
