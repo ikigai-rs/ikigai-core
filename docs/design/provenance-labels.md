@@ -225,3 +225,6 @@ rather than by convention.
 - **The formal side.** "Labels only accumulate along a chain, except at a declared
   endorsement" is a monotonicity property of the same shape as the scope-floor certificate's
   hypotheses (`docs/formal/`). It should be stated there once the increment is built.
+- **A closed lattice.** A fixed integrity and confidentiality lattice (integrity joins by
+  minimum, confidentiality by maximum) rides in the same open label set, encoded so that union
+  is the join: `docs/design/label-lattice.md` (ledger #3640).
