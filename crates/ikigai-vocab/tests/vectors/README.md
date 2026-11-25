@@ -341,3 +341,54 @@ cargo test -p ikigai-vocab --test failure_class_vectors -- --ignored
 
 A face picks the new vectors up by copying the file again. This file is the canonical
 source for devtools' `vector-drift` to compare consumer copies against.
+
+# Shared Exists answer vectors
+
+Copy `exists_vectors.json` **verbatim** into the Python, TypeScript, .NET and
+Clojure test suites. These are specification fixtures for the proposed
+[opt-in Exists answer profile](../../../../docs/design/exists.md#opt-in-contract-exists-bool-v1),
+not generated outputs or a claim that current core implements the profile.
+The JSON is test data, not a wire encoding.
+
+Every case has an `id` and an `expected` outcome. Assert the boolean only
+for rows with `expected.boolean`. For `expected.error`, assert the core error
+kind and any additional fields shown. `expected.opaque_hex` means legacy
+bytes, with no boolean interpretation. Decode all hexadecimal strings to bytes
+before comparison.
+
+| Section | What a face supplies and checks |
+|---|---|
+| `bodies` | Supply the exact `media_type` string, `params` map (empty if omitted) and decoded `body_hex` as a successful profile reply. |
+| `streams` | Supply the decoded `chunks_hex` in order with the given `media_type`. Finish with clean `eof` or the named typed failure. No boolean should be returned before clean EOF. |
+| `dispatch` | Issue a profile request against the fixture below. Assert the outcome and that unsupported or denied routes do not enter a legacy handler. |
+| `revalidation` | Seed the specified `prior` state and issue a profile request. A `marker` is a revalidation reply with a fresh deadline, not a body. Other `reply` values name a row in `bodies`. Assert the result and that ineligible entries were not offered. |
+| `wire` | Supply the advertised tokens and requested token (null omits the field). Run negotiation, then simulate the expected reply with `echo` (null omits it) and either a named `bodies` row or `reply_error`. Assert whether the request was sent. |
+
+For dispatch, bind `urn:test:members` and alias `urn:test:alias` to it.
+Defaults for omitted fixture fields are target `urn:test:members`, argument
+`member=a`, current time view, primary scope, a registered metadata handler,
+a Source-only declaration requiring `read`, and a caller holding `read`.
+Expand the short scope names as `urn:cap:test:<name>`. The argument contract
+requires `member` and accepts `a` and `b` only. Only `a` in the primary scope
+at the current time exists. An explicit null `arg` omits it. `declared`
+replaces the verb and requirement map. `sensitive: true` marks Source as
+existence-sensitive. `handler_error` overrides the metadata answer with that
+typed error. The `source-adapter` uses an authorized Source read that returns
+the literal body `false` for the existing resource. An unregistered path can
+have a legacy handler returning that same body, but the profile must not call it.
+
+For revalidation, `validated-expired` is a time-expired profile entry under
+the current effective key, with intact threads, an eligible origin validator
+and the given `prior_boolean`. The other states have no eligible entry.
+`legacy-false` and `source` store boolean-looking bytes under the legacy
+Exists and Source keys, respectively. `cut`, `no-validator` and
+`different-key` differ from the eligible entry only as named. Simulate an
+endpoint returning the marker even when no stale entry was offered. An
+invalid replacement must not extend the stale entry's freshness.
+
+For wire rows, `sent` defaults to true. The explicit `sent: true` row
+with an unknown requested token injects an invalid request at the receiver to
+test rejection independently of the caller's advertisement check.
+An empty advertisement represents no supported profile, including an old
+peer with no advertisement at all. Neither a negotiation failure nor a
+missing or incorrect success echo permits a legacy retry.
