@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use futures::executor::block_on;
 use ikigai_core::{
     ArgRef, AsyncFnEndpoint, Body, ByteStream, Bytes, Capability, ContentId, Description, Endpoint,
-    EndpointSpace, Error, Exact, FnEndpoint, Invocation, Iri, Kernel, Replay, ReprType,
-    Representation, Request, Result, TraceEvent, Tracer, Verb, UNCACHED_NOTE,
+    EndpointSpace, Error, Exact, FnEndpoint, Invocation, Iri, Kernel, Level, MetaRenderer, Mount,
+    Replay, ReprType, Representation, Request, Result, TraceEvent, Tracer, Verb, UNCACHED_NOTE,
 };
 
 fn iri(s: &str) -> Iri {
@@ -35,6 +35,7 @@ fn chunks(parts: &'static [&'static [u8]]) -> Body {
 struct Answers<F> {
     repr_type: ReprType,
     make: F,
+    description: Option<Description>,
 }
 
 #[async_trait]
@@ -42,6 +43,12 @@ impl<F: Fn() -> Body + Send + Sync> Endpoint for Answers<F> {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let body = self.invoke_body(inv).await?;
         body.collect_within(inv.memory_budget().unwrap()).await
+    }
+
+    fn describe(&self) -> Description {
+        self.description
+            .clone()
+            .unwrap_or_else(|| Description::new(self.name()))
     }
 
     async fn invoke_body(&self, _inv: &Invocation<'_>) -> Result<Representation<Body>> {
@@ -53,6 +60,7 @@ fn answers<F: Fn() -> Body + Send + Sync>(media: &str, make: F) -> Answers<F> {
     Answers {
         repr_type: ReprType::new(media),
         make,
+        description: None,
     }
 }
 
@@ -147,6 +155,7 @@ fn kernel() -> (Kernel, Arc<AtomicUsize>) {
             Answers {
                 repr_type: ReprType::new("text/plain").with_param("charset", "iso-8859-1"),
                 make: || chunks(&[b"caf\xe9"]),
+                description: None,
             },
         );
     (Kernel::new(Arc::new(space)), opened)
@@ -426,6 +435,80 @@ fn a_plan_hands_an_incremental_step_the_stream_and_collects_for_the_rest() {
         ["bytes"],
         "collected first, as before bodies"
     );
+}
+
+#[test]
+fn meta_preserves_a_transreptors_stream_and_traces_the_scoped_step() {
+    struct TurtleOnly;
+
+    impl MetaRenderer for TurtleOnly {
+        fn render(&self, _: &Description, target: &ReprType) -> Result<Representation> {
+            if target.media_type == "text/turtle" {
+                Ok(Representation::new(target.clone(), b"# test".to_vec()))
+            } else {
+                Err(Error::Endpoint("only Turtle is rendered directly".into()))
+            }
+        }
+    }
+
+    let module = EndpointSpace::new()
+        .bind(
+            Exact::new("urn:mod:page"),
+            FnEndpoint::new("page", |_| unreachable!("Meta does not invoke the page")),
+        )
+        // These IRIs are outside the mount's prefix. Only the page's level can resolve them.
+        .bind(
+            Exact::new("urn:local:encode"),
+            Answers {
+                description: Some(
+                    Description::new("encode")
+                        .transreptor(["text/turtle"], ["text/b"])
+                        .incremental()
+                        .verb(Verb::Source)
+                        .input(ikigai_core::ArgSpec::new("content"))
+                        .input(ikigai_core::ArgSpec::new("as").optional()),
+                ),
+                ..answers("text/b", || chunks(&[b"ab", b"c"]))
+            },
+        );
+    let kernel = Kernel::with_meta_renderer(
+        Arc::new(Mount::new(
+            "urn:mod:",
+            Arc::new(Level::new(iri("urn:level:mod"), Arc::new(module))),
+        )),
+        Arc::new(TurtleOnly),
+    );
+
+    assert_eq!(kernel.select_transreptor("text/turtle", "text/b"), None);
+    let request = || Request::new(Verb::Meta, iri("urn:mod:page")).with_arg("as", inline("text/b"));
+    let trace = Arc::new(Collect::default());
+    let answer = block_on(kernel.issue_traced(request(), &root(), trace.clone())).unwrap();
+    assert_eq!(answer.repr_type.media_type, "text/b");
+    assert_eq!(answer.bytes, b"abc");
+
+    let events = trace.0.lock().unwrap();
+    let meta = events.iter().find(|e| e.target == "urn:mod:page").unwrap();
+    assert_eq!(meta.parent, None);
+    let step = events
+        .iter()
+        .find(|e| e.target == "urn:local:encode")
+        .unwrap();
+    assert_eq!(step.parent, Some(meta.span));
+    drop(events);
+
+    let answer = block_on(kernel.issue_body(request(), &root())).unwrap();
+    assert!(
+        answer.bytes.is_one_shot(),
+        "Meta must not buffer the step's stream"
+    );
+
+    // A byte caller collects the final body under the caller's run budget.
+    let limited = block_on(kernel.issue_with_context(
+        request(),
+        &root(),
+        ikigai_core::IssueContext::new().with_memory_limit(2),
+    ));
+    assert!(matches!(limited, Err(Error::OverBudget { .. })));
 }
 
 #[test]
