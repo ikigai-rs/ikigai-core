@@ -1738,6 +1738,79 @@ impl<'a> Invocation<'a> {
         })
     }
 
+    /// The bytes of an optional inline argument: `Ok(None)` only when it is absent
+    /// (ledger #4370, `docs/design/optional-arguments.md`).
+    ///
+    /// A present inline value is `Ok(Some(..))`, an empty one included, and its bytes may
+    /// be anything. A `Reference` or `Content` argument (an attached or stored body) is
+    /// refused with [`Error::InvalidArgument`] naming `name`: it is not resolved, fetched
+    /// or consumed. Read a body with [`content_body`](Self::content_body).
+    ///
+    /// Only [`Error::MissingArgument`] from [`inline_arg`](Self::inline_arg) becomes
+    /// `None`; every other error propagates unchanged, so `.unwrap_or(default)` on the
+    /// result picks the default for absence alone, unlike `inline_arg(name).ok()`.
+    ///
+    /// A by-value input the contract gives a default (`ArgSpec::default_value`) is
+    /// injected before the kernel dispatches the request, so it reads as present here:
+    /// `None` describes the invocation, not necessarily the caller's original request.
+    ///
+    /// ```
+    /// use ikigai_core::{ArgRef, Bindings, Capability, Invocation, Iri, Request, Verb};
+    ///
+    /// let bindings = Bindings::new();
+    /// let capability = Capability::root();
+    /// let request = Request::new(Verb::Source, Iri::parse("urn:example").unwrap())
+    ///     .with_arg("raw", ArgRef::Inline(vec![0xff]));
+    /// let inv = Invocation::detached(&request, &bindings, &capability);
+    ///
+    /// assert_eq!(inv.optional_arg("raw")?, Some(&b"\xff"[..]));
+    /// assert_eq!(inv.optional_arg("absent")?, None);
+    /// # Ok::<(), ikigai_core::Error>(())
+    /// ```
+    pub fn optional_arg(&self, name: &str) -> Result<Option<&[u8]>> {
+        absent_as_none(self.inline_arg(name))
+    }
+
+    /// An optional inline argument decoded as UTF-8: `Ok(None)` only when it is absent
+    /// (ledger #4370, `docs/design/optional-arguments.md`).
+    ///
+    /// A present inline value is `Ok(Some(..))`, an empty one included. A value that is
+    /// not valid UTF-8, a `Reference`, or a `Content` argument (an attached or stored
+    /// body) is refused with [`Error::InvalidArgument`] naming `name`; a reference is not
+    /// resolved and a body is not fetched or consumed.
+    ///
+    /// Only [`Error::MissingArgument`] from [`inline_str`](Self::inline_str) becomes
+    /// `None`; every other error propagates unchanged. So a default is chosen only after
+    /// a successful read, where `inline_str(name).ok()` or `.unwrap_or(default)` would
+    /// also choose it for a value it could not read:
+    ///
+    /// ```
+    /// use ikigai_core::{ArgRef, Bindings, Capability, Error, Invocation, Iri, Request, Verb};
+    ///
+    /// fn format<'a>(inv: &'a Invocation<'_>) -> Result<&'a str, Error> {
+    ///     Ok(inv.optional_str("format")?.unwrap_or("text"))
+    /// }
+    ///
+    /// let bindings = Bindings::new();
+    /// let capability = Capability::root();
+    /// let absent = Request::new(Verb::Source, Iri::parse("urn:example").unwrap());
+    /// let inv = Invocation::detached(&absent, &bindings, &capability);
+    /// assert_eq!(format(&inv)?, "text");
+    ///
+    /// let invalid = Request::new(Verb::Source, Iri::parse("urn:example").unwrap())
+    ///     .with_arg("format", ArgRef::Inline(vec![0xff]));
+    /// let inv = Invocation::detached(&invalid, &bindings, &capability);
+    /// assert!(matches!(format(&inv), Err(Error::InvalidArgument { name, .. }) if name == "format"));
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// A by-value input the contract gives a default (`ArgSpec::default_value`) is
+    /// injected before the kernel dispatches the request, so it reads as present here:
+    /// `None` describes the invocation, not necessarily the caller's original request.
+    pub fn optional_str(&self, name: &str) -> Result<Option<&str>> {
+        absent_as_none(self.inline_str(name))
+    }
+
     /// Issue a sub-request through the kernel, recording it as a dependency of
     /// this invocation's result so expiry propagates. Errors if detached.
     ///
@@ -3022,6 +3095,17 @@ fn nonce_id() -> crate::ContentId {
     crate::ContentId::of(h.finalize().as_bytes())
 }
 
+/// The optional readers' one translation: absence becomes `None`, and nothing else does
+/// (ledger #4370). Every other error, including any an inline reader gains later, passes
+/// through unchanged; `tests::absent_as_none_translates_only_a_missing_argument` pins it.
+fn absent_as_none<T>(read: Result<T>) -> Result<Option<T>> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(Error::MissingArgument(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3036,6 +3120,31 @@ mod tests {
 
     fn iri(s: &str) -> Iri {
         Iri::parse(s).unwrap()
+    }
+
+    #[test]
+    fn absent_as_none_translates_only_a_missing_argument() {
+        assert_eq!(absent_as_none(Ok(7)).unwrap(), Some(7));
+        assert_eq!(
+            absent_as_none::<u8>(Err(Error::MissingArgument("x".into()))).unwrap(),
+            None
+        );
+        // Any other error, whatever the reader returns, is the caller's to see.
+        for error in [
+            Error::InvalidArgument {
+                name: "x".into(),
+                detail: "not valid UTF-8".into(),
+            },
+            Error::Unresolved(iri("urn:x")),
+            Error::Endpoint("boom".into()),
+            Error::NotFound("x".into()),
+            Error::Gone("x".into()),
+        ] {
+            let (kind, expected) = (std::mem::discriminant(&error), error.to_string());
+            let actual = absent_as_none::<u8>(Err(error)).unwrap_err();
+            assert_eq!(std::mem::discriminant(&actual), kind);
+            assert_eq!(actual.to_string(), expected);
+        }
     }
 
     #[test]

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.1 (2026-11-25)
+
+### Added
+
+- **Optional inline readers: `Invocation::optional_arg` and `Invocation::optional_str`**
+  (ledger #4370, `docs/design/optional-arguments.md`). `inv.inline_str(name).ok()` and
+  `.unwrap_or(default)` discard every error, so invalid UTF-8, a reference or a body where an
+  inline value was expected silently read as "absent" and selected the default. The new
+  readers answer `Ok(None)` for a missing argument alone and `Ok(Some(..))` for a present
+  inline value, an empty one included; text requires UTF-8, bytes accept anything. A
+  `Reference` or `Content` argument (an attached or stored body) is an `InvalidArgument`
+  naming it, and is neither resolved nor fetched nor consumed. Every other error propagates
+  unchanged, and a test pins that only `MissingArgument` is translated. Write
+  `inv.optional_str("format")?.unwrap_or("text")`. A declared by-value default is injected
+  before dispatch, so it reads as present. Additive; `tests/optional_arguments.rs` replaces
+  the test-only prototype.
+
+### Upgrade
+
+No persisted state changes; nothing to migrate.
+
 ## 0.5.0 (2026-11-24)
 
 `Invocation::time_left` changes what it measures (below), a deliberate behavior change, so the

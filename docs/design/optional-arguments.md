@@ -5,11 +5,13 @@
 An optional argument reader must distinguish an absent argument from a present value it
 cannot read. `inv.inline_str(name).ok()` and `inv.inline_str(name).unwrap_or(default)`
 discard every error. Invalid UTF-8 and non-inline values therefore select the default just
-as a missing argument does. The test-only prototype in
-[`optional_arguments_spike.rs`](../../crates/ikigai-core/tests/optional_arguments_spike.rs)
-reproduces that behavior and checks the proposed distinction. Before the prototype, a test
-expecting `InvalidArgument` from the `.ok()` idiom failed for an inline `0xff` value.
-This is a proof of the reader semantics, not an audit of every endpoint or a public API.
+as a missing argument does. A test-only prototype reproduced that behavior and checked the
+proposed distinction. Before the prototype, a test expecting `InvalidArgument` from the
+`.ok()` idiom failed for an inline `0xff` value. This is a proof of the reader semantics,
+not an audit of every endpoint. The API below shipped in 0.5.1 (and 0.4.3) as
+`Invocation::optional_arg` and `optional_str` (ledger #4370);
+[`optional_arguments.rs`](../../crates/ikigai-core/tests/optional_arguments.rs), which
+replaced the prototype, tests it.
 
 ## Proposed core API
 
