@@ -204,6 +204,7 @@ fn main() {
     let mut report = Report(Vec::new());
     println!("Sink resends over a link that loses the answer after the write lands\n");
     ledger_append(&mut report);
+    ledger_append_request_token(&mut report);
     ledger_keyed_append(&mut report);
     ledger_key_scope(&mut report);
     ledger_comment(&mut report);
@@ -251,6 +252,36 @@ fn ledger_append(report: &mut Report) {
             "not re-sent (resend undeclared without key=); caller sees: {}; items now: 1, \
              which the caller cannot learn",
             answer.unwrap_err()
+        ),
+    );
+}
+
+/// The published ledger does not yet implement append request tokens (ledger #4057).
+/// Flip this case to one item and identical answers when the release carrying it is used.
+fn ledger_append_request_token(report: &mut Report) {
+    let (link, space) = ledger_link();
+    let cap = Capability::root();
+    let append = request(
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &[
+            ("content", "Port the importer"),
+            ("idempotency-key", "repro-append-1"),
+        ],
+    );
+    assert!(!resend_declared_safe(&*space, &append));
+    link.lose_next();
+    let (answer, attempts) = agent_send(&link, &append, &cap);
+    let answer = answer.expect("the retry succeeds");
+    assert_eq!(attempts, 2);
+    assert_eq!(item_count(&link), "2");
+    assert_ne!(link.last_lost(), answer);
+    report.row(
+        "ledger append idempotency-key=, agent retry (pending release)",
+        format!(
+            "lost answer: {}\nretry answer: {}\nitems now: 2 (one intended)",
+            link.last_lost().trim(),
+            answer.trim()
         ),
     );
 }
