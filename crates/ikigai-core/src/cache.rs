@@ -1239,6 +1239,12 @@ struct CacheState {
     bytes: usize,
     /// Lifetime representation removals, excluding replacements and failures.
     evictions: u64,
+    /// The size `generations` must exceed before the next sweep: twice what the last
+    /// sweep kept (`0` before any sweep). See `sweep_generations`.
+    sweep_at: usize,
+    /// How many sweeps scanned the entries, so a test can count them.
+    #[cfg(test)]
+    sweeps: u64,
 }
 
 impl Default for ReprCache {
@@ -1261,6 +1267,9 @@ impl ReprCache {
                 tick: 0,
                 bytes: 0,
                 evictions: 0,
+                sweep_at: 0,
+                #[cfg(test)]
+                sweeps: 0,
             }),
             policy,
             cut_seq: AtomicU64::new(0),
@@ -2094,10 +2103,20 @@ impl CacheState {
     /// zero without making any entry look fresher than it is. Pins are taken under
     /// this same lock, so no in-flight request can pin across a sweep — and the race
     /// check reads the cut log, not this map.
+    ///
+    /// The sweep costs one pass over every resident edge. When the threads still
+    /// pinned alone exceed the base watermark, a sweep cannot bring the map under it,
+    /// so the next sweep waits until the map holds twice what this one kept (ledger
+    /// #707). Without that, every store repeated the pass and shrank nothing: 1.85 ms
+    /// a store under the lock at 4096 entries of 8 cut threads, against 0.3 µs.
     fn sweep_generations(&mut self, max_entries: usize) {
-        let watermark = max_entries.saturating_mul(2).max(1024);
+        let watermark = max_entries.saturating_mul(2).max(1024).max(self.sweep_at);
         if self.generations.len() <= watermark {
             return;
+        }
+        #[cfg(test)]
+        {
+            self.sweeps += 1;
         }
         let live: HashSet<Thread> = self
             .entries
@@ -2110,6 +2129,7 @@ impl CacheState {
             )
             .collect();
         self.generations.retain(|thread, _| live.contains(thread));
+        self.sweep_at = self.generations.len().saturating_mul(2);
     }
 }
 
@@ -2839,6 +2859,60 @@ mod tests {
         assert_eq!(rows[0], ("urn:data:pinned".to_string(), 1));
         // …and the entry that pins it is still valid, which is what makes it safe.
         assert!(cache.probe(&key(1), None));
+    }
+
+    #[test]
+    fn pinned_threads_above_the_watermark_do_not_rescan_every_store() {
+        // Ledger #707: 100 entries each pinning 20 cut threads keep 2000 generations,
+        // above the 1024 watermark, and no sweep can drop any of them. Before the fix
+        // every store after that repeated the full scan.
+        let cache = ReprCache::new(Arc::new(Lru::with_bound(CacheBound::new(256, 1 << 20))));
+        for e in 0..100u8 {
+            let mut answer = repr(8);
+            for t in 0..20 {
+                let thread = format!("urn:data:{e}:{t}");
+                cache.cut(Thread::new(thread.clone()));
+                answer = answer.depends_on(thread);
+            }
+            assert!(cache.store(key(e), "a".into(), answer, cache.snapshot(), None));
+        }
+        assert_eq!(
+            cache.generation_rows().len(),
+            2000,
+            "every pinned thread is kept"
+        );
+        let before = cache.state.lock().unwrap().sweeps;
+        for n in 0..50u8 {
+            assert!(cache.store(
+                key(200 + n % 4),
+                "b".into(),
+                repr(8),
+                cache.snapshot(),
+                None
+            ));
+        }
+        assert_eq!(
+            cache.state.lock().unwrap().sweeps,
+            before,
+            "stores that add no generation must not rescan"
+        );
+        // The map still sweeps once it doubles past what the last sweep kept.
+        for n in 0..4100 {
+            cache.cut(Thread::new(format!("urn:data:flood:{n}")));
+        }
+        assert!(cache.store(key(250), "c".into(), repr(8), cache.snapshot(), None));
+        assert_eq!(cache.state.lock().unwrap().sweeps, before + 1);
+        assert_eq!(
+            cache.generation_rows().len(),
+            2000,
+            "only pinned threads survive"
+        );
+        for e in 0..100u8 {
+            assert!(
+                cache.probe(&key(e), None),
+                "a kept pin keeps its entry valid"
+            );
+        }
     }
 
     #[test]

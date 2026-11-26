@@ -38,6 +38,17 @@ A patch release: the delegation API below is additive public API on `Kernel` and
   `Kernel::grants` lists the table and `grant_for` gives the grant beside an enumerated door.
   Additive: a kernel with no grants behaves exactly as before.
 
+### Fixed
+
+- **The generation sweep no longer rescans on every store when pinned threads exceed its
+  watermark** (ledger #707). The sweep forgets thread generations no entry pins once the map
+  passes `max(2 × max_entries, 1024)`. When the pinned threads alone were above that, no sweep
+  could get the map under it, so every store repeated a pass over every resident edge under the
+  cache lock. Measured in release at 4096 entries each pinning 8 cut threads: 1.85 ms a store,
+  against 0.3 µs. The next sweep now waits until the map holds twice what the last one kept. What
+  a sweep forgets is unchanged, and the map stays within twice its pinned threads or the base
+  watermark, whichever is larger.
+
 ## 0.5.1 (2026-11-25)
 
 ### Added
