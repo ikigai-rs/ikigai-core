@@ -1584,10 +1584,11 @@ its printed form. Now:
 - `Invocation::scope` is crate-private, and so are `Scope::spaces` and `Scope::levels`, each
   refused from outside the crate with E0624 by a `compile_fail` doctest. An endpoint never
   receives a `Scope` at all; the kernel keeps its own access.
-- Time stays: `Invocation::now`, unchanged (R7.10). The one scope fact an endpoint may read
-  besides it is `Invocation::clock_pinned`, whether that time is a temporal corridor's. It is
-  covered by the key through the corridor's name and instant: a clock reaches a chain only beside
-  the corridor it is derived from, and the fingerprint hashes the instant it read at injection
+- Time stays: `Invocation::now`, unchanged (R7.10). The scope facts an endpoint may read
+  besides it are `Invocation::clock_pinned`, whether that time is a temporal corridor's, and
+  `Invocation::pinned_now`, that corridor's instant alone, never a live clock's (since ledger
+  [#4285](http://localhost:1062/l/default/item/4285)). Both are covered by the key through the
+  corridor's name and instant: a clock reaches a chain only beside the corridor it is derived from, and the fingerprint hashes the instant it read at injection
   (R7.10, since ledger [#3869](http://localhost:1062/l/default/item/3869)). So a pinned answer is
   never served to a chain without that corridor, nor to the same name with no clock or another
   instant.
@@ -1607,6 +1608,7 @@ an answer the cache keys; whether that path needs closing too is open.
     doctest: `Invocation::scope`
     doctest: `Scope::spaces`
     doctest: `Invocation::clock_pinned`
+    doctest: `Invocation::pinned_now`
 
 **The read measurement** (§10): injecting the chain into every issue cost 0–10 ns on a ~410 ns
 cache-hit read once the empty chain became a null handle; reaching the four faces and adding the

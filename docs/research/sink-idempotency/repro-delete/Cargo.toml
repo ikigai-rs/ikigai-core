@@ -1,0 +1,22 @@
+# A reproduction for docs/research/sink-idempotency.md §3 ("Delete is not as idempotent as
+# `Verb::is_idempotent` says", ledger #4063), NOT a workspace member: it builds the PUBLISHED
+# intray and throttle modules (which name ikigai-core 0.4) from crates.io, so it has its own
+# workspace and lock file and is never built by the repository's `cargo test`. It is apart
+# from `../repro/` because that one pins ikigai-core 0.3, which the ledger and layers name.
+#
+#     cargo run --manifest-path docs/research/sink-idempotency/repro-delete/Cargo.toml
+[package]
+name = "delete-idempotency-repro"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[dependencies]
+async-trait = "0.1"
+futures = "0.3"
+ikigai-core = "=0.4.2"
+ikigai-intray = "=0.7.1"
+ikigai-throttle = "=0.6.2"

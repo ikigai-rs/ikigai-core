@@ -684,9 +684,9 @@ fn reads_body_vectors_pin_the_tail_and_input_triples() {
 }
 
 /// Ledger #3381: resend safety. A declared action is v2 and fed LAST, after the fixed
-/// inputs, as the byte `5` then `0` (safe) or `1` and the key; an absent declaration (or a
-/// JSON `null`) feeds nothing, so a contract that declares none keeps its digest and reads
-/// as NOT safe. The `core/resend` door pins the triples: `ik:resendKey` naming the keyed
+/// inputs, as the byte `5` then `0` (safe), `1` and the key, or `2` (unsafe, ledger #4063);
+/// an absent declaration (or a JSON `null`) feeds nothing, so a contract that declares none
+/// keeps its digest and reads as NOT safe. The `core/resend` door pins the triples: `ik:resendKey` naming the keyed
 /// contract's own input node, `ik:resendSafe true`, and nothing on the read.
 #[test]
 fn resend_vectors_pin_the_tail_and_the_action_triples() {
@@ -713,6 +713,12 @@ fn resend_vectors_pin_the_tail_and_the_action_triples() {
         "resend/keyed-after-failures-and-flag",
     ]
     .map(contract);
+    // Ledger #4063: a Delete that declares itself unsafe is a different contract from one
+    // that declares nothing (the byte `5` then `2`).
+    assert_ne!(
+        contract("resend/undeclared-delete"),
+        contract("resend/unsafe-delete")
+    );
     assert_eq!(
         distinct.iter().collect::<BTreeSet<_>>().len(),
         distinct.len()

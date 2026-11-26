@@ -137,6 +137,7 @@ mod kernel_ops;
 pub mod listen;
 mod media;
 mod meta;
+mod monotonic;
 mod redirect;
 mod repr;
 mod request;
@@ -217,6 +218,7 @@ pub use listen::{
 };
 pub use media::{media_type_essence, media_types_agree};
 pub use meta::MetaRenderer;
+pub use monotonic::{MonotonicClock, MonotonicError, MonotonicInstant};
 pub use redirect::{Redirect, RedirectStatus, REDIRECT_MEDIA_TYPE};
 pub use repr::{
     Expiry, OriginValidator, Provenance, ReprType, Representation, Stale, Thread, Time,

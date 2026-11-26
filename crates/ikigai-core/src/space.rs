@@ -390,6 +390,14 @@ impl Scope {
         self.clock().map(|clock| clock.now())
     }
 
+    /// The instant the chain's innermost temporal corridor read when it was injected
+    /// ([`with_named_at`](Self::with_named_at)), the one the
+    /// [fingerprint](Self::fingerprint) hashes; `None` exactly when [`clock`](Self::clock)
+    /// is. Read by [`Invocation::pinned_now`](crate::Invocation::pinned_now).
+    pub(crate) fn instant(&self) -> Option<Time> {
+        self.chain.as_ref().and_then(|chain| chain.instant)
+    }
+
     /// **Stack** `inner` onto this chain: every corridor `inner` injected is pushed
     /// innermost, in `inner`'s order and under `inner`'s identities, so the result is
     /// the chain you would have built by applying to `self` the steps that built

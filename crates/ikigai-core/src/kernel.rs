@@ -82,6 +82,8 @@ pub trait Clock: Send + Sync {
 /// A [`Clock`] reading the system wall clock — the default real clock. Replay and
 /// test harnesses inject a fixed clock instead. (A browser host injects a
 /// `Date.now()`-backed clock; `ikigai-core` itself stays runtime-agnostic.)
+/// Wall-clock corrections can move readings in either direction. Use
+/// [`MonotonicClock`](crate::MonotonicClock) for windows and cooldowns.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemClock;
 
@@ -775,7 +777,7 @@ pub struct Kernel {
     /// ever served back to the same authority that computed it — a different (e.g.
     /// narrower) capability misses and must pass the endpoint's own check. Without
     /// this, a cache hit is served *before* the endpoint runs (see
-    /// [`issue_inner`](Self::issue_inner)), which would skip the capability check
+    /// [`issue_answer`](Self::issue_answer)), which would skip the capability check
     /// and let one authority read another's cached result. The scope is part of it
     /// so an answer computed in one resolution chain (a confinement, an injected
     /// corridor) is never served to a request in another — the same name can
@@ -1976,7 +1978,7 @@ enum Outcome {
 }
 
 /// Where one request sits in a resolution, beyond the request and its capability:
-/// everything `Kernel::issue_inner` needs to place it (ledger #792). Named fields
+/// everything `Kernel::issue_answer` needs to place it (ledger #792). Named fields
 /// rather than six positional arguments, four of which are `None` or zero at most
 /// call sites; [`top`](Self::top) is a top-level request and a call site states
 /// only what differs from it.
@@ -2793,10 +2795,10 @@ impl Kernel {
     }
 
     /// Render `description` to `target` by transrepting its canonical Turtle: render the
-    /// Turtle, [`select`](Self::select_transreptor_in_with) a transreptor chain
+    /// Turtle, [`select`](Invocation::select_transreptor_with) a transreptor chain
     /// `text/turtle → target` **in the resolution chain the Meta request runs in** and
     /// under the request's [`TransreptionPolicy`], and run it (piping `content`, setting
-    /// `as`) through the kernel in that same chain, as sub-requests of the Meta
+    /// `as`) through [`Invocation::transrept`] in that same chain, as sub-requests of the Meta
     /// resolution. Used by the `Meta` path for any type the renderer doesn't emit
     /// directly.
     ///
@@ -2824,38 +2826,30 @@ impl Kernel {
     /// (`Denied` is a principal's authority, and consent here is per request, not per
     /// holder), and the request's arguments are each well-formed (`InvalidArgument`
     /// would blame `as`). The engine's `describe <iri> <type>` shows the message.
-    #[allow(clippy::too_many_arguments)] // the Meta arm's sub-request: every fact of its resolution, named
     async fn transrept_meta(
         &self,
         description: &Description,
         target: &ReprType,
         policy: &TransreptionPolicy,
-        capability: &Capability,
-        parent: Option<u64>,
-        trace: &Option<TraceScope>,
-        scope: &Scope,
-        depth: u32,
-        reach: &mut u32,
-    ) -> Result<Representation> {
+        invocation: &Invocation<'_>,
+    ) -> Result<Representation<Body>> {
         let renderer = self
             .meta
             .as_ref()
             .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
         let canonical = renderer.render(description, &ReprType::new(crate::select::CANONICAL))?;
-        let Some(plan) = self.select_transreptor_in_with(
+        let Some(plan) = invocation.select_transreptor_with(
             crate::select::CANONICAL,
             &target.media_type,
-            scope,
             policy,
         ) else {
             // No permitted plan. If a LOSSY one exists, the caller must consent to it,
             // and is told so — the second walk runs only on this branch, which used to
             // substitute; the default path is the one walk it always was.
             if !policy.allows_lossy() {
-                if let Some(lossy) = self.select_transreptor_in_with(
+                if let Some(lossy) = invocation.select_transreptor_with(
                     crate::select::CANONICAL,
                     &target.media_type,
-                    scope,
                     &TransreptionPolicy::allow_lossy(),
                 ) {
                     let steps = lossy
@@ -2873,39 +2867,12 @@ impl Kernel {
                 }
             }
             // Nothing converts Turtle to the requested type — hand back the canonical Turtle.
-            return Ok(canonical.cacheable());
+            return Ok(canonical.cacheable().into_body());
         };
-        let mut current = canonical;
-        for step in plan {
-            let iri = Iri::parse(&step.endpoint).map_err(|e| {
-                Error::Endpoint(format!("bad transreptor IRI `{}`: {e}", step.endpoint))
-            })?;
-            let request = Request::new(Verb::Source, iri)
-                .with_arg("content", ArgRef::Inline(current.bytes))
-                .with_arg("as", ArgRef::Inline(step.to.into_bytes()));
-            // Box the re-entrant issue: the async call graph (issue → transrept_meta →
-            // issue) is a cycle the compiler must size via indirection, even though at
-            // runtime these are plain `Source` transreptions, never `Meta`. A step runs
-            // one level below the Meta resolution, in its chain and its trace.
-            // …and as deep as it went, for the depth the description consumes (ledger
-            // #3792): a transreptor may issue sub-requests of its own.
-            let mut step_deps = Dependencies::none();
-            current = Box::pin(self.issue_inner(
-                request,
-                capability,
-                IssueCtx {
-                    parent,
-                    trace: trace.clone(),
-                    scope: scope.clone(),
-                    depth: depth + 1,
-                    failed: Some(&mut step_deps),
-                    ..IssueCtx::top()
-                },
-            ))
-            .await?;
-            *reach = (*reach).max(step_deps.reach).max(depth + 1);
-        }
-        Ok(current.cacheable())
+        let rendered = invocation.transrept(canonical.into_body(), &plan).await?;
+        // Keep Meta's caching policy separate from plan execution. The final
+        // representation still carries the threads of the step that produced it.
+        Ok(rendered.cacheable())
     }
 
     /// Make this kernel **schedulable**: wrap it in an `Arc` and inject `spawner`, so
@@ -2938,6 +2905,71 @@ impl Kernel {
             .started = Some(clock.now());
         self.clock = Some(clock);
         self
+    }
+
+    /// The kernel's **operational** time (ledger #1916, `docs/design/time.md`): what the
+    /// clock installed with [`with_clock`](Self::with_clock) reads now, the clock a run's
+    /// deadline ([`IssueContext::with_not_after`](crate::IssueContext::with_not_after)) and
+    /// cache expiry are judged on. `None` on a kernel with no clock: never the system's,
+    /// and never a temporal corridor's (that is world time,
+    /// [`Invocation::now`](crate::Invocation::now)).
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{EndpointSpace, FixedClock, Kernel, Time};
+    ///
+    /// let clockless = Kernel::new(Arc::new(EndpointSpace::new()));
+    /// assert_eq!(clockless.now(), None);
+    /// assert!(clockless.clock().is_none());
+    /// let kernel = clockless.with_clock(Arc::new(FixedClock::at(1_000)));
+    /// assert_eq!(kernel.now(), Some(Time::from_millis(1_000)));
+    /// ```
+    pub fn now(&self) -> Option<Time> {
+        self.now_stamp()
+    }
+
+    /// The operational clock itself, for a host component that must read the same source
+    /// as the kernel (a door rebuilding a peer's deadline, an overlay keeping its own
+    /// window): the one installed with [`with_clock`](Self::with_clock), or `None`.
+    pub fn clock(&self) -> Option<&Arc<dyn Clock>> {
+        self.clock.as_ref()
+    }
+
+    /// The deadline `left` from now **on this kernel's operational clock**: what a door
+    /// that received a run's remaining time (a wire peer's `time_left`, never an instant
+    /// on the peer's clock) passes to
+    /// [`IssueContext::with_not_after`](crate::IssueContext::with_not_after), which only
+    /// ever shortens a deadline already set. Refuses with
+    /// [`Error::Unsupported`]` { verb: None, .. }` on a kernel with no clock: a bounded
+    /// request must not silently run unbounded, nor be measured on a clock the kernel
+    /// does not use.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    /// use ikigai_core::{EndpointSpace, Error, FixedClock, IssueContext, Kernel, Time};
+    ///
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new()))
+    ///     .with_clock(Arc::new(FixedClock::at(1_000)));
+    /// let deadline = kernel.deadline_in(Duration::from_millis(250)).unwrap();
+    /// assert_eq!(deadline, Time::from_millis(1_250));
+    /// let run = IssueContext::new().with_not_after(deadline);
+    /// assert_eq!(run.not_after(), Some(Time::from_millis(1_250)));
+    ///
+    /// let clockless = Kernel::new(Arc::new(EndpointSpace::new()));
+    /// let refused = clockless.deadline_in(Duration::from_millis(250));
+    /// assert!(matches!(refused, Err(Error::Unsupported { verb: None, .. })));
+    /// ```
+    pub fn deadline_in(&self, left: std::time::Duration) -> Result<Time> {
+        let now = self.now().ok_or_else(|| Error::Unsupported {
+            verb: None,
+            detail: format!(
+                "a run with {} ms left needs a clock to measure it, and the host configured none",
+                left.as_millis()
+            ),
+        })?;
+        let left = u64::try_from(left.as_millis()).unwrap_or(u64::MAX);
+        Ok(now.plus_millis(left))
     }
 
     /// Set the **nesting budget** (builder): the deepest sub-request this kernel
@@ -4221,7 +4253,7 @@ impl Kernel {
     /// will not see those resolutions in the global collector. That is deliberate —
     /// the alternative is a double-write, and a per-connection trace wants exactly one
     /// destination — but it is a behavioral contract you would otherwise only find by
-    /// reading `issue_inner`, which is not where a host author looks.
+    /// reading `issue_answer`, which is not where a host author looks.
     pub async fn issue_traced(
         &self,
         request: Request,
@@ -4664,28 +4696,6 @@ impl Kernel {
         .await
     }
 
-    /// The resolution path, carrying the `parent` span of the invocation that issued
-    /// this request (`None` at the top level), any upstream pipe [`Provenance`], and
-    /// the resolution chain (`scope`) to resolve in.
-    /// [`Issuer::issue_in_scope`] threads the span and the chain through re-entrant
-    /// sub-requests so a recorded run links each node to its parent and a
-    /// confinement holds below the endpoint that entered it; the public
-    /// [`issue`](Self::issue) is the parentless, no-upstream, empty-chain entry
-    /// point.
-    ///
-    /// The bytes face of [`issue_answer`](Self::issue_answer): a streamed body collected
-    /// under the run's byte pool, refused with `OverBudget` past it, never truncated
-    /// (ledgers #2237, #2238). A buffer is handed over as it is; only a streamed body is
-    /// read here, after the answer was recorded, stored or not stored.
-    async fn issue_inner(
-        &self,
-        request: Request,
-        capability: &Capability,
-        ctx: IssueCtx<'_>,
-    ) -> Result<Representation> {
-        collected(self.issue_answer(request, capability, ctx).await).await
-    }
-
     /// The Meta arm of [`issue_answer`](Self::issue_answer), boxed: the endpoint's description,
     /// rendered or transrepted to the requested type. Out of line and boxed, like
     /// [`settling`](Self::settling), so that neither its state nor its temporaries widen the
@@ -4697,6 +4707,7 @@ impl Kernel {
         &'a self,
         endpoint: &'a Arc<dyn Endpoint>,
         request: &'a Request,
+        bindings: &'a Bindings,
         capability: &'a Capability,
         span: Option<u64>,
         trace: &'a Option<TraceScope>,
@@ -4704,6 +4715,8 @@ impl Kernel {
         levels: &'a LevelPath,
         depth: u32,
         started: Option<Time>,
+        run: &'a crate::run::IssueContext,
+        pool: &'a mut Option<crate::MemoryBudget>,
         reach: &'a mut u32,
     ) -> MetaAnswering<'a> {
         Box::pin(async move {
@@ -4730,25 +4743,28 @@ impl Kernel {
             let target = meta_target(request);
             let policy = meta_policy(request)?;
             let rendered = match renderer.render(&description, &target) {
-                Ok(repr) => repr.cacheable(),
+                Ok(repr) => repr.cacheable().into_body(),
                 // The renderer doesn't emit this type directly — transrept the canonical
                 // Turtle to it.
                 // The steps run in the RESOLVED scope — where the endpoint described
                 // was found — so a transreptor its own level binds is the one that
                 // converts its description (space-scoped transreptors).
                 Err(_) => {
-                    self.transrept_meta(
-                        &description,
-                        &target,
-                        &policy,
-                        capability,
-                        span,
-                        trace,
-                        &resolved_scope,
-                        depth,
-                        reach,
-                    )
-                    .await?
+                    let admitted =
+                        run.clone()
+                            .admitted(self.retry.as_ref(), &self.memory, capability);
+                    *pool = admitted.memory_budget().cloned();
+                    let invocation = Invocation::with_issuer(request, bindings, capability, self)
+                        .with_span(span)
+                        .with_trace(trace.clone())
+                        .with_scope(resolved_scope)
+                        .with_depth(depth)
+                        .with_run(admitted);
+                    let rendered = self
+                        .transrept_meta(&description, &target, &policy, &invocation)
+                        .await?;
+                    *reach = invocation.reach();
+                    rendered
                 }
             };
             // A description is a function of the BINDING, not of any state, so the
@@ -4759,10 +4775,7 @@ impl Kernel {
             // nothing would cut the binding thread for it (ledger #1579).
             let bound = description.contract_caching.expiry_at(started);
             let expiry = rendered.expiry.most_restrictive(bound);
-            Ok(rendered
-                .depends_on(BINDINGS_THREAD)
-                .with_expiry(expiry)
-                .into_body())
+            Ok(rendered.depends_on(BINDINGS_THREAD).with_expiry(expiry))
         })
     }
 
@@ -5428,7 +5441,7 @@ impl Kernel {
         }
 
         // Facts the endpoint attaches to its own span via `Invocation::trace_note`
-        // (hoisted out of the invocation arm — the Meta arm has no invocation).
+        // (hoisted out of the invocation arm — Meta does not invoke the described endpoint).
         let mut trace_notes = Vec::new();
         // Why the result will not be cached, when it will not — named here, where
         // the causes are still in hand, rather than reconstructed from an expiry that
@@ -5444,6 +5457,7 @@ impl Kernel {
             self.meta_answering(
                 &resolved.endpoint,
                 &request,
+                &bindings,
                 capability,
                 span,
                 &trace,
@@ -5451,6 +5465,8 @@ impl Kernel {
                 levels,
                 depth,
                 started,
+                &run,
+                &mut pool,
                 &mut reach,
             )
             .await?
@@ -5689,7 +5705,7 @@ impl Kernel {
             representation.with_expiry(effective).with_threads(threads)
         };
         if request.verb == Verb::Meta {
-            // The Meta arm takes no invocation, so it never reached the note-merging
+            // Meta does not invoke the described endpoint, so it skips the note-merging
             // above; the rewrite and the answerer still have to show on the event.
             trace_notes = provenance_notes(&trace, alias, answered, levels, &defaulted, &collected);
         }
@@ -6042,7 +6058,7 @@ impl Kernel {
         // runs, so nothing downstream can report it.
         //
         // A successful (or otherwise failed) kernel operation is recorded by the
-        // caller, `issue_inner`'s `urn:kernel:*` arm (ledger #39); a DENIAL is
+        // caller, `issue_answer`'s `urn:kernel:*` arm (ledger #39); a DENIAL is
         // recorded here, where the scope it lacked is known. Kernel operations stay
         // absent from the constraint window: introspection, not throughput.
         let require_cap = |scope: &str| -> Result<()> {
@@ -6661,6 +6677,10 @@ impl Kernel {
                                     m.action,
                                     crate::contract::encode_name(key)
                                 ));
+                            }
+                            // Never safe (ledger #4063): a Delete that is not idempotent.
+                            Some(crate::describe::Resend::Unsafe) => {
+                                body.push_str(" ;\n    ik:resendSafe false");
                             }
                         }
                         body.push_str(" .\n");
@@ -7856,7 +7876,7 @@ impl Issuer for Kernel {
         depth: u32,
     ) -> Result<Representation> {
         // Everything `issue_in_scope` carries plus the nesting depth the budget is
-        // checked against in `issue_inner`. (`issue_recording` below is the seam
+        // checked against in `issue_answer`. (`issue_recording` below is the seam
         // `Invocation` calls; this one is for an issuer that wraps the kernel.)
         collected(
             self.issue_answer(
@@ -7919,7 +7939,7 @@ impl Issuer for Kernel {
     ) -> (Result<Representation>, Dependencies) {
         // `issue_recording` plus the run's context (ledger #1546): the pool and the
         // deadline reach the sub-request, which narrows the pool to its own capability's
-        // entitlement in `issue_inner`.
+        // entitlement in `issue_answer`.
         let mut failed = Dependencies::none();
         let result = self
             .issue_answer(

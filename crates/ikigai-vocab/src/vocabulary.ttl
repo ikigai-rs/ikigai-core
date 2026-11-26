@@ -47,7 +47,7 @@
 <https://ikigai-rs.dev/ns#> a owl:Ontology ;
     rdfs:label "ikigai endpoint vocabulary" ;
     rdfs:comment "Self-description vocabulary for ikigai resource-oriented endpoints, and the process vocabulary that makes a plan (a DAG of requests) a resource in the same graph." ;
-    owl:versionInfo "0.5.0" .
+    owl:versionInfo "0.5.2" .
 
 #
 # Classes
@@ -300,7 +300,7 @@ ik:existenceSensitive a rdf:Property ;
 ik:resendSafe a rdf:Property ;
     rdfs:range xsd:boolean ;
     rdfs:label "resendSafe" ;
-    rdfs:comment "On an ik:Action node (or an ik:ActionMatch in urn:kernel:actions): a RESEND of this action is safe whatever the call carries, so a client that does not know whether a request landed (a timeout, a dropped connection) may send it again. Written only when true. An action that says neither this nor ik:resendKey is NOT safe to resend: a client must not guess from the verb's name. Part of the contract: a declared action is a different content-addressed contract, and one that declares nothing keeps its IRI (ledger #3381)." .
+    rdfs:comment "On an ik:Action node (or an ik:ActionMatch in urn:kernel:actions): a RESEND of this action is safe whatever the call carries, so a client that does not know whether a request landed (a timeout, a dropped connection) may send it again. false says the opposite: a resend is NEVER safe, because a repeat does different work from the first call (an intray take with no selector pops the next tuple), which is how a Delete, otherwise resent by its verb, says it is not idempotent (ledger #4063). Written only when declared. An action that says none of this nor ik:resendKey is NOT safe to resend, unless its verb is idempotent (Source, Exists, Meta, Delete); for a Sink a client must not guess. Part of the contract: a declared action is a different content-addressed contract, and one that declares nothing keeps its IRI (ledger #3381)." .
 
 ik:resendKey a rdf:Property ;
     rdfs:range rdfs:Resource ;

@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.2 (unreleased)
 
-A minor release: the delegation API below is additive public API on `Kernel` and
+A patch release: the delegation API below is additive public API on `Kernel` and
 `Invocation`. No wire, cache-key or behavior change for a kernel with no grants.
 
 ### Added
@@ -30,6 +30,81 @@ A minor release: the delegation API below is additive public API on `Kernel` and
   `GRANTED_FOR_NOTE`, and its cache entry is keyed under the grant's fingerprint.
   `Kernel::grants` lists the table and `grant_for` gives the grant beside an enumerated door.
   Additive: a kernel with no grants behaves exactly as before.
+
+## 0.5.1 (2026-11-25)
+
+### Added
+
+- **Optional inline readers: `Invocation::optional_arg` and `Invocation::optional_str`**
+  (ledger #4370, `docs/design/optional-arguments.md`). `inv.inline_str(name).ok()` and
+  `.unwrap_or(default)` discard every error, so invalid UTF-8, a reference or a body where an
+  inline value was expected silently read as "absent" and selected the default. The new
+  readers answer `Ok(None)` for a missing argument alone and `Ok(Some(..))` for a present
+  inline value, an empty one included; text requires UTF-8, bytes accept anything. A
+  `Reference` or `Content` argument (an attached or stored body) is an `InvalidArgument`
+  naming it, and is neither resolved nor fetched nor consumed. Every other error propagates
+  unchanged, and a test pins that only `MissingArgument` is translated. Write
+  `inv.optional_str("format")?.unwrap_or("text")`. A declared by-value default is injected
+  before dispatch, so it reads as present. Additive; `tests/optional_arguments.rs` replaces
+  the test-only prototype.
+
+### Upgrade
+
+No persisted state changes; nothing to migrate.
+
+## 0.5.0 (2026-11-24)
+
+`Invocation::time_left` changes what it measures (below), a deliberate behavior change, so the
+next release is a minor.
+
+### Changed (behavior)
+
+- **`Invocation::time_left` is measured on operational time** (ledger #1916,
+  `docs/design/time.md`). The run's deadline (`not_after`) is an instant on the kernel's
+  clock, but `time_left` subtracted `Invocation::now()`, which reads a temporal corridor's
+  pinned instant first: under a corridor pinned in the past a 500 ms deadline read as
+  10,499 ms left, and under one pinned in the future as 0 (`tests/operational_time.rs`
+  reproduces both). It now subtracts the new `Invocation::operational_now()`, so neither a
+  corridor nor a world clock attached with `Invocation::with_clock` moves it. A detached
+  test that measured `time_left` against a clock attached with `with_clock` now reads
+  `None`: attach it with `with_operational_clock` instead. `time_left` is still `None` with
+  no deadline and on a kernel with no clock; the docs now say so.
+
+### Added
+
+- **Operational time, readable and enforceable** (ledger #1916). `Kernel::now()` and
+  `Kernel::clock()` report the clock installed with `with_clock`, and nothing else: `None`
+  on a clockless kernel, never the system's clock or a corridor's. `Invocation::operational_now()`
+  reads the issuer's clock; `Invocation::with_operational_clock` is a detached test seam,
+  read only when there is no issuer, so it cannot move a kernel-issued run's deadline.
+  `Invocation::time_left_checked()` tells no deadline (`Ok(None)`) from no clock to measure
+  one (`Unsupported { verb: None, .. }`), for code that must enforce the deadline.
+  `Kernel::deadline_in(left)` rebuilds a deadline from a remaining duration on the kernel's
+  own clock and refuses with `Unsupported { verb: None, .. }` without one: what a wire door
+  does with a peer's `time_left_ms`, instead of adding it to `SystemClock`.
+- **`Invocation::pinned_now`: the pinned instant on its own** (ledger #4285). `now()`
+  merges a clock attached with `with_clock`, a temporal corridor's and the kernel's, and an
+  endpoint holds no `Scope`, so it could not tell an as-of instant from a live one. New:
+  `Invocation::pinned_now() -> Option<Time>`, the instant the chain's innermost temporal
+  corridor read at injection (`Scope::with_named_at`), and `None` when no corridor pinned
+  time, whatever clock the kernel or the caller has. It is the instant the chain's
+  fingerprint hashes, so an answer computed from it is covered by the cache key, as
+  `clock_pinned` is. For the SPARQL `NOW()` rewrite in `ikigai-store`
+  (`docs/design/sparql-now-clock.md` there), which may then cache under a pinned corridor.
+  Additive.
+- **A `Delete` can say it is not idempotent** (ledger #4063). `Verb::is_idempotent` says
+  every `Delete` is, and `ikigai-throttle`'s `Retry` sends one again on a transient
+  failure, but an intray take with no selector pops the NEXT tuple on a repeat: one call
+  behind `Retry` consumed two tuples and handed the first to nobody
+  (`docs/research/sink-idempotency/repro-delete/` reproduces it against the published
+  `ikigai-intray` 0.7.1 and `ikigai-throttle` 0.6.2). New: `Resend::Unsafe` (JSON
+  `"resend": "unsafe"`, `ik:resendSafe false`, fed into the contract digest as the byte `5`
+  then `2`), the builder `ActionSpec::resend_unsafe`, and `ActionSpec::may_resend` /
+  `Description::may_resend`, the one question a retrying overlay asks: the declaration when
+  there is one, the verb's default when there is not. A `Delete` that declares nothing, and
+  every existing contract, is unchanged; validation refuses `resend_unsafe` on a read.
+  `Resend` is `#[non_exhaustive]`, so the new variant breaks no match outside core. Throttle
+  still asks the verb alone until it adopts `may_resend`.
 - **`urn:kernel:constraint over=start`: the totals since the kernel started** (ledger
   #4096; `docs/design/constraint-history.md`, build step 3). One row per endpoint and target
   shape: computed count, of which stored and of which failed, cache hits, uncached and

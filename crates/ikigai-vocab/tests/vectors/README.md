@@ -126,6 +126,13 @@ contract's own input node (`{contract}:input:key`), `ik:resendSafe true`, and no
 action that declares neither. A Python or Deno face that computes contract IRIs or Turtle
 from a description NEEDS the field: without it a declared contract's IRI and Turtle differ.
 
+**Unsafe resend** (ledger #4063; not yet in a release): `"resend": "unsafe"` says a resend
+is NEVER safe, because a repeat does different work (an intray take with no selector pops
+the next tuple). It is how a `Delete`, which a face that reads no declaration resends by its
+verb, says it is not idempotent; absent still means the verb's default. It is fed as the
+byte `5` then `2`, and rendered `ik:resendSafe false`. The `resend/undeclared-delete` and
+`resend/unsafe-delete` contracts pin that the two digests differ.
+
 ## Lenient in, canonical out
 
 Postel's law (ledger #1107, decided 2026-10-10). A percent escape is `%` and exactly two
