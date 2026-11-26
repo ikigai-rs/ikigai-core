@@ -21,40 +21,145 @@ uses Source's requirements when declared. Builtins using verb-insensitive closur
 can exhibit the same shape, while explicit Exists implementations may already
 return booleans.
 
-## Proposed contract
+## Opt-in contract `exists-bool-v1`
 
-For an authorized, well-formed request to a resolved endpoint, `Exists` answers
-`text/plain` containing exactly `true` or `false` in UTF-8. The boolean concerns
-the resource selected by the canonical target **and request arguments**, in the
-same scope and time view as the request. `false` is an endpoint's affirmative
-answer of absence, not a synonym for failure. Denied, concealed, unresolved,
-invalid arguments, unavailable, and other errors retain their existing classes.
-A resolvable route alone does not prove that a resource exists. An endpoint must
-not mutate just to answer. This is a point-in-time answer, not a promise that a
-subsequent Source or Sink will succeed; atomic decisions need their own operation.
+This section specifies a future profile, not a feature available on main.
+A repeat of the probe on core main at
+[`41d76f68241d48b2994b2830d8628bd1c003d855`](https://github.com/ikigai-rs/ikigai-core/tree/41d76f68241d48b2994b2830d8628bd1c003d855)
+returned `s3cr3t` for both Source and undeclared Exists on a verb-insensitive
+`FnEndpoint`. Requiring `true` instead failed. The assertions used the kernel
+issue path with a caller holding no scopes and an endpoint requiring none.
 
-Make the endpoint responsible for deciding existence and producing the boolean:
-it can use a metadata lookup, index or filesystem check without materializing the
-representation. Kernel post-resolution projection alone cannot distinguish a
-successful `false` from a successful resource body, and still pays for a full
-read. The kernel should enforce the answer's type and exact bytes before returning
-or caching it, while preserving expiry, dependency threads and authority. Handle
-streaming and revalidation explicitly: validate a bounded boolean body and only
-revalidate against a previously validated Exists answer. Do not infer `true`
-from arbitrary success, including the bytes `false`. Where no cheap check exists,
-a separately declared compatibility adapter may source the resource and map only
-a documented absence to false; it must preserve Source authority and dependencies,
-and its full-read cost must be visible. Otherwise an unsupported Exists should
-refuse. Explicit Exists grants may be narrower only if the endpoint's check does
-not read or disclose data beyond that grant. Keep the current undeclared-verb
-floor until a separately reviewed authority contract replaces it.
+### Meaning and encoding
 
-This is a breaking change for endpoints and callers. First add a versioned or
-opt-in contract and conformance checks; migrate endpoints and callers, including
-wire and host adapters, before changing the default. Do not silently project legacy
-bodies: a body may itself be the literal `false`. Settle media type, whitespace
-and protocol negotiation in that versioned contract, with cross-language vectors.
-Existing newline-terminated booleans need a migration path.
+An authorized, well-formed Exists request under this profile asks about the
+resource selected by the canonical target **and effective arguments**, including
+bindings and defaults, in the request's scope and time view. A resolved route
+does not prove the resource exists. `true` means the endpoint found the selected
+resource. `false` means the endpoint affirmatively determined that it is absent.
+Neither promises the result of a later Source or Sink. An atomic decision needs
+its own operation.
+
+There is one successful representation. At the kernel boundary its media type
+string is exactly `text/plain` (lowercase) with an empty parameter map. Check the
+raw type before normalization. Its complete body is
+one of these UTF-8 byte sequences:
+
+| Meaning | Text | Bytes in hexadecimal |
+|---|---|---|
+| Present | `true` | `74 72 75 65` |
+| Absent | `false` | `66 61 6c 73 65` |
+
+Do not trim, fold case, strip a byte-order mark, transcode, or coerce from a
+different format. In particular, neither LF nor CRLF termination is valid.
+An endpoint that emits a newline today can keep that encoding on the legacy
+path and remove the newline in its profile-specific writer. A host may add a
+newline when *displaying* the answer, not when forwarding its representation.
+An argument such as `as` cannot negotiate a different successful encoding.
+Apply the endpoint's argument rules normally, refusing unsupported arguments
+rather than using them to select a different output format.
+
+Denial, concealment, an unresolved target, argument errors, and unavailability
+retain their existing error behavior and classes. In particular, concealment
+is indistinguishable from the ordinary unresolved answer. Even a typed
+`NotFound` from an endpoint is an error to the kernel, not permission to synthesize
+`false`. The endpoint can emit `false` after deciding that its own backend result
+means absence of the selected resource, not an inaccessible or failed lookup.
+
+### Endpoint support and authority
+
+Support requires an explicit, profile-aware handler registered by the endpoint
+or its host on the resolved path. A declaration of the Exists verb is not proof
+of profile support, and a profile registration does not add a verb declaration.
+Never call a verb-insensitive legacy handler to see if its bytes look boolean.
+For a profile request on an authorized route without a handler, return
+`Unsupported` with `verb: Exists`, not `false`. Keep existing resolution,
+admission, concealment and applicable argument checks ahead of dispatch. In
+particular, do not reveal endpoint support to a caller whose request is concealed.
+
+The capability floor is unchanged. Declared Exists uses its own requirements.
+Undeclared Exists uses the declared Source requirements, or the union of the
+endpoint's declared requirements if Source is not declared. With no requirements
+the floor is open. Explicit Exists requirements can differ from Source only
+insofar as the handler does not read or disclose anything outside its authority.
+A narrow grant to check existence does not grant a body read. Neither selecting
+the profile nor passing the floor bypasses other authorization checks.
+
+The endpoint makes the decision, preferably through metadata, an index or a
+filesystem check without materializing Source. It does not mutate the resource
+or other application state to answer. When a cheap check is unavailable, an
+explicitly registered compatibility adapter may make a nonmutating Source read,
+with the full cost documented. It must enforce Source authority in addition to
+Exists authority and preserve the same selection, scope, time view, lifetime
+and dependencies. It may map a successful authorized read to `true` only if
+Source success establishes presence for that resource. The body is not the
+decision and can itself be `false`. It maps only a documented, authoritative
+absence for that resource to `false`, never a denial, concealed error, unresolved
+route or unavailable backend. Without those guarantees, refuse support.
+
+### Validation, streaming and revalidation
+
+Validate the media type and bytes before making any success visible or inserting
+it in the cache. A malformed successful reply (including a redirect or a body
+of the wrong media type) becomes `Error::Endpoint`, never a boolean. For a
+framed or streamed body, buffer at most five payload bytes, reject as soon as
+the bytes cannot be a prefix of either token (including on any sixth byte), and
+require clean end of body even after a complete token. Cancel on rejection and
+honor the request's timeout and cancellation while waiting for end of body.
+Preserve typed stream failures rather than treating failure as clean end.
+Return a collected representation after validation. Preserve freshness and
+dependency metadata, including metadata learned at completion. Invalid,
+interrupted or incomplete answers are not published or cached as successes.
+
+A revalidation marker is not a boolean representation. Allow it only for an
+offered, time-expired, previously validated answer under the same profile and
+effective cache key, whose origin validator covers that existence decision.
+Honor the kernel's current thread and metadata rules, including cuts during
+revalidation. Return the stored boolean and apply the allowed freshness update,
+not the bytes or media type of the marker. A marker with no eligible offered
+entry is an `Error::Endpoint`. A fresh replacement has to pass full validation.
+Never offer a legacy entry, a Source entry, a cut entry or an unvalidated body
+for profile revalidation.
+
+### Selection and rollout
+
+The compatibility default remains **legacy**. An in-process caller expressly
+selects the profile on the Exists invocation through typed call options, not
+through a resource argument or a media type. It is a requirement, not a
+preference. If the receiving host cannot honor it, it returns `Unsupported`
+(with no verb for an unsupported profile facility). It never retries as legacy
+on the caller's behalf. A caller can separately choose to issue a legacy request,
+but must treat its answer as an opaque representation, not a presence signal.
+
+On the wire, use a transport revision or extension that explicitly supports
+profile negotiation. The serving peer advertises supported profile tokens before
+profile calls are sent. An old peer, absent advertisement, or advertisement
+without the exact case-sensitive token does not support this profile. On a
+profile-capable connection the caller sends an `exists_profile` metadata field
+with the exact token on each opted-in Exists request. No field means legacy.
+A receiver that sees an unknown token refuses with `Unsupported` (facility)
+without dispatching. A success reply must echo the exact selected token in
+`exists_profile` response metadata. The caller refuses a successful reply with
+a missing or different token as an endpoint protocol error, even if its bytes
+look boolean. Typed error replies do not require an echo. The transport's future
+binding must define advertisement and field framing before use. No current wire
+revision is assigned these fields by this document.
+
+A forwarding peer must carry the selection across each hop and verify the
+upstream success before echoing it downstream, or fail closed. It cannot treat
+a legacy hop as a profile handler. The profile token is independent of the wire
+revision and of the contract IRI digest forms. Separate profile and legacy cache
+entries and in-flight work even when the verb, target and arguments are identical.
+Do not reuse a legacy result whose bytes happen to pass the new validator.
+
+Copy the [shared vectors](../../crates/ikigai-vocab/tests/vectors/exists_vectors.json)
+verbatim into the language faces. Before rollout, conformance must exercise
+both polarities, exact bytes and type, error preservation, argument selection
+and authorization, stream completion and failure, and revalidation, including
+cross-profile and cut entries. Test mixed peers, legacy bodies that look like
+booleans, cache separation and invalidation. Migrate endpoint writers and callers,
+including wire and host adapters, before any separately reviewed default change.
+This design adds no runtime support and changes no default.
 
 ## Caching and invalidation
 
