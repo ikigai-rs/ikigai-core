@@ -421,6 +421,21 @@ pub const ANSWERED_NOTE: &str = "answered-by";
 /// silent skip. Like a denial, the event names something that never ran.
 pub const SEALED_NOTE: &str = "sealed";
 
+/// The [`TraceEvent::notes`] key marking a sub-request issued **under a delegation**
+/// ([`Invocation::issue_granted`](crate::Invocation::issue_granted), ledger #3769). Its
+/// value is the host-declared target prefix the grant is bound to
+/// ([`Kernel::with_grants`]), which names the delegation. On such an event
+/// [`TraceEvent::capability`] is the grant (the authority that bounded the effect), and
+/// [`GRANTED_FOR_NOTE`] records the authority the delegating module was itself invoked
+/// under, so a reader sees who acted under whose authority.
+pub const GRANTED_NOTE: &str = "granted";
+
+/// The [`TraceEvent::notes`] key beside [`GRANTED_NOTE`]: one note per scope of the
+/// capability the DELEGATING module was invoked under (its caller's authority), or a
+/// single `root` for a root caller. The authority axis, not an agent: it is not
+/// `log:onBehalfOf`.
+pub const GRANTED_FOR_NOTE: &str = "granted-for";
+
 /// The [`TraceEvent::notes`] key under which the kernel reports the **levels an
 /// endpoint was found in** — its found path ([`Resolved::levels`](crate::Resolved::levels)),
 /// innermost first, as [`LevelPath`](crate::LevelPath) renders it, e.g.
@@ -650,6 +665,22 @@ pub trait Tracer: Send + Sync {
     fn record(&self, event: TraceEvent);
 }
 
+/// The tracer behind [`TraceScope::delegated`].
+struct Delegated {
+    inner: Arc<dyn Tracer>,
+    parent: Option<u64>,
+    notes: Vec<(String, String)>,
+}
+
+impl Tracer for Delegated {
+    fn record(&self, mut event: TraceEvent) {
+        if event.parent == self.parent {
+            event.notes.extend(self.notes.iter().cloned());
+        }
+        self.inner.record(event);
+    }
+}
+
 /// One traced resolution's recording context: the collector its events go to and
 /// the span-id source its nodes draw from. Created per traced call
 /// ([`Kernel::issue_traced`]) — or from the kernel's globally-installed tracer
@@ -678,6 +709,21 @@ impl TraceScope {
     /// span counter (successive one-shot `trace` runs keep unique ids).
     fn global(tracer: Arc<dyn Tracer>, spans: Arc<AtomicU64>) -> Self {
         TraceScope { tracer, spans }
+    }
+
+    /// This scope, with `notes` appended to every event whose parent is `parent`: the
+    /// immediate hop of ONE delegated sub-request (ledger #3769). Descendants of that hop
+    /// record under it with their own parents, so they are untouched; the span counter is
+    /// shared, so ids stay unique across the trace.
+    pub(crate) fn delegated(&self, parent: Option<u64>, notes: Vec<(String, String)>) -> Self {
+        TraceScope {
+            tracer: Arc::new(Delegated {
+                inner: Arc::clone(&self.tracer),
+                parent,
+                notes,
+            }),
+            spans: Arc::clone(&self.spans),
+        }
     }
 
     fn next_span(&self) -> u64 {
@@ -849,6 +895,9 @@ pub struct Kernel {
     /// when the kernel is built and consulted on resolution. With only core's claim
     /// it is trivial and costs one `bool` read per resolution.
     seals: Seals,
+    /// The host's delegations ([`with_grants`](Self::with_grants)): fixed at construction,
+    /// never named or enlarged by a request (ledger #3769).
+    grants: crate::grant::Grants,
     /// The registered cut listeners ([`listen`](Self::listen)). With none registered
     /// a cut pays one atomic load for them.
     listeners: Listeners,
@@ -2064,6 +2113,7 @@ impl Kernel {
             scope_names: Mutex::new(BTreeMap::new()),
             uncached: Mutex::new(UncachedLog::default()),
             seals,
+            grants: crate::grant::Grants::default(),
             listeners: Listeners::default(),
         }
     }
@@ -2190,6 +2240,211 @@ impl Kernel {
     {
         let host: Vec<String> = host.into_iter().map(Into::into).collect();
         Seals::from_topology(&root.topology(), &host).map(|_| ())
+    }
+
+    /// **Delegate fixed authority to the endpoints bound under each prefix** (ledger
+    /// #3769; `docs/design/sub-request-authority.md`, Part B). Each entry is a CANONICAL
+    /// target prefix and the scopes the root's endpoints bound under it may issue
+    /// sub-requests under, through
+    /// [`Invocation::issue_granted`](crate::Invocation::issue_granted), instead of under
+    /// their caller's capability.
+    ///
+    /// The rules, each enforced here or at dispatch:
+    ///
+    /// - **Never wider than the host.** Every grant is `host` attenuated to its scopes; a
+    ///   scope `host` does not hold is refused, not dropped.
+    /// - **Static.** The table is fixed when the kernel is built. A request cannot name a
+    ///   grant, select one or enlarge one; no scope is a pattern or a template.
+    /// - **Given to enumerated endpoints, not to names.** When the table is built, each
+    ///   prefix selects the root's own EXACT bindings under it (`Space::entries`), and each
+    ///   is resolved then. The grant is given to that name and the endpoint that answered it,
+    ///   and applies at dispatch only when that same endpoint answers that name. Anything
+    ///   else answering under the prefix gets no grant: a template or fallback pattern, a
+    ///   binding a mounted remote surfaced, a space that answers with a fresh endpoint per
+    ///   resolution (no identity to give a grant to, so refused here), or a door swapped in
+    ///   after construction.
+    /// - **On a segment boundary.** A prefix covers a name equal to it, or continuing it after
+    ///   a `:` or `/`: `urn:dash` and `urn:dash:` cover `urn:dash:prices`, and neither covers
+    ///   `urn:dashboard-other:x`.
+    /// - **Disjoint.** No prefix may cover another, so at most one grant applies to any
+    ///   target and there is no precedence to misread.
+    /// - **Keyed on the canonical target**, after every rewrite, and only for an endpoint
+    ///   the host's tree answered: the root, a level in it, or a corridor the host
+    ///   injected. An endpoint a confinement bound gets no grant, nor does one found in a
+    ///   level on a confined chain (a level entered through a module's own corridor is the
+    ///   module's choice), so a module cannot borrow another's grant by binding a name under
+    ///   its prefix in a corridor of its own.
+    /// - **Not moved into by a space's rewrite.** Where a space reported a rewrite
+    ///   (`Resolved::canonical`), the name the kernel asked and the name reported must fall
+    ///   under the same grant; otherwise there is none. A host routes a name into a granted
+    ///   prefix with the kernel's own alias table ([`with_aliases`](Self::with_aliases)),
+    ///   which rewrites before resolution.
+    /// - **Replacement, never union.** A delegated sub-request runs under exactly the
+    ///   grant; the endpoint it reaches gets its own grant (or none), never this one.
+    /// - **The floor stays the caller's.** Whether the module runs at all is decided by
+    ///   its declared `requires` against the caller's capability, unchanged.
+    ///
+    /// Panics on a refused table; [`try_with_grants`](Self::try_with_grants) returns the
+    /// refusal instead.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     AsyncFnEndpoint, Capability, Description, EndpointSpace, Error, Exact, FnEndpoint, Iri,
+    ///     Kernel, ReprType, Representation, Request, Verb,
+    /// };
+    ///
+    /// let file = FnEndpoint::new("file", |inv| {
+    ///     if !inv.capability.allows("urn:cap:fs:read:/prices") {
+    ///         return Err(Error::Denied("no grant for /prices".into()));
+    ///     }
+    ///     Ok(Representation::new(ReprType::new("text/plain"), b"42".to_vec()))
+    /// });
+    /// let dashboard = AsyncFnEndpoint::new("dashboard", |inv| {
+    ///     Box::pin(async move {
+    ///         let read = Request::new(Verb::Source, Iri::parse("urn:file:prices").unwrap());
+    ///         inv.issue_granted(read).await
+    ///     })
+    /// })
+    /// .with_description(Description::new("dashboard").requires("urn:cap:dash:read"));
+    /// let kernel = Kernel::new(Arc::new(
+    ///     EndpointSpace::new()
+    ///         .bind(Exact::new("urn:file:prices"), file)
+    ///         .bind(Exact::new("urn:dash:prices"), dashboard),
+    /// ))
+    /// .with_grants(&Capability::root(), [("urn:dash:", ["urn:cap:fs:read:/prices"])]);
+    ///
+    /// // The caller holds only the dashboard's own read scope…
+    /// let caller = Capability::root().attenuate(["urn:cap:dash:read"]);
+    /// let got = block_on(kernel.issue(
+    ///     Request::new(Verb::Source, Iri::parse("urn:dash:prices").unwrap()),
+    ///     &caller,
+    /// ))
+    /// .unwrap();
+    /// assert_eq!(got.bytes, b"42");
+    /// // …and cannot read the file itself.
+    /// assert!(block_on(kernel.issue(
+    ///     Request::new(Verb::Source, Iri::parse("urn:file:prices").unwrap()),
+    ///     &caller,
+    /// ))
+    /// .is_err());
+    /// ```
+    pub fn with_grants<I, P, S, T>(self, host: &Capability, grants: I) -> Self
+    where
+        I: IntoIterator<Item = (P, S)>,
+        P: Into<String>,
+        S: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.try_with_grants(host, grants)
+            .unwrap_or_else(|refused| panic!("the kernel's grants are refused: {refused}"))
+    }
+
+    /// [`with_grants`](Self::with_grants), with a refusal returned rather than panicked
+    /// on, for a host whose grants come from configuration. On `Err` the kernel is
+    /// consumed. Calling it again adds to the table, under the same rules.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{Capability, EndpointSpace, GrantError, Kernel};
+    ///
+    /// let host = Capability::root().attenuate(["urn:cap:fs:read:/prices"]);
+    /// // A host cannot delegate what it does not hold…
+    /// let refused = Kernel::new(Arc::new(EndpointSpace::new()))
+    ///     .try_with_grants(&host, [("urn:dash:", ["urn:cap:fs:read:/etc"])])
+    ///     .err()
+    ///     .unwrap();
+    /// assert!(matches!(refused, GrantError::NotHeld { .. }));
+    /// // …and two grants may not overlap.
+    /// let refused = Kernel::new(Arc::new(EndpointSpace::new()))
+    ///     .try_with_grants(
+    ///         &host,
+    ///         [("urn:dash:", ["urn:cap:fs:read:/prices"]), ("urn:dash:x", ["urn:cap:fs:read:/prices"])],
+    ///     )
+    ///     .err()
+    ///     .unwrap();
+    /// assert!(matches!(refused, GrantError::Overlaps { .. }));
+    /// ```
+    pub fn try_with_grants<I, P, S, T>(
+        mut self,
+        host: &Capability,
+        grants: I,
+    ) -> std::result::Result<Self, crate::GrantError>
+    where
+        I: IntoIterator<Item = (P, S)>,
+        P: Into<String>,
+        S: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.grants = self.grants.extend(&self.root, host, grants)?;
+        Ok(self)
+    }
+
+    /// The host's delegations, in declaration order: each target prefix and the scopes an
+    /// endpoint resolved under it may issue sub-requests with
+    /// ([`with_grants`](Self::with_grants)).
+    pub fn grants(&self) -> Vec<(String, Vec<String>)> {
+        self.grants
+            .entries()
+            .iter()
+            .map(|grant| {
+                let scopes = grant
+                    .capability()
+                    .scopes()
+                    .map(|held| held.iter().cloned().collect())
+                    .unwrap_or_default();
+                (grant.prefix().to_string(), scopes)
+            })
+            .collect()
+    }
+
+    /// The scopes delegated to the endpoint the host's root bound at the exact `target`
+    /// (canonical), if a grant was given to it at construction: what a host or a description
+    /// renderer shows beside the endpoint's own `requires`, so the delegation is declared
+    /// where it is enforced. `None` for any other name under a grant's prefix: a template or
+    /// fallback binding, a mounted peer, or a door added after the table was built.
+    pub fn grant_for(&self, target: &Iri) -> Option<Vec<String>> {
+        self.grants.at_door(target.as_str()).map(|grant| {
+            grant
+                .capability()
+                .scopes()
+                .map(|held| held.iter().cloned().collect())
+                .unwrap_or_default()
+        })
+    }
+
+    /// The grant an endpoint resolved at the canonical `target` runs with (ledger #3769).
+    /// `asked` is the name the kernel resolved when a SPACE reported a rewrite of it to
+    /// `target` (`Resolved::canonical`); `None` when no space rewrote it.
+    ///
+    /// ★ A reported rewrite cannot move an endpoint into a grant (hub review of PR 333,
+    /// round 2). A space chooses both the endpoint it answers with and the name it reports,
+    /// so a module mounted as a `Rewrite` over its own doors could answer its own name with
+    /// its own endpoint, report a name under another module's granted prefix, and act under
+    /// that grant while the real module still answered its name. The grant is therefore
+    /// given only when the name the kernel ASKED and the name the space reported fall under
+    /// the same grant. A host that wants an alias into a granted prefix uses the kernel's
+    /// own alias table, which rewrites before resolution, so the asked name is already the
+    /// granted one.
+    ///
+    /// ★ And only for the endpoint the grant was GIVEN to (round 3): `answered` must be the
+    /// very endpoint the host's root bound at `target` when the table was built
+    /// (`Grants::given`). Whatever else answers under the prefix gets none.
+    fn grant_at(
+        &self,
+        target: &Iri,
+        asked: Option<&Iri>,
+        answered: Option<&Arc<dyn Endpoint>>,
+    ) -> Option<Arc<crate::grant::Grant>> {
+        let grant = self.grants.given(target.as_str(), answered?)?;
+        match asked {
+            None => Some(grant),
+            Some(asked) => self
+                .grants
+                .for_target(asked.as_str())
+                .filter(|at_asked| Arc::ptr_eq(at_asked, &grant)),
+        }
     }
 
     /// Every sealed prefix and its owner, core's first, then the host's, then each
@@ -4815,6 +5070,10 @@ impl Kernel {
         // answered further out: a swap that adds a door there shadows it. The space
         // reports its miss to the record around the walk, and the answer is hung from
         // its thread like an answer it served (ledger #3916; `dynamic::MissRecord`).
+        // Whether an endpoint's own confinement answered: such an endpoint gets no host
+        // grant (ledger #3769). Tracked only when the host declared grants, so the hot
+        // path is the walk it always was.
+        let mut confined_hit = false;
         let (resolution, missed) = if crate::stream::is_stream(request.target.as_str()) {
             (
                 Ok(self.streams.resolve(&request, &Scope::empty())),
@@ -4822,8 +5081,21 @@ impl Kernel {
             )
         } else {
             let record = crate::dynamic::MissRecord::begin();
-            let resolution = scope.resolve_in(&request, &self.root, &self.seals);
+            let resolution = if self.grants.is_empty() {
+                scope.resolve_in(&request, &self.root, &self.seals)
+            } else {
+                let (resolution, confined) =
+                    scope.resolve_noting_confined(&request, &self.root, &self.seals);
+                confined_hit = confined;
+                resolution
+            };
             (resolution, record.finish())
+        };
+        // The endpoint the space answered with, before the kernel wraps it: the identity a
+        // grant is checked against (ledger #3769, round 3). Only when grants exist.
+        let answering = match &resolution {
+            Ok(Resolution::Hit(hit)) if !self.grants.is_empty() => Some(Arc::clone(&hit.endpoint)),
+            _ => None,
         };
         let mut resolved = match resolution {
             Ok(Resolution::Hit(resolved)) if missed.is_empty() => resolved,
@@ -5228,7 +5500,15 @@ impl Kernel {
                 .with_depth(depth)
                 // The run's pools, narrowed to what THIS request's capability is entitled
                 // to (minted here when nothing above minted one), and its deadline.
-                .with_run(admitted);
+                .with_run(admitted)
+                // The host's delegation for this CANONICAL target, if any (ledger #3769):
+                // never for an endpoint a confinement answered, never from the request,
+                // and never moved into by a rewrite a space reported (`grant_at`).
+                .with_grant(if confined_hit || self.grants.is_empty() {
+                    None
+                } else {
+                    self.grant_at(&request.target, probed_as.as_ref(), answering.as_ref())
+                });
             invocation.offer(offer.as_deref());
             // A body attached under a NONCE id (ledger #2239, #2402) makes this request one
             // that can never be asked for again, whether or not the endpoint reads it: its

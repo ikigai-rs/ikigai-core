@@ -1,9 +1,12 @@
 # Sub-request authority: attenuation, and delegation
 
-**Status:** Part A (attenuation) **is built** — `Invocation::issue_attenuated` /
-`source_attenuated`, this change. Part B (delegation — a module acting under authority
-*it* holds) is **design only and deliberately not built**; the verdict and the
-conditions that would change it are in the last two sections.
+**Status:** Part A (attenuation) **is built**: `Invocation::issue_attenuated` /
+`source_attenuated`. Part B (delegation: a module acting under authority *it* holds) **is
+built for statically enumerated grants only** (ledger #3769): `Kernel::with_grants` /
+`try_with_grants`, `Invocation::issue_granted` / `source_granted` / `grant`. Request-derived
+grants (prefix scopes, templated scopes) remain **out of scope**; the original verdict on them
+stands, in "Verdict: not yet" below. What was built, and how it settles each point of this
+note, is in "Part B as built" just before the verdict.
 
 **Anchor types:** `ikigai_core::{Capability, Invocation, Kernel, TraceEvent}`.
 **Companions:** `docs/design/cache-ejection.md` §2 (the capability fingerprint is not an
@@ -351,6 +354,98 @@ findings, in descending order of how quietly they would go wrong:
 
 ---
 
+## Part B as built (static grants, ledger #3769)
+
+The static case asked: a dashboard host serves resources composed from a fixed set of files
+it names at startup, bound inside a confining corridor, and its callers should need only the
+dashboard's own read scope. Point 1 of the verdict below no longer blocks it, because nothing
+in that case is request-derived. What shipped, against the design above:
+
+- **The table is the host's, at construction.** `Kernel::with_grants(&host, [(prefix,
+  scopes)])`. Each grant is `host.attenuate(scopes)`, and a scope `host` does not hold is
+  refused (`GrantError::NotHeld`), not dropped. So a delegation never exceeds the authority the
+  host itself presents. Prefixes must be non-empty and disjoint (`GrantError::Overlaps`); a
+  grant with no scopes is refused. Nothing is a pattern: a grant's scopes are exact tokens, held
+  as any scoped capability holds them.
+- ★ **Given to the endpoints the host enumerated, not to a name prefix.** (Round 3 of the
+  review: the grant had followed `target.starts_with(prefix)`, so any endpoint the host tree
+  answered under the prefix received it.) When the table is built, the prefix selects the
+  root's own exact bindings under it (`Space::entries`: not a pattern, and not a binding a
+  mounted remote surfaced), and the kernel resolves each one then. A grant records each name
+  and the endpoint that answered it, and holds that `Arc`, so its address cannot be reused. At
+  dispatch the grant applies only when the endpoint the space answered with, before the
+  kernel wraps it, is that same endpoint, at that same canonical name. Everything else that
+  answers under the prefix gets no grant, and its delegated hop is `Denied`: a template or
+  fallback binding, a mounted peer, a door a dynamic space's sink swaps in later. A binding
+  whose identity cannot be established is refused when the table is built, so it is never
+  granted at dispatch. That covers a hit that captured template variables, one that reported
+  a rewrite, and a space that answers with a new endpoint each time it is asked (a mount's
+  forwarder, a dynamic space's threaded wrapper). The prefix is how the host writes the
+  table. Who acts under the grant is fixed by identity.
+- **On a segment boundary.** A prefix covers a name equal to it, or continuing it after a
+  `:` or `/` (the prefix's last character or the name's next one). `urn:dash` and `urn:dash:`
+  cover `urn:dash:prices` and `urn:dash/raw`. Neither covers `urn:dashboard-other:x`.
+  Disjointness uses the same rule, so `urn:dash` and `urn:dashboard` may both be granted.
+- **A scope is an exact token in core, and a subtree to the door that reads it.** Core
+  compares grant scopes as exact strings (`Capability::allows`), but the door decides what a
+  scope means. ikigai-fs reads `urn:cap:fs:read:<dir>` as the whole subtree under `<dir>`, so
+  a grant of one directory reaches every file under it. What keeps a delegation narrow is
+  therefore what the module passes INTO the delegated sub-request. Pass typed arguments the
+  module controls (a fixed file name, a parsed date), never a caller's string interpolated
+  into a path or a target, or the caller chooses which file under the granted subtree the
+  module reads with the host's authority.
+- **Keyed on the canonical target**, after every rewrite, at dispatch. ★ **And only for an
+  endpoint the root space or a host corridor answered.** An endpoint a *confinement* answered
+  gets no grant, whatever its name. Without that rule a module could confine itself to a
+  corridor binding a name under another module's granted prefix and borrow its grant; the
+  kernel learns which member answered from the same walk resolution takes
+  (`Scope::resolve_noting_confined`), and only when the host declared grants. On a chain
+  with a confinement on it, the **level stack** counts as the endpoint's choice too: a
+  confinement empties the stack, so every level on such a chain was entered afterwards, and
+  one entered through the module's own corridor is the module's. The stack does not record
+  which member each level came from, so this fails closed: a level entered from a host
+  corridor of a confined chain gets no grant either. (Round 2 of the review: a level inside a
+  module's corridor had been counted as the host's, and its endpoint borrowed the grant.)
+- **Not moved into by a space's rewrite.** A space picks both the endpoint it answers with
+  and the canonical name it reports (`Resolved::canonical`). A module mounted at the root as
+  a `Rewrite` over its own doors could otherwise answer its own name with its own endpoint,
+  report a name under another module's prefix, and act under that grant while the real
+  module still answered its name. So where a space reported a rewrite, the name the kernel
+  asked and the name reported must fall under the **same** grant, or there is none. A host
+  that routes a name into a granted prefix uses the kernel's own alias table
+  (`Kernel::with_aliases`), which rewrites before resolution, so the asked name is the
+  granted one. (Also round 2.)
+- **`issue_granted` takes no capability**, errors with `Denied` where no grant is bound (never
+  a fallback to the caller's), and runs the hop under exactly the grant: **replacement, never
+  union**. The grant lives on the `Invocation` the kernel built, survives reborrows and
+  `confine` (the same endpoint), and is never inherited by the endpoint the sub-request reaches.
+  `Invocation::with_issuer` (the module-shim seam) starts with no grant, so a loadable module
+  cannot carry a grant across the shim.
+- **The floor stays the caller's.** Unchanged: the declared `requires` is checked against the
+  authority the request arrived with.
+- **Trace.** The delegated hop's event carries the grant as `capability` (the effective
+  authority), `GRANTED_NOTE` (`granted`) naming the delegation by its host prefix, and
+  `GRANTED_FOR_NOTE` (`granted-for`), one per scope of the authority the delegating module ran
+  under (`root` for root). Notes, not a typed field, so the `TraceEvent` wire layout is
+  unchanged; `ikigai-log` maps each key to a column, so the log line names the delegation once
+  it adds the two vocabulary terms.
+- **Cache.** The delegated sub-request is keyed under the grant's fingerprint, exactly as any
+  capability is (finding 2 above): two callers of the same module share its internal reads, and a
+  module under a different grant misses and is refused by the door. Finding 1 (the outer entry
+  computed under a grant that later changes) cannot arise: the grant table is fixed for the
+  kernel's lifetime and the cache belongs to the kernel, so no entry outlives the grant it was
+  computed under. Finding 3 (thread names cross the boundary) holds as stated.
+- **Declared = enforced.** The module declares only its own scope, the delegation makes that
+  declaration true, so the manifold offers the module to exactly the callers who can use it and
+  names no file scope. The table is readable: `Kernel::grants()` lists it and
+  `Kernel::grant_for(target)` gives the grant beside a binding. ⚠ Not yet built: a
+  `urn:kernel:grants` resource and an RDF term for a description's delegated grant, which need a
+  vocabulary term in `ikigai-vocab` first.
+
+The adoption rules above still bind a host: delegate only to a door that enforces its own effect
+boundary, pass typed arguments into a delegated sub-request, never grant a general-purpose
+evaluator.
+
 ## Verdict: not yet
 
 Part A ships. **Part B should not be built until the conditions below are met**, and the
@@ -432,6 +527,11 @@ grants. Getting delegation wrong costs 31 crates a mechanism they cannot remove.
 ---
 
 ## Release shape
+
+Part B's static form is additive public API too (`Kernel::with_grants`, `try_with_grants`,
+`grants`, `grant_for`; `Invocation::issue_granted`, `source_granted`, `grant`; `GrantError`;
+`GRANTED_NOTE`, `GRANTED_FOR_NOTE`), with no wire or cache-key change and no behavior change for a
+kernel with no grants: a **minor** bump in this workspace's 0.x scheme, released as **0.5.0**.
 
 Part A is additive public API on `Invocation` — a **minor** bump. It carries no format,
 wire, or cache change, and it can and should ship ahead of any decision about Part B;

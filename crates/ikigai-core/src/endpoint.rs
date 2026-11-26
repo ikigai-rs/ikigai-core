@@ -515,6 +515,11 @@ pub struct Invocation<'a> {
     /// [`with_retries`](Invocation::with_retries) and
     /// [`with_not_after`](Invocation::with_not_after), which narrow.
     run: crate::run::IssueContext,
+    /// The host's delegation for the target this invocation was resolved at (ledger
+    /// #3769, [`Kernel::with_grants`](crate::Kernel::with_grants)), set by the kernel only.
+    /// Kept across reborrows and [`confine`](Invocation::confine) (the same endpoint, the
+    /// same binding); never inherited by a sub-request, which gets its own target's.
+    grant: Option<Arc<crate::grant::Grant>>,
     /// Everything the endpoint records while it runs, shared by every reborrow of
     /// this invocation. See [`Recorded`].
     recorded: Arc<Recorded>,
@@ -837,6 +842,7 @@ impl<'a> Invocation<'a> {
             scope: Scope::empty(),
             depth: 0,
             run: crate::run::IssueContext::new(),
+            grant: None,
             recorded: Arc::new(Recorded::default()),
         }
     }
@@ -868,6 +874,7 @@ impl<'a> Invocation<'a> {
             scope: Scope::empty(),
             depth: 0,
             run: crate::run::IssueContext::new(),
+            grant: None,
             recorded: Arc::new(Recorded::default()),
         }
     }
@@ -939,6 +946,7 @@ impl<'a> Invocation<'a> {
             run: self.run.clone(),
             // Shared, deliberately: see the doc above. The reborrow records INTO
             // this invocation, not beside it.
+            grant: self.grant.clone(),
             recorded: Arc::clone(&self.recorded),
         }
     }
@@ -1048,6 +1056,7 @@ impl<'a> Invocation<'a> {
             scope: self.scope.clone().confined(name, space),
             depth: self.depth,
             run: self.run.clone(),
+            grant: self.grant.clone(),
             recorded: Arc::clone(&self.recorded),
         }
     }
@@ -1143,6 +1152,14 @@ impl<'a> Invocation<'a> {
     /// ```
     pub fn clock_pinned(&self) -> bool {
         self.scope.clock().is_some()
+    }
+
+    /// Attach the host's delegation for this invocation's target (set by the kernel at
+    /// dispatch, ledger #3769). Crate-private: an endpoint that could set its own grant
+    /// could mint authority.
+    pub(crate) fn with_grant(mut self, grant: Option<Arc<crate::grant::Grant>>) -> Self {
+        self.grant = grant;
+        self
     }
 
     /// The **pinned instant** alone: the one the resolution chain's innermost temporal
@@ -1515,6 +1532,7 @@ impl<'a> Invocation<'a> {
             scope: self.scope.clone(),
             depth: self.depth,
             run,
+            grant: self.grant.clone(),
             recorded: Arc::clone(&self.recorded),
         }
     }
@@ -1893,6 +1911,71 @@ impl<'a> Invocation<'a> {
         self.issue_under(request, &attenuated).await
     }
 
+    /// The authority the host delegated to the target this invocation was resolved at
+    /// ([`Kernel::with_grants`](crate::Kernel::with_grants), ledger #3769), if any: what
+    /// [`issue_granted`](Self::issue_granted) would issue under. `None` for an endpoint
+    /// no grant covers, for one a confinement answered, and for any invocation the kernel
+    /// did not build.
+    pub fn grant(&self) -> Option<&Capability> {
+        self.grant.as_deref().map(crate::grant::Grant::capability)
+    }
+
+    /// Issue a sub-request under the authority **the host delegated to this endpoint's
+    /// binding** ([`Kernel::with_grants`](crate::Kernel::with_grants)) instead of under the
+    /// caller's capability (ledger #3769; `docs/design/sub-request-authority.md` Part B).
+    ///
+    /// It takes **no capability**: the authority comes from the kernel's table, keyed on the
+    /// canonical target this invocation was resolved at, never from the endpoint or the
+    /// request. Exactly one authority is in effect, the grant, and it **replaces** the
+    /// caller's rather than joining it: the sub-request holds nothing the caller held that
+    /// the grant does not. Where no grant covers this binding it is refused with
+    /// [`Error::Denied`], never a fallback to the caller's capability (a fallback would
+    /// turn "the host forgot to wire the grant" into a call that succeeded under an
+    /// authority the code did not intend).
+    ///
+    /// Recorded as a dependency exactly as [`issue`](Self::issue) records one. The answer
+    /// is cached under the grant's fingerprint, as any capability's is. On the trace, the
+    /// sub-request's event carries the grant as its capability, [`GRANTED_NOTE`] naming
+    /// the delegation (the host's prefix) and [`GRANTED_FOR_NOTE`] the caller's authority.
+    ///
+    /// ⚠ The caller still chooses what this endpoint does with the grant. Pass typed
+    /// arguments into a delegated sub-request, never interpolated caller strings, and
+    /// delegate only to a door that enforces its own effect boundary.
+    ///
+    /// [`GRANTED_NOTE`]: crate::GRANTED_NOTE
+    /// [`GRANTED_FOR_NOTE`]: crate::GRANTED_FOR_NOTE
+    pub async fn issue_granted(&self, request: Request) -> Result<Representation> {
+        let Some(grant) = self.grant.clone() else {
+            return Err(Error::Denied(
+                format!(
+                    "no grant is bound to `{}`: the host delegated no authority to this endpoint",
+                    self.request.target
+                )
+                .into(),
+            ));
+        };
+        let trace = self.trace.as_ref().map(|trace| {
+            let mut notes = vec![(crate::GRANTED_NOTE.to_string(), grant.prefix().to_string())];
+            match self.capability.scopes() {
+                None => notes.push((crate::GRANTED_FOR_NOTE.to_string(), "root".to_string())),
+                Some(held) => notes.extend(
+                    held.iter()
+                        .map(|scope| (crate::GRANTED_FOR_NOTE.to_string(), scope.clone())),
+                ),
+            }
+            trace.delegated(self.span, notes)
+        });
+        self.issue_under_traced(request, grant.capability(), trace)
+            .await
+    }
+
+    /// `SOURCE` `target` under this endpoint's delegated grant
+    /// ([`issue_granted`](Self::issue_granted)).
+    pub async fn source_granted(&self, target: &Iri) -> Result<Representation> {
+        self.issue_granted(Request::new(Verb::Source, target.clone()))
+            .await
+    }
+
     /// The one place a sub-request's authority is chosen.
     ///
     /// ★ **This is private, and that is a security property, not an oversight.**
@@ -1909,6 +1992,18 @@ impl<'a> Invocation<'a> {
         request: Request,
         capability: &Capability,
     ) -> Result<Representation> {
+        self.issue_under_traced(request, capability, self.trace.clone())
+            .await
+    }
+
+    /// [`issue_under`](Self::issue_under), recording into `trace` (this invocation's own,
+    /// or a delegated view of it). Private for the same reason.
+    async fn issue_under_traced(
+        &self,
+        request: Request,
+        capability: &Capability,
+        trace: Option<crate::TraceScope>,
+    ) -> Result<Representation> {
         let issuer = self
             .issuer
             .ok_or_else(|| Error::Endpoint("sub-requests require a kernel context".to_string()))?;
@@ -1921,7 +2016,7 @@ impl<'a> Invocation<'a> {
                 request,
                 capability,
                 self.span,
-                self.trace.clone(),
+                trace,
                 self.scope.clone(),
                 self.depth + 1,
                 self.run.clone(),
@@ -2655,6 +2750,7 @@ impl<'a> Invocation<'a> {
             scope: self.scope.clone(),
             depth: self.depth,
             run: self.run.clone(),
+            grant: self.grant.clone(),
             recorded: Arc::clone(&self.recorded),
         }
     }
