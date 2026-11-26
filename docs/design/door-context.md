@@ -238,8 +238,11 @@ bound work, not to be written into answers. The follow-up list records whether a
 - **Carry door context on the wire** (decision 5): an `IssueWith` field, the peer-trust
   configuration for inbound claims, and the inbound re-minting rule. This needs a protocol
   version bump.
-- **Specify monotone execution budgets** (carried over from the overlay note): shared versus
-  per-branch accounting, hit behavior, refusal at seamless issuers, and whether a budget read
-  that reaches an answer should be detectable, deciding the deadline case of test 3.
-- **Replace the downstream task-local** once the door half exists: the run-budget overlay reads
-  the run context, and its scheduled fan-out holds without same-task execution.
+- **Monotone execution budgets** are specified in [execution-budget.md](execution-budget.md)
+  (ledger #4322): shared versus per-branch accounting, hit behavior, and the rule that a budget
+  may refuse but never change an answer. Two questions from this note stay open there: refusal
+  at issuers without the seam, and whether a read of `not_after` that reaches an answer should
+  be detectable, deciding the deadline case of test 3.
+- **The downstream task-local** is replaced by a budget cap on the run context, not by the door
+  half, since a run budget is not a door fact (decision 1). That replacement is a follow-up of
+  [execution-budget.md](execution-budget.md#what-it-replaces-downstream).
