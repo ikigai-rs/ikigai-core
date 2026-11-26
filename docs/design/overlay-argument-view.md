@@ -221,7 +221,7 @@ remain as the baseline.
 
 - **Add the overlay argument view.** `Invocation::amend_arguments`, `AmendedArguments`,
   `check_against` and `with_arguments` as specified in decisions 1 to 7, with the tests above.
-  It needs a minor version: new public API, and new public trace-note keys.
+  The new public API and trace-note keys are additive, so it ships in a patch release.
 - **Add `ArgSpec::pinned()`** to the contract and the vocabulary (`ikigai:pinned` in
   `vocabulary.ttl` and `shapes.ttl`), with `idempotency-key` pinned implicitly.
   `urn:kernel:validate` reports a pinned change the same way.
