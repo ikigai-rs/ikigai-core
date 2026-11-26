@@ -799,7 +799,9 @@ impl<'a> Invocation<'a> {
     /// target, even on failure. An endpoint may call this when it knows the whole
     /// invocation wrote nothing, for example when returning a recorded replay.
     /// The assertion applies on success and failure and is shared by reborrows,
-    /// but not by sub-requests. Incorrectly asserting it can leave reads stale.
+    /// but not by sub-requests. It cannot be withdrawn, so call it only where the
+    /// endpoint returns without writing (the replay's return point), never before a
+    /// write that might partly apply. Incorrectly asserting it can leave reads stale.
     pub fn nothing_written(&self) {
         self.recorded.nothing_written.store(true, Ordering::Relaxed);
     }
