@@ -3695,8 +3695,8 @@ impl Kernel {
     /// #1105). Out of line, so the issue path's frame holds nothing for it.
     #[cold]
     #[inline(never)]
-    fn unoffered(&self, request: &Request) -> Error {
-        if request.verb.is_mutating() {
+    fn unoffered(&self, request: &Request, nothing_written: bool) -> Error {
+        if request.verb.is_mutating() && !nothing_written {
             self.cut_thread(request.target.as_str());
         }
         Error::Endpoint("answered `revalidated` with no stale answer offered".to_string())
@@ -5453,6 +5453,7 @@ impl Kernel {
         // The deepest level this computation reached, absolute (ledger #3792): its own
         // depth, raised by every sub-request it issued, a hit counting its entry's δ.
         let mut reach = depth;
+        let mut nothing_written = false;
         let representation = if request.verb == Verb::Meta {
             self.meta_answering(
                 &resolved.endpoint,
@@ -5578,17 +5579,17 @@ impl Kernel {
                             &scope,
                         );
                     }
-                    // ★ A WRITE THAT RAN AND FAILED STILL CUTS (ledger #1105). The
+                    // ★ A WRITE THAT RAN AND FAILED CUTS BY DEFAULT (ledger #1105). The
                     // endpoint was entered, so it may have changed state before it
                     // failed (a script run recorded, then the run errored), and no
                     // endpoint can cut a thread itself: without this, a cached
                     // fallback over what it wrote goes on answering for the old
                     // state. Over-invalidation is the cost when the failure changed
-                    // nothing, and it is bounded: this arm is reached only AFTER the
-                    // limiter, the declared-capability floor and the nesting budget,
+                    // nothing unless the endpoint asserts it did not write. This arm is reached
+                    // only AFTER the limiter, the declared-capability floor and the nesting budget,
                     // so a refusal before dispatch never cuts, and only a caller
                     // holding the endpoint's declared capabilities can.
-                    if request.verb.is_mutating() {
+                    if request.verb.is_mutating() && !invocation.wrote_nothing() {
                         self.cut_thread(request.target.as_str());
                     }
                     // A failed revalidation forgets the stale entry, as the lookup did
@@ -5611,8 +5612,9 @@ impl Kernel {
             // A `revalidated` answer `Revalidate` did not turn into a stored body answered
             // an invocation that was offered nothing (ledger #2534).
             if representation.is_revalidated() {
-                return Err(self.unoffered(&request));
+                return Err(self.unoffered(&request, invocation.wrote_nothing()));
             }
+            nothing_written = invocation.wrote_nothing();
             let reason = representation.uncached_reason();
             // Effective expiry propagates from the dependencies: the result is no
             // fresher than its most volatile part. The endpoint's own expiry is met
@@ -5816,13 +5818,14 @@ impl Kernel {
         );
         self.record_resolution(&request, started, Outcome::Computed, tally);
 
-        // A successful mutating verb invalidates its target: cut the thread named
+        // A mutating verb normally invalidates its target: cut the thread named
         // after it, so cached `Source`s of that resource — and composites over
         // them — recompute. This is the internal half of the golden thread (the
         // kernel owns invalidation on writes); an external watcher cuts the same
         // thread on an out-of-band change. A failed one that RAN cuts too, in the
-        // invocation's error arm above (ledger #1105).
-        if request.verb.is_mutating() {
+        // invocation's error arm above (ledger #1105). An explicit no-write assertion
+        // suppresses the cut on either outcome.
+        if request.verb.is_mutating() && !nothing_written {
             self.cut_thread(request.target.as_str());
         }
         Ok(Answer::Body(representation).budgeted(|| pool))
@@ -5835,7 +5838,8 @@ impl Kernel {
     /// external watcher cuts it on change.
     ///
     /// **The kernel's own write-cut fires when it DISPATCHED the write**, whether the
-    /// endpoint then returned `Ok` or `Err` (ledger #1105): an endpoint can change
+    /// endpoint then returned `Ok` or `Err` (ledger #1105), unless it asserts
+    /// [`Invocation::nothing_written`]: an endpoint can change
     /// state before it fails, and cannot cut a thread itself. A refusal the kernel
     /// answers before dispatch (the capability floor's `Denied`, a limiter's
     /// `Unresolved`, `DepthExceeded`, an unbound target) cuts nothing, so only a

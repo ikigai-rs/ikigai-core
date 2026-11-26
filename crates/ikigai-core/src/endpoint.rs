@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -542,6 +542,7 @@ struct Recorded {
     /// [`TraceEvent`](crate::TraceEvent) once the invocation completes. Only
     /// collected while tracing (no cost, no growth off the trace path).
     trace_notes: Mutex<Vec<(String, String)>>,
+    nothing_written: AtomicBool,
     deps: Mutex<Deps>,
     /// Union of the golden threads of every sub-resource resolved during this
     /// invocation — so the kernel can propagate them onto the result.
@@ -792,6 +793,21 @@ impl Recorded {
 }
 
 impl<'a> Invocation<'a> {
+    /// Assert that this invocation made no change to the target's state.
+    ///
+    /// A dispatched `Sink` or `Delete` normally invalidates cached reads of its
+    /// target, even on failure. An endpoint may call this when it knows the whole
+    /// invocation wrote nothing, for example when returning a recorded replay.
+    /// The assertion applies on success and failure and is shared by reborrows,
+    /// but not by sub-requests. Incorrectly asserting it can leave reads stale.
+    pub fn nothing_written(&self) {
+        self.recorded.nothing_written.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn wrote_nothing(&self) -> bool {
+        self.recorded.nothing_written.load(Ordering::Relaxed)
+    }
+
     /// A context with no kernel attached: `source`/`issue` are unavailable.
     /// Useful for invoking an endpoint directly in tests.
     ///
