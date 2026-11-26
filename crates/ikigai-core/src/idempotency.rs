@@ -20,6 +20,10 @@
 //!
 //! Core stores nothing, and no default behavior changes: an endpoint opts in.
 //!
+//! An endpoint that answers a repeat from its [`Replay`] wrote nothing, so it calls
+//! [`Invocation::nothing_written`](crate::Invocation::nothing_written) where it returns the
+//! replay; otherwise the kernel cuts the target's thread and every cached read of it recomputes.
+//!
 //! The rules the record follows, which an endpoint keeps:
 //!
 //! - **Scope**: per (endpoint resource, principal, token) ([`ReplayScope`]). A call with no

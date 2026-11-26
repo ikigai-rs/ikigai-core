@@ -7,6 +7,13 @@ A patch release: the delegation API below is additive public API on `Kernel` and
 
 ### Added
 
+- **`Invocation::nothing_written()`** (ledger #4064, from the Sink idempotency research). A
+  dispatched `Sink` or `Delete` cuts its target's thread even when it changed nothing, so a
+  replayed answer invalidated every cached read of the target. An endpoint that knows the
+  invocation wrote nothing (a recorded replay) says so, and the kernel skips the cut of that
+  invocation's own target. Sub-requests do not inherit it; a failure with no assertion still
+  cuts. Call it at the point the endpoint returns the replay, never earlier: it cannot be
+  withdrawn, so a later partial write would go uncut.
 - **Sub-request delegation for statically enumerated grants** (ledger #3769;
   `docs/design/sub-request-authority.md`, Part B). A host declares at construction which of its
   endpoints may act under which fixed scopes: `Kernel::with_grants(&host, [(prefix, scopes)])`
