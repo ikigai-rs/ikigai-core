@@ -60,12 +60,14 @@ and missing-context policy; a task-local alone is not that contract.
 
 ## Budget and cache hits
 
-For the proposed execution budget, a hit **observes** the current budget and spends
-no execution units: serving a cached answer does not perform the covered computation.
-Admission and any minimum-budget refusal must run before reuse, even on a hit. If the
-budget also limits delivery bytes, charge those bytes separately on every delivery,
-including a hit, using the existing accounting contract; do not infer a delivery charge
-from the cost of the original computation. An overlay that must spend a unit per
+How an execution budget meets a cache hit is settled by
+[execution-budget.md](execution-budget.md#on-a-cache-hit-observe-and-spend-only-what-the-hit-itself-costs):
+a hit spends what serving it costs, never what producing it cost, and a budget cap does
+not forbid a hit. So a hit spends no execution units, and a low budget is not a reason to
+refuse one. Bytes a hit buffers are charged to the byte pool on every delivery, under the
+existing accounting contract, never inferred from the cost of the original computation.
+Admission still narrows the run's budgets to the capability's entitlement; that narrowing
+is not a refusal of the hit. An overlay that must spend a unit per
 invocation, or whose side effects must occur every time, cannot use this hit policy
 without a separate pre-lookup charge or effect contract. Until that is specified it
 must bypass. The mutable remaining counter is never part of a key: it changes during
@@ -74,8 +76,8 @@ execution and cannot provide a stable identity or safe concurrent accounting.
 A low budget that changes the amended request or its result is not merely an admission
 check. It requires the bypass above or a proven stable partition/transformation. A
 budget refusal must not be reused across budgets unless the same equivalence proof
-covers it. Budget state is shared and narrowed according to a separate future budget
-contract; this note does not claim that today's run context enforces these rules.
+covers it. Budget state is shared and narrowed as [execution-budget.md](execution-budget.md)
+proposes; this note does not claim that today's run context enforces these rules.
 
 ## Failures and configuration changes
 
@@ -107,8 +109,9 @@ bypass. The reproduction's target cut is a control, not proof of this protocol.
   entries, including concurrent roots and a cached ancestor.
 - Specify configuration publication and invalidation, then test cuts racing lookup
   and insertion for both success and failure entries and dependent ancestors.
-- Specify host-owned monotone budget accounting, admission on hits, delivery charges,
-  concurrency and boundary behavior; test exhaustion and hit/miss parity.
+- Monotone budget accounting, hits, delivery charges, concurrency and boundary behavior
+  follow [execution-budget.md](execution-budget.md)'s follow-up items; test exhaustion and
+  hit/miss parity there.
 - Evaluate a stable partition or pre-lookup transformation with a concrete overlay,
   identity and authorization review, collision handling, and equivalence tests before
   enabling reuse. Specify the argument-view contract separately.
