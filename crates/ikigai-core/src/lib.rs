@@ -184,9 +184,9 @@ pub use declare::{
     MAX_DECLARATION_NODES, MAX_DECLARATION_TEXT,
 };
 pub use describe::{
-    ActionSpec, ArgSpec, Arguments, ContractCaching, DefaultValue, Description, EndpointKind,
-    Failures, GroupKind, InputGroup, InputSource, ListSeparator, OutputFrom, Resend, Transreption,
-    ValueNote,
+    ActionSpec, ArgSpec, Arguments, ContractCaching, DefaultValue, Delegation, Description,
+    EndpointKind, Failures, GroupKind, InputGroup, InputSource, ListSeparator, OutputFrom, Resend,
+    Transreption, ValueNote,
 };
 pub use dynamic::{
     DynamicRefusal, DynamicSpace, DynamicStatus, SpaceCheck, Threaded, DYNAMIC_PREFIX,

@@ -30,6 +30,17 @@ A patch release: the delegation API below is additive public API on `Kernel` and
   `GRANTED_FOR_NOTE`, and its cache entry is keyed under the grant's fingerprint.
   `Kernel::grants` lists the table and `grant_for` gives the grant beside an enumerated door.
   Additive: a kernel with no grants behaves exactly as before.
+- **A module's fixed grant is stated where the module is described** (ledger #4163). A `Meta`
+  answer (Turtle, JSON and text faces) states the grant the asked door acts under, by the rule
+  dispatch uses, and `urn:kernel:catalog` states every door of an endpoint that was given one.
+  New `Description::delegations` field (a `Vec<Delegation>`: `door`, `prefix`, `scopes`), written
+  only by the kernel: whatever an endpoint's `describe()` puts there is replaced. Omitted from
+  JSON when empty, so a kernel with no grants serves the same bytes as before. A struct literal
+  of `Description` that does not end in `..Default::default()` needs the new field.
+- **Vocabulary** (`ikigai-vocab`): `ik:Delegation`, `ik:actsUnder`, `ik:delegatedAt`,
+  `ik:delegationPrefix` and `ik:replacesCallerCapability`; scopes reuse `ik:scope`. The Turtle
+  face writes one `ik:Delegation` node per door, `urn:ikigai:endpoint:{id}:delegation:{door}`.
+  Needs a vocabulary publish and an `/ns` deploy.
 
 ## 0.5.1 (2026-11-25)
 

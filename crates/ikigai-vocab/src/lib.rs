@@ -615,6 +615,27 @@ pub fn to_turtle(description: &Description) -> String {
         predicates.push(format!("ik:group <{iri}>"));
         extra_nodes.push(statement);
     }
+    // The host's fixed grants (ledger #4163): authority the endpoint acts under that its
+    // caller does not hold, one ik:Delegation node per door, skolemized under the endpoint
+    // by the door's name. ik:replacesCallerCapability is always written, so the graph
+    // states the rule rather than leaving a reader to know it.
+    for delegation in &description.delegations {
+        let node_iri = format!(
+            "{endpoint_iri}:delegation:{}",
+            name_fragment(&delegation.door)
+        );
+        predicates.push(format!("ik:actsUnder <{node_iri}>"));
+        let mut preds = vec![
+            "a ik:Delegation".to_string(),
+            format!("ik:delegatedAt {}", iri_term(&delegation.door)),
+            format!("ik:delegationPrefix {}", lit(&delegation.prefix)),
+        ];
+        for scope in &delegation.scopes {
+            preds.push(format!("ik:scope {}", cap_term(scope)));
+        }
+        preds.push("ik:replacesCallerCapability true".to_string());
+        extra_nodes.push(format!("<{node_iri}> {} .", preds.join(" ;\n    ")));
+    }
 
     // The per-verb ACTION view — the unit of selection. One ik:Action node per
     // non-Meta verb, normalized from either authoring form (explicit ActionSpec
@@ -779,6 +800,14 @@ pub fn to_text(description: &Description) -> String {
     }
     if !description.outputs.is_empty() {
         s.push_str(&format!("outputs: {}\n", description.outputs.join(", ")));
+    }
+    for delegation in &description.delegations {
+        s.push_str(&format!(
+            "acts under a host grant at {}: {}; each sub-request it issues under the grant \
+             runs with these scopes instead of the caller's capability\n",
+            delegation.door,
+            delegation.scopes.join(", ")
+        ));
     }
     if let Some(t) = description.transreption() {
         let lossy = if t.lossless { "" } else { " (lossy)" };

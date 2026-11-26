@@ -73,6 +73,24 @@ impl Grant {
         &self.capability
     }
 
+    /// The scopes this grant holds, sorted, as `Kernel::grants` lists them.
+    pub(crate) fn scopes(&self) -> Vec<String> {
+        self.capability
+            .scopes()
+            .map(|held| held.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// This grant as a description states it for the endpoint given it at `door`
+    /// ([`Delegation`](crate::Delegation), ledger #4163).
+    pub(crate) fn delegation(&self, door: &str) -> crate::Delegation {
+        crate::Delegation {
+            door: door.to_string(),
+            prefix: self.prefix.clone(),
+            scopes: self.scopes(),
+        }
+    }
+
     /// The exact names this grant was given to, in the root's enumeration order.
     pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
         self.doors.iter().map(|door| door.name.as_str())

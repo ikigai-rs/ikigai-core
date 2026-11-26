@@ -22,6 +22,7 @@
     "Consultation": "ik:Consultation",
     "CorsPolicy": "ik:CorsPolicy",
     "Credential": "ik:Credential",
+    "Delegation": "ik:Delegation",
     "Directory": "ik:Directory",
     "Door": "ik:Door",
     "DryRun": "ik:DryRun",
@@ -78,6 +79,10 @@
     "activeTasks": {
       "@id": "ik:activeTasks",
       "@type": "xsd:nonNegativeInteger"
+    },
+    "actsUnder": {
+      "@id": "ik:actsUnder",
+      "@type": "@id"
     },
     "addressedTo": {
       "@id": "ik:addressedTo",
@@ -238,6 +243,11 @@
       "@type": "@id"
     },
     "default": "ik:default",
+    "delegatedAt": {
+      "@id": "ik:delegatedAt",
+      "@type": "@id"
+    },
+    "delegationPrefix": "ik:delegationPrefix",
     "derivedAt": {
       "@id": "ik:derivedAt",
       "@type": "xsd:dateTime"
@@ -513,6 +523,10 @@
     },
     "refTemplate": "ik:refTemplate",
     "refusal": "ik:refusal",
+    "replacesCallerCapability": {
+      "@id": "ik:replacesCallerCapability",
+      "@type": "xsd:boolean"
+    },
     "repo": "ik:repo",
     "repository": {
       "@id": "ik:repository",
