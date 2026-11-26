@@ -65,7 +65,7 @@ budgets:
 | Fan-out | one pool for every branch | same deadline | one pool |
 | Cache hit | not spent | not consulted | spent only for the bytes the hit itself buffers |
 | Missing | no pool; overlays keep their own `attempts` | no deadline | minted at the host's default (64 MiB) |
-| Remote | no wire form in core | no wire form in core | no wire form in core |
+| Remote | wire v9 `IssueWith`: what is left, as the server's pool limit | wire v9 `IssueWith`: time left in ms | not carried |
 
 This table describes the code:
 
@@ -218,11 +218,23 @@ supports the second kind.
 
 ### Across a remote call
 
-Core defines **no wire form** for `IssueContext`. Today a mounted remote receives the request
-and the capability (`Call::IssueAs`), and the server clamps the capability to the session's
+Core defines no wire form for `IssueContext`, but the wire crate already carries part of it.
+A mounted remote receives the request and the capability, and the server clamps the capability
+to the session's
 ([sub-request-authority.md](sub-request-authority.md#can-a-modules-authority-exceed-the-hosts-own-and-across-the-wire)).
-A remote call therefore drops the deadline, the pools and any budget. The proposal applies
-the same rule as the capability clamp:
+Since wire v9, a client whose run has a retry pool or a deadline sends `Call::IssueWith`
+instead of `Call::IssueAs`
+([ikigai-wire](https://github.com/ikigai-rs/ikigai-cli/blob/main/crates/ikigai-wire/src/lib.rs),
+sent by ikigai-ipc and ikigai-quic). Its `IssueWith` carries two budgets:
+
+- `retries`: what is left of the caller's retry pool. The server mints a pool with that limit,
+  and admission narrows it to the clamped capability's entitlement.
+- `time_left_ms`: the deadline as time left in whole milliseconds, which the server adds to its
+  own `now`.
+
+A remote call therefore keeps the retry pool's remaining count and the deadline. It drops the
+byte pool, and it would drop any new budget dimension. The proposal extends the same rule as
+the capability clamp:
 
 - **Caps cross as values**, and the server admits each one as `min(carried, session policy)`.
   A carried cap can only lower what the server would give this peer, so an untrusted carried
@@ -233,7 +245,7 @@ the same rule as the capability clamp:
   the caller gives that back. Without such a report, the reservation is spent. This keeps the
   caller's total sound without trusting the peer's accounting.
 - **The deadline crosses as time left**, not as an instant, because the two kernels' clocks
-  differ. The server applies it to its own clock.
+  differ. The server applies it to its own clock. `IssueWith` already does this.
 - **A missing or malformed carried budget** is treated as missing, and the server applies its
   session policy for that peer. A missing budget never means unlimited.
 
@@ -318,9 +330,10 @@ same partition the task-local draws today, now made at the door.
    for every dimension. Turn the tests in `execution_budget.rs` into tests of the new API.
 2. **core: document shared pools across roots.** Say on `IssueContext` that a clone shares its
    pools, and that this is how a host spans several roots with one budget.
-3. **wire: carry the run context across `IssueAs`.** Carry caps as values, pools as reserved
-   amounts, and the deadline as time left. Clamp each to the session policy at the server.
-   Treat a missing or malformed budget as missing.
+3. **wire: carry the rest of the run context in `IssueWith`.** It already carries the retry
+   pool's remaining count and the deadline as time left. Add the byte pool and the new budget
+   dimensions: caps as values, pools as reserved amounts. Clamp each to the session policy at
+   the server. Treat a missing or malformed budget as missing.
 4. **store and sparql: read the evaluation-time cap from the run context.** Bound each
    evaluation by `min(grant budget, budget=, cap)`, and refuse with `OverBudget` or `Timeout`,
    never with a truncated answer.
