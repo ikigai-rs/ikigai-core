@@ -40,6 +40,14 @@ A patch release: the delegation API below is additive public API on `Kernel` and
 
 ### Fixed
 
+- **Meta runs its transreption steps the way an `Invocation` does** (ikigai-rs/ikigai-core PR 360).
+  A Meta answer that needed a transreptor ran the step under Meta's own span, and
+  `Kernel::issue_body` returned a collected buffer instead of the step's one-shot body. Meta now
+  uses `Invocation::transrept` in the described endpoint's resolved scope, so each step takes the
+  ordinary sub-request path for authority, trace, depth and body handling, and a streamed final
+  step reaches a body caller uncollected (byte callers still collect it under their run budget).
+  Renderer-first selection, the canonical Turtle fallback, lossy consent and Meta's caching of
+  buffered answers are unchanged.
 - **The generation sweep no longer rescans on every store when pinned threads exceed its
   watermark** (ledger #707). The sweep forgets thread generations no entry pins once the map
   passes `max(2 × max_entries, 1024)`. When the pinned threads alone were above that, no sweep
