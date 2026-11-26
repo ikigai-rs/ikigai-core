@@ -27,7 +27,9 @@ Since ledger #3381:
 **The exposure still holds** wherever a call carries no key, and on every endpoint that has
 no key to carry. The existing keys also leave four gaps: a repeat does not answer the first
 answer, a reused key is not compared against the content it comes with, keys are not scoped
-per principal, and a compare-and-set has no key at all. All of this is reproduced below.
+per principal, and a compare-and-set has no key at all. These natural-key gaps are reproduced
+below. The separate append request token has since been merged upstream, but is pending a
+published release, as described in §2.
 
 ## 2. Reproduction
 
@@ -48,7 +50,8 @@ an assertion, so the program fails as soon as a module changes the behavior it r
 cargo run --manifest-path docs/research/sink-idempotency/repro/Cargo.toml
 ```
 
-Output from 2026-11-21 (the IRIs vary between runs; everything else is fixed):
+The output below was recorded on 2026-11-21 against 0.24.0 (the IRIs vary between runs).
+The additional request-token case is shown separately below.
 
 ```text
 - ledger append, no key, agent retry
@@ -89,19 +92,36 @@ Output from 2026-11-21 (the IRIs vary between runs; everything else is fixed):
 10 findings reproduced.
 ```
 
+**Append request token: pending release.** [Ledger PR 152](https://github.com/ikigai-rs/ikigai-ledger/pull/152)
+merged `idempotency-key=` for append after 0.26.3 was published. The repro remains pinned to
+0.24.0; it asserts that a token-bearing agent retry still creates two items and gets a different
+answer. The latest published 0.26.3 source also does not declare the append token. Once a
+published release carries the change, update the dependencies and flip this case to assert two
+attempts, one item, the first answer byte for byte, and a contract-declared safe retry. The
+existing `key=` cases exercise the separate natural key.
+
+The new case produced the following on 2026-11-26 with the pinned 0.24.0 (IRIs vary):
+
+```text
+- ledger append idempotency-key=, agent retry (pending release)
+    lost answer: #1 urn:iki:ledger:default:item:01m7q5crf82wcncssdq9knm
+    retry answer: #2 urn:iki:ledger:default:item:01m7q5da1r2wcncssdq9knn
+    items now: 2 (one intended)
+```
+
 The "two principals" line is the test that the key is shared across principals (both
 writers hold grants on one ledger, so this is not a read leak). It shows that two writers'
 keys collide: one writer's item silently stands in for the other's.
 
 ## 3. Inventory: the non-idempotent writes in the published modules
 
-Read from the latest published sources (`ikigai-judge` and `ikigai-gonk` from their default
-branches). "Repeat" means the same call sent again after the first one succeeded. Only rows
+Read from the published sources available for the original study (`ikigai-judge` and
+`ikigai-gonk` from their default branches); the append token status is updated below. "Repeat" means the same call sent again after the first one succeeded. Only rows
 in §2 were run; the rest were read from source.
 
 | Module | Write | Repeat today | Key today |
 |---|---|---|---|
-| ledger | `append` | a second item | `key=`: a natural key, per ledger, taken forever (survives delete and purge); repeat answers `existing <status>`; content not compared |
+| ledger | `append` | a second item without a key | In the repro’s 0.24.0: `key=` is a natural key, per ledger, taken forever; repeat answers `existing <status>` without comparing content. `idempotency-key=` is merged upstream, pending release. |
 | ledger | `comment`, `note` | a second comment / note | `key=`, one namespace for both, per ledger; dropped when its item is deleted; repeat answers `… existing`; the item named is not compared |
 | ledger | `item:{id}:state` (`from` → `to`) | `Conflict` for work that succeeded | none; the contract says so: "`from` is a state precondition, not a request ID" |
 | ledger | `close`, `reopen`, `defer`, `claim`, `claim` Delete with `content=` | the state is idempotent, but `content=` is posted again as an unkeyed comment | none |
@@ -347,8 +367,8 @@ the retry's bytes equal the lost answer's".
    and `ik:resendWindow` in the vocabulary. Additive, with no stored state in core. Tests pin
    the fingerprint's independence from argument order and the token's exclusion.
 2. **ledger: `idempotency-key=` on `append`, scoped per principal, replaying the first
-   answer.** Commit the record in the append's own update. A mismatch is `InvalidArgument`,
-   and an attempt still in flight is `RetryAfter`. Flip the repro's append case.
+   answer.** Merged in [ledger PR 152](https://github.com/ikigai-rs/ikigai-ledger/pull/152);
+   pending a published release and the corresponding repro flip.
 3. **ledger: a `differs` flag when a reused `key=` comes with different content.** Store a
    fingerprint of title, body and labels with the natural key, and answer
    `existing <status> differs` (JSON `"differs": true`).
