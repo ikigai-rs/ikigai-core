@@ -438,9 +438,19 @@ in that case is request-derived. What shipped, against the design above:
 - **Declared = enforced.** The module declares only its own scope, the delegation makes that
   declaration true, so the manifold offers the module to exactly the callers who can use it and
   names no file scope. The table is readable: `Kernel::grants()` lists it and
-  `Kernel::grant_for(target)` gives the grant beside a binding. ⚠ Not yet built: a
-  `urn:kernel:grants` resource and an RDF term for a description's delegated grant, which need a
-  vocabulary term in `ikigai-vocab` first.
+  `Kernel::grant_for(target)` gives the grant beside a binding.
+- **Described where the module is described** (ledger #4163). A `Meta` answer, in every face,
+  states the grant the asked door would act under, decided by the same rule dispatch uses
+  (`grant_at`, and none for a confined hit), and `urn:kernel:catalog` states every door of an
+  endpoint that was given one. `Description::delegations` carries it, and the Turtle face
+  writes one `ik:Delegation` node per door through `ik:actsUnder`: `ik:delegatedAt` (the door,
+  which identifies the module), `ik:delegationPrefix`, `ik:scope` per scope, and
+  `ik:replacesCallerCapability true`. Only the kernel writes it: whatever `describe()` put in
+  the field is replaced, so a module cannot claim a grant. A kernel with no grants describes
+  exactly what it did before. A caller who cannot read the module's `Meta` (an
+  existence-sensitive module's floor refuses it) learns nothing about the grant, and the catalog
+  still needs inspect authority. ⚠ Not yet built: a `urn:kernel:grants` resource, and the
+  delegation in `urn:kernel:actions`.
 
 The adoption rules above still bind a host: delegate only to a door that enforces its own effect
 boundary, pass typed arguments into a delegated sub-request, never grant a general-purpose

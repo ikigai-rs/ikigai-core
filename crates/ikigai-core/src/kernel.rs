@@ -2388,14 +2388,7 @@ impl Kernel {
         self.grants
             .entries()
             .iter()
-            .map(|grant| {
-                let scopes = grant
-                    .capability()
-                    .scopes()
-                    .map(|held| held.iter().cloned().collect())
-                    .unwrap_or_default();
-                (grant.prefix().to_string(), scopes)
-            })
+            .map(|grant| (grant.prefix().to_string(), grant.scopes()))
             .collect()
     }
 
@@ -2405,13 +2398,9 @@ impl Kernel {
     /// where it is enforced. `None` for any other name under a grant's prefix: a template or
     /// fallback binding, a mounted peer, or a door added after the table was built.
     pub fn grant_for(&self, target: &Iri) -> Option<Vec<String>> {
-        self.grants.at_door(target.as_str()).map(|grant| {
-            grant
-                .capability()
-                .scopes()
-                .map(|held| held.iter().cloned().collect())
-                .unwrap_or_default()
-        })
+        self.grants
+            .at_door(target.as_str())
+            .map(|grant| grant.scopes())
     }
 
     /// The grant an endpoint resolved at the canonical `target` runs with (ledger #3769).
@@ -4706,6 +4695,7 @@ impl Kernel {
     fn meta_answering<'a>(
         &'a self,
         endpoint: &'a Arc<dyn Endpoint>,
+        delegated: Option<Arc<crate::grant::Grant>>,
         request: &'a Request,
         bindings: &'a Bindings,
         capability: &'a Capability,
@@ -4739,7 +4729,14 @@ impl Kernel {
             // C6). Resolving it in the request's chain instead described the root's binding
             // of a name a level shadows, while a `Source` through the view reached the
             // level's (ledger #3867).
-            let description = self.meta_description(endpoint, &resolved_scope, capability);
+            let mut description = self.meta_description(endpoint, &resolved_scope, capability);
+            // ★ AUTHORITY THE CALLER DOES NOT HOLD IS STATED (ledger #4163): the fixed grant
+            // the host gave this door, which replaces the caller's capability on each
+            // sub-request the endpoint issues under it. Only the kernel says this, so
+            // whatever `describe()` put here is replaced.
+            description.delegations = delegated
+                .map(|grant| vec![grant.delegation(request.target.as_str())])
+                .unwrap_or_default();
             let target = meta_target(request);
             let policy = meta_policy(request)?;
             let rendered = match renderer.render(&description, &target) {
@@ -5456,6 +5453,14 @@ impl Kernel {
         let representation = if request.verb == Verb::Meta {
             self.meta_answering(
                 &resolved.endpoint,
+                // The grant an invocation here would run under (ledger #4163), by the very
+                // rule dispatch uses below, so the description states what a `Source`
+                // would act under and nothing else.
+                if confined_hit || self.grants.is_empty() {
+                    None
+                } else {
+                    self.grant_at(&request.target, probed_as.as_ref(), answering.as_ref())
+                },
                 &request,
                 &bindings,
                 capability,
@@ -6525,6 +6530,8 @@ impl Kernel {
                     .ok_or_else(|| Error::Endpoint("no Meta renderer configured".to_string()))?;
                 let turtle = ReprType::new("text/turtle");
                 let mut described: Vec<Description> = Vec::new();
+                // Each listed description's fixed grants, by position (ledger #4163).
+                let mut granted: Vec<Vec<crate::Delegation>> = Vec::new();
                 // The tightest bound of every contract read, folded BEFORE the dedup: a
                 // description equal to one already listed may still be kept for less
                 // (equality ignores cache policy), and the catalog says what it says.
@@ -6545,11 +6552,25 @@ impl Kernel {
                     // Through the shared probe: a hit on ⊥ is dropped, so a name a
                     // limiter carved out is listed by no catalog (the subtraction
                     // of the reachability algebra, at the face that computes reach).
+                    let delegations = self.delegations_at(&space, &iri);
                     if let Some(resolved) = crate::select::probe(&space, iri) {
                         let description = resolved.endpoint.describe();
                         caching = caching.most_restrictive(description.contract_caching);
-                        if !described.contains(&description) {
-                            described.push(description);
+                        // The endpoint's fixed grants (ledger #4163), kept beside its
+                        // contract rather than in it, so an endpoint given one at each of
+                        // two doors is still one contract, listing both.
+                        let at = match described.iter().position(|d| *d == description) {
+                            Some(at) => at,
+                            None => {
+                                described.push(description);
+                                granted.push(Vec::new());
+                                described.len() - 1
+                            }
+                        };
+                        for delegation in delegations {
+                            if !granted[at].contains(&delegation) {
+                                granted[at].push(delegation);
+                            }
                         }
                     }
                 }
@@ -6560,7 +6581,13 @@ impl Kernel {
                     caching = caching.most_restrictive(entry.description.contract_caching);
                     if !described.contains(&entry.description) {
                         described.push(entry.description);
+                        granted.push(Vec::new());
                     }
+                }
+                // Only the kernel states a delegation: whatever `describe()` put there is
+                // replaced by what the grant table gives.
+                for (description, delegations) in described.iter_mut().zip(granted) {
+                    description.delegations = delegations;
                 }
                 let mut body = String::new();
                 let mut copies: BTreeMap<&str, usize> = BTreeMap::new();
@@ -7173,6 +7200,24 @@ impl Kernel {
                 });
                 Some(crate::forward::project(&forward, own, inner.as_ref()))
             }
+        }
+    }
+
+    /// The fixed grant the host gave the endpoint `space` answers the exact `iri` with, as
+    /// [`Description::delegations`] states it (ledger #4163): the grant given to that door
+    /// AND that endpoint, by the identity rule dispatch uses (`Grants::given`), so a door
+    /// swapped in after the table was built is listed with none. Empty with no grants.
+    fn delegations_at(&self, space: &dyn Space, iri: &Iri) -> Vec<crate::Delegation> {
+        if self.grants.at_door(iri.as_str()).is_none() {
+            return Vec::new();
+        }
+        match space.resolve(&Request::new(Verb::Meta, iri.clone()), &Scope::empty()) {
+            Resolution::Hit(hit) if hit.canonical.is_none() => self
+                .grants
+                .given(iri.as_str(), &hit.endpoint)
+                .map(|grant| vec![grant.delegation(iri.as_str())])
+                .unwrap_or_default(),
+            _ => Vec::new(),
         }
     }
 

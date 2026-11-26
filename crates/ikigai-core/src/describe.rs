@@ -1563,6 +1563,41 @@ pub struct Description {
     /// says the resource exists. Omitted from serialized output when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub existence_sensitive: bool,
+    /// The fixed grants the host gave this endpoint (ledger #4163): each one a door the
+    /// host enumerated with [`Kernel::with_grants`](crate::Kernel::with_grants), so that
+    /// a sub-request the endpoint issues there with
+    /// [`Invocation::issue_granted`](crate::Invocation::issue_granted) runs under the
+    /// grant's scopes and NOT under its caller's capability. Said here because that is
+    /// authority a caller does not hold, and a reader of the description would otherwise
+    /// not see it.
+    ///
+    /// **Set by the kernel, never by an endpoint**: the kernel replaces whatever
+    /// `describe()` put here with what its grant table gives, in a `Meta` answer (the one
+    /// grant given to the door asked, if any) and in `urn:kernel:catalog` (every door of
+    /// the endpoint that was given one). A description read from `describe()` directly
+    /// carries none. Omitted from serialized output when empty, so a kernel with no grants
+    /// serves the same JSON as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delegations: Vec<Delegation>,
+}
+
+/// One fixed grant the host gave an endpoint at one door
+/// ([`Description::delegations`], ledger #4163).
+///
+/// The grant **replaces** the caller's capability for each sub-request the endpoint issues
+/// under it ([`Invocation::issue_granted`](crate::Invocation::issue_granted)), for that
+/// hop only: the endpoint the hop reaches gets its own grant or none. It is never wider
+/// than the capability of the host that declared it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delegation {
+    /// The door the grant was given to: the exact name the host's root bound the endpoint
+    /// at when the grant table was built. It identifies which endpoint acts under it.
+    pub door: String,
+    /// The host-declared target prefix that selected the door, which names the delegation
+    /// on the trace ([`GRANTED_NOTE`](crate::GRANTED_NOTE)).
+    pub prefix: String,
+    /// The capability scopes the grant holds: what a delegated sub-request may do.
+    pub scopes: Vec<String>,
 }
 
 // Every field but `contract_caching`, which is cache policy, not contract (see the field).
@@ -1588,6 +1623,7 @@ impl PartialEq for Description {
             failures,
             contract_caching: _,
             existence_sensitive,
+            delegations,
         } = self;
         *id == other.id
             && *title == other.title
@@ -1605,6 +1641,7 @@ impl PartialEq for Description {
             && *output_from == other.output_from
             && *failures == other.failures
             && *existence_sensitive == other.existence_sensitive
+            && *delegations == other.delegations
     }
 }
 
