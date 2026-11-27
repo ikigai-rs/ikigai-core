@@ -44,7 +44,7 @@ A server can forward stale notifications over SSE or WebSocket and let the page 
 
 ## Delivered answers: the record and its handshake
 
-Status: decided in ledger #4400, the first follow-up below. The proof is a test-only prototype in [`tests/delivered_answers.rs`](../../crates/ikigai-core/tests/delivered_answers.rs); it is not API, and nothing in `src/` changed. It is built only from what core exports today.
+Status: proposed in ledger #4400 (a design spike, the first follow-up below); its decisions are proposals until a maintainer accepts them. The proof is a test-only prototype in [`tests/delivered_answers.rs`](../../crates/ikigai-core/tests/delivered_answers.rs); it is not API, and nothing in `src/` changed. It is built only from what core exports today.
 
 **What was reproduced first.** Three tests in that file pin the gap on today's kernel. A listener whose `ListenSpec` names a composite's target hears nothing when a differently named part is cut. A listener under the session's own capability hears nothing when a thread of an *uncached* answer it was handed is cut, and nothing once a cached answer it was handed has been *evicted*. Both follow from hearing being filtered by resident entries under the same capability fingerprint. So a non-root host cannot build an honest record from a session-capability listener today. The prototype instead hears through one root listener with an empty prefix and discloses only the presentation keys of the session's own records (see the authority decision below).
 
@@ -107,7 +107,7 @@ A prototype should exercise a composite with differently named dependencies; dis
 
 ## Proposed follow-up items
 
-- **Define delivered-answer registration and race recovery** (done in #4400, above). Specify view identity, atomic read-to-delivery handoff, replacement, teardown, and bounded fallback; test cuts racing each transition.
+- **Define delivered-answer registration and race recovery** (designed in ledger #4400, above). Specify view identity, atomic read-to-delivery handoff, replacement, teardown, and bounded fallback; test cuts racing each transition.
 - **Add target-matched subscriptions.** Match cuts through delivered answer threads, preserve per-session authority, and test composite targets, nonresident answers, overflow, and resynchronization.
 - **Measure and implement reverse indexes.** Compare resident-cache and delivered-view indexes with scans under fan-out and churn; maintain each through its full lifecycle only if the measured tradeoff warrants it.
 - **Deliver deadline notifications.** Expose effective per-answer deadlines and earliest deadline; integrate host-provided waking with due-event coalescing, clock corrections, unavailable timers, and recovery.
