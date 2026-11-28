@@ -42,7 +42,10 @@ signed means something a self-issued one does not.
 ## Decision: one property, six values
 
 Draft **`ik:asserterRole`**: the standing in which a claim's asserter made it, as one concept of
-the scheme **`ik:AsserterRoles`**.
+the scheme **`ik:AsserterRole`**. The scheme's name is singular, type first, as the house
+naming rule asks. `ik:LayerKinds` is an older plural scheme; it is not renamed here. The scheme
+and the property differ only in case, as the type and the property that names one do elsewhere
+in the vocabulary (`ik:FailureClass` and `ik:failureClass`, `ik:Offer` and `ik:offer`).
 
 | Concept | Notation | The asserter is | Typical claim |
 |---|---|---|---|
@@ -59,60 +62,61 @@ the scheme **`ik:AsserterRoles`**.
 ik:asserterRole a rdf:Property ;
     rdfs:range skos:Concept ;
     rdfs:label "asserterRole" ;
-    rdfs:comment "The standing in which a claim's asserter made it, as one concept of ik:AsserterRoles: the acting agent about its own work, the principal responsible, a person reviewing, a deterministic check, a model, or a third party. prov:wasAttributedTo names WHO asserted the claim; this names in what standing, which the agent's type cannot say: one person is the principal on a brief and a reviewer on a verdict, one machine the acting agent on a hand-back and a check on a CI run. At most one per claim. A claim confirmed, overruled or verified by someone else is not restamped: the confirmation is its own claim, with its own role, that names the first (prov:wasDerivedFrom), so the agent's claim and the reviewer's stay one hop apart and both survive. Absent means UNSTATED, never agent: a reader treats an unstated role as the weakest it accepts. Set by whoever records the claim and knows the standing (a host stamping prov:wasAttributedTo, a judge recording a verdict), never taken from the asserter's own say-so, as a layer host refuses a sent ik:seq. The shorthand for a PROV qualified attribution: C ik:asserterRole R with C prov:wasAttributedTo A says what C prov:qualifiedAttribution [ prov:agent A ; prov:hadRole R ] says, so each concept is a prov:Role too. The vocabulary states no precedence among the roles; a reader that must pick between claims states its own (ikigai-judge's person, then rule, then model is one). No domain: a hand-back, a verdict, a credential, a citation and a log entry all carry it, and a domain would type each as the others." .
+    rdfs:comment "The standing in which a claim's asserter made it, as one concept of ik:AsserterRole: the acting agent about its own work, the principal responsible, a person reviewing, a deterministic check, a model, or a third party. prov:wasAttributedTo names WHO asserted the claim; this names in what standing, which the agent's type cannot say: one person is the principal on a brief and a reviewer on a verdict, one machine the acting agent on a hand-back and a check on a CI run. At most one per claim. A claim confirmed, overruled or verified by someone else is not restamped: the confirmation is its own claim, with its own role, that names the first (prov:wasDerivedFrom), so the agent's claim and the reviewer's stay one hop apart and both survive. Absent means UNSTATED, never agent: a reader treats an unstated role as the weakest it accepts. Set by whoever records the claim and knows the standing (a host stamping prov:wasAttributedTo, a judge recording a verdict), never taken from the asserter's own say-so, as a layer host refuses a sent ik:seq. The shorthand for a PROV qualified attribution: C ik:asserterRole R with C prov:wasAttributedTo A says what C prov:qualifiedAttribution [ prov:agent A ; prov:hadRole R ] says, so each concept is a prov:Role too. The vocabulary states no precedence among the roles; a reader that must pick between claims states its own (ikigai-judge's person, then rule, then model is one). No domain: a hand-back, a verdict, a credential, a citation and a log entry all carry it, and a domain would type each as the others." .
 
-ik:AsserterRoles a skos:ConceptScheme ;
-    rdfs:label "AsserterRoles" ;
+ik:AsserterRole a skos:ConceptScheme ;
+    rdfs:label "AsserterRole" ;
     rdfs:comment "The standings a claim's asserter can make it in: the values of ik:asserterRole. Closed and enumerated here, unlike ik:severity's values, because the readers are every module rather than the one that serves them: a dispatcher filtering hand-backs, a judge weighing verdicts and an audit over the log ask the same question of different emitters. A configuration or a line face names one by its skos:notation (ledger #4511)." ;
     skos:prefLabel "Asserter roles"@en ;
     skos:hasTopConcept ik:AgentAsserter , ik:PrincipalAsserter , ik:ReviewerAsserter ,
         ik:CheckAsserter , ik:ModelAsserter , ik:ThirdPartyAsserter .
 
 ik:AgentAsserter a skos:Concept , prov:Role ;
-    skos:inScheme ik:AsserterRoles ;
-    skos:topConceptOf ik:AsserterRoles ;
+    skos:inScheme ik:AsserterRole ;
+    skos:topConceptOf ik:AsserterRole ;
     skos:notation "agent" ;
     skos:prefLabel "Agent"@en ;
     skos:definition "The agent doing the work asserted it about its own work: a hand-back, its evidence, a progress report. Its own claim, until someone in another standing confirms it."@en .
 
 ik:PrincipalAsserter a skos:Concept , prov:Role ;
-    skos:inScheme ik:AsserterRoles ;
-    skos:topConceptOf ik:AsserterRoles ;
+    skos:inScheme ik:AsserterRole ;
+    skos:topConceptOf ik:AsserterRole ;
     skos:notation "principal" ;
     skos:prefLabel "Principal"@en ;
     skos:definition "The person or organization responsible asserted it on their own authority: a brief, a grant, a credential they issue, a waiver."@en .
 
 ik:ReviewerAsserter a skos:Concept , prov:Role ;
-    skos:inScheme ik:AsserterRoles ;
-    skos:topConceptOf ik:AsserterRoles ;
+    skos:inScheme ik:AsserterRole ;
+    skos:topConceptOf ik:AsserterRole ;
     skos:notation "reviewer" ;
     skos:prefLabel "Reviewer"@en ;
     skos:definition "A person asserted it after judging a claim or an item someone else produced: a person verdict, a published finding, a dispatcher's close of a hand-back."@en .
 
 ik:CheckAsserter a skos:Concept , prov:Role ;
-    skos:inScheme ik:AsserterRoles ;
-    skos:topConceptOf ik:AsserterRoles ;
+    skos:inScheme ik:AsserterRole ;
+    skos:topConceptOf ik:AsserterRole ;
     skos:notation "check" ;
     skos:prefLabel "Check"@en ;
     skos:definition "A deterministic procedure asserted it, one that gives the same answer for the same inputs: a rule or mapping, a CI run, a SHACL validation, a signature or quote check."@en .
 
 ik:ModelAsserter a skos:Concept , prov:Role ;
-    skos:inScheme ik:AsserterRoles ;
-    skos:topConceptOf ik:AsserterRoles ;
+    skos:inScheme ik:AsserterRole ;
+    skos:topConceptOf ik:AsserterRole ;
     skos:notation "model" ;
     skos:prefLabel "Model"@en ;
     skos:definition "A statistical or generative model asserted it: a language model's answer or finding, a classifier's verdict. ik:model names which model, when known."@en .
 
 ik:ThirdPartyAsserter a skos:Concept , prov:Role ;
-    skos:inScheme ik:AsserterRoles ;
-    skos:topConceptOf ik:AsserterRoles ;
+    skos:inScheme ik:AsserterRole ;
+    skos:topConceptOf ik:AsserterRole ;
     skos:notation "third-party" ;
     skos:prefLabel "Third party"@en ;
     skos:definition "A party outside the principal's organization that checked the claim asserted it: a directory, an external credential issuer, a registry."@en .
 ```
 
 The JSON-LD `@context` gains `asserterRole` coerced to `@id` (the range is `skos:Concept`), and
-the three terms ride the existing `context.gen.py` regeneration when they are published.
+the eight drafted terms (the property, the scheme and its six concepts) ride the existing
+`context.gen.py` regeneration when they are published.
 
 ### Why these choices
 
@@ -174,8 +178,11 @@ agent acts for a principal. The principal's own say-so would be a separate claim
 ### ikigai-judge: person > rule > model
 
 The judge's `Producer` enum (`src/lib.rs`) orders verdicts: a person (unshared, then shared),
-then a mapping, then a model, then a stale model, then bayes. `decide()` takes the first that
-answers. The kinds are Rust strings today. A stored person verdict names its maker with
+then a mapping, then a model, then a stale verdict, then bayes. `decide()` takes the first that
+answers. A stale verdict is a recorded verdict of EITHER kind, person or model, on the item's
+previous text: `gather` in `src/endpoints.rs` rewraps it as `Producer::Stale` and keeps the
+original producer's name under the provenance key `was` (`person`, `person-shared` or `model`),
+beside `staleFrom`, the previous digest. The kinds are Rust strings today. A stored person verdict names its maker with
 `dcterms:creator`, a model verdict with `prov:wasAssociatedWith` and `prov:wasGeneratedBy` a run.
 The "why" face gives each ranked verdict `schema:agent "<producer>"` as a string literal.
 
@@ -183,8 +190,18 @@ The "why" face gives each ranked verdict `schema:agent "<producer>"` as a string
 |---|---|
 | person (unshared or shared) | `reviewer` |
 | mapping | `check` |
-| model, stale model | `model` (a stale one is still a model's claim; staleness is the judge's own fact) |
+| model | `model` |
+| stale, `was` = `person` or `person-shared` | `reviewer` |
+| stale, `was` = `model` | `model` |
 | bayes | `model` |
+
+A stale verdict takes the role of the producer it rewraps, never one of its own: a stale
+person verdict is still a person's claim, about the previous text, and staleness is the
+judge's own fact. A reader tells the two apart by the `was` key, which every face carries:
+`provenance.was` in the JSON face, `was=…` in the text and HTML faces, and inside
+`schema:description` beside `schema:agent "stale"` in the Turtle face. Mapping by
+`schema:agent` alone would read every stale verdict as one standing, so the judge's task
+below stamps the role from `was`, and a stale verdict with no `was` is unstated.
 
 The precedence stays the judge's. It is a reader's declared order over these roles, with its
 finer distinctions kept in its own terms: shared vs. unshared, fresh vs. stale, confident bayes.
@@ -256,7 +273,7 @@ request, with a test that the term is emitted.
 - **ikigai-ledger:** surface the role beside `ledger:authorSource` on comments and closes, and
   let `ledger:awaiting` name the standing it waits for (a `check` or a `reviewer`).
 - **ikigai-judge:** map `Producer` to the role, as in the table above, on stored verdicts and on
-  the "why" face. That face keeps `schema:agent` for the producer name and gains the role IRI.
+  the "why" face, taking a stale verdict's role from its `was` producer. That face keeps `schema:agent` for the producer name and gains the role IRI.
   Give the disagreement signal an RDF face that carries both roles.
 - **ikigai-log:** add an `asserter=` key bound to `ik:asserterRole`, written by notation (`agent`,
   `check`, ...). Default it to `agent` only for lines the host writes about its own work, and

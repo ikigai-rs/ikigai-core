@@ -111,7 +111,7 @@ fn today_the_standing_is_not_in_the_graph() {
     let declared = subjects(&vocabulary);
 
     // The draft's terms are not published.
-    for term in ["asserterRole", "AsserterRoles"]
+    for term in ["asserterRole", "AsserterRole"]
         .into_iter()
         .chain(ROLES.iter().map(|(name, _)| *name))
     {
@@ -175,7 +175,7 @@ fn the_drafted_property_follows_the_vocabulary_conventions() {
         objects(&draft, &property, &format!("{RDFS}range")),
         [format!("{SKOS}Concept")]
     );
-    for term in [property.clone(), ik("AsserterRoles")] {
+    for term in [property.clone(), ik("AsserterRole")] {
         assert_eq!(
             objects(&draft, &term, &format!("{RDFS}label")).len(),
             1,
@@ -192,7 +192,7 @@ fn the_drafted_property_follows_the_vocabulary_conventions() {
 #[test]
 fn the_drafted_roles_are_one_complete_scheme_of_distinct_prov_roles() {
     let draft = draft();
-    let scheme = ik("AsserterRoles");
+    let scheme = ik("AsserterRole");
     assert_eq!(
         objects(&draft, &scheme, RDF_TYPE),
         [format!("{SKOS}ConceptScheme")]
