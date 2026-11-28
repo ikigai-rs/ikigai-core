@@ -44,13 +44,16 @@ out. A host must never publish a practice it would fail.
 ## Proposed resource
 
 `urn:host:practice`, a Source each host serves, answering `Source` with the current statements
-and `Meta` with its ordinary description. The name is illustrative, subject to vocabulary review.
+and `Meta` with its ordinary description. The request name is illustrative, subject to vocabulary
+review. What it answers is named stably (see "Names" below): the host's practices across versions
+are `urn:iki:practice:host:{host}`, and the current version is
+`urn:iki:practice:host:{host}:version:{n}`.
 
 Why a resource rather than only the host's `Meta`: `Meta` describes an endpoint's contract (its
 verbs, inputs and faces), and a host is many endpoints with no single one to describe. Practices
 are facts about the deployment, not a contract of any one endpoint. `urn:kernel:topology` may
-link to it with one proposed property, `ik:practice`, so a reader that finds the host finds its
-practices.
+link to it with one proposed property, `ik:practice`, whose object is
+`urn:iki:practice:host:{host}`, so a reader that finds the host finds its practices.
 
 Faces:
 
@@ -66,7 +69,7 @@ constraint (see below): the resource states *kinds* and *bounds*, never paths, k
 identifiers, principal IRIs or counts that identify one party.
 
 Caching: the answer changes only when the host's configuration changes or a check reruns, so it
-carries a thread (proposed `urn:host:practice`) that the host cuts on either, and an expiry no
+carries a thread (proposed `urn:iki:practice:host:{host}`) that the host cuts on either, and an expiry no
 later than the earliest check's due date, so a reader never caches a result past the date it
 stops being current.
 
@@ -102,50 +105,79 @@ Result rules, borrowed from ACCESSIBILITY.md:
 | Non-collection | Aggregate counts are not broken down finer than *k* parties. | Test: a count with fewer than *k* contributors is suppressed or merged in every face. |
 | Keys | Each ikigai-secret store's kind and protection (for example, an OS keychain, or a file encrypted at rest), never its path or contents. | Probe at startup: the host compares the served kind with the store it actually opened, and refuses to serve the statement on mismatch. Scan: no key material or key identifier in any log segment. |
 | Keys | The QUIC certificate rotates at least every *R*; the private key never leaves the host. | Probe: read the served certificate's validity window from a client and fail if its age exceeds *R* or its remaining life is under the renewal margin. Review: the key file's permissions and that no export path exists. |
-| Revocation | A revoked capability or session stops being honored within *B* (ledger #4507). | Test: revoke, then repeat a cached read and an uncached read at *B* under a test clock; both must be refused. The bound is whatever #4507 settles; this note only publishes it. |
+| Revocation | A revoked capability or session stops being honored within *B* (ledger #4507). | Test: revoke, then repeat a cached read and an uncached read at *B* under a test clock; both must be refused. The bound is whatever ledger #4507 settles; this note only publishes it. |
 | Disclosure | How a request for disclosure is made, who decides, what is released, and in what time. | Review: the stated contact and process exist and are reachable. Test: a disclosure request for data the host says it never records returns that it has none, and the non-collection scan above backs that answer. |
 
 Every *D*, *M*, *R*, *k* and *B* is the host's own value, read from its configuration. This note
 fixes none of them.
 
+## Names
+
+No blank nodes: every version, statement and check has a stable IRI, so two answers diff, a
+reader can cite one statement, and `prov:wasRevisionOf` links named versions. Every partition
+is by a named key.
+
+| Resource | IRI |
+|---|---|
+| A host's practices, across versions | `urn:iki:practice:host:{host}` |
+| One version of them (an `ik:PracticeSet`) | `urn:iki:practice:host:{host}:version:{n}` |
+| One statement in that version | `urn:iki:practice:host:{host}:version:{n}:statement:id:{id}` |
+| That statement's check | `urn:iki:practice:host:{host}:version:{n}:statement:id:{id}:check` |
+
+`{host}` is the host's name, `{n}` a version number that only increases, and `{id}` a short,
+stable name for the statement (`log-retention`, `principal-noncollection`) that keeps its value
+from version to version, so `…:version:3:statement:id:log-retention` and
+`…:version:2:statement:id:log-retention` are the same practice in two versions. A version is
+`prov:specializationOf` the host's practices and `prov:wasRevisionOf` the version before it.
+A check's IRI is fixed within a version; a rerun changes its result, date and summary in the
+answer, and cuts the thread, without minting a new version, because a version changes what the
+host promises and a rerun only reports on it.
+
 ## Example
 
 ```turtle
-@prefix ik:  <https://ikigai-rs.dev/ns#> .
-@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ik:   <https://ikigai-rs.dev/ns#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
 
-<urn:host:practice> a ik:PracticeSet ;
-    ik:effective "2026-11-27"^^xsd:date ;
-    ik:statement [
-        a ik:PracticeStatement ;
-        ik:area ik:Retention ;
-        ik:about "ikigai-log segments" ;
-        ik:keptFor "P30D"^^xsd:duration ;
-        ik:valueFrom "log.retention" ;
-        ik:checkedBy [
-            a ik:PracticeCheck ;
-            ik:method ik:Scan ;
-            ik:command "segment age scan" ;
-            ik:every "P1D"^^xsd:duration ;
-            ik:result ik:Pass ;
-            ik:evidence "no segment older than 31 days" ;
-            ik:checkedOn "2026-11-27"^^xsd:date
-        ]
-    ] , [
-        a ik:PracticeStatement ;
-        ik:area ik:NonCollection ;
-        ik:about "which principal made which request" ;
-        ik:neverRecorded true ;
-        ik:checkedBy [
-            a ik:PracticeCheck ;
-            ik:method ik:Test ;
-            ik:result ik:Fail ;
-            ik:evidence "the log writes a principal column per request"
-        ]
-    ] .
+<urn:iki:practice:host:example:version:2> a ik:PracticeSet ;
+    prov:specializationOf <urn:iki:practice:host:example> ;
+    prov:wasRevisionOf <urn:iki:practice:host:example:version:1> ;
+    ik:practiceEffective "2026-11-27"^^xsd:date ;
+    ik:practiceStatement <urn:iki:practice:host:example:version:2:statement:id:log-retention> ,
+        <urn:iki:practice:host:example:version:2:statement:id:principal-noncollection> .
+
+<urn:iki:practice:host:example:version:2:statement:id:log-retention> a ik:PracticeStatement ;
+    ik:practiceArea ik:RetentionArea ;
+    ik:practiceSubject "ikigai-log segments" ;
+    ik:keptFor "P30D"^^xsd:duration ;
+    ik:practiceConfigKey "log.retention" ;
+    ik:practiceCheck <urn:iki:practice:host:example:version:2:statement:id:log-retention:check> .
+
+<urn:iki:practice:host:example:version:2:statement:id:log-retention:check> a ik:PracticeCheck ;
+    ik:checkMethod ik:ScanMethod ;
+    ik:checkCommand "segment age scan" ;
+    ik:checkInterval "P1D"^^xsd:duration ;
+    ik:checkResult ik:PassResult ;
+    ik:checkSummary "no segment older than 31 days" ;
+    ik:checkDate "2026-11-27"^^xsd:date .
+
+<urn:iki:practice:host:example:version:2:statement:id:principal-noncollection> a ik:PracticeStatement ;
+    ik:practiceArea ik:NonCollectionArea ;
+    ik:practiceSubject "which principal made which request" ;
+    ik:neverRecorded true ;
+    ik:practiceCheck <urn:iki:practice:host:example:version:2:statement:id:principal-noncollection:check> .
+
+<urn:iki:practice:host:example:version:2:statement:id:principal-noncollection:check> a ik:PracticeCheck ;
+    ik:checkMethod ik:TestMethod ;
+    ik:checkResult ik:FailResult ;
+    ik:checkSummary "the log writes a principal column per request" .
 ```
 
 The second statement is what a host would serve if it published today: a Fail, stated as one.
+A check whose evidence is itself a resource (a CI run, a published test report) also names it
+with `ik:evidence <…>`; the summary stays a sentence, and states a result, never raw scan
+output.
 
 ## Proposed vocabulary
 
@@ -156,23 +188,52 @@ Proposed only; none is added to `vocabulary.ttl` by this note.
 | `ik:PracticeSet` | class | One version of a host's published practices. |
 | `ik:PracticeStatement` | class | One practice, with its check. |
 | `ik:PracticeCheck` | class | How a statement is confirmed, and its last result. |
-| `ik:practice` | property | From a host or topology to its `ik:PracticeSet`. |
-| `ik:statement`, `ik:checkedBy` | properties | Set to statement; statement to check. |
-| `ik:area` | property | `ik:Retention`, `ik:NonCollection`, `ik:Keys`, `ik:Revocation`, `ik:Disclosure`. |
-| `ik:about`, `ik:keptFor`, `ik:neverRecorded`, `ik:rotatesWithin`, `ik:honoredWithin`, `ik:storeKind`, `ik:disclosureProcess` | properties | The claim. Durations are `xsd:duration`. |
-| `ik:valueFrom` | property | The configuration key the value is read from. |
-| `ik:method` | property | `ik:Test`, `ik:Scan`, `ik:Probe`, `ik:Review`. |
-| `ik:result` | property | `ik:Pass`, `ik:Fail`, `ik:Blocked`. |
-| `ik:evidence`, `ik:checkedOn`, `ik:every`, `ik:revision` | properties | The result's evidence, date, rerun interval and host revision. |
-| `ik:effective` | property | The date a version took effect; earlier versions link with `prov:wasRevisionOf`. |
+| `ik:practice` | property | From a host or topology to its practices, `urn:iki:practice:host:{host}`. |
+| `ik:practiceStatement`, `ik:practiceCheck` | properties | Set version to statement; statement to check. |
+| `ik:practiceArea` | property | A concept of the scheme `ik:PracticeArea`: `ik:RetentionArea`, `ik:NonCollectionArea`, `ik:KeyArea`, `ik:RevocationArea`, `ik:DisclosureArea`. |
+| `ik:practiceSubject` | property | What the statement is about, as a store kind in words (`xsd:string`). |
+| `ik:keptFor`, `ik:neverRecorded`, `ik:rotatesWithin`, `ik:honoredWithin`, `ik:storeKind`, `ik:disclosureProcess` | properties | The claim. Durations are `xsd:duration`. |
+| `ik:practiceConfigKey` | property | The configuration key the value is read from. |
+| `ik:practiceEffective` | property | The date a version took effect; earlier versions link with `prov:wasRevisionOf`. |
+| `ik:checkMethod` | property | A concept of the scheme `ik:CheckMethod`: `ik:TestMethod`, `ik:ScanMethod`, `ik:ProbeMethod`, `ik:ReviewMethod`. |
+| `ik:checkResult` | property | A concept of the scheme `ik:CheckResult`: `ik:PassResult`, `ik:FailResult`, `ik:BlockedResult`. |
+| `ik:checkSummary` | property | The result's evidence in one sentence (`xsd:string`): what was found, never raw output. |
+| `ik:evidence` | property (existing, reused) | A resource that shows the result, by IRI: a CI run, a test report. Optional. |
+| `ik:checkCommand`, `ik:checkInterval`, `ik:checkDate`, `ik:checkRevision` | properties | The command or test name, the rerun interval, the date and the host revision the check ran against. |
+
+### Names chosen, and the existing terms they avoid
+
+An earlier draft reused four published terms whose meaning does not fit. Under RDFS, a domain
+types every subject that uses the property, so reusing one asserts something false about the
+subject.
+
+| Slot | Chosen | Existing term it avoids | Why |
+|---|---|---|---|
+| What a statement is about | `ik:practiceSubject` | `ik:about` | `ik:about` has `rdfs:domain ik:Explanation`, so every statement would be inferred an `ik:Explanation`, and it ranges over browse resources, not words. |
+| A check's result | `ik:checkResult` | `ik:result` | `ik:result` has `rdfs:domain ik:Process` (a plan's answering step), so every check would be inferred an `ik:Process`. |
+| A review check's method | `ik:ReviewMethod` | `ik:Review` | `ik:Review` is already a class, an archived LLM review pass; using it as a method value would make a published class a method too. The other methods take the same `…Method` form, so none is a bare word. |
+| The result's evidence as words | `ik:checkSummary` | `ik:evidence` with a literal | `ik:evidence` has `rdfs:range rdfs:Resource` and means a resource by IRI. It is reused, with an IRI, where a check's evidence is a resource; the sentence gets its own property. |
+
+The other slots were renamed type first, so none is a bare word another family could want next:
+`ik:statement` → `ik:practiceStatement`, `ik:checkedBy` → `ik:practiceCheck`, `ik:area` →
+`ik:practiceArea`, `ik:valueFrom` → `ik:practiceConfigKey`, `ik:effective` →
+`ik:practiceEffective`, `ik:method` → `ik:checkMethod`, `ik:command` → `ik:checkCommand`,
+`ik:every` → `ik:checkInterval`, `ik:checkedOn` → `ik:checkDate`, `ik:revision` →
+`ik:checkRevision`. The area, method and result values are concepts of a singular scheme each,
+named like `ik:LayerKinds`'s values (`ik:TalkKind`): qualifier, then the scheme's type. A scheme
+and its property differ only in case (`ik:CheckResult`, `ik:checkResult`), as `ik:FailureClass`
+and `ik:failureClass` do. None of the chosen names is declared in `vocabulary.ttl` today, in any
+case.
 
 A shape in `shapes.ttl` would require every statement to have exactly one check with a result,
-and every Pass or Fail to have evidence and a date.
+every Pass or Fail to have a summary and a date, and every version, statement and check to be an
+IRI, never a blank node.
 
 ## Adherence over time
 
 A practice that changes is a new version, never an edit in place: the host serves the current
-`ik:PracticeSet` and keeps earlier ones readable, linked by `prov:wasRevisionOf`, so a reader can
+`ik:PracticeSet` and keeps earlier ones readable at their own
+`urn:iki:practice:host:{host}:version:{n}` IRIs, linked by `prov:wasRevisionOf`, so a reader can
 learn what applied on a date. A shortened retention applies to data already held; a lengthened
 one applies only to data collected after it takes effect, and the statement says so. The host
 regenerates the set at startup from its effective configuration, so a configuration change that
@@ -198,8 +259,8 @@ The resource is public, so it must not become a map for an attacker or a tracker
 - [ ] A small helper that renders a `PracticeSet` to its Turtle, JSON-LD and `text/plain` faces,
       so hosts do not each write the plain-text face; tests for each face, including that
       results are words.
-- [ ] Decide the reserved name (`urn:host:practice`) and the `ik:practice` link from
-      `urn:kernel:topology`.
+- [ ] Decide the reserved request name (`urn:host:practice`), the `urn:iki:practice:host:{host}`
+      family and the `ik:practice` link from `urn:kernel:topology`.
 
 ### ikigai-log (a library each host configures)
 
@@ -218,11 +279,12 @@ The resource is public, so it must not become a map for an attacker or a tracker
 - [ ] Run the non-collection check against its own log configuration and fix what fails, before
       publishing anything.
 - [ ] Serve `urn:host:practice` from its effective configuration: log retention, session bounds,
-      secret store kind, QUIC certificate rotation, the #4507 revocation bound, and a disclosure
+      secret store kind, QUIC certificate rotation, the ledger #4507 revocation bound, and a disclosure
       process.
 - [ ] Wire each check: the scans on a schedule, the tests in CI, the certificate probe from a
       client; record results with evidence and date.
-- [ ] Cut the `urn:host:practice` thread on configuration change and on each check rerun.
+- [ ] Cut the `urn:iki:practice:host:{host}` thread on configuration change and on each check
+      rerun.
 
 ### gonk
 
@@ -232,7 +294,7 @@ The resource is public, so it must not become a map for an attacker or a tracker
 - [ ] State session bounds for its HTTP passkey and QUIC client-certificate doors, with the
       clock-advance test for each.
 - [ ] State ledger retention, lease records included.
-- [ ] Serve `urn:host:practice` with the same checks as the `ikigai` binary, and the #4507
+- [ ] Serve `urn:host:practice` with the same checks as the `ikigai` binary, and the ledger #4507
       revocation test for both doors.
 
 ## Open questions
