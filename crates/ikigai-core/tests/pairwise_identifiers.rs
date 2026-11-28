@@ -10,8 +10,12 @@
 //!   here under `urn:example:` as this crate's namespace test asks)
 //!   hand their endpoints the same string, and partition their caches by it;
 //! - a capability carried across a mount serializes its principal verbatim, so the peer
-//!   on the far side reads the upstream's name for its caller, although `clamp` throws
-//!   that name away and it buys the caller no authority there.
+//!   on the far side reads the upstream's name for its caller, although a SCOPED ceiling's
+//!   `clamp` throws that name away and it buys the caller no authority there.
+//!
+//! A fourth marks the limit of shedding that name: under a ROOT ceiling (and over IPC,
+//! which resolves under the carried capability as a root ceiling would) the carried name
+//! IS the attribution, so shedding it makes the request anonymous (ledger #879's failure).
 //!
 //! The rest prove the note's decisions with a test-only prototype of a per-peer derivation:
 //! a stable, distinct name per peer, which the kernel accepts unchanged, which the
@@ -124,6 +128,7 @@ fn reproduction_a_carried_capability_discloses_the_upstream_principal_on_the_wir
 
 #[test]
 fn reproduction_the_carried_name_is_disclosure_only_shedding_it_changes_no_clamp() {
+    // Under a SCOPED ceiling only; see the next test for a root one.
     let remote_ceiling = session_for(&one_client_iri());
     let named = Capability::scoped([READ])
         .with_principal("urn:example:gonk:passkey:AbC")
@@ -133,6 +138,36 @@ fn reproduction_the_carried_name_is_disclosure_only_shedding_it_changes_no_clamp
     assert_eq!(shed.principal(), None);
     assert!(!serde_json::to_string(&shed).unwrap().contains("passkey"));
     assert_eq!(remote_ceiling.clamp(&named), remote_ceiling.clamp(&shed));
+}
+
+#[test]
+fn under_a_root_ceiling_the_carried_name_is_the_attribution_and_shedding_it_loses_it() {
+    let caller = "urn:example:gonk:passkey:AbC";
+    let named = Capability::scoped([READ]).with_principal(caller).unwrap();
+    let shed = named.attenuate([READ]);
+    let root_ceiling = Capability::root();
+
+    // root.clamp(c) = c: the carried capability passes, principal included.
+    let kept = root_ceiling.clamp(&named);
+    assert_eq!(kept, named);
+    assert_eq!(kept.principal(), Some(caller));
+    assert!(kept.acts_as(caller));
+
+    // Shed before sending, the same remote sees nobody: no principal, no acts_as.
+    let lost = root_ceiling.clamp(&shed);
+    assert_eq!(lost.principal(), None);
+    assert!(!lost.acts_as(caller));
+    assert_ne!(root_ceiling.clamp(&named), root_ceiling.clamp(&shed));
+
+    // What the remote's endpoint records as the caller: the carried name, or nothing.
+    let remote = peer();
+    read(&remote, &kept);
+    read(&remote, &lost);
+    assert_eq!(
+        *remote.seen.lock().unwrap(),
+        vec![Some(caller.to_string()), None],
+        "shedding toward a root ceiling turns an attributed request into an anonymous one"
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -150,12 +185,12 @@ fn pairwise(root_secret: &[u8; 32], peer_identity: &str) -> String {
     let mut h = blake3::Hasher::new_keyed(&key);
     h.update(&(peer_identity.len() as u64).to_le_bytes());
     h.update(peer_identity.as_bytes());
-    format!("urn:example:pairwise:{}", h.finalize().to_hex())
+    format!("urn:example:pairwise:digest:{}", h.finalize().to_hex())
 }
 
 const ROOT: [u8; 32] = [7; 32];
-const LEDGER: &str = "urn:example:host:ledger";
-const LAYERS: &str = "urn:example:host:layers";
+const LEDGER: &str = "urn:example:host:name:ledger";
+const LAYERS: &str = "urn:example:host:name:layers";
 
 #[test]
 fn a_pairwise_name_is_stable_per_peer_and_distinct_across_peers() {
