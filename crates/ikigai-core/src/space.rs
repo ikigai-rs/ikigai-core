@@ -385,7 +385,11 @@ impl Scope {
         self.chain.as_ref().and_then(|chain| chain.clock.as_ref())
     }
 
-    /// The chain's "now", per its [clock](Self::clock); `None` when it has none.
+    /// The chain's "now", per its [clock](Self::clock); `None` when it has none. It reads
+    /// the clock again on every call, so under a clock that ticks it moves on from the
+    /// instant the corridor read at injection, the one the [fingerprint](Self::fingerprint)
+    /// hashes. An answer cached under this chain computes from that instant,
+    /// [`Invocation::pinned_now`](crate::Invocation::pinned_now), not from this (ledger #4551).
     pub fn now(&self) -> Option<Time> {
         self.clock().map(|clock| clock.now())
     }

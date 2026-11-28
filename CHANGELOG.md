@@ -1,6 +1,22 @@
 # Changelog
 
-## 0.5.2 (unreleased)
+## Unreleased
+
+### Documented
+
+- **A cacheable answer computes from `Invocation::pinned_now()`, never `now()`** (ledger #4551,
+  found building `ikigai-store` PR 116, ledger #4286). Under a temporal corridor whose clock
+  ticks, `now()` (through `Scope::now()`) reads that clock again on every call, while
+  `pinned_now()` stays at the instant the corridor read at injection, the one the cache key
+  covers; a clock attached with `Invocation::with_clock` wins over both in `now()`. An answer
+  computed from a `now()` that has moved is cached under a key that does not name the time it
+  holds. `pinned_now()` now says so with a doctest over a ticking corridor clock, `now()`,
+  `Scope::now()` and `clock_pinned()` point to it, and `clock_pinned()`'s example computes from
+  `pinned_now()`. `tests/pinned_now.rs` pins the cache consequence. No behavior change: a
+  corridor's `now()` still ticks with its clock, and with a `FixedClock` corridor (every one the
+  engine's `as-of=` builds) the two agree.
+
+## 0.5.2 (2026-11-26)
 
 A patch release: the delegation API below is additive public API on `Kernel` and
 `Invocation`. No wire, cache-key or behavior change for a kernel with no grants.

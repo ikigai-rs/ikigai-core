@@ -143,3 +143,60 @@ fn the_pinned_instant_is_the_one_read_at_injection() {
         format!("pinned={PINNED} now={}", PINNED + 5)
     );
 }
+
+/// Answers `inv.now()` or `inv.pinned_now()`, declared cacheable: an as-of endpoint.
+fn cached(read: fn(&Invocation<'_>) -> Option<Time>) -> FnEndpoint {
+    FnEndpoint::new("cached", move |inv: &Invocation<'_>| {
+        Ok(
+            Representation::new(ReprType::new("text/plain"), millis(read(inv)).into_bytes())
+                .cacheable(),
+        )
+    })
+}
+
+#[test]
+fn a_cacheable_answer_computed_from_now_holds_a_time_its_key_does_not_name() {
+    // Ledger #4551. Under a corridor whose clock ticks, `now` moves on from the instant
+    // the key covers. An answer computed from it is cached under that key all the same,
+    // and served after the clock has moved again: it names neither instant. One computed
+    // from `pinned_now` is the instant the key covers, every time.
+    let kernel = Kernel::new(Arc::new(
+        EndpointSpace::new()
+            .bind(Exact::new("urn:from-now"), cached(|inv| inv.now()))
+            .bind(
+                Exact::new("urn:from-pinned"),
+                cached(|inv| inv.pinned_now()),
+            ),
+    ))
+    .with_clock(Arc::new(FixedClock::at(LIVE)));
+    let cap = Capability::root();
+    let tick = Arc::new(AtomicU64::new(PINNED));
+    let scope = Scope::empty().with_named_at(
+        iri("urn:ctx:time:moving"),
+        Arc::new(EndpointSpace::new()),
+        Arc::new(Moving(Arc::clone(&tick))),
+    );
+    let read = |name: &str| {
+        let answer =
+            block_on(kernel.issue_in(Request::new(Verb::Source, iri(name)), &cap, scope.clone()))
+                .unwrap();
+        String::from_utf8(answer.bytes.to_vec()).unwrap()
+    };
+
+    tick.store(PINNED + 5, Ordering::SeqCst);
+    assert_eq!(read("urn:from-now"), (PINNED + 5).to_string());
+    assert_eq!(read("urn:from-pinned"), PINNED.to_string());
+
+    tick.store(PINNED + 9, Ordering::SeqCst);
+    assert!(kernel.is_cached_in(
+        &Request::new(Verb::Source, iri("urn:from-now")),
+        &cap,
+        &scope
+    ));
+    assert_eq!(
+        read("urn:from-now"),
+        (PINNED + 5).to_string(),
+        "the first miss's reading, kept: neither the key's instant nor the clock's"
+    );
+    assert_eq!(read("urn:from-pinned"), PINNED.to_string());
+}
