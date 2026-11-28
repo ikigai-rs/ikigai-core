@@ -6,7 +6,8 @@
 //! first three tests pin that on today's kernel, from public API only:
 //!
 //! - two peers whose doors mint a principal from the same client certificate fingerprint
-//!   (the `urn:iki:gonk:client:<fingerprint>` convention in `principal-capability.md`)
+//!   (gonk's `urn:iki:`-rooted client convention in `principal-capability.md`, spelled
+//!   here under `urn:example:` as this crate's namespace test asks)
 //!   hand their endpoints the same string, and partition their caches by it;
 //! - a capability carried across a mount serializes its principal verbatim, so the peer
 //!   on the far side reads the upstream's name for its caller, although `clamp` throws
@@ -35,7 +36,7 @@ fn iri(s: &str) -> Iri {
 }
 
 fn one_client_iri() -> String {
-    format!("urn:iki:gonk:client:{FINGERPRINT}")
+    format!("urn:example:gonk:client:{FINGERPRINT}")
 }
 
 /// A peer: one kernel whose only endpoint records the principal each request named, and
@@ -103,12 +104,12 @@ fn reproduction_two_peers_see_the_same_principal_for_one_client() {
 fn reproduction_a_carried_capability_discloses_the_upstream_principal_on_the_wire() {
     // The upstream's view of its caller: a passkey-authenticated person.
     let upstream_caller = Capability::scoped([READ])
-        .with_principal("urn:iki:gonk:passkey:AbC")
+        .with_principal("urn:example:gonk:passkey:AbC")
         .unwrap();
     // A sub-request to a mounted remote carries the capability in its serialized form.
     let wire = serde_json::to_string(&upstream_caller).unwrap();
     assert!(
-        wire.contains("urn:cap:principal:urn:iki:gonk:passkey:AbC"),
+        wire.contains("urn:cap:principal:urn:example:gonk:passkey:AbC"),
         "the carried capability names the upstream's caller: {wire}"
     );
 
@@ -125,7 +126,7 @@ fn reproduction_a_carried_capability_discloses_the_upstream_principal_on_the_wir
 fn reproduction_the_carried_name_is_disclosure_only_shedding_it_changes_no_clamp() {
     let remote_ceiling = session_for(&one_client_iri());
     let named = Capability::scoped([READ])
-        .with_principal("urn:iki:gonk:passkey:AbC")
+        .with_principal("urn:example:gonk:passkey:AbC")
         .unwrap();
     // What a door could send instead: the same grants, principal shed by narrowing.
     let shed = named.attenuate([READ]);
@@ -149,12 +150,12 @@ fn pairwise(root_secret: &[u8; 32], peer_identity: &str) -> String {
     let mut h = blake3::Hasher::new_keyed(&key);
     h.update(&(peer_identity.len() as u64).to_le_bytes());
     h.update(peer_identity.as_bytes());
-    format!("urn:iki:pairwise:{}", h.finalize().to_hex())
+    format!("urn:example:pairwise:{}", h.finalize().to_hex())
 }
 
 const ROOT: [u8; 32] = [7; 32];
-const LEDGER: &str = "urn:iki:host:ledger.example";
-const LAYERS: &str = "urn:iki:host:layers.example";
+const LEDGER: &str = "urn:example:host:ledger";
+const LAYERS: &str = "urn:example:host:layers";
 
 #[test]
 fn a_pairwise_name_is_stable_per_peer_and_distinct_across_peers() {

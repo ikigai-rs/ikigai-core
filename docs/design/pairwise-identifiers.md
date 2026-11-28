@@ -36,7 +36,7 @@ For ikigai, the question has four parts:
 Today one party has one name at every peer. Three tests pin this:
 
 - `reproduction_two_peers_see_the_same_principal_for_one_client`: two kernels mint a
-  principal from the same certificate fingerprint, as gonk does (`urn:iki:gonk:client:<hex>`).
+  principal from the same certificate fingerprint, as gonk does (`urn:iki:gonk:client:<hex>`; the tests spell it under `urn:example:`, since `tests/namespaces.rs` admits only published `urn:iki:` namespaces).
   Both hand their endpoints the same string and partition their caches by it. Every record
   that holds a principal holds that one string: the log's `principal=` column, the trace,
   held content (`put_for`) and an author gate. Two operators who compare those records can
@@ -110,7 +110,7 @@ The input to the derivation decides who can link whom. It must be:
   get separate names.
 
 **Decision: the peer identity is a configured IRI per federation entry** (for example
-`urn:iki:host:<name>`), never derived from what the peer presents. A peer the participant
+`urn:example:host:<name>`; the real namespace is chosen with task 3), never derived from what the peer presents. A peer the participant
 has not configured gets no automatic name. Enrollment is deliberate.
 
 ### 4. What still links them, for whom
@@ -145,7 +145,7 @@ the name (the third reproduction test). The change belongs where `Call::IssueAs`
 | Revocation by the peer | Revoke one fingerprint | Unchanged: the peer revokes the one name it knows |
 | Revocation across services | One central list entry revokes everywhere | The operator revokes N names at N peers, or retires the root secret. No peer can do it for the others, which is the point, and it is the main operational cost. |
 | Compromise | One key exposed | A stolen root secret exposes every peer's key. A stolen per-peer key exposes one peer. |
-| Audit lines | `principal=urn:iki:gonk:client:<fp>`, the same at every service | Each service logs its own name. Joining across services needs the operator's table. The 512-byte principal bound is not at risk: the sketch's IRI is 81 bytes. |
+| Audit lines | `principal=urn:iki:gonk:client:<fp>`, the same at every service | Each service logs its own name. Joining across services needs the operator's table. The 512-byte principal bound is not at risk: the sketch's IRI, `urn:example:pairwise:<64 hex>`, is 85 bytes. Its namespace is illustrative; choosing a real one is part of task 4. |
 | Cache | One partition per principal per peer | The same: one name per peer, one partition per peer (`two_peers_see_two_names_and_each_peer_keeps_one_partition`) |
 | Held content (`put_for`) | Scoped to the principal at that peer | The same: it was already per peer |
 | Chains (A to B to C) | B shows C its one fingerprint, and may carry A's principal along | B shows C its name for C. A's name is shed at B's mount (§5). |
@@ -191,7 +191,7 @@ Do these now. Each is a change in the repository named, not in core:
    and read by services in different sectors. A comment at each existing grant table is
    enough.
 3. **Name the sector.** In the participant's federation configuration (gonk client, layer
-   participant), give each configured peer a stable `urn:iki:host:<name>` entry, even though
+   participant), give each configured peer a stable sector IRI (namespace to be chosen there), even though
    nothing derives from it yet. This is the input a later derivation needs, and it gives audit
    lines a peer name that does not change when the peer's certificate rotates.
 
