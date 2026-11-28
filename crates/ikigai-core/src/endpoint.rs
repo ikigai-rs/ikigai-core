@@ -1136,7 +1136,9 @@ impl<'a> Invocation<'a> {
     /// injection (ledger #3869, see [`Scope::with_named_at`]). So an answer cached under
     /// a pinned chain is never served to a chain with no temporal corridor, with a
     /// different one, or with the same name at another instant. An endpoint uses it to declare an as-of answer [`cacheable`](Representation::cacheable)
-    /// and a live one not:
+    /// and a live one not. What `clock_pinned` covers is the corridor, not the time `now`
+    /// reads: a cacheable answer computes from [`pinned_now`](Self::pinned_now), which
+    /// can differ from `now` under a corridor whose clock ticks (ledger #4551):
     ///
     /// ```
     /// use std::sync::Arc;
@@ -1147,10 +1149,14 @@ impl<'a> Invocation<'a> {
     /// };
     ///
     /// let stamp = FnEndpoint::new("stamp", |inv| {
-    ///     let now = inv.now().map_or(0, |t| t.as_millis());
-    ///     let answer = Representation::new(ReprType::new("text/plain"), now.to_string().into_bytes());
-    ///     // As of an instant: a pure function of the context. Live: not cacheable.
-    ///     Ok(if inv.clock_pinned() { answer.cacheable() } else { answer })
+    ///     let text = |t: u64| Representation::new(ReprType::new("text/plain"), t.to_string().into_bytes());
+    ///     Ok(match inv.pinned_now() {
+    ///         // As of an instant: a pure function of the context, computed from the
+    ///         // instant the key covers (`pinned_now`, never `now`: see `pinned_now`).
+    ///         Some(then) if inv.clock_pinned() => text(then.as_millis()).cacheable(),
+    ///         // Live: not cacheable.
+    ///         _ => text(inv.now().map_or(0, |t| t.as_millis())),
+    ///     })
     /// });
     /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:stamp"), stamp)))
     ///     .with_clock(Arc::new(FixedClock::at(2_000)));
@@ -1192,10 +1198,78 @@ impl<'a> Invocation<'a> {
     /// Like [`clock_pinned`](Self::clock_pinned), it is **covered by the cache key**: this
     /// is the instant the chain's fingerprint hashes beside the corridor's name (ledger
     /// #3869), so an answer computed from it is never served to a chain that pins another
-    /// instant or none. Nested corridors pin the innermost one's instant. With a
-    /// [`FixedClock`](crate::FixedClock) it is the time `now` reads under the corridor; a
-    /// corridor's clock that moves keeps moving in `now`, while this stays at the instant
-    /// it read at injection.
+    /// instant or none. Nested corridors pin the innermost one's instant.
+    ///
+    /// ★ **A cacheable answer computes from this, never from [`now`](Self::now)**
+    /// (ledger #4551). The two can name different instants under a corridor:
+    /// - a corridor's clock that **ticks** keeps moving in `now`, which reads it again on
+    ///   every call ([`Scope::now`]), while this stays at the instant it read at
+    ///   injection, the one the key covers;
+    /// - a clock attached with [`with_clock`](Self::with_clock) wins over both in `now`.
+    ///
+    /// With a [`FixedClock`](crate::FixedClock) corridor and no attached clock they agree;
+    /// every corridor the engine's `as-of=` builds is one. An answer computed from a `now`
+    /// that has moved is cached under a key that does not name the time it holds, and is
+    /// served as it was until something cuts it:
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicU64, Ordering};
+    /// use futures::executor::block_on;
+    /// use ikigai_core::{
+    ///     Capability, Clock, EndpointSpace, Exact, FixedClock, FnEndpoint, Iri, Kernel, ReprType,
+    ///     Representation, Request, Scope, Time, Verb,
+    /// };
+    ///
+    /// /// A corridor clock that ticks: it reads whatever `tick` holds.
+    /// struct Ticking(Arc<AtomicU64>);
+    /// impl Clock for Ticking {
+    ///     fn now(&self) -> Time {
+    ///         Time::from_millis(self.0.load(Ordering::SeqCst))
+    ///     }
+    /// }
+    /// fn text(t: Time) -> Representation {
+    ///     Representation::new(ReprType::new("text/plain"), t.as_millis().to_string().into_bytes())
+    /// }
+    /// let kernel = Kernel::new(Arc::new(
+    ///     EndpointSpace::new()
+    ///         // Right: the instant the key covers.
+    ///         .bind(
+    ///             Exact::new("urn:pinned"),
+    ///             FnEndpoint::new("pinned", |inv| Ok(text(inv.pinned_now().unwrap()).cacheable())),
+    ///         )
+    ///         // Wrong: whatever the ticking clock said at the first miss, kept.
+    ///         .bind(
+    ///             Exact::new("urn:now"),
+    ///             FnEndpoint::new("now", |inv| Ok(text(inv.now().unwrap()).cacheable())),
+    ///         ),
+    /// ))
+    /// .with_clock(Arc::new(FixedClock::at(9_000)));
+    /// let cap = Capability::root();
+    /// let source = |name: &str| Request::new(Verb::Source, Iri::parse(name).unwrap());
+    ///
+    /// let tick = Arc::new(AtomicU64::new(1_000));
+    /// // Injected at 1000: the key covers 1000.
+    /// let corridor = Scope::empty().with_named_at(
+    ///     Iri::parse("urn:ctx:time:then").unwrap(),
+    ///     Arc::new(EndpointSpace::new()),
+    ///     Arc::new(Ticking(Arc::clone(&tick))),
+    /// );
+    /// tick.store(1_005, Ordering::SeqCst); // the corridor's clock moves on
+    ///
+    /// let read = |name| block_on(kernel.issue_in(source(name), &cap, corridor.clone())).unwrap();
+    /// assert_eq!(read("urn:pinned").bytes, b"1000");
+    /// assert_eq!(read("urn:now").bytes, b"1005", "not the instant the key covers");
+    ///
+    /// // Both are cached. The clock moves again: `now` would read 1009, and the cache
+    /// // still serves 1005, an instant neither the key nor the clock names.
+    /// tick.store(1_009, Ordering::SeqCst);
+    /// assert!(kernel.is_cached_in(&source("urn:now"), &cap, &corridor));
+    /// assert_eq!(read("urn:now").bytes, b"1005");
+    /// assert_eq!(read("urn:pinned").bytes, b"1000");
+    /// ```
+    ///
+    /// The plain case, branching on whether there is a pinned instant at all:
     ///
     /// ```
     /// use std::sync::Arc;
@@ -2587,6 +2661,12 @@ impl<'a> Invocation<'a> {
     /// the wall clock behind the caller's back is what makes resolution
     /// non-replayable, and core does it in exactly one place, inside
     /// [`SystemClock`](crate::SystemClock), where a host opts into it by name.
+    ///
+    /// ⚠ **Not the instant a cacheable answer computes from** (ledger #4551): under a
+    /// corridor whose clock ticks, or with a clock attached by
+    /// [`with_clock`](Self::with_clock), this can differ from the instant the cache key
+    /// covers. An as-of answer declared [`cacheable`](Representation::cacheable) computes
+    /// from [`pinned_now`](Self::pinned_now), whose example shows the two parting.
     pub fn now(&self) -> Option<Time> {
         self.clock
             .as_ref()
